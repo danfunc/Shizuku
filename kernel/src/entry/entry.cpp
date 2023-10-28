@@ -1,5 +1,5 @@
 
 
-void entry(){
+extern "C" void entry(){
     return;
 }
