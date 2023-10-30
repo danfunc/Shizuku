@@ -1,7 +1,8 @@
-
 set(SHIZUKU_PLATFORM "unknown" CACHE STRING "shizuku platform name")
 set(SHIZUKU_PROCESSOR "unknown" CACHE STRING "shizuku processor name")
-if(NOT (SHIZUKU_PLATFORM STREQUAL "unknown"))
+if(SHIZUKU_PLATFORM STREQUAL "unknown")
+message(SEND_ERROR SHIZUKU_PLATFORM is unknown)
+else()
 add_subdirectory(${SHIZUKU_PLATFORM})
 endif()
 message(SHIZUKU_PLATFORM:${SHIZUKU_PLATFORM})
