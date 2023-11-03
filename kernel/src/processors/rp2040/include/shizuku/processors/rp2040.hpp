@@ -9,7 +9,7 @@ struct shizuku::types::processors::rp2040::context {
   void *sp, *lr;
 };
 struct shizuku::types::processors::rp2040::cpu_driver {
-  static int load_context(const context &context, const int return_value = 1);
+  static int load_context(const int return_value, const context &context);
   static int save_context(context &context);
   static int context_switch(context &current, context &next);
   static void entry_func(void (*entry)(void), context &context);

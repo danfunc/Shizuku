@@ -5,7 +5,7 @@
 
 int shizuku::types::processors::rp2040::cpu_driver::save_context(
     context &context) {
-  void *sp, *lr, *pc;
+  void *sp, *lr;
   uint32_t r4, r5, r6, r7, r8, r9, r10, r11, r12;
   asm volatile("mov %0, r4" : "=r"(r4));
   context.r4 = r4;
