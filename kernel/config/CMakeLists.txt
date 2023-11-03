@@ -1,2 +1,2 @@
-
+target_include_directories(shizuku_kernel PUBLIC interface)
 target_compile_definitions(shizuku_kernel PUBLIC SHIZUKU_PROCESSOR=${SHIZUKU_PROCESSOR} PUBLIC SHIZUKU_PLATFORM=${SHIZUKU_PLATFORM})
