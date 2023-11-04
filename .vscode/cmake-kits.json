@@ -1,6 +1,8 @@
 [
     {
         "name": "raspberryPi_pico_pico_sdk",
-        "toolchainFile": "${workspaceFolder}/toolchains/pico_sdk.cmake"
+        "environmentVariables": {
+            "SHIZUKU_TOOLCHAIN": "pico_sdk"
+        }
     }
 ]
