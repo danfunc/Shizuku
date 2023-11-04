@@ -7,14 +7,13 @@
 
 void shizuku::types::processors::rp2040::cpu_driver::entry_func(
     void (*entry)(), context &context) {
-  register void (*entry_point)() = entry;
-  void *sp = malloc(8 * 1024) + 8 * 1024;
-
+  void *sp = (void *)((int)malloc(4 * 1024) + 4 * 1024);
+  sp = (void *)((int)sp & ~0xfL);
   if (save_context(context) == 0) {
     context.sp = sp;
     return;
   } else {
-    entry_point();
+    entry();
     while (true)
       ;
   }

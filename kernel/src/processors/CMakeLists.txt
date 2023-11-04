@@ -1,5 +1,5 @@
-if(SHIZUKU_PROCESSOR STREQUAL "unkown")
-message(SEND_ERROR "SHIZUKU_PROCESSOR is unkown")
+if(NOT(SHIZUKU_PROCESSOR STREQUAL "unkown"))
+    add_subdirectory(${SHIZUKU_PROCESSOR})
 else()
-add_subdirectory(${SHIZUKU_PROCESSOR})
+    message(SEND_ERROR "SHIZUKU_PROCESSOR is unkown")
 endif()

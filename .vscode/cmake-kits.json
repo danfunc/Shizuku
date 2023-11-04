@@ -1,6 +1,6 @@
 [
     {
         "name": "raspberryPi_pico_pico_sdk",
-        "environmentSetupScript": "${workspaceFolder}/toolchains/raspberryPi_pico_pico_sdk.cmake"
+        "toolchainFile": "${workspaceFolder}/toolchains/pico_sdk.cmake"
     }
 ]
