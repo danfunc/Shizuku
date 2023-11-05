@@ -1,5 +1,5 @@
 #include "shizuku/processors.hpp"
-#include "shizuku/processors/rp2040.hpp"
+#include "shizuku/processors/@SHIZUKU_PROCESSOR@.hpp"
 namespace shizuku {
 namespace processor = shizuku::types::processors::SHIZUKU_PROCESSOR;
 using context = processor::context;

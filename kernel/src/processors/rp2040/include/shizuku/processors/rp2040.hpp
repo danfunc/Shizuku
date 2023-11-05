@@ -14,6 +14,11 @@ struct shizuku::types::processors::rp2040::cpu_driver {
   static int context_switch(context &current, context &next);
   static void entry_func(void (*entry)(void), context &context);
   static void create_thread(void (*entry)(void));
-  std::vector<context> context_list;
+
+private:
+  using context_list = struct context_list {
+    context_list *next;
+    shizuku::types::processors::rp2040::context *context;
+  };
 };
 #endif
