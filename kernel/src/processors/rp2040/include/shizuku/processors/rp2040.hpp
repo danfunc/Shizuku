@@ -1,5 +1,7 @@
 #ifndef RP2040_HPP
 #define RP2040_HPP
+#include "functional"
+#include "list"
 #include "shizuku/processors.hpp"
 #include "stdint.h"
 #include "vector"
@@ -11,14 +13,12 @@ struct shizuku::types::processors::rp2040::context {
 struct shizuku::types::processors::rp2040::cpu_driver {
   static int load_context(const int return_value, const context &context);
   static int save_context(context &context);
-  static int context_switch(context &current, context &next);
+  static void context_switch(context &current, context &next);
+  void context_switch();
   static void entry_func(void (*entry)(void), context &context);
   static void create_thread(void (*entry)(void));
-
-private:
-  using context_list = struct context_list {
-    context_list *next;
-    shizuku::types::processors::rp2040::context *context;
-  };
+  void add_context(context &context);
+  std::list<shizuku::types::processors::rp2040::context> context_list;
+  std::list<shizuku::types::processors::rp2040::context>::iterator current;
 };
 #endif
