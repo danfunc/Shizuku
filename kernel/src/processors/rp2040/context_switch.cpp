@@ -9,15 +9,26 @@ void shizuku::types::processors::rp2040::cpu_driver::context_switch(
   return;
 }
 
-void shizuku::types::processors::rp2040::cpu_driver::add_context(
-    context &context) {
-  this->context_list.push_front(context);
-}
-
 void shizuku::types::processors::rp2040::cpu_driver::context_switch() {
-  this->current;
-  auto from = current;
-  current++;
-  auto to = current;
-  context_switch(*from, *to);
+  if (current_task.context == nullptr) {
+    current_task.context = new shizuku::types::processors::rp2040::context();
+  }
+  if (current_task.remain_time == 0) {
+    return;
+  } else if (--current_task.remain_time == 0) {
+    context &current_context = *current_task.context;
+    if (task_queue.empty()) {
+      ++current_task.remain_time;
+      return;
+    } else {
+      context *current = current_task.context,
+              *next = task_queue.front().context;
+      current_task = task_queue.front();
+      task_queue.pop();
+      context_switch(*current, *next);
+    }
+  } else {
+    return;
+  }
+  return;
 }

@@ -2,6 +2,8 @@
 #define SHIZUKU_CONFIG PROVIDED_BY_CMAKE
 #include "shizuku/processors.hpp"
 #include "shizuku/processors/@SHIZUKU_PROCESSOR@.hpp"
+#define SHIZUKU_PROCESSOR @SHIZUKU_PROCESSOR@
+#define SHIZUKU_PLATFORM @SHIZUKU_PLATFORM@
 namespace shizuku {
 namespace processor = shizuku::types::processors::SHIZUKU_PROCESSOR;
 using context = processor::context;
