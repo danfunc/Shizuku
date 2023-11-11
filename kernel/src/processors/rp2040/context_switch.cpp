@@ -24,11 +24,20 @@ void shizuku::types::processors::rp2040::cpu_driver::context_switch() {
       context *current = current_task.context,
               *next = task_queue.front().context;
       current_task = task_queue.front();
-      task_queue.pop();
-      context_switch(*current, *next);
+      task_queue.pop_front();
+      if (next == nullptr)
+        return;
+      else
+        context_switch(*current, *next);
     }
   } else {
     return;
   }
+  return;
+}
+
+void shizuku::types::processors::rp2040::cpu_driver::change_current_context(
+    shizuku::types::processors::rp2040::context &context) {
+  current_task.context = &context;
   return;
 }

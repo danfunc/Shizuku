@@ -1,0 +1,9 @@
+
+#ifndef MEMORY_MANAGER_HPP
+#define MEMORY_MANAGER_HPP PROVIDED_BY_CMAKE
+#include "shizuku/memory_managers/@SHIZUKU_PLATFORM@.hpp"
+#include "shizuku/platforms.hpp"
+namespace shizuku {
+namespace platform = shizuku::types::platforms::SHIZUKU_PLATFORM;
+} // namespace shizuku
+#endif

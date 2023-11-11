@@ -8,7 +8,7 @@ namespace types {
 class kernel {
 private:
   shizuku::cpu_driver cpu_driver;
-
+  
 public:
   kernel(/* args */);
   ~kernel();

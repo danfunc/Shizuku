@@ -5,7 +5,7 @@ namespace types {
 namespace processors {
 namespace rp2040 {
 struct context;
-struct cpu_driver;
+class cpu_driver;
 } // namespace rp2040
 namespace X64 {} // namespace X64
 } // namespace processors

@@ -17,14 +17,11 @@ struct context_list {
 context_list main_node, sub_node, *current_node;
 
 void shizuku_entry(void) {
-  driver.current_task.context = &main_context;
-  driver.current_task.remain_time = 1;
   shizuku::cpu_driver::entry_func(sub_func, sub_context);
-  driver.task_queue.push(
-      shizuku::cpu_driver::task{.context = &sub_context, .remain_time = 1});
+  driver.add_task(sub_context, 1);
+  driver.change_current_context(main_context);
   while (true) {
-    driver.task_queue.push(
-        shizuku::cpu_driver::task{.context = &main_context, .remain_time = 1});
+    driver.add_task(main_context, 1);
     printf("main");
     sleep_ms(100);
     driver.context_switch();
@@ -34,9 +31,9 @@ void shizuku_entry(void) {
 
 void sub_func() {
   while (true) {
-    driver.task_queue.push(
-        shizuku::cpu_driver::task{.context = &sub_context, .remain_time = 1});
+    driver.add_task(sub_context, 1);
     printf("sub");
+    sleep_ms(100);
     driver.context_switch();
   }
 }

@@ -1,1 +1,2 @@
 target_link_libraries(shizuku_kernel PUBLIC pico_stdlib)
+add_subdirectory(platform)
