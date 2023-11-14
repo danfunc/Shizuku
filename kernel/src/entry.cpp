@@ -18,6 +18,7 @@ context_list main_node, sub_node, *current_node;
 
 void shizuku_entry(void) {
   shizuku::cpu_driver::entry_func(sub_func, sub_context);
+  shizuku::kernel.context_switch();
   driver.add_task(sub_context, 1);
   driver.change_current_context(main_context);
   while (true) {

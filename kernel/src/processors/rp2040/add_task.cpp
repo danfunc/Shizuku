@@ -3,6 +3,6 @@
 
 void shizuku::types::processors::rp2040::cpu_driver::add_task(
     shizuku::types::processors::rp2040::context &context, size_t time) {
-  task_queue.emplace_back(&context, time);
+  task_queue.emplace(&context, time);
   return;
 }

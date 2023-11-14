@@ -3,7 +3,7 @@
 #define SHIZUKU_PROCESSOR rp2040
 #define SHIZUKU_PLATFORM pico_sdk
 
-#include "shizuku/memory_manager.hpp"
 #include "shizuku/platform.hpp"
 #include "shizuku/processor.hpp"
+#include "shizuku/memory_manager.hpp"
 #endif

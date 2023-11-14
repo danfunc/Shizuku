@@ -1,4 +1,4 @@
-#include "shizuku.hpp"
+#include "shizuku/kernel.hpp"
 #include "shizuku/processors/rp2040.hpp"
 
 void shizuku::types::processors::rp2040::cpu_driver::context_switch(
@@ -21,10 +21,10 @@ void shizuku::types::processors::rp2040::cpu_driver::context_switch() {
       ++current_task.remain_time;
       return;
     } else {
-      context *current = current_task.context,
-              *next = task_queue.front().context;
-      current_task = task_queue.front();
-      task_queue.pop_front();
+      context *current = current_task.context, *next = task_queue.top().context;
+      current_task = task_queue.top();
+
+      task_queue.pop();
       if (next == nullptr)
         return;
       else
