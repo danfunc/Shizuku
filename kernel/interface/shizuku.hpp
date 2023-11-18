@@ -1,8 +1,8 @@
 #ifndef SHIZUKU_HPP
 #define SHIZUKU_HPP
-#include "cstdint"
 namespace shizuku {
-void *malloc(std::size_t size);
+using size_t = unsigned int;
+void *malloc(size_t size);
 void context_switch();
 } // namespace shizuku
 #endif

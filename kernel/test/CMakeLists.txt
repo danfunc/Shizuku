@@ -1,0 +1,5 @@
+add_library(mmu_emulate_test)
+target_sources(mmu_emulate_test PRIVATE MMU_emulate_test.cpp)
+target_link_libraries(shizuku_kernel PUBLIC mmu_emulate_test)
+target_link_libraries(mmu_emulate_test PUBLIC pico_stdlib)
+set(PICO_COPY_TO_RAM=1)

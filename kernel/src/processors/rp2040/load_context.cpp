@@ -1,5 +1,5 @@
 
-#include "shizuku/kernel.hpp"
+
 #include "shizuku/processors/rp2040.hpp"
 
 int shizuku::types::processors::rp2040::cpu_driver::load_context(

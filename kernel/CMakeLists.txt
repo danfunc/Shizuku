@@ -6,3 +6,4 @@ target_include_directories(
 add_subdirectory(config)
 add_subdirectory(lib)
 add_subdirectory(src)
+add_subdirectory(test)

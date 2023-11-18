@@ -5,6 +5,10 @@ namespace shizuku {
 types::kernel::kernel() {}
 types::kernel::~kernel() {}
 types::kernel kernel;
-void types::kernel::context_switch() { this->cpu_driver[0].context_switch(); }
 
+void context_switch() { kernel.context_switch(); }
+
+void types::kernel::context_switch() {
+  cpu_driver[cpu_driver::get_core_num()].context_switch();
+}
 } // namespace shizuku

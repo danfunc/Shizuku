@@ -1,0 +1,1 @@
+target_sources(shizuku_kernel PRIVATE scheduler.cpp enqueue.cpp)
