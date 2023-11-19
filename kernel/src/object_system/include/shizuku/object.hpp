@@ -47,10 +47,6 @@ using object = struct object {
   shizuku::platform::std::map<shizuku::platform::std::string,
                               int (*)(int, char *[])>
       functions;
-  object() {
-    thread_map = shizuku::platform::std::set<thread>();
-    memory_map = shizuku::platform::std::set<memory>();
-  }
 };
 
 static inline bool operator<(object x, object y) { return x.name < y.name; }

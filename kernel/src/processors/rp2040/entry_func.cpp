@@ -5,7 +5,8 @@
 /*this is secure version but not test and disable. if you enable this
 version, please comment out there.*/
 void shizuku::types::processors::rp2040::cpu_driver::entry_func(
-    int (*entry)(int argc, char *argv[]), context &context, int argc,
+    int (*entry)(int argc, char *argv[]),
+    shizuku::platform::std::shared_ptr<context> context, int argc,
     char *argv[]) {
   asm("mov r4,%0" ::"r"(entry) : "r4");
   asm("mov r5,%0" ::"r"(argc) : "r5");
@@ -13,7 +14,7 @@ void shizuku::types::processors::rp2040::cpu_driver::entry_func(
   void *sp = (void *)((int)malloc(1 * 1024) + 1 * 1024);
   sp = (void *)((int)sp & ~0xfL);
   if (save_context(context) == 0) {
-    context.sp = sp;
+    context->sp = sp;
     return;
   } else {
     asm("mov r7,#0" ::: "r7");
