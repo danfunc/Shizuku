@@ -1,0 +1,2 @@
+target_include_directories(shizuku_kernel PRIVATE include)
+target_sources(shizuku_kernel PRIVATE context_switch.cpp)
