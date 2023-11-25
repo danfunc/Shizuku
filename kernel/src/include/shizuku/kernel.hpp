@@ -4,7 +4,7 @@
 #include "map"
 #include "set"
 #include "shizuku/config.hpp"
-#include "shizuku/cpu_manager/cpu_manager.hpp"
+#include "shizuku/cpu_manager.hpp"
 #include "shizuku/namespaces.hpp"
 #include "shizuku/object.hpp"
 #include "string"
@@ -12,7 +12,7 @@ namespace shizuku {
 namespace types {
 class kernel {
 private:
-  shizuku::types::cpu_manager cpu_driver[shizuku::processor_count];
+  shizuku::types::cpu_manager cpu_manager[shizuku::processor_count];
   shizuku::memory_manager memory_manager;
   shizuku::platform::std::map<shizuku::platform::std::string, object>
       object_tree;

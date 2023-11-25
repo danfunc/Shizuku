@@ -10,6 +10,8 @@
 #define SIO_CPUID_OFFSET (0x00000000) // imported from pico_sdk
 
 #include "cstdint"
+#include "cstdlib"
+#include "shizuku/platform.hpp"
 namespace shizuku {
 namespace types {
 struct object;

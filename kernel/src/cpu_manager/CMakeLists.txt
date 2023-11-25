@@ -1,2 +1,1 @@
-target_include_directories(shizuku_kernel PRIVATE include)
-target_sources(shizuku_kernel PRIVATE context_switch.cpp)
+target_sources(shizuku_kernel PRIVATE context_switch.cpp add_task.cpp)
