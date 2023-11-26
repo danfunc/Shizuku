@@ -16,7 +16,7 @@ private:
   shizuku::memory_manager memory_manager;
   shizuku::platform::std::map<shizuku::platform::std::string, object>
       object_tree;
-  shizuku::platform::std::set<shizuku ::types::thread> thread_tree;
+  shizuku::platform::std::set<shizuku::types::thread> thread_tree;
   void enqueue();
 
 public:
@@ -25,6 +25,7 @@ public:
   void context_switch(void);
   void create_object(shizuku::platform::std::string name,
                      void (*entry)(int, char *[]), int argc, char *argv[]);
+  void create_object(shizuku::platform::std::string name);
   void add_thread(shizuku::platform::std::string const &name,
                   int (*entry)(int, char *[]), int argc, char *argv[]);
   int call_func(shizuku::platform::std::string const &object_name,

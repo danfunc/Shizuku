@@ -35,11 +35,12 @@ using function = struct function {
 
 using object = struct object {
   shizuku::platform::std::string name;
-
   shizuku::platform::std::set<memory> memory_map;
   shizuku::platform::std::map<shizuku::platform::std::string,
                               int (*)(int, char *[])>
       functions;
+  shizuku::platform::std::set<shizuku::types::thread> threads;
+  size_t thread_count;
 };
 
 static inline bool operator<(object x, object y) { return x.name < y.name; }
