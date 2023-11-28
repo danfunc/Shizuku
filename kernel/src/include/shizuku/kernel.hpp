@@ -14,10 +14,10 @@ class kernel {
 private:
   shizuku::types::cpu_manager cpu_manager[shizuku::processor_count];
   shizuku::memory_manager memory_manager;
-  shizuku::platform::std::map<shizuku::platform::std::string, object>
-      object_tree;
+  shizuku::platform::std::set<object> object_tree;
   shizuku::platform::std::set<shizuku::types::thread> thread_tree;
   void enqueue();
+  size_t thread_count;
 
 public:
   kernel();

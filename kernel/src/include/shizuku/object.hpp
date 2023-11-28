@@ -41,6 +41,9 @@ using object = struct object {
       functions;
   shizuku::platform::std::set<shizuku::types::thread> threads;
   size_t thread_count;
+  auto operator<=>(object const &right) const {
+    return this->name <=> right.name;
+  }
 };
 
 static inline bool operator<(object x, object y) { return x.name < y.name; }

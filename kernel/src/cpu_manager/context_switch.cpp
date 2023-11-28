@@ -18,10 +18,13 @@ void cpu_manager::context_switch() {
       if (task_queue.empty())
         return;
       else {
-        before_context = current_task.context;
+        before_context =
+            shizuku::platform::std::move(current_task.thread->context);
         current_task = task_queue.top();
         task_queue.pop();
-        context_switch(before_context.get(), current_task.context.get());
+        context_switch(before_context.get(),
+                       current_task.thread->context.get());
+        before_context.reset();
         return;
       };
     } else {
