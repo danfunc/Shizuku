@@ -11,7 +11,8 @@
 namespace shizuku {
 namespace types {
 struct task {
-  shizuku::platform::std::shared_ptr<shizuku::types::thread> thread;
+  shizuku::platform::std::shared_ptr<shizuku::types::thread> thread =
+      shizuku::platform::std::make_shared<shizuku::types::thread>();
   size_t remain_time;
   int priority;
   bool operator<(const task &y) const { return this->priority < y.priority; };
