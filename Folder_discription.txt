@@ -1,0 +1,3 @@
+/config is global config (for example image, kernel,and etc)
+/image creates installer image
+/kernel is provide shizuku_kernel as library which is depends on environments (for instance arch,platform,and config)

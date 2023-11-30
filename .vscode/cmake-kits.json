@@ -1,0 +1,8 @@
+[
+    {
+        "name": "raspberryPi_pico_pico_sdk",
+        "environmentVariables": {
+            "SHIZUKU_TOOLCHAIN": "pico_sdk"
+        }
+    }
+]

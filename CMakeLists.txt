@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.26)
+include(load_toolchain.cmake)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED on)
+project(shizuku C CXX ASM)
+add_subdirectory(config)
+add_subdirectory(kernel)
+add_subdirectory(image)

@@ -1,0 +1,2 @@
+target_include_directories(shizuku_kernel PUBLIC include)
+target_sources(shizuku_kernel PRIVATE call_function.cpp add_thread.cpp)

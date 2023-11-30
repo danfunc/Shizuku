@@ -1,0 +1,5 @@
+if(NOT(SHIZUKU_PROCESSOR STREQUAL "unkown"))
+    add_subdirectory(${SHIZUKU_PROCESSOR})
+else()
+    message(SEND_ERROR "SHIZUKU_PROCESSOR is unkown")
+endif()

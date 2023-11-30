@@ -1,0 +1,9 @@
+#ifndef SHIZUKU_CONFIG
+#define SHIZUKU_CONFIG PROVIDED_BY_CMAKE
+#define SHIZUKU_PROCESSOR @SHIZUKU_PROCESSOR@
+#define SHIZUKU_PLATFORM @SHIZUKU_PLATFORM@
+
+#include "shizuku/platform.hpp"
+#include "shizuku/processor.hpp"
+#include "shizuku/memory_manager.hpp"
+#endif

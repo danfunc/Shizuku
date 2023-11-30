@@ -1,0 +1,8 @@
+#ifndef SHIZUKU_PLATFORM_HPP
+#define SHIZUKU_PLATFORM_HPP PROVIDED_BY_CMAKE
+#include "shizuku/platforms.hpp"
+#include "shizuku/platforms/@SHIZUKU_PLATFORM@.hpp"
+namespace shizuku {
+namespace platform = shizuku::types::platforms::SHIZUKU_PLATFORM;
+} // namespace shizuku
+#endif
