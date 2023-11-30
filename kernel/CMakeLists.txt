@@ -12,4 +12,4 @@ target_include_directories(
   shizuku_interface
   INTERFACE
   interface)
-target_link_libraries(shizuku_kernel INTERFACE shizuku_interface)
+target_link_libraries(shizuku_kernel PUBLIC shizuku_interface)
