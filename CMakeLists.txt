@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.26)
 include(load_toolchain.cmake)
+add_compile_options(-Wall)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED on)
 project(shizuku C CXX ASM)

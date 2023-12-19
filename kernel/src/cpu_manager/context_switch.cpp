@@ -15,17 +15,19 @@ void cpu_manager::context_switch() {
     return;
   } else {
     if (--current_task.remain_time == 0) {
-      if (task_queue.empty())
-        return;
-      else {
-        before_context = current_task.thread->context;
+      before_context = current_task.thread->context;
+      current_task.thread.reset();
+      if (task_queue.empty()) {
+        current_task.thread = default_thread;
+        current_task.remain_time = 0;
+        current_task.priority = 0;
+      } else {
         current_task = task_queue.top();
         task_queue.pop();
-        context_switch(before_context.get(),
-                       current_task.thread->context.get());
-        before_context.reset();
-        return;
       };
+      context_switch(before_context.get(), current_task.thread->context.get());
+      before_context.reset();
+      return;
     } else {
       return;
     }

@@ -13,7 +13,3 @@ void shizuku_entry(void) {
   multi_thread_entry();
   return;
 }
-
-namespace shizuku {
-types::object boot_object;
-}
