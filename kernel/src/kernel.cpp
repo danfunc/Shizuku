@@ -2,12 +2,12 @@
 #include "shizuku.hpp"
 #include "shizuku/object.hpp"
 namespace shizuku {
-
+/*
 types::kernel::~kernel() {}
 types::kernel kernel;
 
 void context_switch() { kernel.context_switch(); }
-/*
+
 int types::kernel::add_thread(int (*entry)(int, char *[]), int argc,
                               char *argv[]) {
   if (auto object_pointer = cpu_manager[types::cpu_manager::get_core_num()]
@@ -22,7 +22,7 @@ int types::kernel::add_thread(int (*entry)(int, char *[]), int argc,
     return 0;
   }
 }
-*/
+
 void shizuku::types::kernel::exit(
     shizuku::platform::std::weak_ptr<shizuku::types::object> &parent) {}
 
@@ -32,4 +32,5 @@ int add_thread(int (*entry)(int, char **), int argc, char *argv[]) {
 void types::kernel::context_switch() {
   cpu_manager[types::cpu_manager::get_core_num()].context_switch();
 }
+*/
 } // namespace shizuku

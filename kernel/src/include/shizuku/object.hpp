@@ -63,6 +63,10 @@ public:
   auto operator<=>(object const &right) const {
     return this->name <=> right.name;
   };
+  void add_thread(
+      shizuku::platform::std::shared_ptr<shizuku::types::thread> &thread_ptr) {
+    this->threads.insert(thread_ptr);
+  }
   friend shizuku::types::kernel;
 };
 

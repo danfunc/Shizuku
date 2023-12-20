@@ -39,7 +39,8 @@ public:
 };
 
 } // namespace types
-extern types::kernel kernel;
+
+namespace kernel {}
 } // namespace shizuku
 
 #endif

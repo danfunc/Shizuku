@@ -15,3 +15,4 @@ int shizuku::types::kernel::add_thread(int (*entry)(int, char **), int argc,
   } else
     return 0;
 }
+0
