@@ -10,7 +10,7 @@ void kernel::create_object(shizuku::platform::std::string name,
   auto thread = shizuku::platform::std::make_shared<shizuku::types::thread>(
       (int (*)(int, char *[]))entry, argc, argv,
       (shizuku::types::object *)&(*result));
-  result->add_thread(thread);
+  ((shizuku::types::object *)&(*result))->add_thread(thread);
 }
 } // namespace types
 } // namespace shizuku
