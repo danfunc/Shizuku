@@ -16,9 +16,9 @@ void multi_thread_entry() {
   shizuku::cpu_driver::entry_func(sub_func, sub2_thread->context.get(), 2, 0);
   shizuku::cpu_driver::entry_func(sub_func, sub3_thread->context.get(), 3, 0);
   shizuku::cpu_driver::entry_func(sub_func, sub4_thread->context.get(), 4, 0);
-  shizuku::kernel.add_task(sub_thread, 1, 3);
-  shizuku::kernel.add_task(sub2_thread, 1, 3);
-  shizuku::kernel.add_task(sub3_thread, 1, 3);
+  shizuku::kernel.add_task(sub_thread, 1, 6);
+  shizuku::kernel.add_task(sub2_thread, 1, 5);
+  shizuku::kernel.add_task(sub3_thread, 1, 4);
   shizuku::kernel.add_task(sub4_thread, 1, 3);
   shizuku::kernel.abort_current_task();
   /*while (true) {
@@ -31,11 +31,13 @@ void multi_thread_entry() {
 }
 int sub_func(int argc, char **argv) {
   auto sub_thread = shizuku::kernel.get_current_thread().lock();
+  int count = 0;
   while (true) {
     printf("sub_thread\n");
     printf("thread_argc:%d\n", argc);
     sleep_ms(500);
-    shizuku::kernel.add_task(sub_thread, 1, 2);
+    if (++count % 3)
+      shizuku::kernel.add_task(sub_thread, 3, 1);
     shizuku::kernel.context_switch();
   }
 }

@@ -31,6 +31,14 @@ void shizuku::types::kernel::exit(
 int add_thread(int (*entry)(int, char **), int argc, char *argv[]) {
   return kernel.add_thread(entry, argc, argv);
 };
+
+void types::kernel::add_func(const std::string &name,
+                             int (*entry)(int, char **)) {
+  if (auto current_thread = get_current_thread().lock()) {
+    current_thread->parent_object;
+  }
+}
+
 void types::kernel::context_switch() {
   cpu_manager[types::cpu_manager::get_core_num()].context_switch();
 }

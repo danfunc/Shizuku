@@ -11,7 +11,7 @@ void shizuku::types::processors::rp2040::cpu_driver::entry_func(
   asm("mov r4,%0" ::"r"(entry) : "r4");
   asm("mov r5,%0" ::"r"(argc) : "r5");
   asm("mov r6,%0" ::"r"(argv) : "r6");
-  constexpr size_t size = 2 * 1024;
+  constexpr size_t size = 4 * 1024;
   if (save_context(context) == 0) {
     void *sp = (void *)((int)malloc(size) + size);
     sp = (void *)((int)sp & ~0xfL);

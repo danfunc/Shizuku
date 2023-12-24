@@ -1,9 +1,9 @@
 #ifndef SHIZUKU_OBJECT_HPP
 #define SHIZUKU_OBJECT_HPP
-#include "function.hpp"
 #include "memory"
 #include "queue"
 #include "shizuku/config.hpp"
+#include "shizuku/function.hpp"
 #include "shizuku/thread.hpp"
 #include "string"
 #include <map>
@@ -33,6 +33,7 @@ inline bool operator<(memory x, memory y) {
   return x.virtual_start < y.virtual_start;
 }
 class object {
+  friend shizuku::types::kernel;
   shizuku::platform::std::string name;
   shizuku::platform::std::set<memory> memory_map;
   shizuku::types::functions functions;
@@ -50,7 +51,16 @@ public:
       shizuku::platform::std::shared_ptr<shizuku::types::thread> &thread_ptr) {
     this->threads.insert(thread_ptr);
   }
-  friend shizuku::types::kernel;
+  void add_func(
+      shizuku::platform::std::string const &name,
+      int (*entry)(void *user_arg1, void *user_arg2,
+                   const shizuku::platform::std::string &parent_object_name,
+                   size_t thread_id));
+  void exit(shizuku::platform::std::shared_ptr<shizuku::types::thread> const
+                &thread) {
+    threads.erase(thread);
+  }
+  void call_func(shizuku::platform::std::string const &name);
 };
 
 class object_shared_ptr
