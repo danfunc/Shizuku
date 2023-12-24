@@ -24,15 +24,14 @@ void cpu_manager::context_switch() {
       } else {
         while (true) {
           if (auto next_thread = task_queue.top().thread.lock()) {
+            task_queue.pop();
+            current_context = next_thread->context;
             break;
+          } else {
+            task_queue.pop();
+            continue;
           }
         }
-
-        current_task = task_queue.top();
-        task_queue.pop();
-        current_context =
-            current_task.thread.lock()
-                ->context; // スレッドが死なないことが前提になってる。要リファクタリング
       };
       context_switch(before_context.get(), current_context.get());
       before_context.reset();

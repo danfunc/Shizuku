@@ -8,7 +8,6 @@ shizuku::types::cpu_manager manager = shizuku::types::cpu_manager();
 int sub_func(int argc, char **argv);
 void multi_thread_entry() {
   shizuku::platform::std::shared_ptr<shizuku::types::thread>
-      main_thread = shizuku::kernel.get_current_thread().lock(),
       sub_thread = std::make_shared<shizuku::types::thread>(),
       sub2_thread = std::make_shared<shizuku::types::thread>(),
       sub3_thread = std::make_shared<shizuku::types::thread>(),
