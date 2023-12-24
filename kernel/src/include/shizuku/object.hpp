@@ -1,5 +1,6 @@
 #ifndef SHIZUKU_OBJECT_HPP
 #define SHIZUKU_OBJECT_HPP
+#include "function.hpp"
 #include "memory"
 #include "queue"
 #include "shizuku/config.hpp"
@@ -31,24 +32,6 @@ struct memory {
 inline bool operator<(memory x, memory y) {
   return x.virtual_start < y.virtual_start;
 }
-
-struct function {
-  int (*entry_point)(void *user_arg1, void *user_arg2,
-                     const object parent_object, size_t thread_id);
-  shizuku::platform::std::string name;
-  const auto operator<=>(function const &right) const {
-    return this->name <=> right.name;
-  };
-};
-
-class functions : public shizuku::platform::std::set<function> {
-public:
-  const function &operator[](shizuku::platform::std::string const &name) {
-    function finder{.name = name};
-    return *this->find(finder);
-  }
-};
-
 class object {
   shizuku::platform::std::string name;
   shizuku::platform::std::set<memory> memory_map;
@@ -68,6 +51,20 @@ public:
     this->threads.insert(thread_ptr);
   }
   friend shizuku::types::kernel;
+};
+
+class object_shared_ptr
+    : shizuku::platform::std::shared_ptr<shizuku::types::object> {
+  using shizuku::platform::std::shared_ptr<shizuku::types::object>::operator*;
+  using shizuku::platform::std::shared_ptr<shizuku::types::object>::operator->;
+  auto operator<=>(shizuku::platform::std::string const &right) const {
+    return this->operator->()->operator<=>(right);
+  }
+};
+class object_weak_ptr
+    : shizuku::platform::std::weak_ptr<shizuku::types::object> {
+  using shizuku::platform::std::weak_ptr<shizuku::types::object>::lock;
+  auto operator<=>(shizuku::platform::std::string const &right) const {};
 };
 
 class object_tree

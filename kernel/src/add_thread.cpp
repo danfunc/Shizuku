@@ -2,10 +2,10 @@
 
 int shizuku::types::kernel::add_thread(int (*entry)(int, char **), int argc,
                                        char **argv) {
-  if (shizuku::platform::std::shared_ptr<shizuku::types::object>
-          current_object = this->cpu_manager[cpu_driver::get_core_num()]
-                               .get_current_thread()
-                               ->parent_object.lock()) {
+  if (auto current_object = this->cpu_manager[cpu_driver::get_core_num()]
+                                .get_current_thread()
+                                .lock()
+                                ->parent_object) {
     shizuku::platform::std::shared_ptr<shizuku::types::thread> new_thread =
         shizuku::platform::std::make_shared<shizuku::types::thread>(
             entry, argc, argv, current_object);
@@ -15,4 +15,3 @@ int shizuku::types::kernel::add_thread(int (*entry)(int, char **), int argc,
   } else
     return 0;
 }
-0

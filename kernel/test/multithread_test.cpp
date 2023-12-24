@@ -8,7 +8,7 @@ shizuku::types::cpu_manager manager = shizuku::types::cpu_manager();
 int sub_func(int argc, char **argv);
 void multi_thread_entry() {
   shizuku::platform::std::shared_ptr<shizuku::types::thread>
-      main_thread = manager.get_current_thread(),
+      main_thread = shizuku::kernel.get_current_thread().lock(),
       sub_thread = std::make_shared<shizuku::types::thread>(),
       sub2_thread = std::make_shared<shizuku::types::thread>(),
       sub3_thread = std::make_shared<shizuku::types::thread>(),
@@ -17,11 +17,11 @@ void multi_thread_entry() {
   shizuku::cpu_driver::entry_func(sub_func, sub2_thread->context.get(), 2, 0);
   shizuku::cpu_driver::entry_func(sub_func, sub3_thread->context.get(), 3, 0);
   shizuku::cpu_driver::entry_func(sub_func, sub4_thread->context.get(), 4, 0);
-  manager.add_task(sub_thread, 1, 3);
-  manager.add_task(sub2_thread, 1, 3);
-  manager.add_task(sub3_thread, 1, 3);
-  manager.add_task(sub4_thread, 1, 3);
-  manager.abort_current_task();
+  shizuku::kernel.add_task(sub_thread, 1, 3);
+  shizuku::kernel.add_task(sub2_thread, 1, 3);
+  shizuku::kernel.add_task(sub3_thread, 1, 3);
+  shizuku::kernel.add_task(sub4_thread, 1, 3);
+  shizuku::kernel.abort_current_task();
   /*while (true) {
     printf("main_thread\n");
     sleep_ms(500);
@@ -31,12 +31,12 @@ void multi_thread_entry() {
   return;
 }
 int sub_func(int argc, char **argv) {
-  auto sub_thread = manager.get_current_thread();
+  auto sub_thread = shizuku::kernel.get_current_thread().lock();
   while (true) {
     printf("sub_thread\n");
     printf("thread_argc:%d\n", argc);
     sleep_ms(500);
-    manager.add_task(sub_thread, 1, 2);
-    manager.context_switch();
+    shizuku::kernel.add_task(sub_thread, 1, 2);
+    shizuku::kernel.context_switch();
   }
 }

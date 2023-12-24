@@ -11,7 +11,7 @@
 namespace shizuku {
 namespace types {
 struct task {
-  shizuku::platform::std::shared_ptr<shizuku::types::thread> thread;
+  shizuku::platform::std::weak_ptr<shizuku::types::thread> thread;
   size_t remain_time;
   int priority;
   bool operator<(const task &y) const { return this->priority < y.priority; };
@@ -21,6 +21,7 @@ struct task {
 class cpu_manager : shizuku::cpu_driver {
 private:
   shizuku::platform::std::priority_queue<shizuku::types::task> task_queue;
+  shizuku::platform::std::shared_ptr<shizuku::context> current_context;
   shizuku::types::task current_task;
   shizuku::platform::std::shared_ptr<shizuku::context> before_context;
   shizuku::platform::std::shared_ptr<shizuku::types::thread> default_thread;
@@ -33,9 +34,9 @@ public:
            size_t processing_time, int priority);
   inline shizuku::platform::std::shared_ptr<shizuku::context>
   get_current_context() {
-    return current_task.thread->context;
+    return current_context;
   };
-  inline shizuku::platform::std::shared_ptr<shizuku::types::thread>
+  inline shizuku::platform::std::weak_ptr<shizuku::types::thread>
   get_current_thread() {
     return current_task.thread;
   };
@@ -48,16 +49,18 @@ public:
   }
   using cpu_driver::get_core_num;
   cpu_manager() {
+    default_thread =
+        shizuku::platform::std::make_shared<shizuku::types::thread>();
     this->current_task = shizuku::types::task{
-        .thread = shizuku::platform::std::make_shared<shizuku::types::thread>(),
-        .remain_time = 0,
-        .priority = 0};
-    default_thread = current_task.thread;
+        .thread = default_thread, .remain_time = 0, .priority = 0};
+    current_context = default_thread->context;
   }
   inline void
   set_default_thread(shizuku::platform::std::shared_ptr<shizuku::types::thread>
                          &default_thread) {
-    this->default_thread = default_thread;
+    if (default_thread) {
+      this->default_thread = default_thread;
+    }
   }
 };
 } // namespace types

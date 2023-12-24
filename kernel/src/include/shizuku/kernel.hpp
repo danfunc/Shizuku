@@ -33,14 +33,31 @@ public:
                 char *argv[]);
   void add_func(shizuku::platform::std::string const &name,
                 int (*entry)(int, char *[]));
+  inline shizuku::platform::std::weak_ptr<shizuku::types::thread>
+  get_current_thread() {
+    return this->cpu_manager[shizuku::types::cpu_manager::get_core_num()]
+        .get_current_thread();
+  };
+  inline void
+  add_task(shizuku::platform::std::shared_ptr<shizuku::types::thread> &thread,
+           size_t processing_time, int priority) {
+    this->cpu_manager[shizuku::types::cpu_manager::get_core_num()].add_task(
+        thread, processing_time, priority);
+  };
+  inline void abort_current_task() {
+    this->cpu_manager[shizuku::types::cpu_manager::get_core_num()]
+        .abort_current_task();
+  }
   void init();
   void exit();
   void exit(shizuku::platform::std::weak_ptr<shizuku::types::object> &parent);
+  void exit(int exit_cord);
 };
 
 } // namespace types
 
-namespace kernel {}
+extern types::kernel kernel;
+
 } // namespace shizuku
 
 #endif
