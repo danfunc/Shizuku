@@ -7,10 +7,9 @@ void object_system_test_main() {
   shizuku::kernel.create_object("test_object", test_object_main, 1, nullptr);
   shizuku::kernel.add_task(main_thread, 1, 0);
   shizuku::kernel.context_switch();
+  shizuku::kernel.call_func("test_object", "test_arm", 0, nullptr);
+  shizuku::kernel.context_switch();
   while (1) {
-    shizuku::kernel.call_func("test_object", "test_arm", 0, nullptr);
-    shizuku::kernel.add_task(main_thread, 1, 0);
-    shizuku::kernel.context_switch();
     printf("returned\n");
     sleep_ms(1000);
   }
