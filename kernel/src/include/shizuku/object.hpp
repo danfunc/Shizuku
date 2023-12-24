@@ -60,35 +60,18 @@ public:
                 &thread) {
     threads.erase(thread);
   }
-  void call_func(shizuku::platform::std::string const &name);
+  void call_func(shizuku::platform::std::string const &name, void *user_arg1,
+                 void *user_arg2);
 };
 
-class object_shared_ptr
-    : shizuku::platform::std::shared_ptr<shizuku::types::object> {
-  using shizuku::platform::std::shared_ptr<shizuku::types::object>::operator*;
-  using shizuku::platform::std::shared_ptr<shizuku::types::object>::operator->;
-  auto operator<=>(shizuku::platform::std::string const &right) const {
-    return this->operator->()->operator<=>(right);
-  }
-};
-class object_weak_ptr
-    : shizuku::platform::std::weak_ptr<shizuku::types::object> {
-  using shizuku::platform::std::weak_ptr<shizuku::types::object>::lock;
-  auto operator<=>(shizuku::platform::std::string const &right) const {};
-};
-
-class object_tree
-    : shizuku::platform::std::set<
-          shizuku::platform::std::shared_ptr<shizuku::types::object>> {
+class object_tree : shizuku::platform::std::set<shizuku::types::object> {
   friend shizuku::types::kernel;
-  using shizuku::platform::std::set<
-      shizuku::platform::std::shared_ptr<shizuku::types::object>>::find;
+  using shizuku::platform::std::set<shizuku::types::object>::find;
 
 public:
-  const shizuku::platform::std::shared_ptr<shizuku::types::object>
+  shizuku::types::object *const
   operator[](shizuku::platform::std::string const &name) const {
-    return *this->find(
-        shizuku::platform::std::make_shared<shizuku::types::object>(name));
+    return (shizuku::types::object *)&(*this->find(name));
   }
 };
 

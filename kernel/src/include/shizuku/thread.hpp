@@ -10,7 +10,7 @@ class kernel;
 struct thread {
   friend types::kernel;
   shizuku::platform::std::shared_ptr<shizuku::context> context;
-  shizuku::platform::std::set<shizuku::types::object>::pointer parent_object;
+  shizuku::types::object *parent_object;
   int priority;
   int thread_id;
   const bool operator<(shizuku::types::thread const &right) const {
@@ -30,8 +30,7 @@ struct thread {
     this->thread_id = 0;
   }
   thread(int (*entry)(int, char **), int argc, char **argv,
-         shizuku::platform::std::set<shizuku::types::object>::pointer
-             &parent_object) {
+         shizuku::types::object *parent_object) {
     this->context = shizuku::platform::std::make_shared<shizuku::context>();
     shizuku::cpu_driver::entry_func(entry, this->context.get(), argc, argv);
     this->parent_object = parent_object;

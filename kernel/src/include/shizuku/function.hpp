@@ -13,6 +13,18 @@ struct function {
   const auto operator<=>(function const &right) const {
     return this->name <=> right.name;
   };
+  function(shizuku::platform::std::string name) {
+    this->name = name;
+    this->entry_point = nullptr;
+  }
+  function(int (*entry_point)(
+               void *user_arg1, void *user_arg2,
+               const shizuku::platform::std::string &parent_object_name,
+               size_t thread_id),
+           shizuku::platform::std::string name) {
+    this->name = name;
+    this->entry_point = entry_point;
+  }
 };
 
 class functions : public shizuku::platform::std::set<function> {
