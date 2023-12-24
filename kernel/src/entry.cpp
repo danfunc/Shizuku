@@ -9,8 +9,9 @@
 void sub_func();
 void mmu_test_entry();
 void multi_thread_entry();
+void object_system_test_main();
 void shizuku_entry(void) {
   shizuku::kernel.init();
-  multi_thread_entry();
+  object_system_test_main();
   return;
 }

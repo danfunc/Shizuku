@@ -11,7 +11,9 @@ int kernel::call_func(shizuku::platform::std::string const &object_name,
       (int (*)(int, char **))entry_point, argc, argv,
       this->object_tree[object_name]);
   this->object_tree[object_name]->add_thread(thread); // 安全じゃない！！！
-  return 0;
+  this->cpu_manager[shizuku::cpu_driver::get_core_num()].add_task(thread, 0,
+                                                                  100);
+  return ++this->thread_count;
 }
 } // namespace types
 } // namespace shizuku
