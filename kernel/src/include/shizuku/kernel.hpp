@@ -26,7 +26,8 @@ public:
   void context_switch(void);
   void create_object(shizuku::platform::std::string name,
                      void (*entry)(int, char *[]), int argc, char *argv[]);
-  void create_object(shizuku::platform::std::string name);
+  void create_object(shizuku::platform::std::string name,
+                     void (*entry)(int, char *[]));
   int add_thread(int (*entry)(int, char *[]), int argc, char *argv[]);
   int call_func(shizuku::platform::std::string const &object_name,
                 shizuku::platform::std::string const &func_name, int argc,

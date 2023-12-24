@@ -69,7 +69,7 @@ class object_tree : shizuku::platform::std::set<shizuku::types::object> {
   using shizuku::platform::std::set<shizuku::types::object>::find;
 
 public:
-  shizuku::types::object *const
+  shizuku::types::object *
   operator[](shizuku::platform::std::string const &name) const {
     return (shizuku::types::object *)&(*this->find(name));
   }
