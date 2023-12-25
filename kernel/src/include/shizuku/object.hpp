@@ -3,50 +3,77 @@
 #include "memory"
 #include "queue"
 #include "shizuku/config.hpp"
+#include "shizuku/function.hpp"
 #include "shizuku/thread.hpp"
 #include "string"
 #include <map>
 #include <set>
 namespace shizuku {
 namespace types {
+class kernel;
 
-using permission = struct permission {
+struct permission {
   bool writable;
   bool readable;
   bool executable;
   bool kernel_only;
 };
 
-using memory = struct memory {
-  shizuku::types::permission permission;
+struct memory {
   void *real_start;
   void *virtual_start;
   shizuku::platform::std::size_t size;
+  shizuku::types::permission permission;
+  int operator<=>(const memory &right) const {
+    return (int)this->virtual_start - (int)right.virtual_start;
+  }
 };
 
 inline bool operator<(memory x, memory y) {
   return x.virtual_start < y.virtual_start;
 }
-
-using function = struct function {
-  int (*entry)(int argc, char *argv[]);
-  shizuku::platform::std::string name;
-};
-
-using object = struct object {
+class object {
+  friend shizuku::types::kernel;
   shizuku::platform::std::string name;
   shizuku::platform::std::set<memory> memory_map;
-  shizuku::platform::std::map<shizuku::platform::std::string,
-                              int (*)(int, char *[])>
-      functions;
-  shizuku::platform::std::set<shizuku::types::thread> threads;
-  size_t thread_count;
+  shizuku::types::functions functions;
+  shizuku::platform::std::set<
+      shizuku::platform::std::shared_ptr<shizuku::types::thread>>
+      threads;
+  friend shizuku::types::kernel;
+
+public:
+  object(shizuku::platform::std::string const &name) { this->name = name; };
   auto operator<=>(object const &right) const {
     return this->name <=> right.name;
+  };
+  void add_thread(
+      shizuku::platform::std::shared_ptr<shizuku::types::thread> &thread_ptr) {
+    this->threads.insert(thread_ptr);
   }
+  void add_func(
+      shizuku::platform::std::string const &name,
+      int (*entry)(void *user_arg1, void *user_arg2,
+                   const shizuku::platform::std::string &parent_object_name,
+                   size_t thread_id));
+  void exit(shizuku::platform::std::shared_ptr<shizuku::types::thread> const
+                &thread) {
+    threads.erase(thread);
+  }
+  void call_func(shizuku::platform::std::string const &name, void *user_arg1,
+                 void *user_arg2);
 };
 
-static inline bool operator<(object x, object y) { return x.name < y.name; }
+class object_tree : shizuku::platform::std::set<shizuku::types::object> {
+  friend shizuku::types::kernel;
+  using shizuku::platform::std::set<shizuku::types::object>::find;
+
+public:
+  shizuku::types::object *
+  operator[](shizuku::platform::std::string const &name) const {
+    return (shizuku::types::object *)&(*this->find(name));
+  }
+};
 
 } // namespace types
 
