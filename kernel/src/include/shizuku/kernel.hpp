@@ -21,6 +21,7 @@ private:
                  int (*entry)(int, char *[]), int argc, char *argv[]);
 
 public:
+  void recharge_slice();
   kernel();
   ~kernel();
   void context_switch(void);

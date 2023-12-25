@@ -2,7 +2,8 @@
     {
         "name": "raspberryPi_pico_pico_sdk",
         "environmentVariables": {
-            "SHIZUKU_TOOLCHAIN": "pico_sdk"
+            "SHIZUKU_TOOLCHAIN": "pico_sdk",
+            "SHIZUKU_CONFIGURATION_FILE": "default_conf.cmake"
         }
     }
 ]

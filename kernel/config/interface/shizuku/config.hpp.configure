@@ -2,6 +2,7 @@
 #define SHIZUKU_CONFIG PROVIDED_BY_CMAKE
 #define SHIZUKU_PROCESSOR @SHIZUKU_PROCESSOR@
 #define SHIZUKU_PLATFORM @SHIZUKU_PLATFORM@
+#define SHIZUKU_TIME_SLICE_ONCE @SHIZUKU_TIME_SLICE_ONCE@
 
 #include "shizuku/platform.hpp"
 #include "shizuku/processor.hpp"
