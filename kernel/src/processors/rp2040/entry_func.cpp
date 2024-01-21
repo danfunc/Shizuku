@@ -3,15 +3,13 @@
 #include "pico/stdlib.h"
 #include "shizuku/processors/rp2040.hpp"
 
-/*this is secure version but not test and disable. if you enable this
-version, please comment out there.*/
 void shizuku::types::processors::rp2040::cpu_driver::entry_func(
     int (*entry)(int argc, char *argv[]), context *context, int argc,
     char *argv[]) {
   asm("mov r4,%0" ::"r"(entry) : "r4");
   asm("mov r5,%0" ::"r"(argc) : "r5");
   asm("mov r6,%0" ::"r"(argv) : "r6");
-  constexpr size_t size = 4 * 1024;
+  constexpr size_t size = 2 * 1024;
   if (save_context(context) == 0) {
     void *sp = (void *)((int)malloc(size) + size);
     sp = (void *)((int)sp & ~0xfL);

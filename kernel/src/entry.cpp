@@ -11,7 +11,10 @@ void mmu_test_entry();
 void multi_thread_entry();
 void object_system_test_main();
 void shizuku_entry(void) {
-  shizuku::kernel.init();
   object_system_test_main();
+  // shizuku::kernel.init();
+  //  object_system_test_main();
   return;
 }
+
+int kernel_init_method(size_t, size_t, size_t arg1, size_t arg2) { return 0; }
