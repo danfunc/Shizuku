@@ -15,14 +15,17 @@ void object_system_test_main() {
 
 void test_object_main(size_t callee_object_id, size_t creator_object_id,
                       int argc, char **argv) {
-  shizuku::kernel.export_method(callee_object_id, test_method,
+  shizuku::kernel.export_method(test_method,
                                 "test_method"); // メソッドを公開
-  shizuku::kernel.call_method(callee_object_id, callee_object_id, "test_method",
-                              1, 1); // メソッドを呼び出し
+  shizuku::kernel.call_method(callee_object_id, "test_method", 1,
+                              1); // メソッドを呼び出し
 }
 int test_method(size_t callee_object_id, size_t caller_object_id, size_t arg1,
                 size_t arg2) {
   while (1) {
+    if (auto current_thread = shizuku::kernel.get_current_thread().lock()) {
+      printf("thread_exist\n");
+    }
     printf("callee_object_id:%d\n", callee_object_id);
     printf("caller_object_id:%d\n", caller_object_id);
     printf("arg1:%d\n", arg1);

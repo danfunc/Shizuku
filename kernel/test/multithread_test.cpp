@@ -74,6 +74,9 @@ int sub_func(int argc, char **argv) {
     printf("sub_thread\n");
     printf("thread_argc:%d\n", argc);
     sleep_ms(500);
+    if (sub_thread) {
+      printf("sub_thread_exist\nthread_id:%d\n", sub_thread->thread_id);
+    }
     // shizuku::kernel.add_task(sub_thread, 1, 1);
     // shizuku::kernel.context_switch();
   }

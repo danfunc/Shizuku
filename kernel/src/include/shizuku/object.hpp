@@ -56,8 +56,10 @@ public:
                                    arg1, arg2, total_thread_count));
   }
   void export_method(method entry, shizuku::string const &name);
-  size_t create_thread(method entry, size_t caller_object_id,
-                       size_t callee_object_id, size_t arg1, size_t arg2);
+  shizuku::thread_shared_ptr create_thread(method entry,
+                                           size_t caller_object_id,
+                                           size_t callee_object_id, size_t arg1,
+                                           size_t arg2);
   void remove_thread(size_t thread_id);
 };
 

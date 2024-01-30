@@ -53,10 +53,11 @@ public:
     this->cpu_manager[shizuku::types::cpu_manager::get_core_num()]
         .abort_current_task();
   };
-  size_t get_core_num() { return types::cpu_manager::get_core_num(); };
+  inline size_t get_core_num() { return types::cpu_manager::get_core_num(); };
   size_t export_method(method entry, shizuku::string const &name);
   size_t export_method(size_t object_id, method entry,
                        shizuku::string const &name);
+  void delete_exported_method(shizuku::string const &name);
 
 public:
   // super_object_only
@@ -64,6 +65,9 @@ public:
   void
   add_task(shizuku::platform::std::shared_ptr<shizuku::types::thread> &thread,
            size_t processing_time, int priority);
+  size_t create_object(shizuku::string name, uint32_t creator_object_id,
+                       method init_method, uint32_t arg1, uint32_t arg2,
+                       object_attribute attribute);
 };
 
 } // namespace types
