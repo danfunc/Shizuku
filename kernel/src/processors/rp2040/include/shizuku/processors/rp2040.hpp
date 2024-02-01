@@ -1,15 +1,19 @@
 #ifndef RP2040_HPP
 #define RP2040_HPP
 #ifdef SIO_CPUID_OFFSET
-#define Before_CPUID_OFFSET SIO_CPUID_OFFSET
+#define BEFORE_CPUID_OFFSET SIO_CPUID_OFFSET
 #undef SIO_CPUID_OFFSET
 #endif
 #ifdef SIO_BASE
-#define Before_SIO_BASE SIO_BASE
+#define BEFORE_SIO_BASE SIO_BASE
 #undef SIO_BASE
 #endif
-#define SIO_BASE (0xd0000000)         // imported from pico_sdk
+#ifndef SIO_BASE
+#define SIO_BASE (0xd0000000) // imported from pico_sdk
+#endif
+#ifndef SIO_CPUID_OFFSET
 #define SIO_CPUID_OFFSET (0x00000000) // imported from pico_sdk
+#endif
 
 #include "cstdint"
 #include "cstdlib"
@@ -81,5 +85,8 @@ struct shizuku::types::processors::rp2040::context {
   };
   context(){};
 };
+
+#undef SIO_BASE
+#undef SIO_CPUID_OFFSET
 
 #endif

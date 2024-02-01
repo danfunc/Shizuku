@@ -9,4 +9,6 @@ set(SHIZUKU_PLATFORM
 set(SHIZUKU_PROCESSOR
     rp2040
     CACHE STRING "shizuku platform name" FORCE)
-include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
+set(PICO_SDK_FETCH_FROM_GIT on)
+
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/pico_sdk_import.cmake)

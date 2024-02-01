@@ -37,11 +37,12 @@ class object {
   shizuku::platform::std::string name;
   shizuku::platform::std::set<memory> memory_map;
   shizuku::map<shizuku::string, method> method_map;
+
   size_t total_thread_count;
   shizuku::map<size_t,
                shizuku::platform::std::shared_ptr<shizuku::types::thread>>
       thread_map;
-  shizuku::map<size_t, size_t> under_object_map;
+  shizuku::map<size_t, size_t> child_object_map;
 
 public:
   const size_t object_id;

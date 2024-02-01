@@ -13,6 +13,7 @@ int kernel_init_method(
     size_t); // arg1 = mode(0=kernel_initialize 1=cpu_manager_initialize)
              // arg2 = core_num(mode=1 only)
 namespace types {
+
 class kernel {
 private:
   friend int shizuku::kernel_init_method(size_t, size_t, size_t, size_t);

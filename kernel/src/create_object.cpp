@@ -17,8 +17,9 @@ size_t kernel::create_object(shizuku::string const &name, method init_method,
       (size_t)target_id,
       shizuku::object_shared_ptr{new object{target_id, creator_id, init_method,
                                             arg1, arg2, super_object}});
-  object_tree[(size_t)target_id]->thread_map[1]->parent_object =
-      object_tree[(size_t)target_id];
+  shizuku::object_shared_ptr created_object = object_tree[(size_t)target_id];
+  created_object->thread_map[1]->parent_object = created_object;
+  created_object->name = name;
   cpu_manager[get_core_num()].add_task(
       object_tree[(size_t)target_id]->thread_map[1], 1, 100);
   return target_id;
