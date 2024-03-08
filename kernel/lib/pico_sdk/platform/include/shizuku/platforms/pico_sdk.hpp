@@ -8,6 +8,7 @@
 #include "queue"
 #include "set"
 #include "shizuku/memory_managers/pico_sdk.hpp"
+#include "shizuku/method.hpp"
 #include "string"
 #include "vector"
 namespace shizuku {
@@ -43,6 +44,8 @@ using context_weak_ptr =
     ::std::weak_ptr<::shizuku::types::processors::rp2040::context>;
 using task_queue = ::std::priority_queue<::shizuku::types::task>;
 using thread_map = ::std::map<int, shizuku::types::thread>;
+using method_shared_ptr = ::std::shared_ptr<shizuku::types::method>;
+using method_weak_ptr = ::std::weak_ptr<shizuku::types::method>;
 template <typename T, typename U> using map = ::std::map<T, U>;
 } // namespace shizuku
 

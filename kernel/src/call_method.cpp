@@ -17,6 +17,6 @@ int kernel::call_method(size_t callee_object_num,
 int kernel::call_method(size_t callee_object_num, size_t caller_object_num,
                         shizuku::string const &method_name, size_t arg1,
                         size_t arg2) {
-  return object_tree[callee_object_num]->method_map[method_name](
+  return (*(object_tree[callee_object_num]->method_map[method_name].get()))(
       callee_object_num, caller_object_num, arg1, arg2);
 }

@@ -62,6 +62,11 @@ template <typename T, typename U, typename S>
 concept map_requires = requires(T map, U key, S value) {
   { map.operator[](key) } -> shizuku::same_as<S &>;
 };
+template <typename T>
+concept method_shared_ptr_requires =
+    shared_ptr_requires<T, shizuku::types::method>;
+template <typename T>
+concept method_weak_ptr_requires = weak_ptr_requires<T, shizuku::types::method>;
 } // namespace concepts
 } // namespace shizuku
 

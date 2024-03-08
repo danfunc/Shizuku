@@ -2,7 +2,7 @@
 #include "shizuku/cpu_manager.hpp"
 #include "shizuku/kernel.hpp"
 #include "shizuku/method.hpp"
-const uint LED_PIN = PICO_DEFAULT_LED_PIN;
+const constexpr uint LED_PIN = PICO_DEFAULT_LED_PIN;
 shizuku::context sub_context, main_context;
 shizuku::cpu_driver driver = shizuku::cpu_driver();
 shizuku::types::cpu_manager manager = shizuku::types::cpu_manager();
@@ -49,15 +49,6 @@ shizuku::cpu_driver::construct_entry_context(
   shizuku::kernel.create_object("sub_object", (shizuku::types::method)sub_func,
                                 0, 0);
   shizuku::kernel.abort_current_task();
-  auto current_thread = shizuku::kernel.get_current_thread().lock();
-  while (true) {
-    if (current_thread)
-      printf("%d\n", current_thread->thread_id);
-    else
-      printf("current_thread_not_exist\n");
-    sleep_ms(1000);
-  }
-
   /*
 while (true) {
 printf("main_thread\n");
@@ -69,14 +60,10 @@ manager.context_switch();
   return;
 }
 int sub_func(int argc, char **argv) {
-  auto sub_thread = shizuku::kernel.get_current_thread().lock();
   while (true) {
     printf("sub_thread\n");
     printf("thread_argc:%d\n", argc);
     sleep_ms(500);
-    if (sub_thread) {
-      printf("sub_thread_exist\nthread_id:%d\n", sub_thread->thread_id);
-    }
     // shizuku::kernel.add_task(sub_thread, 1, 1);
     // shizuku::kernel.context_switch();
   }

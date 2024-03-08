@@ -50,14 +50,18 @@ public:
     return (*(uint32_t *)(SIO_BASE + SIO_CPUID_OFFSET));
   };
 };
+constexpr size_t size = 2 * 1024;
 
 struct shizuku::types::processors::rp2040::context {
+  void auto_exit_request();
   uint32_t r4, r5, r6, r7, r8, r9, r10, r11, r12;
   void *sp, *lr;
+  void *const stack_start_p;
   uint32_t r0, r1, r2, r3;
   inline context(int (*entry)(size_t, size_t, size_t, size_t), size_t arg1,
-                 size_t arg2, size_t arg3, size_t arg4) {
-    constexpr size_t size = 2 * 1024;
+                 size_t arg2, size_t arg3, size_t arg4)
+      : stack_start_p{
+            (void *)((int)((uint32_t)((int)malloc(size) + size)) & ~0xfL)} {
     if (::shizuku::types::processors::rp2040::cpu_driver::save_context(this) ==
         0) {
       r4 = (uint32_t)entry;
@@ -65,7 +69,7 @@ struct shizuku::types::processors::rp2040::context {
       r6 = (uint32_t)arg2;
       r7 = (uint32_t)arg3;
       r8 = (uint32_t)arg4;
-      sp = (void *)((int)((uint32_t)((int)malloc(size) + size)) & ~0xfL);
+      sp = stack_start_p;
       return;
     } else {
       asm("mov r0,r5");
@@ -79,11 +83,17 @@ struct shizuku::types::processors::rp2040::context {
       asm("mov r11,r7");
       asm("mov r12,r7");
       asm("blx r4");
-      while (true)
-        ;
+      while (1) {
+        auto_exit_request();
+      }
     }
   };
-  context(){};
+  context() : stack_start_p{nullptr} {};
+  ~context() {
+    if (stack_start_p != nullptr) {
+      free(stack_start_p);
+    }
+  }
 };
 
 #undef SIO_BASE
