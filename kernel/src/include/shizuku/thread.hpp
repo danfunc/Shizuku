@@ -1,48 +1,37 @@
 #ifndef SHIZUKU_THREAD_HPP
 #define SHIZUKU_THREAD_HPP
-#include "memory"
+#include "shizuku/method.hpp"
 #include "shizuku/platform.hpp"
 #include "shizuku/processor.hpp"
+#include <atomic>
 namespace shizuku {
 namespace types {
 struct object;
 class kernel;
+enum status {
+  wait_queueing,
+  wait_executing,
+  executing,
+  sleeping,
+};
 struct thread {
-  friend types::kernel;
-  shizuku::platform::std::shared_ptr<shizuku::context> context;
-  shizuku::types::object *parent_object;
+  shizuku::context_shared_ptr context;
+  shizuku::object_weak_ptr parent_object;
   int priority;
-  int thread_id;
-  const bool operator<(shizuku::types::thread const &right) const {
-    return this->thread_id < right.thread_id;
+  const size_t thread_id;
+  shizuku::types::status status = wait_queueing;
+  thread(method entry, size_t callee_object_num, size_t caller_object_num,
+         size_t arg1, size_t arg2, size_t id, int priority = 0)
+      : context(new shizuku::context(entry, callee_object_num,
+                                     caller_object_num, arg1, arg2)),
+        thread_id{id} {
+    this->priority = priority;
   };
-  thread(const thread &&right) {
-    this->context = right.context;
-    this->parent_object = right.parent_object;
-    this->priority = right.priority;
-    this->thread_id = right.thread_id;
-  }
-  thread() {
-    this->context = shizuku::platform::std::make_shared<shizuku::context>();
-    this->parent_object =
-        shizuku::platform::std::set<shizuku::types::object>::pointer();
-    this->priority = 0;
-    this->thread_id = 0;
-  }
-  thread(int (*entry)(int, char **), int argc, char **argv,
-         shizuku::types::object *parent_object) {
-    this->context = shizuku::platform::std::make_shared<shizuku::context>();
-    shizuku::cpu_driver::entry_func(entry, this->context.get(), argc, argv);
-    this->parent_object = parent_object;
-    this->thread_id = 0;
-  }
+  thread(size_t thread_id)
+      : context{new shizuku::context}, thread_id{thread_id} {};
 };
 
 } // namespace types
 } // namespace shizuku
 
-static inline const int operator<=>(shizuku::types::thread const &x,
-                                    shizuku::types::thread const &y) {
-  return x.thread_id - y.thread_id;
-}
 #endif

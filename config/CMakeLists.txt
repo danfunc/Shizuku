@@ -1,12 +1,20 @@
 set(SHIZUKU_PLATFORM
     "unknown"
     CACHE STRING "shizuku platform name")
+
+if(NOT SHIZUKU_CONFIG)
+  set(SHIZUKU_CONFIG
+      $ENV{SHIZUKU_CONFIGURATION_FILE}
+      CACHE STRING "shizuku configuration file name")
+  message("SHIZUKU_CONFIG SETTED FROM ENV")
+else()
+  set(SHIZUKU_CONFIG
+      "unknown"
+      CACHE STRING "shizuku configuration file")
+endif()
 set(SHIZUKU_PROCESSOR
     "unknown"
     CACHE STRING "shizuku processor name")
-set(SHIZUKU_CONFIG
-    "unknown"
-    CACHE STRING "shizuku configuration file")
 if(SHIZUKU_PLATFORM STREQUAL "unknown")
   message(SEND_ERROR SHIZUKU_PLATFORM is unknown)
 else()

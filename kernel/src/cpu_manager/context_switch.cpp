@@ -16,6 +16,9 @@ void cpu_manager::context_switch() {
   } else {
     if (--current_task.remain_time == 0) {
       before_context = current_context;
+      if (auto current_thread = current_task.thread.lock()) {
+        current_thread->status = wait_queueing;
+      }
       current_task.thread.reset();
       while (true) {
         if (task_queue.empty()) {
