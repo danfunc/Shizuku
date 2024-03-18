@@ -15,4 +15,6 @@ target_sources(
           get_current_thread.cpp
           export_method.cpp
           create_object.cpp
-          call_method.cpp)
+          call_method.cpp
+          get_current_object_is_super.cpp
+          create_nomal_object.cpp)

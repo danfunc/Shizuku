@@ -6,7 +6,7 @@
 int main(void) {
   stdio_init_all();
   sleep_ms(100);
-  multicore_launch_core1(shizuku_entry);
+  multicore_launch_core1((void (*)())shizuku_entry);
   while (1) {
   }
   return 0;

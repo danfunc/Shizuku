@@ -5,18 +5,34 @@
 #include "shizuku/check_config.hpp"
 #include "shizuku/config.hpp"
 #include "shizuku/cpu_manager.hpp"
-#include "shizuku/namespaces.hpp"
 #include "shizuku/object.hpp"
 namespace shizuku {
-int kernel_init_method(
-    size_t, size_t, size_t,
-    size_t); // arg1 = mode(0=kernel_initialize 1=cpu_manager_initialize)
-             // arg2 = core_num(mode=1 only)
+int kernel_init_method(size_t, size_t, size_t, size_t);
+// arg1 = mode(0=kernel_initialize 1=cpu_manager_initialize)
+// arg2 = core_num(mode=1 only)
 
 namespace types {
 class kernel;
-class kernel_api_error;
-class kernel_api_error {};
+enum struct error_code : size_t {
+  noerror = 0,
+  wait_for_async_call,
+  no_such_object, // for super object
+  no_such_method,
+  no_such_object_in_your_child, // for normal object
+  you_are_not_super_object,
+
+};
+template <typename T> class kernel_api_error {
+  error_code operation_result;
+  T return_value;
+  operator bool() {
+    if (this->operation_result == error_code::noerror) {
+      return false;
+    } else {
+      return true;
+    }
+  };
+};
 class kernel_api_for_super_object {
   friend shizuku::types::kernel;
 
@@ -85,6 +101,7 @@ public:
   inline size_t get_core_num() { return types::cpu_manager::get_core_num(); };
   size_t export_method(method entry, shizuku::string const &name);
   void delete_exported_method(shizuku::string const &name);
+  bool get_current_object_is_super(void);
 
 public:
   // super_object_only

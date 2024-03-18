@@ -10,7 +10,6 @@ struct object;
 class kernel;
 enum status {
   wait_queueing,
-  wait_executing,
   executing,
   sleeping,
 };
