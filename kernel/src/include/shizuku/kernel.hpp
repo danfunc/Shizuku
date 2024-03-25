@@ -2,8 +2,7 @@
 #ifndef SHIZUKU_KERNEL_HPP
 #define SHIZUKU_KERNEL_HPP
 #include "cstdint"
-#include "shizuku/check_config.hpp"
-#include "shizuku/config.hpp"
+#include "shizuku/api_result.hpp"
 #include "shizuku/cpu_manager.hpp"
 #include "shizuku/object.hpp"
 namespace shizuku {
@@ -13,26 +12,6 @@ int kernel_init_method(size_t, size_t, size_t, size_t);
 
 namespace types {
 class kernel;
-enum struct error_code : size_t {
-  noerror = 0,
-  wait_for_async_call,
-  no_such_object, // for super object
-  no_such_method,
-  no_such_object_in_your_child, // for normal object
-  you_are_not_super_object,
-
-};
-template <typename T> class kernel_api_error {
-  error_code operation_result;
-  T return_value;
-  operator bool() {
-    if (this->operation_result == error_code::noerror) {
-      return false;
-    } else {
-      return true;
-    }
-  };
-};
 class kernel_api_for_super_object {
   friend shizuku::types::kernel;
 
@@ -42,12 +21,13 @@ private:
   bool get_current_object_is_super();
 
 public:
-  shizuku::thread_weak_ptr get_current_thread();
-  void
+  api_result<shizuku::thread_weak_ptr> get_current_thread();
+  api_result<size_t>
   add_task(shizuku::platform::std::shared_ptr<shizuku::types::thread> &thread,
            size_t processing_time, int priority);
-  void export_method(size_t target_object_id, shizuku::types::method method,
-                     shizuku::string name);
+  api_result<void> export_method(size_t target_object_id,
+                                 shizuku::types::method method,
+                                 shizuku::string name);
 };
 class kernel {
 private:
@@ -59,15 +39,23 @@ private:
   shizuku::map<size_t, shizuku::object_shared_ptr> object_tree;
   size_t total_object_count = 0;
   shizuku::object_shared_ptr kernel_object;
-  int create_object(shizuku::string name, uint32_t creator_object_id,
-                    method init_method, uint32_t arg1, uint32_t arg2);
+  intptr_t_api_result create_object(shizuku::string name,
+                                    uint32_t creator_object_id,
+                                    method init_method, uint32_t arg1,
+                                    uint32_t arg2);
 
   shizuku::thread_weak_ptr get_current_thread();
-  size_t export_method(size_t target_object_id, shizuku::types::method method,
-                       shizuku::string const &name);
+  api_result<void> export_method(size_t target_object_id,
+                                 shizuku::types::method method,
+                                 shizuku::string const &name);
 
-  int call_method(size_t callee_object_num, size_t caller_object_num,
-                  shizuku::string const &method_name, size_t arg1, size_t arg2);
+  intptr_t_api_result call_method(size_t callee_object_num,
+                                  size_t caller_object_num, size_t arg1,
+                                  size_t arg2,
+                                  shizuku::string const &method_name);
+  api_result<size_t>
+  add_task(shizuku::platform::std::shared_ptr<shizuku::types::thread> &thread,
+           size_t processing_time, int priority);
 
 public:
   kernel_api_for_super_object for_super_object;
@@ -85,29 +73,31 @@ public:
           kernel_object->thread_map[kernel_object->total_thread_count]);
     }
   };
-  int call_method(size_t callee_object_num, shizuku::string const &method_name,
-                  size_t arg1, size_t arg2);
-  inline int call_method(size_t arm_num, size_t arg1, size_t arg2);
-  int call_armed_method(size_t arm_num, size_t arg1, size_t arg2);
+  intptr_t_api_result call_method(size_t callee_object_num,
+                                  shizuku::string const &method_name,
+                                  size_t arg1, size_t arg2);
+  inline intptr_t_api_result call_method(size_t arm_num, size_t arg1,
+                                         size_t arg2);
+  intptr_t_api_result call_armed_method(size_t arm_num, size_t arg1,
+                                        size_t arg2);
   void context_switch(void);
   void exit(int exit_cord);
-  size_t create_thread(method entry, size_t arg1, size_t arg2);
-  size_t create_object(shizuku::string const &name, method init_method,
-                       size_t arg1, size_t arg2);
+  api_result<size_t> create_thread(method entry, size_t arg1, size_t arg2);
+  api_result<size_t> create_object(shizuku::string const &name,
+                                   method init_method, size_t arg1,
+                                   size_t arg2);
   inline void abort_current_task() {
     this->cpu_manager[shizuku::types::cpu_manager::get_core_num()]
         .abort_current_task();
   };
   inline size_t get_core_num() { return types::cpu_manager::get_core_num(); };
-  size_t export_method(method entry, shizuku::string const &name);
+  api_result<void> export_method(method entry, shizuku::string const &name);
   void delete_exported_method(shizuku::string const &name);
   bool get_current_object_is_super(void);
 
 public:
   // super_object_only
-  void
-  add_task(shizuku::platform::std::shared_ptr<shizuku::types::thread> &thread,
-           size_t processing_time, int priority);
+
   size_t create_object(shizuku::string name, uint32_t creator_object_id,
                        method init_method, uint32_t arg1, uint32_t arg2,
                        object_attribute attribute);
@@ -123,8 +113,8 @@ extern types::kernel kernel;
 
 namespace shizuku {
 namespace types {
-int shizuku::types::kernel::call_method(size_t arm_num, size_t arg1,
-                                        size_t arg2) {
+intptr_t_api_result
+shizuku::types::kernel::call_method(size_t arm_num, size_t arg1, size_t arg2) {
   return call_armed_method(arm_num, arg1, arg2);
 };
 } // namespace types

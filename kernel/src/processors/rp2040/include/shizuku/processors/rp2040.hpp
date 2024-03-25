@@ -40,17 +40,11 @@ public:
   static void entry_func(int (*entry)(int argc, char *argv[]),
                          shizuku::types::processors::rp2040::context *context,
                          int argc, char *argv[]);
-  static void construct_entry_context(
-      void *arg1, void *arg2,
-      int (*entry)(void *arg1, void *arg2,
-                   ::shizuku::thread_weak_ptr &current_thread_ptr,
-                   ::shizuku::object_weak_ptr &caller_object_ptr),
-      shizuku::types::processors::rp2040::context *context);
   static inline unsigned int get_core_num() {
     return (*(uint32_t *)(SIO_BASE + SIO_CPUID_OFFSET));
   };
 };
-constexpr size_t size = 2 * 1024;
+constexpr size_t size = 4 * 1024;
 
 struct shizuku::types::processors::rp2040::context {
   void auto_exit_request();
@@ -72,19 +66,19 @@ struct shizuku::types::processors::rp2040::context {
       sp = stack_start_p;
       return;
     } else {
-      asm("mov r0,r5");
-      asm("mov r1,r6");
-      asm("mov r2,r7");
-      asm("mov r3,r8");
+      asm volatile("mov r0,r5");
+      asm volatile("mov r1,r6");
+      asm volatile("mov r2,r7");
+      asm volatile("mov r3,r8");
       // 引数を設定
-      asm("mov r7,#0");
-      asm("mov r9,r7");
-      asm("mov r10,r7");
-      asm("mov r11,r7");
-      asm("mov r12,r7");
-      asm("blx r4");
+      asm volatile("mov r7,#0");
+      asm volatile("mov r9,r7");
+      asm volatile("mov r10,r7");
+      asm volatile("mov r11,r7");
+      asm volatile("mov r12,r7");
+      asm volatile("blx r4");
       while (1) {
-        auto_exit_request();
+        printf("context_exited");
       }
     }
   };

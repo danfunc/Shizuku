@@ -61,6 +61,8 @@ concept cpu_driver_requires =
 template <typename T, typename U, typename S>
 concept map_requires = requires(T map, U key, S value) {
   { map.operator[](key) } -> shizuku::same_as<S &>;
+  map.find(key);
+  map.end();
 };
 template <typename T>
 concept method_shared_ptr_requires =

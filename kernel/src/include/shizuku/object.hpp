@@ -57,7 +57,7 @@ public:
         new shizuku::types::thread(entry, this_object_id, creator_object_id,
                                    arg1, arg2, total_thread_count));
   }
-  void export_method(method &entry, shizuku::string const &name);
+  void export_method(method entry, shizuku::string const &name);
   shizuku::thread_shared_ptr create_thread(method entry,
                                            size_t caller_object_id,
                                            size_t callee_object_id, size_t arg1,

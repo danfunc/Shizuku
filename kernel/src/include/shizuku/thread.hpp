@@ -9,16 +9,17 @@ namespace types {
 struct object;
 class kernel;
 enum status {
-  wait_queueing,
+  waiting_queued,
   executing,
   sleeping,
+  waiting_other_thread_exit,
 };
 struct thread {
   shizuku::context_shared_ptr context;
   shizuku::object_weak_ptr parent_object;
   int priority;
   const size_t thread_id;
-  shizuku::types::status status = wait_queueing;
+  shizuku::types::status status = waiting_queued;
   thread(method entry, size_t callee_object_num, size_t caller_object_num,
          size_t arg1, size_t arg2, size_t id, int priority = 0)
       : context(new shizuku::context(entry, callee_object_num,

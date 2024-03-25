@@ -2,7 +2,8 @@
 
 using namespace shizuku::types;
 
-size_t kernel::create_thread(method entry, size_t arg1, size_t arg2) {
+api_result<size_t> kernel::create_thread(method entry, size_t arg1,
+                                         size_t arg2) {
   if (auto current_thread = this->get_current_thread().lock()) {
     if (auto current_object = current_thread->parent_object.lock()) {
       shizuku::thread_shared_ptr created_thread =
@@ -10,7 +11,10 @@ size_t kernel::create_thread(method entry, size_t arg1, size_t arg2) {
                                         current_object->object_id, arg1, arg2);
       created_thread->parent_object = current_object;
       return created_thread->thread_id;
+    } else {
+      return error_code::your_object_are_killed;
     }
+  } else {
+    return error_code::your_thread_are_killed;
   }
-  return 0;
 }

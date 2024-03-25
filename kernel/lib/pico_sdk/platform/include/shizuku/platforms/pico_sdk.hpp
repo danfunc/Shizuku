@@ -47,6 +47,7 @@ using thread_map = ::std::map<int, shizuku::types::thread>;
 using method_shared_ptr = ::std::shared_ptr<shizuku::types::method>;
 using method_weak_ptr = ::std::weak_ptr<shizuku::types::method>;
 template <typename T, typename U> using map = ::std::map<T, U>;
+template <typename T> using shared_ptr = ::std::shared_ptr<T>;
 } // namespace shizuku
 
 #endif

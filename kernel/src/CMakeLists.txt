@@ -13,8 +13,11 @@ target_sources(
           add_task.cpp
           create_thread.cpp
           get_current_thread.cpp
-          export_method.cpp
           create_object.cpp
           call_method.cpp
           get_current_object_is_super.cpp
           create_nomal_object.cpp)
+
+target_precompile_headers(
+  shizuku_kernel PRIVATE $<$<COMPILE_LANGUAGE:CXX>:
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/shizuku/check_config.hpp>)

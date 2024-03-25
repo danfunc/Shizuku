@@ -20,6 +20,3 @@ configure_file(
 configure_file(
   "${CMAKE_CURRENT_SOURCE_DIR}/interface/shizuku/platform.hpp.configure"
   "${CMAKE_CURRENT_SOURCE_DIR}/interface/shizuku/platform.hpp")
-target_precompile_headers(
-  shizuku_kernel PRIVATE $<$<COMPILE_LANGUAGE:CXX>:
-  ${CMAKE_CURRENT_SOURCE_DIR}/interface/shizuku/config.hpp>)
