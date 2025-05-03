@@ -1,6 +1,0 @@
-
-if(SHIZUKU_PLATFORM STREQUAL "unknown")
-    message(SEND_ERROR SHIZUKU_PLATFORM is unknown)
-else()
-    add_subdirectory(${SHIZUKU_PLATFORM})
-endif()

@@ -1,2 +1,0 @@
-add_subdirectory(memory_manager)
-target_include_directories(shizuku_kernel PUBLIC include)

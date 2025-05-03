@@ -1,9 +1,20 @@
 [
     {
         "name": "raspberryPi_pico_pico_sdk",
-        "environmentVariables": {
-            "SHIZUKU_TOOLCHAIN": "pico_sdk",
-            "SHIZUKU_CONFIGURATION_FILE": "default_conf.cmake"
+        "cmakeSettings":{
+            "PRELOAD_TOOLCHAIN_FILE":"${workspaceFolder}/cmake/pico_sdk/pico_sdk_import.cmake",
+            "POSTLOAD_TOOLCHAIN_FILE":"${workspaceFolder}/cmake/pico_sdk/pico_sdk_setup.cmake",
+            "CMAKE_CXX_STANDARD":"23",
+            "SHIZUKU_CPU_MANAGER":"rp2040",
+            "SHIZUKU_OBJECT":"shizuku::dummy::object",
+            "SHIZUKU_CPU_COUNT" : "2",
+            "CMAKE_EXPORT_COMPILE_COMMANDS":"ON",
+            "CMAKE_CXX_FLAGS": "-fconcepts-diagnostics-depth=2"
+        },
+        "compilers": {
+            "C": "/opt/homebrew/bin/arm-none-eabi-gcc",
+            "CXX": "/opt/homebrew/bin/arm-none-eabi-g++",
+            "ASM": "/opt/homebrew/bin/arm-none-eabi-gcc"
         }
     }
 ]
