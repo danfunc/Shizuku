@@ -4,10 +4,12 @@ namespace shizuku
 {
     namespace templates
     {
-        template<typename THREAD,typename METHOD,typename MEMORY>
+        template<typename THREAD_TABLE,typename METHOD_TABLE,typename MEMORY_TABLE>
         struct object
         {
-
+            THREAD_TABLE thread_table;
+            METHOD_TABLE method_table;
+            MEMORY_TABLE memory_table;
         };
         
     } // namespace templates

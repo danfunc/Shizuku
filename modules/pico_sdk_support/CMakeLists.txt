@@ -8,7 +8,6 @@ target_sources(pico_sdk_support
 )
 
 target_link_libraries(Shizuku PRIVATE pico_sdk_support)
-target_link_libraries(pico_sdk_support PUBLIC pico_stdlib)
-target_link_libraries(pico_sdk_support PRIVATE hardware_interp)
+target_link_libraries(pico_sdk_support PUBLIC pico_stdlib pico_stdio hardware_exception )
 target_link_libraries(pico_sdk_support PUBLIC Shizuku_HEADERS)
 target_include_directories(pico_sdk_support PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/interface)
