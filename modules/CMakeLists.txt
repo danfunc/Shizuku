@@ -1,4 +1,4 @@
-foreach(module ${USE_SHIZUKU_MODULES})
+foreach(module IN LISTS USE_SHIZUKU_MODULES)
     if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${module}/CMakeLists.txt)
         add_subdirectory(${module})
     else()

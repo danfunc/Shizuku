@@ -1,6 +1,5 @@
 cmake_minimum_required(VERSION 3.26)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/buildUtilities.cmake)
-
 preloadToolchain()
 project(Shizuku C CXX ASM)
 add_executable(Shizuku)
