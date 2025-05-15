@@ -11,9 +11,9 @@
             "CMAKE_EXPORT_COMPILE_COMMANDS":"ON"
         },
         "compilers": {
-            "C": "/opt/homebrew/bin/arm-none-eabi-gcc",
-            "CXX": "/opt/homebrew/bin/arm-none-eabi-g++",
-            "ASM": "/opt/homebrew/bin/arm-none-eabi-gcc"
+            "C": "arm-none-eabi-gcc",
+            "CXX": "arm-none-eabi-g++",
+            "ASM": "arm-none-eabi-gcc"
         }
     }
 ]
