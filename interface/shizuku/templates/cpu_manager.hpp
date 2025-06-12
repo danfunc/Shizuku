@@ -4,7 +4,9 @@
 #include "cstdint"
 namespace shizuku {
 namespace templates {
-template <shizuku::concepts::cpu_driver_requires CPU_DRIVER, uint32_t core_count> class cpu_manager {};
+template <shizuku::concepts::cpu_driver_requires CPU_DRIVER, uint32_t core_count> class cpu_manager {
+    CPU_DRIVER cpu_drivers[core_count];
+};
 } // namespace Templates
 } // namespace shizuku
 #endif // SHIZUKU_CPU_MANAGER_HPP

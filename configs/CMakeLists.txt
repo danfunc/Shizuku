@@ -1,4 +1,5 @@
 set(INCLUDE_HEADERS_INSTRUCTION "")
+set(config_need_headers)
 
 foreach(header_path IN LISTS config_need_headers)
     if(header_path)

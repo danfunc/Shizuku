@@ -6,9 +6,7 @@ namespace shizuku{
     namespace concepts{
         template <typename CPU_DRIVER_CLASS>
         concept cpu_driver_requires = requires(CPU_DRIVER_CLASS cpu_driver){
-            {cpu_driver.get_core_num()} -> std::same_as<unsigned int>;
             requires shizuku::concepts::context_requires<typename CPU_DRIVER_CLASS::context>;
-            CPU_DRIVER_CLASS::syscall();
         };
     }
 } //

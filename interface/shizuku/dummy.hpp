@@ -8,6 +8,8 @@ namespace shizuku{
         struct cpu_manager
         {
         };
+        struct memory_map{};
+        struct thread{};
     }
 }
 #endif // SHIZUKU_DUMMY_HPP
