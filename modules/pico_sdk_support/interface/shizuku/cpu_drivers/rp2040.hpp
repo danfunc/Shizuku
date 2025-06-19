@@ -20,6 +20,8 @@ public:
   void init();
   static unsigned int get_core_num() { return get_core_num(); }
   struct context {
+    const uint32_t limit;
+    void *sp, (*lr)(void), (*pc)(void);
     void pop();
   };
   using method = uint32_t (*)(uint32_t arg0, uint32_t arg1, uint32_t arg2,
@@ -29,7 +31,7 @@ public:
                                           uint32_t arg2, uint32_t arg3) {
     return rp2040_syscall(arg0, arg1, arg2, arg3);
   };
-
+  int corenum;
 private:
   static uint32_t svc_handler(uint32_t arg0, uint32_t arg1, uint32_t arg2,
                               uint32_t arg3);
