@@ -4,7 +4,7 @@ namespace shizuku{
 namespace concepts {
     template<typename CONTEXT>
     concept context_requires = requires(CONTEXT context){
-        context.pop();
+        true;
     };
     }
 } //

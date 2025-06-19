@@ -20,9 +20,9 @@ public:
   void init();
   static unsigned int get_core_num() { return get_core_num(); }
   struct context {
-    const uint32_t limit;
+    const void* stack_start;
     void *sp, (*lr)(void), (*pc)(void);
-    void pop();
+    
   };
   using method = uint32_t (*)(uint32_t arg0, uint32_t arg1, uint32_t arg2,
                               uint32_t arg3);
