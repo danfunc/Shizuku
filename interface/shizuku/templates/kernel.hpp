@@ -7,6 +7,7 @@ template <typename CPU_MANAGER,typename OBJECT> class kernel {
     public:
     CPU_MANAGER cpu_manager;
     static_table<OBJECT*,128> object_table;
+    void init();
 };
 } // namespace templates
 } // namespace shizuku

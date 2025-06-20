@@ -2,4 +2,8 @@
 
 namespace shizuku{
     KERNEL kernel;
+    template<>
+    void KERNEL::init(){
+        
+    };
 }

@@ -11,3 +11,11 @@ using namespace cpu_drivers;
 void rp2040::init(){
     exception_set_exclusive_handler(SVCALL_EXCEPTION,(exception_handler_t)svc_handler);
 }
+void rp2040::trap(){
+    while (1)
+    {
+        #ifdef DEBUG
+        printf("Trap occurred! Core: %d\n", get_core_num());
+        #endif
+    }
+}

@@ -7,7 +7,7 @@ target_sources(pico_sdk_support
     cpu_driver.cpp
     syscall.S
 )
-set(config_need_headers "shizuku/cpu_drivers/rp2040.hpp;${config_need_headers}" CACHE INTERNAL "")
+set(config_need_headers "shizuku/cpu_drivers/rp2040.hpp;shizuku/abis/rp2040_abi.hpp;${config_need_headers}" CACHE INTERNAL "")
 target_link_libraries(Shizuku PRIVATE pico_sdk_support)
 target_link_libraries(pico_sdk_support PUBLIC pico_stdlib pico_stdio hardware_exception )
 target_link_libraries(pico_sdk_support PUBLIC Shizuku_HEADERS)

@@ -10,8 +10,8 @@
             "SHIZUKU_CPU_COUNT" : "2",
             "CMAKE_EXPORT_COMPILE_COMMANDS":"ON",
             "SHIZUKU_OBJECT_USE_THREAD_TABLE":"shizuku::templates::static_table<shizuku::dummy::thread,128>",
-            "SHIZUKU_OBJECT_USE_MEMORY_TABLE":"shizuku::templates::static_table<shizuku::dummy::memory_map,128>",
-            "SHIZUKU_OBJECT_USE_METHOD_TABLE":"shizuku::templates::static_table<shizuku::cpu_drivers::rp2040::method,128>"
+            "SHIZUKU_OBJECT_USE_MEMORY_TABLE":"void",
+            "SHIZUKU_OBJECT_USE_METHOD_TABLE":"shizuku::templates::static_table<shizuku::abis::rp2040::method_t,128>"
         },
         "compilers": {
             "C": "arm-none-eabi-gcc",
