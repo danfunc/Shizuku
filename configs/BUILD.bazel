@@ -10,17 +10,14 @@ expand_template(
         "${INCLUDE_HEADERS_INSTRUCTION}": "\n".join([
             "#include <shizuku/archs/armv8m.hpp>",
             "#include <shizuku/boards/rp2350_pico2.hpp>",
-            "#include <shizuku/abis/rp2040_abi.hpp>",
             "#include <shizuku/memory_managers/pico_sdk.hpp>",
             "#include <shizuku/app_entry.hpp>",
         ]),
         "${SHIZUKU_ARCH}": "armv8m",
         "${SHIZUKU_BOARD}": "rp2350_pico2",
         "${SHIZUKU_CPU_COUNT}": "1",
+        "${SHIZUKU_THREAD_COUNT}": "32",
         "${SHIZUKU_MEMORY_MANAGER}": "shizuku::memory_managers::pico_sdk",
-        "${SHIZUKU_OBJECT_USE_THREAD_TABLE}": "shizuku::templates::static_table<shizuku::THREAD,128>",
-        "${SHIZUKU_OBJECT_USE_METHOD_TABLE}": "shizuku::templates::static_table<shizuku::METHOD,128>",
-        "${SHIZUKU_OBJECT_USE_MEMORY_TABLE}": "shizuku::templates::static_table<shizuku::MEMORY_MAP,128>",
     },
     template = "config_template.hpp.in",
 )

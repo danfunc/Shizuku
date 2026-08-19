@@ -16,6 +16,7 @@ cc_library(
 cc_library(
     name = "pico_sdk_support",
     srcs = [
+        "arch_glue.cpp",
         "armv8m_ctx.S",
         "board.cpp",
         "main.cpp",

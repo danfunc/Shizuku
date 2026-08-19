@@ -1,3 +1,12 @@
+# 構成変数の既定値 (kit や -D で上書きできる)。ここに既定を置くことで、
+# 変数を渡し忘れても configure が壊れずに済む。
+if(NOT SHIZUKU_THREAD_COUNT)
+  set(SHIZUKU_THREAD_COUNT 32)
+endif()
+if(NOT SHIZUKU_CPU_COUNT)
+  set(SHIZUKU_CPU_COUNT 1)
+endif()
+
 set(INCLUDE_HEADERS_INSTRUCTION "")
 set(config_need_headers)
 

@@ -190,6 +190,38 @@ concept を満たさないダミー型で「どの要件が欠けたか」が 1 
 - スタック不足で NO_STACK が返る (PSPLIM 手前拒否)
 - 2 コアで SWITCH/GRANT のストレス (参照 smp_stress の縮小版) が ADVANCING
 
+### Phase 2 進捗記録 (2026-08-19 実装。**実機未確認**)
+
+実装済み (CALL / RETURN / SET_HANDLER。SWITCH / GRANT は Phase 2b へ):
+- `kernel_abi.hpp`: プリミティブ 5 種と `call_request` / `kernel_error`。
+  **カーネルの語彙に「未知の番号」「権限がない」は無い** (§3.6.1)
+- `templates/kernel.hpp` を D1 の形へ再定義: `kernel<CPU_MANAGER, MEMORY_MANAGER,
+  THREAD_COUNT>`。OBJECT パラメータと object_table を削除し、現在オブジェクトは
+  不透明な cookie に。`templates/object.hpp` (特権 enum を含む旧型) は削除 (D6)
+- `templates/thread.hpp`: 状態機械 + 活性化状態 (cookie / caller_cookie / trusted) +
+  call_stack (top/depth)
+- `source/kernel/dispatch.cpp`: 呼び出しフレームの push/pop、do_call、svc_dispatch。
+  トランポリンと CALL は **do_call 1 本を共有**する (別機構にしない)
+- `source/kernel/init.cpp`: init + bootstrap (今の実行をスレッド 0 として採用)
+- arch 拡張: 幾何 (normalize_frame / psp_after_return)、ABI スロット (arg/set_args/
+  set_result/set_entry)、活性化情報、return stub、enter_thread_mode、syscall ラッパ
+  (レジスタ明示束縛で最適化レベル非依存に)
+- `source/selftest/call_ladder.cpp`: 梯子 (1 段 → FP 活性 → 6 段 → 段数申告ミス →
+  スタック枯渇)。identity は呼ばれた側に申告させて突き合わせる
+
+**参照実装からの意図的な差分** (どれも DESIGN 側の要求):
+- フレームヘッダは文脈を**丸ごと**退避する (参照は r4-r11/control/exc_return/fp を
+  個別に退避)。ISA 非依存にでき、pop が `*context = header->saved` の 1 行になる。
+  代償は FP 非活性時も fp[16] を運ぶこと (64B/段)
+- 参照の「-8 の余裕」を廃し、作業コピー側の整列パディング指定を消して
+  (`normalize_frame`) 幾何を厳密一致させ、push のたびに `psp_after_return` で検算する
+- 戻り口 (return stub) はネスト数を申告しない (0)。発行者がカーネル自身で、
+  落とす枚数もカーネルが決めているため。申告が意味を持つのはオブジェクト側が
+  段数を指定して巻き戻すとき (exit の 2 枚 pop など)
+
+**次にやること**: 実機で自己テストを流す (下の受け入れ条件)。その後 Phase 2b
+(SWITCH / GRANT / スレッド生成) → Phase 3 (kobj)。
+
 ## Phase 3 — カーネルオブジェクト (kobj) + 委譲ファミリ
 
 目的: オブジェクトモデル・表・方針をすべて kobj 側に実装 (PORT §3)。

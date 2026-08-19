@@ -124,3 +124,47 @@ shizuku_armv8m_pendsv_entry:
     CTX_SAVE
     bl   shizuku_pendsv_dispatch  // shizuku_pendsv_dispatch(context = r0)
     CTX_RESTORE
+
+// ---------------------------------------------------------------------------
+// 戻り口 — 呼び先が普通に return するとここへ落ちる (カーネルが lr に載せる)。
+// 自分の活性化を 1 枚ぶん巻き戻すだけ。
+//   r0 = 呼び先の戻り値 (C の return 値がそのまま乗っている)
+// ★ネスト数の申告は 0 (= 申告しない)。この経路の発行者はカーネル自身で、落とす枚数も
+//   カーネルが決めた 1 枚なので、両側チェックの対象になる「発行側の思い違い」が
+//   原理的に存在しない。申告が意味を持つのはオブジェクト側が段数を指定して巻き戻す
+//   とき (exit の 2 枚 pop や異常系の連鎖畳み) で、そちらは必ず申告する。
+//   ここで callee-saved レジスタ (r7 等) を読まないのも重要 — 呼び先の C 関数が
+//   フレームポインタとして潰しているので、値を信用できない。
+// ---------------------------------------------------------------------------
+.thumb_func
+.global shizuku_armv8m_return_stub
+.align 2
+.type shizuku_armv8m_return_stub, %function
+shizuku_armv8m_return_stub:
+    mov   r2, r0        // a2 = 戻り値
+    movs  r1, #1        // a1 = 落とす段数 1
+    movs  r3, #0        // a3 = エラーコード 0 (成功)
+    mov.w r12, #0       // a4 = ネスト数の申告なし
+    movs  r0, #2        // a0 = RETURN (kernel_abi.hpp と static_assert で両縛り)
+    svc   0
+    b     shizuku_return_stub_failed // 戻ってきた = 巻き戻しが弾かれた
+
+// ---------------------------------------------------------------------------
+// ブート時にスレッドスタック (PSP) へ移り、entry を呼ぶ。
+//   r0 = スタック先頭 (高位), r1 = スタック下限, r2 = entry
+// SP を差し替える処理をコンパイラに任せると、切替後に SP 相対の局所変数へ触って
+// 壊れ得る。ここは全部 asm で書いて確定させる。entry が万一 return しても、
+// blx の lr がすぐ下の無限ループを指すので暴走しない。
+// ---------------------------------------------------------------------------
+.thumb_func
+.global shizuku_armv8m_enter_thread_mode
+.align 2
+.type shizuku_armv8m_enter_thread_mode, %function
+shizuku_armv8m_enter_thread_mode:
+    msr  PSPLIM, r1
+    msr  PSP, r0
+    movs r3, #2         // CONTROL: SPSEL=1 (スレッドは PSP), nPRIV=0 (特権)
+    msr  CONTROL, r3
+    isb
+    blx  r2
+1:  b    1b

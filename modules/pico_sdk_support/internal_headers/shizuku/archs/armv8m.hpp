@@ -3,9 +3,10 @@
 #include <cstddef>
 #include <cstdint>
 #include "shizuku/concepts/arch.hpp"
+#include "shizuku/kernel_abi.hpp"
 
 // ARMv8-M mainline (Cortex-M33 / RP2350) の arch バックエンド。
-// 文脈退避・復帰の実体は armv8m_ctx.S (CTX_SAVE / CTX_RESTORE)。
+// 文脈退避・復帰・戻り口・スレッドモード移行の実体は armv8m_ctx.S。
 // レイアウトと退避規約は参照実装 (latest_ver_from_flight_robocon の
 // svc_asm_handler.S / kernel.hpp context_t) の実機検証済みの形をそのまま移植した。
 
@@ -13,10 +14,13 @@ extern "C" {
 // armv8m_ctx.S の例外入口。board 層がベクタへ登録する。
 void shizuku_armv8m_svc_entry();
 void shizuku_armv8m_pendsv_entry();
-// asm から呼ばれるフック。カーネル側 (当面は board 層のグルー) が実装する。
-// shizuku_current_context は「今このコアで走っているスレッドの文脈」を返す。
-// dispatch は退避完了後に呼ばれ、戻った後 shizuku_current_context を**再取得**して
-// 復帰する (= dispatch 内で現在文脈を差し替えればスレッド切替になる)。
+// 呼び先が普通に return したときの戻り口 (RETURN プリミティブを 1 段ぶん発行)。
+void shizuku_armv8m_return_stub();
+// スレッドスタック (PSP) へ移って entry を呼ぶ。戻らない。
+[[noreturn]] void shizuku_armv8m_enter_thread_mode(uintptr_t stack_top,
+                                                   uintptr_t stack_limit,
+                                                   void (*entry)());
+// asm から呼ばれるフック。実体は modules/pico_sdk_support/arch_glue.cpp。
 struct shizuku_armv8m_context;
 shizuku_armv8m_context *shizuku_current_context();
 void shizuku_svc_dispatch(shizuku_armv8m_context *context);
@@ -36,25 +40,28 @@ public:
   // 現在値の bit0 だけをこの値で置き換える read-modify-write を行う。
   static constexpr uint32_t CONTROL_PRIV_PSP = 0b10;   // nPRIV=0 (特権)
   static constexpr uint32_t CONTROL_UNPRIV_PSP = 0b11; // nPRIV=1 (非特権)
+  // 呼び出しフレームを積むときスタック下限の手前に残す余裕。呼び先のプロローグと
+  // 最初の数フレームぶんを見込む (足りないと PSPLIM の UsageFault が先に出る)。
+  static constexpr uint32_t CALL_HEADROOM = 256;
 
   // armv8m_ctx.S の .equ (CTX_*) と一致させること。下の static_assert が両縛りする。
   struct context_t {
-    uint32_t r4 = 0, r5 = 0, r6 = 0, r7 = 0;     // offset 0..12
-    uint32_t r8 = 0, r9 = 0, r10 = 0, r11 = 0;   // offset 16..28
-    exception_frame_t *sp = nullptr;             // offset 32
+    uint32_t r4 = 0, r5 = 0, r6 = 0, r7 = 0;   // offset 0..12
+    uint32_t r8 = 0, r9 = 0, r10 = 0, r11 = 0; // offset 16..28
+    exception_frame_t *sp = nullptr;           // offset 32
     // キャッシュした EXC_RETURN。bit4=0 なら拡張 (FP) フレーム。新規スレッドは
     // 基本フレームの Thread/PSP へ復帰する (0 のままだと初回復帰で即 HardFault)。
-    uint32_t exc_return = 0xFFFFFFFD;            // offset 36
-    uint32_t fp[16] = {};                        // offset 40 (S16-S31 退避域)
-    // PSP 下限。0 = 制限なし。スレッド寿命の間は不変なので CTX_RESTORE のみが適用。
-    uint32_t psplim = 0;                         // offset 104
-    uint32_t control = CONTROL_PRIV_PSP;         // offset 108
+    uint32_t exc_return = 0xFFFFFFFD;    // offset 36
+    uint32_t fp[16] = {};                // offset 40 (S16-S31 退避域)
+    uint32_t psplim = 0;                 // offset 104 (0 = 制限なし)
+    uint32_t control = CONTROL_PRIV_PSP; // offset 108
   };
-  // メソッド ABI (呼び出し 4 引数 + r12)。svc ラッパの ABI 確定 (Q1) までの暫定形。
+  // メソッド ABI (引数 4 本 + r12)。
   using method_t = uintptr_t (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t,
                                  uintptr_t);
 
-  // 例外フレーム実サイズ: 基本 32B / FP 拡張 104B。EXC_RETURN bit4 で判別する。
+  // ---- 例外フレームの幾何 -------------------------------------------------
+  // 基本 32B / FP 拡張 104B。EXC_RETURN bit4 で判別する。
   static uint32_t exc_frame_bytes(const context_t &context) {
     return (context.exc_return & 0x10u) ? 32u : 104u;
   }
@@ -65,21 +72,75 @@ public:
     return (uintptr_t)context.sp + exc_frame_bytes(context) +
            ((context.sp->xPSR & (1u << 9)) ? 4u : 0u);
   }
+  // カーネルが 8B 境界へ置き直した作業コピーには追加調整を入れさせない。
+  static void normalize_frame(exception_frame_t &frame) {
+    frame.xPSR &= ~(uint32_t)(1u << 9);
+  }
+
+  // ---- syscall ABI のスロット (a0..a4 = r0,r1,r2,r3,r12) -------------------
+  static uintptr_t arg(const exception_frame_t &frame, unsigned index) {
+    switch (index) {
+    case 0:
+      return frame.r0;
+    case 1:
+      return frame.r1;
+    case 2:
+      return frame.r2;
+    case 3:
+      return frame.r3;
+    default:
+      return frame.r12;
+    }
+  }
+  static void set_args(exception_frame_t &frame, const uintptr_t *args) {
+    frame.r0 = (uint32_t)args[0];
+    frame.r1 = (uint32_t)args[1];
+    frame.r2 = (uint32_t)args[2];
+    frame.r3 = (uint32_t)args[3];
+  }
+  static void set_result(exception_frame_t &frame, uintptr_t error,
+                         uintptr_t value) {
+    frame.r0 = (uint32_t)error;
+    frame.r1 = (uint32_t)value;
+  }
+  static void set_entry(exception_frame_t &frame, uintptr_t pc, uintptr_t lr) {
+    frame.pc = (uint32_t)pc;
+    frame.lr = (uint32_t)lr;
+  }
+  // 活性化情報は callee-saved レジスタで渡す (呼び先の引数は a0..a3 で埋まるため)。
+  // r7 = 今のネスト数。ハンドラ ABI シムはこれを引数へ変換して受け取る。
+  static void set_activation_info(context_t &context, uintptr_t number,
+                                  uintptr_t caller_cookie,
+                                  uintptr_t caller_thread, uintptr_t depth) {
+    context.r4 = (uint32_t)number;
+    context.r5 = (uint32_t)caller_cookie;
+    context.r6 = (uint32_t)caller_thread;
+    context.r7 = (uint32_t)depth;
+  }
+  static uintptr_t return_stub() {
+    return (uintptr_t)&shizuku_armv8m_return_stub;
+  }
+
+  // ---- 特権とスタック上限 -------------------------------------------------
   // 「今の実行が特権か」の自己申告 (CONTROL.nPRIV を実際に読む)。
   static bool current_priv() {
     uint32_t control;
     asm volatile("MRS %0, CONTROL" : "=r"(control));
     return (control & 1u) == 0;
   }
-  // この文脈が次に復帰するときの特権状態 (適用は CTX_RESTORE)。
-  static void set_priv(context_t &context, bool priv) {
-    context.control = priv ? CONTROL_PRIV_PSP : CONTROL_UNPRIV_PSP;
+  static void set_priv(context_t &context, bool privileged) {
+    context.control = privileged ? CONTROL_PRIV_PSP : CONTROL_UNPRIV_PSP;
   }
   static void stack_limit_set(context_t &context, uintptr_t limit) {
     context.psplim = (uint32_t)limit;
   }
-  // ★ARCH SEAM — マルチコア atomic (DESIGN §14.5.3)。RP2350 (ARMv8-M) は
-  // LDREX/STREX (= __atomic 系)。SIO ハードウェアスピンロックは E2 erratum で不可。
+  static uintptr_t stack_limit(const context_t &context) {
+    return context.psplim;
+  }
+
+  // ---- ★ARCH SEAM — マルチコア atomic (DESIGN §14.5.3) --------------------
+  // RP2350 (ARMv8-M) は LDREX/STREX (= __atomic 系)。SIO ハードウェアスピンロックは
+  // E2 erratum で使えない。RP2040 (ARMv6-M) では逆に LDREX/STREX が無い。
   static bool cas32(volatile uint32_t *address, uint32_t expected,
                     uint32_t desired) {
     return __atomic_compare_exchange_n((uint32_t *)address, &expected, desired,
@@ -91,6 +152,34 @@ public:
   }
   static uint32_t load_acquire32(volatile uint32_t *address) {
     return __atomic_load_n((uint32_t *)address, __ATOMIC_ACQUIRE);
+  }
+
+  // ---- syscall の発行口 ---------------------------------------------------
+  // a0 = 番号 (Q1: 即値でなくレジスタ渡し。RISC-V の ecall に即値が無いため)。
+  // レジスタを明示束縛するので、最適化レベルによらずオペランド割付が壊れない。
+  struct syscall_result {
+    uintptr_t error;
+    uintptr_t value;
+  };
+  static inline syscall_result syscall(uintptr_t number, uintptr_t a1 = 0,
+                                       uintptr_t a2 = 0, uintptr_t a3 = 0,
+                                       uintptr_t a4 = 0) {
+    register uintptr_t r0 asm("r0") = number;
+    register uintptr_t r1 asm("r1") = a1;
+    register uintptr_t r2 asm("r2") = a2;
+    register uintptr_t r3 asm("r3") = a3;
+    register uintptr_t r12 asm("r12") = a4;
+    asm volatile("svc 0"
+                 : "+r"(r0), "+r"(r1)
+                 : "r"(r2), "r"(r3), "r"(r12)
+                 : "memory");
+    return {r0, r1};
+  }
+
+  [[noreturn]] static void enter_thread_mode(uintptr_t stack_top,
+                                             uintptr_t stack_limit_address,
+                                             void (*entry)()) {
+    shizuku_armv8m_enter_thread_mode(stack_top, stack_limit_address, entry);
   }
 };
 
@@ -105,6 +194,9 @@ static_assert(offsetof(armv8m::context_t, psplim) == 104,
               "context_t layout mismatch: psplim offset (asm CTX_PSPLIM)");
 static_assert(offsetof(armv8m::context_t, control) == 108,
               "context_t layout mismatch: control offset (asm CTX_CONTROL)");
+// 戻り口 (armv8m_ctx.S) が即値で埋め込んでいる ABI 定数との一致。
+static_assert((uintptr_t)shizuku::primitive::RETURN == 2,
+              "armv8m_ctx.S の return stub が撃つ番号と一致させること");
 static_assert(shizuku::concepts::arch_requires<armv8m>,
               "armv8m does not satisfy the arch concept");
 
