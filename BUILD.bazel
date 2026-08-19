@@ -24,9 +24,7 @@ cc_binary(
         "source/cpu_manager/init.cpp",
         "source/kernel/dispatch.cpp",
         "source/kernel/init.cpp",
-        "source/kernel_object/init.cpp",
-        "source/object_system/Object.cpp",
-        "source/object_system/init.cpp",
+        "source/kernel_object/handler.cpp",
         "source/selftest/call_ladder.cpp",
     ],
     deps = [

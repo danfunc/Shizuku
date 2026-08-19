@@ -107,18 +107,69 @@ public:
     frame.pc = (uint32_t)pc;
     frame.lr = (uint32_t)lr;
   }
-  // 活性化情報は callee-saved レジスタで渡す (呼び先の引数は a0..a3 で埋まるため)。
-  // r7 = 今のネスト数。ハンドラ ABI シムはこれを引数へ変換して受け取る。
-  static void set_activation_info(context_t &context, uintptr_t number,
-                                  uintptr_t caller_cookie,
-                                  uintptr_t caller_thread, uintptr_t depth) {
+  // ハンドラを起こすときにカーネルが渡す情報。呼び先の引数は a0..a3 で埋まって
+  // いるので callee-saved レジスタで渡す。
+  //   r4 = svc 番号 (a0 と同値。ハンドラ側の読みやすさのため)
+  //   r7 = **今のネスト数**。オブジェクトは RETURN を撃てないので、何段巻き戻すかを
+  //        決めるのはハンドラであり、その申告 (両側チェック) の材料がこれ。
+  // 下の handler_shim がこれらを C の引数 5..8 へ変換する。
+  static void set_handler_info(context_t &context, uintptr_t number,
+                               uintptr_t depth) {
     context.r4 = (uint32_t)number;
-    context.r5 = (uint32_t)caller_cookie;
-    context.r6 = (uint32_t)caller_thread;
+    context.r5 = 0;
+    context.r6 = 0;
     context.r7 = (uint32_t)depth;
   }
+
+  // ハンドラの ABI シム。カーネルが callee-saved で渡した情報を、C の第 5..8 引数
+  // (AAPCS ではスタック渡し) として受け取れる形に変換する。
+  // ★push 順で [sp+0/4/8/12] に来るのは r4, r5, r6, **r7** (r12 ではない)。
+  //   参照実装はここを取り違えて時間を溶かしている。だから naked は共通ヘッダの
+  //   この 1 ヶ所にだけ置き、サブシステムごとに書かせない。
+  // ★戻るときは r4-r7 を復元してから lr (カーネルの戻り口) へ返る。戻り口は r7 の
+  //   ネスト数を申告に使うので、ここで復元されていることが前提になる。
+  template <auto FUNCTION>
+  __attribute__((naked, aligned(4))) static void handler_shim() {
+    asm volatile("push {r4-r7, r12, lr}\n"
+                 "ldr  r4, 1f\n"
+                 "blx  r4\n"
+                 "pop  {r4-r7, r12, pc}\n"
+                 ".align 2\n"
+                 "1: .word %c0\n"
+                 :
+                 : "i"(FUNCTION) // シンボルをそのまま即値として埋める
+                 :);
+  }
+  template <auto FUNCTION> static uintptr_t handler_entry() {
+    return (uintptr_t)&handler_shim<FUNCTION>;
+  }
+  // 信頼された活性化 (svc ハンドラ) 用の戻り口。RETURN を 1 段ぶん撃つ。
   static uintptr_t return_stub() {
     return (uintptr_t)&shizuku_armv8m_return_stub;
+  }
+  // オブジェクトランド用の戻り口。呼び先は信頼されないので RETURN プリミティブを
+  // 撃てず、代わりに**オブジェクトランドの exit API** を撃って戻る。何段落とすかは
+  // その API を実装する側 (カーネルオブジェクト) が決める (D5)。
+  // ★番号はオブジェクトランドの持ち物なのでテンプレート引数で外から与える —
+  //   カーネルも arch も番号の意味を知らないままでいられる。
+  //   naked を共通ヘッダ 1 ヶ所に閉じ込めるのも意図的で、サブシステムごとに
+  //   自作させると必ず間違える (参照実装で実際に起きた)。
+  template <uintptr_t NUMBER>
+  __attribute__((naked, aligned(4))) static void object_exit_entry() {
+    asm volatile("mov  r1, r0\n"  // a1 = 呼び先の戻り値
+                 "movs r2, #0\n"  // a2 = 追加で落とす段数 (既定 0)
+                 "movs r3, #0\n"
+                 "ldr  r0, 1f\n"  // a0 = exit API 番号
+                 "svc  0\n"
+                 "b    shizuku_return_stub_failed\n" // 戻ってきた = 巻き戻し失敗
+                 ".align 2\n"
+                 "1: .word %c0\n"
+                 :
+                 : "i"(NUMBER)
+                 :);
+  }
+  template <uintptr_t NUMBER> static uintptr_t object_exit_stub() {
+    return (uintptr_t)&object_exit_entry<NUMBER>;
   }
 
   // ---- 特権とスタック上限 -------------------------------------------------

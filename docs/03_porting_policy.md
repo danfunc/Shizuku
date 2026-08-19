@@ -23,39 +23,44 @@ objects/      ドライバ / アプリ
 | **kernel** (機構・ISA 非依存) | `internal_headers/shizuku/templates/kernel.hpp` ほか + `source/` | `templates::kernel<ARCH, BOARD, …>` クラステンプレート。実装は config.hpp で確定した別名への `template<>` 特殊化 (.cpp) |
 | **arch** | `modules/<port>/internal_headers/shizuku/archs/<isa>.hpp` + `<isa>_ctx.S` | kernel のテンプレートパラメータ。`concepts::arch_requires` で縛る。現行の `cpu_drivers/` を **`archs/` に改名・再定義** (D2) |
 | **board** | `modules/<port>/internal_headers/shizuku/boards/<board>.hpp` + .cpp | 同上 (`concepts::board_requires`)。現行の `memory_managers/` の役割を包含し、時刻・コア起動・クロック API も持つ |
-| **kobj** | `internal_headers/shizuku/templates/kernel_object.hpp` + `source/kernel_object/` | ISA 非依存の C++。kernel テンプレートとは**別クラス**。カーネルへは SET_HANDLER + プリミティブ ABI 経由でのみ関与 |
+| **kobj** | `internal_headers/shizuku/templates/kernel_object.hpp` + `source/kernel_object/` | ISA 非依存の C++。kernel テンプレートとは**別クラス**。カーネルからはハンドラとして起こされ、プリミティブ (CALL/RETURN) を撃ち返す |
 | **objects** | **別リポジトリ「XNO」** (D17) | Shizuku 本体に残るのはカーネル検証用の自己テストオブジェクトのみ |
 | 型注入・構成 | `configs/config_template.hpp.in` (現行機構を維持) | `SHIZUKU_ARCH` / `SHIZUKU_BOARD` / `SHIZUKU_CPU_COUNT` 等の kit 変数で確定 |
 
 ## 2. 決定事項 (設計文書由来。再議論しない)
 
 - **D1. カーネルはオブジェクトを知らない** (PORT §3 / DESIGN §7)。カーネルが知るのは
-  スレッド / 文脈 / スタック上限 / 呼び出しフレーム / 登録ハンドラ entry + 信頼フラグ /
+  スレッド / 文脈 / スタック上限 / 呼び出しフレーム / 登録ハンドラ entry /
   スケジューリング機構 / MPU region だけ。`templates::kernel` から `OBJECT_T`
   パラメータと `object_table` を**外す** (現行骨格からの最大の変更点)。
-  current object はカーネルには**不透明な cookie** (uintptr_t) としてフレームに積むだけ。
+  **identity (cookie) すらカーネルには無い** — 「誰がどのオブジェクトとして走って
+  いるか」は kobj が自分の台帳 (影スタック) で追う。カーネルが持つのは
+  「この枠はハンドラを起こしたものか」の 1 ビットだけ (§3.6.1)。
 - **D2. arch と board を分離**し、cpu_driver という名前は廃止 (01 §4-6 のねじれ解消)。
   最初の実体は `archs::armv8m` (RP2350) と `boards::rp2350_pico2` (pico-sdk ベース)。
   ※ 参照実装の実績があるのは RP2350。RP2040 (ARMv6-M) は PORT §6 の移植順序 3 番目以降。
-- **D3. カーネルプリミティブは 5 種** (DESIGN §7.2 から **REDISPATCH を削除**。
-  経緯と根拠は §3.6 / 2026-08-19 改定):
-  `CALL(entry_pc, callee_cookie, caller_cookie, protection, args…)` /
-  `RETURN(n, value, err, depth_claim)` /
-  `SET_HANDLER(entry)` / `SWITCH(tid)` / `GRANT(tid, us)`。
-  - I-1: svc 番号で経路を分岐しない (経路は発行元の信頼ビットのみ)
-  - I-2: CALL を発行できるのは信頼活性化だけ
-  - identity (caller_cookie) は**カーネルオブジェクトが埋める**。カーネルは解釈しない
+- **D3. カーネルプリミティブは 4 種** (DESIGN §7.2 から REDISPATCH と SET_HANDLER を
+  削除。経緯と根拠は §3.6 / 2026-08-19 改定):
+  `CALL(call_request*)` / `RETURN(n, value, err, depth_claim)` /
+  `SWITCH(tid)` / `GRANT(tid, us)`。
+  - I-1: svc 番号で経路を分岐しない。**経路はカーネル自身が積んだフレームだけで
+    決まる** — 今の実行が「ハンドラを起こすために積んだ枠」の中かどうか。
+    呼び出しの履歴を書けるのはカーネルだけなので偽装できない
+  - I-2: プリミティブを撃てるのはカーネルオブジェクトのハンドラだけ。上の判定
+    そのものが保証するので、検査して弾くコードは存在しない
+  - **カーネルは identity (cookie) も信頼ビットも持たない**。誰が誰かは kobj の台帳
+    (PORT §3.1「呼び出し元 identity はカーネル支援不要」)
+  - ハンドラの登録は syscall ではなく系の組み立て (`set_object_handler`)
   - `protection` = 実行特権 + (将来) region set (DESIGN §11.3)
-- **D4. 委譲 2 形態** (PORT §4.6 改め): CALL_STRICT (元発行元を caller_cookie に) /
-  CALL (中継者 = 自分を caller_cookie に)。**既定は CALL_STRICT** (identity を
-  落とすのは明示指定)。svc 範囲のサブカーネル委譲も CALL_STRICT で行い、
-  **svc 番号は arg0 に載せて転送する** (syscall ABI は番号に r0 を予約済みなので
-  実引数 r1-r3 と合わせて 4 スロットに収まる。Q1 のレジスタ渡し統一と整合)。
-- **D5. exit は kobj からの `RETURN(n=2, value, err, depth_claim)` で実装**
-  (トランポリン枠 + 対象活性化枠の 2 枚 pop。REPLACE モードは作らない)。
-  「+1」の知識は kobj の 1 ヶ所に閉じる (PORT §4.5 の退避策を正式採用)。
-  I-6 の所有権とも整合する — トランポリン枠も呼び出し枠も積んだのは kobj なので、
-  kobj が 2 枚落とすのは自分の所有分。巻き戻しは常に段数申告の両側チェック付き。
+- **D4. 委譲は kobj のメソッド呼び出しで行う** (PORT §4.6 改め)。カーネルが持つのは
+  「オブジェクトランドの svc ハンドラ」の入口 1 個だけで、番号 → 担当の表は kobj 側。
+  identity は kobj の台帳から取るので、呼び出しに identity 引数は要らない。
+- **D5. exit はオブジェクトランドの exit API 経由**。オブジェクトは RETURN を撃て
+  ないので、(a) カーネルがハンドラを起こすとき**今のネスト数を渡し**、
+  (b) オブジェクトは exit API に**何段戻すか**を載せて撃ち、
+  (c) ハンドラが `RETURN(n, value, err, depth_claim)` で巻き戻す。
+  既定は 2 枚 (exit を運んだ枠 + 呼び先の枠)。段数は必ず申告し、カーネルが実際の
+  深さと突き合わせる (§9.3 の両側チェック)。REPLACE モードは作らない。
 - **D6. 特権の静的クラスを作らない** (DESIGN §11.6 / PORT §4)。信頼ビットは 1 個。
   サブカーネルへの特権貸し出しはしない (overhead を払う。決着済み 2026-08-17)。
   現行骨格の `obj_type::PRIVILEGED_LAND_OBJECT` 系 enum は削除し、オブジェクト属性は
@@ -192,6 +197,16 @@ DESIGN §7.2-7.3 / PORT §4.6 は「REDISPATCH + CALL の 2 種」としてい�
 でなく普通の export メソッドになる (書きやすくなる方向の変更)。
 
 ### §3.6.1 svc ハンドラは 2 つある。混同しないこと (2026-08-19 確定)
+
+**★2026-08-19 追記 (ユーザー指摘による修正)**: 当初この節で「カーネルが
+カーネルオブジェクトの cookie を持って比較する」と書いたが、それも不要だった。
+経路判定に使えるのは**カーネル自身が積んだ呼び出しフレーム**で、そこに
+「ハンドラを起こすために積んだ枠か」を記録すれば足りる (書けるのはカーネルだけ
+なので偽装不能)。したがってカーネルは cookie も identity も信頼ビットも持たない。
+また「活性化 (activation) に権限が付く」という概念も置かない — 参照実装の
+`in_handler` はその形で、ハンドラから呼ばれた先まで特権化する穴だった。
+なお「カーネルオブジェクトのルータを例外文脈で C++ 直呼びする」案も検討したが
+**却下** (ユーザー判断)。ハンドラはスレッドモードで走る。
 
 「カーネルだけで svc dispatch は完結すべきでは / kobj を経由する必要があるのか」
 というユーザーの問いに対し、**リファレンス実装の形が正しい**と確定した。

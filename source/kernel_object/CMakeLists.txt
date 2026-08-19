@@ -1,2 +1,1 @@
-
-target_sources(Shizuku PRIVATE init.cpp)
+target_sources(Shizuku PRIVATE handler.cpp)

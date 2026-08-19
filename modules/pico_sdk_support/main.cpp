@@ -2,6 +2,7 @@
 #include "pico/stdlib.h"
 #include "shizuku/app_entry.hpp"
 #include "shizuku/kernel.hpp"
+#include "shizuku/kernel_object.hpp"
 #include "shizuku/selftest.hpp"
 #include "stdio.h"
 
@@ -19,7 +20,11 @@ int main() {
   stdio_init_all();
   sleep_ms(1000); // ホストが CDC を開く前の出力を落とさないための待ち
   shizuku::kernel_instance.init();
+  // 系の組み立て: カーネルオブジェクトの表を用意し、そのハンドラをカーネルへ据える。
+  // これ以降、オブジェクトが撃った svc はすべてそのハンドラへ届く。
+  shizuku::kernel_object_instance.init();
+  shizuku::kernel_instance.set_object_handler(
+      shizuku::KERNEL_OBJECT::handler_entry());
   // 今の実行をスレッド 0 として採用し、スレッドスタックへ移って app_entry へ。
-  shizuku::kernel_instance.bootstrap(shizuku::selftest::BOOT_COOKIE,
-                                     shizuku::app_entry);
+  shizuku::kernel_instance.bootstrap(shizuku::app_entry);
 }

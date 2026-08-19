@@ -1,0 +1,90 @@
+#ifndef SHIZUKU_TEMPLATES_KERNEL_OBJECT_HPP
+#define SHIZUKU_TEMPLATES_KERNEL_OBJECT_HPP
+#include <cstdint>
+#include "shizuku/object_api.hpp"
+
+namespace shizuku {
+namespace templates {
+
+// ===========================================================================
+//  カーネルオブジェクト — 方針を持つ唯一の信頼オブジェクト (DESIGN §5 / §7.1)
+// ===========================================================================
+//  カーネルが持たないものは全部ここにある: オブジェクト表 / メソッド表 /
+//  identity の台帳 / svc 番号の意味 / (将来) 親子関係・md・スケジューリング方針。
+//
+//  ★ここが「オブジェクトランドの svc ハンドラ」。カーネルの svc ハンドラ (例外文脈で
+//    走る機構) とは別物で、こちらは**スレッドモードで**走る。カーネルは番号を見ずに
+//    ここへ渡すだけなので、経路の決定も番号の解釈も全部こちら側にある。
+//
+//  ★カーネルのプリミティブを撃てるのはここだけ。オブジェクトは撃てないので:
+//    (a) カーネルはこのハンドラを起こすとき**今のネスト数**を渡す (第 8 引数)
+//    (b) オブジェクトは exit API に**何段戻すか**を載せて撃つ
+//    (c) ここがその段数で RETURN する。段数は必ず申告し、カーネルが実際の深さと
+//        突き合わせる (§9.3 の両側チェック)
+//
+//  ★identity の台帳は「影スタック」で持つ。呼び出しを積むのも巻き戻すのも自分なので
+//    追跡でき、カーネルの助けは要らない (PORT §3.1 の「カーネル支援不要」の実装形)。
+template <typename KERNEL_T, uintptr_t OBJECT_COUNT_T,
+          uintptr_t METHOD_COUNT_T, uintptr_t MAX_DEPTH_T>
+class kernel_object {
+public:
+  using KERNEL = KERNEL_T;
+  using ARCH = typename KERNEL::ARCH;
+  using method_t = uintptr_t (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+  static constexpr uintptr_t OBJECT_COUNT = OBJECT_COUNT_T;
+  static constexpr uintptr_t METHOD_COUNT = METHOD_COUNT_T;
+  static constexpr uintptr_t MAX_DEPTH = MAX_DEPTH_T;
+  static constexpr uintptr_t ROOT_OBJECT = 0; // ブートスレッドが名乗るオブジェクト
+  static constexpr uintptr_t NO_OBJECT = OBJECT_COUNT;
+
+  // 表を初期化する (ブート時・スレッドモード。まだ svc は飛んでこない)。
+  void init();
+  // カーネルに据えるハンドラの入口 (ARCH の ABI シムを通したアドレス)。
+  static uintptr_t handler_entry();
+
+  // ---- ハンドラ本体 -------------------------------------------------------
+  // number/a1..a3 は発行元が撃った syscall の引数、depth はカーネルが渡した
+  // 「今のネスト数」。戻り値は発行元へ返る値 (エラーは 0)。
+  uintptr_t handle(uintptr_t number, uintptr_t a1, uintptr_t a2, uintptr_t a3,
+                   uintptr_t depth);
+
+  // 台帳の読み出し (自己テスト・将来のアクセス制御用)。
+  uintptr_t current_object(uint32_t thread) const {
+    const shadow_t &shadow = m_shadow[thread];
+    return shadow.depth == 0 ? ROOT_OBJECT : shadow.object[shadow.depth - 1];
+  }
+  uintptr_t caller_object(uint32_t thread) const {
+    const shadow_t &shadow = m_shadow[thread];
+    return shadow.depth == 0 ? NO_OBJECT : shadow.caller[shadow.depth - 1];
+  }
+
+private:
+  struct object_t {
+    bool created;
+    method_t methods[METHOD_COUNT];
+  };
+  // per-thread の「今どのオブジェクトとして走っているか」の台帳。
+  struct shadow_t {
+    uint16_t object[MAX_DEPTH]; // 呼び出しごとの呼び先
+    uint16_t caller[MAX_DEPTH]; // その呼び出しの発行元 (identity)
+    uint32_t depth;
+  };
+
+  // 各 API。戻り値はそのまま発行元へ返る値。エラーは error 引数へ書く。
+  uintptr_t create_object(uintptr_t id, uintptr_t entry,
+                          object_error &error);
+  uintptr_t export_method(uintptr_t method, uintptr_t entry,
+                          object_error &error);
+  uintptr_t call_method(uintptr_t id, uintptr_t method, uintptr_t argument,
+                        uintptr_t depth, object_error &error);
+  void exit_method(uintptr_t value, uintptr_t extra, uintptr_t depth);
+  // 巻き戻さずにその場で答える (エラー返却)。
+  void reply(object_error error, uintptr_t value, uintptr_t depth);
+
+  object_t m_objects[OBJECT_COUNT];
+  shadow_t m_shadow[KERNEL::THREAD_COUNT];
+};
+
+} // namespace templates
+} // namespace shizuku
+#endif // SHIZUKU_TEMPLATES_KERNEL_OBJECT_HPP

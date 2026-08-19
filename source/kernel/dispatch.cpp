@@ -1,17 +1,19 @@
 // ===========================================================================
 //  svc の受け口とプリミティブ — カーネルの中核 (DESIGN §6.2 / §7 / §8 / §9)
 // ===========================================================================
-//  ここは**カーネルの svc ハンドラ** — 例外文脈 (Handler モード) で走る機構そのもの。
-//  カーネルオブジェクトが持つ**オブジェクトランドの svc ハンドラ** (スレッドモードで
-//  走る方針側) とは別概念で、ここでは後者を「登録された entry」としてしか扱わない。
+//  ここは**カーネルの svc ハンドラ** (例外文脈で走る機構)。カーネルオブジェクトが
+//  持つ**オブジェクトランドの svc ハンドラ** (スレッドモードで走る方針側) とは
+//  別概念で、ここでは後者を「登録された entry」としてしか扱わない。
 //
-//  ★経路は「発行元が信頼された活性化か」の 1 ビットだけで決まる (I-1)。
-//    番号で経路を分けない。番号は経路が決まった後のプリミティブ選択にしか使わない。
-//  ★信頼された活性化 → プリミティブを直接実行し、ここで完結する (オブジェクトランドの
-//    ハンドラは経由しない)。
-//    それ以外 → **登録済みのオブジェクトランドの svc ハンドラをメソッドとして呼ぶ**。
-//    カーネルは「番号 → ハンドラ」の表を持たない — 番号の意味づけも担当への振り分けも
-//    向こう側の仕事。
+//  ★経路はカーネル自身が積んだフレームだけで決まる (I-1):
+//      ハンドラを起こすために積んだ枠の中 → プリミティブを実行
+//      それ以外                          → 登録済みハンドラをメソッドとして呼ぶ
+//    呼び出しの履歴を書けるのはカーネルだけなので偽装できない。identity も
+//    信頼ビットもカーネルは持たない。
+//
+//  ★カーネルオブジェクト以外は RETURN を撃てないので、ハンドラを起こすときに
+//    今のネスト数を渡す。オブジェクトは exit API に何段戻すかを載せて撃ち、
+//    ハンドラがその段数で巻き戻す (D5)。
 #include "shizuku/kernel.hpp"
 
 namespace shizuku {
@@ -22,9 +24,20 @@ template <> KERNEL::CONTEXT *KERNEL::current_context() {
   return m_threads[m_current[BOARD::core_num()]].context;
 }
 
+template <> void KERNEL::set_object_handler(uintptr_t entry_pc) {
+  m_object_svc_handler = entry_pc;
+}
+
+template <>
+bool KERNEL::in_handler_frame(const KERNEL::THREAD &thread) const {
+  if (thread.call_stack.top == 0)
+    return false; // 一度もフレームを積んでいない = 素のスレッド実行
+  return ((const call_frame_header *)thread.call_stack.top)->handler_frame != 0;
+}
+
 template <>
 bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
-                             KERNEL::FRAME **frame) {
+                             KERNEL::FRAME **frame, bool handler_frame) {
   const uint32_t frame_bytes = ARCH::exc_frame_bytes(*context);
   uint32_t total = (uint32_t)sizeof(call_frame_header) + frame_bytes;
   total = (total + 7u) & ~7u; // 8B 境界を保つ
@@ -43,9 +56,7 @@ bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   header->prev = thread.call_stack.top;
   header->total_bytes = total;
   header->frame_bytes = frame_bytes;
-  header->caller_cookie = thread.cookie;
-  header->caller_caller_cookie = thread.caller_cookie;
-  header->caller_trusted = thread.trusted ? 1u : 0u;
+  header->handler_frame = handler_frame ? 1u : 0u;
   header->reserved = 0;
   header->saved = *context; // sp を含めて丸ごと (= 元フレームの位置も記録される)
 
@@ -78,9 +89,6 @@ bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   // 戻すだけで復帰先が正しく決まる (書き戻しも再配置も不要)。
   const uintptr_t previous = header->prev;
   *context = header->saved;
-  thread.cookie = header->caller_cookie;
-  thread.caller_cookie = header->caller_caller_cookie;
-  thread.trusted = header->caller_trusted != 0;
   *frame = context->sp;
   thread.call_stack.top = previous;
   thread.call_stack.depth--;
@@ -90,20 +98,16 @@ bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
 template <>
 kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                              KERNEL::FRAME **frame, const call_request &request,
-                             uintptr_t number) {
-  if (request.entry_pc == 0)
+                             bool handler_frame) {
+  // 戻り口の指定も必須。呼び先は RETURN を撃てないので、「オブジェクトランドの
+  // exit API を撃つコード」を発行側が与える必要がある (D5)。
+  if (request.entry_pc == 0 || request.return_pc == 0)
     return kernel_error::BAD_REQUEST;
-  if (!call_frame_push(thread, context, frame))
+  if (!call_frame_push(thread, context, frame, handler_frame))
     return kernel_error::NO_STACK;
-  ARCH::set_entry(**frame, request.entry_pc, ARCH::return_stub());
+  ARCH::set_entry(**frame, request.entry_pc, request.return_pc);
   ARCH::set_args(**frame, request.args);
-  // 現在オブジェクトと identity を差し替える。カーネルは cookie を解釈しない。
-  thread.cookie = request.callee_cookie;
-  thread.caller_cookie = request.caller_cookie;
-  thread.trusted = (request.protection & PROTECTION_TRUSTED) != 0;
   ARCH::set_priv(*context, (request.protection & PROTECTION_UNPRIVILEGED) == 0);
-  ARCH::set_activation_info(*context, number, request.caller_cookie,
-                            current_thread_id(), thread.call_stack.depth);
   return kernel_error::OK;
 }
 
@@ -112,28 +116,32 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
   FRAME *frame = context->sp;
   const uintptr_t number = ARCH::arg(*frame, 0);
 
-  if (!thread.trusted) {
-    // 信頼されていない活性化からの svc は、オブジェクトランドの svc ハンドラへの
+  if (!in_handler_frame(thread)) {
+    // ハンドラの枠の外からの svc は、オブジェクトランドの svc ハンドラへの
     // **メソッド呼び出し**として届けるだけ。カーネルは番号を解釈しない (I-1) し、
     // 誰が担当かも知らない。
-    if (m_object_svc_handler.entry_pc == 0)
+    if (m_object_svc_handler == 0)
       BOARD::panic("no object-land svc handler registered");
     call_request request{};
-    request.entry_pc = m_object_svc_handler.entry_pc;
-    request.callee_cookie = m_object_svc_handler.cookie;
-    // 呼び出し元 identity はカーネルが記録している値なので偽装できない。
-    request.caller_cookie = thread.cookie;
-    request.protection = m_object_svc_handler.protection;
+    request.entry_pc = m_object_svc_handler;
+    // ハンドラは自分で RETURN を撃てるので、戻り口はカーネルの戻り口でよい。
+    request.return_pc = ARCH::return_stub();
+    request.protection = PROTECTION_PRIVILEGED;
     for (unsigned index = 0; index < 4; ++index)
       request.args[index] = ARCH::arg(*frame, index); // 元の引数をそのまま渡す
-    const kernel_error error = do_call(thread, context, &frame, request, number);
-    if (error != kernel_error::OK)
+    const kernel_error error = do_call(thread, context, &frame, request, true);
+    if (error != kernel_error::OK) {
       ARCH::set_result(*frame, (uintptr_t)error, 0);
+      return;
+    }
+    // ★ハンドラへ「今のネスト数」を渡す。オブジェクトは RETURN を撃てないので、
+    //   何段巻き戻すかを決めるのはハンドラであり、その検算材料がこの値になる。
+    ARCH::set_handler_info(*context, number, thread.call_stack.depth);
     return;
   }
 
-  // ここから先は信頼された活性化だけが到達する。CALL / SET_HANDLER を信頼境界の
-  // 外から撃てないこと (I-2) は、この分岐自体が保証している (検査で弾く場面が無い)。
+  // ここから先はハンドラの枠の中だけ。プリミティブを撃てるのがカーネル
+  // オブジェクトのハンドラに限られること (I-2) は、この分岐自体が保証している。
   switch ((primitive)number) {
   case primitive::CALL: {
     const call_request *pointer = (const call_request *)ARCH::arg(*frame, 1);
@@ -143,8 +151,10 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
     }
     // フレームを書き換える前に内容を控える。
     const call_request request = *pointer;
-    const kernel_error error = do_call(thread, context, &frame, request, 0);
-    // 成功時はこの syscall から戻らない (呼び先が RETURN したときに、復元された
+    // ★呼び先の枠はハンドラ枠にしない。ハンドラから呼ばれただけの普通のメソッドが
+    //   プリミティブを撃てるようになってはいけない (I-8)。
+    const kernel_error error = do_call(thread, context, &frame, request, false);
+    // 成功時はこの syscall から戻らない (呼び先が戻ったときに、復元された
     // 呼び出し元フレームへ戻り値が載る)。失敗時だけその場でエラー復帰する。
     if (error != kernel_error::OK)
       ARCH::set_result(*frame, (uintptr_t)error, 0);
@@ -177,21 +187,12 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
     ARCH::set_result(*frame, error, value);
     break;
   }
-  case primitive::SET_HANDLER: {
-    // 登録するのは「オブジェクトランドの svc ハンドラ」1 個だけ。表ではない。
-    // 信頼と特権は登録した活性化のものを引き継ぐ (登録できるのは信頼側だけ)。
-    m_object_svc_handler.entry_pc = ARCH::arg(*frame, 1);
-    m_object_svc_handler.cookie = thread.cookie;
-    m_object_svc_handler.protection = PROTECTION_TRUSTED;
-    ARCH::set_result(*frame, (uintptr_t)kernel_error::OK, 0);
-    break;
-  }
   default:
-    // ★ここへ来るのは信頼された活性化だけ。存在しないプリミティブ番号を撃つのは
-    //   **カーネル自身の不変条件の破れ**なので panic してよい (§14)。エラーで返す
-    //   相手 (オブジェクト) が居ないので、kernel_error にこの語彙は存在しない。
-    //   ただし**黙って捨てるのは禁止** — 無音の握り潰しは「効いていないのに動いて
-    //   見える」計測事故を生む (DESIGN §11.2.0 で実際に起きた)。
+    // ★ここへ来るのはカーネルオブジェクトのハンドラだけ。存在しないプリミティブを
+    //   撃つのは**カーネル自身の不変条件の破れ**なので panic してよい (§14)。
+    //   エラーで返す相手が居ないので kernel_error にこの語彙は無い。ただし
+    //   **黙って捨てるのは禁止** — 無音の握り潰しは「効いていないのに動いて見える」
+    //   計測事故を生む (DESIGN §11.2.0 で実際に起きた)。
     BOARD::panic("unknown kernel primitive");
     break;
   }
@@ -203,14 +204,14 @@ template <> void KERNEL::pendsv_dispatch(KERNEL::CONTEXT *context) {
 
 } // namespace shizuku
 
-// 戻り口 (ARCH::return_stub) の巻き戻しが弾かれたときの落ち先。
+// 戻り口の巻き戻しが弾かれたときの落ち先。
 //   a0 = kernel_error, a1 = 実際の深さ
 // ★panic しない。段数の申告はオブジェクト側の責任なので、間違えた者だけが止まるべきで、
-//   系全体を道連れにするのは方針として誤り (I-9)。記録を残してこの活性化を隔離する。
+//   系全体を道連れにするのは方針として誤り (I-9)。記録を残してこのスレッドを隔離する。
 extern "C" [[noreturn]] void shizuku_return_stub_failed(uintptr_t error,
                                                         uintptr_t depth) {
   shizuku::KERNEL::BOARD::diag_printf(
-      "[KERNEL] return rejected: error=%lu depth=%lu (activation parked)\n",
+      "[KERNEL] return rejected: error=%lu depth=%lu (thread parked)\n",
       (unsigned long)error, (unsigned long)depth);
   // TODO(Phase 2b): SWITCH を撃って他スレッドへ譲り、このスレッドだけを隔離する。
   // 現状はスレッドが 1 本しかないのでスピンするしかない。

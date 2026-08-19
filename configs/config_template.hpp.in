@@ -7,6 +7,7 @@ ${INCLUDE_HEADERS_INSTRUCTION}
 #include "shizuku/concepts/board.hpp"
 #include "shizuku/templates/cpu_manager.hpp"
 #include "shizuku/templates/kernel.hpp"
+#include "shizuku/templates/kernel_object.hpp"
 
 namespace shizuku{
     using ARCH = shizuku::archs::${SHIZUKU_ARCH};
@@ -14,6 +15,7 @@ namespace shizuku{
     using CPU_MANAGER = shizuku::templates::cpu_manager<ARCH,BOARD,${SHIZUKU_CPU_COUNT}>;
     using MEMORY_MANAGER = ${SHIZUKU_MEMORY_MANAGER};
     using KERNEL = shizuku::templates::kernel<CPU_MANAGER,MEMORY_MANAGER,${SHIZUKU_THREAD_COUNT}>;
+    using KERNEL_OBJECT = shizuku::templates::kernel_object<KERNEL,${SHIZUKU_OBJECT_COUNT},${SHIZUKU_METHOD_COUNT},${SHIZUKU_CALL_DEPTH}>;
 };
 
 #endif // SHIZUKU_CONFIG_TEMPLATE_HPP

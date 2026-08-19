@@ -11,21 +11,26 @@ namespace templates {
 //  カーネル — 機構だけを持つ層 (docs/03_porting_policy.md D1 / DESIGN §7)
 // ===========================================================================
 //  カーネルが知ること: スレッド / 文脈 / スタック上限 / 呼び出しフレームの push・pop /
-//    登録済み svc ハンドラの entry と cookie / 実行権
-//  カーネルが知らないこと: オブジェクト、オブジェクト ID、メソッド表、export、md、
-//    svc 番号の意味
+//    実行権
+//  カーネルが知らないこと: オブジェクト、オブジェクト ID、identity、メソッド表、
+//    export、md、svc 番号の意味、そして「誰が偉いか」
 //
 //  ★★2 つの「svc ハンドラ」は別概念。混ぜないこと:
 //    (1) **カーネルの svc ハンドラ** = svc_dispatch。例外文脈 (Handler モード) で
-//        走る機構そのもの。経路を決め、プリミティブを実行する。番号の意味は持たない
-//    (2) **オブジェクトランドの svc ハンドラ** = SET_HANDLER で登録されるメソッド。
-//        カーネルオブジェクトが持ち、**スレッドモードで**走る方針側。番号を解釈し、
-//        担当サブシステムへ配るのはこちらの仕事
+//        走る機構。経路を決め、プリミティブを実行する。番号の意味は持たない
+//    (2) **オブジェクトランドの svc ハンドラ** = カーネルオブジェクトが持ち、
+//        **スレッドモードで**走る方針側。番号を解釈し、担当へ配る
 //
-//  ★svc の経路は「発行元が信頼された活性化か」の 1 ビットだけで決まる (I-1)。
-//    信頼された活性化 → プリミティブを直接実行 ((1) の中で完結し、(2) は経由しない)
-//    それ以外         → **登録済みの (2) をメソッドとして呼ぶ**
-//  カーネルは番号 → ハンドラの表を持たない。持っているのは登録された entry 1 個だけ。
+//  ★経路は**カーネル自身が積んだフレーム**だけで決まる (I-1):
+//      今の実行が「ハンドラを起こすために積んだ枠」の中 → プリミティブを実行
+//      それ以外                                        → (2) をメソッドとして呼ぶ
+//    呼び出しの履歴を書けるのはカーネルだけなので、この判定は偽装できない。
+//    → カーネルは identity (cookie) も信頼ビットも持たない。オブジェクトが誰かは
+//      カーネルオブジェクトの台帳の話 (PORT §3.1)。
+//
+//  ★カーネルオブジェクト以外は RETURN を撃てない。そのため、ハンドラを起こすときに
+//    **今のネスト数を渡し** (ARCH::set_handler_info)、オブジェクトは exit API に
+//    **何段戻すか**を載せて撃ち、ハンドラがその段数で巻き戻す (D5)。
 template <typename CPU_MANAGER_T, typename MEMORY_MANAGER_T,
           uintptr_t THREAD_COUNT_T>
 class kernel {
@@ -50,7 +55,7 @@ public:
   //                    X-total-frame       X-total                    X
   //
   //  ★I-3: 元の例外フレームは 1 バイトも動かさない。退避域の一番上に元の位置のまま
-  //    residing させ、下へ複製するのは書き換え用の作業コピーだけ (FP 拡張フレームの
+  //    置き、下へ複製するのは書き換え用の作業コピーだけ (FP 拡張フレームの
   //    S0-S15 と乖離させないため)。
   //  ★I-4: 呼び先が復帰した直後の SP が退避域へ食い込んではならない。ISA が復帰時に
   //    SP を追加調整する場合 (ARMv8-M の xPSR bit9 による +4 など) は
@@ -58,13 +63,14 @@ public:
   //    ARCH::psp_after_return で必ず検算する。
   //  ★I-5: pop は push 時に記録した値を読み戻す。再計算しない。
   struct call_frame_header {
-    uintptr_t prev;        // 一つ外側のヘッダのアドレス (0 = 最外)
-    uint32_t total_bytes;  // 退避域の総バイト数 (8B 境界に丸め済み)
-    uint32_t frame_bytes;  // 例外フレーム実サイズ
-    uintptr_t caller_cookie;        // 呼び出し元の「現在オブジェクト」
-    uintptr_t caller_caller_cookie; // その呼び出し元の identity
-    uint32_t caller_trusted;        // 呼び出し元が信頼された活性化だったか
-    uint32_t reserved;              // 8B アライン維持
+    uintptr_t prev;       // 一つ外側のヘッダのアドレス (0 = 最外)
+    uint32_t total_bytes; // 退避域の総バイト数 (8B 境界に丸め済み)
+    uint32_t frame_bytes; // 例外フレーム実サイズ
+    // この枠が「ハンドラを起こすために積んだもの」か。**経路判定の唯一の材料**で、
+    // 書けるのはカーネルだけ。CALL で積む枠には立たないので、ハンドラから呼ばれた
+    // 普通のメソッドがプリミティブを撃てるようにはならない (I-8)。
+    uint32_t handler_frame;
+    uint32_t reserved; // 8B アライン維持
     CONTEXT saved; // 呼び出し元の文脈まるごと (sp を含む = 元フレームの位置)
   };
 
@@ -73,45 +79,38 @@ public:
 
   // 自コアの例外結線とメモリマネージャを初期化する。
   void init();
-  // 今の実行を「信頼された活性化」= スレッド 0 として採用し、entry へ移る。
-  // スレッドスタックへ切り替えるので戻らない (DESIGN §6 のブートストラップ)。
-  [[noreturn]] void bootstrap(uintptr_t cookie, void (*entry)());
+  // オブジェクトランドの svc ハンドラを据える。系の組み立て (composition) の一部で
+  // 実行時 API ではないため、ブート前に 1 回だけ呼ぶ。
+  void set_object_handler(uintptr_t entry_pc);
+  // 今の実行をスレッド 0 として採用し、entry へ移る (スレッドスタックへ
+  // 切り替えるので戻らない)。
+  [[noreturn]] void bootstrap(void (*entry)());
 
   // ---- ISA 層 (例外入口) から呼ばれる ----
   CONTEXT *current_context();
   void svc_dispatch(CONTEXT *context);
   void pendsv_dispatch(CONTEXT *context);
 
-  // ---- 信頼境界の内側 (カーネルオブジェクト) 向けの読み出し ----
   uint32_t current_thread_id() const { return m_current[BOARD::core_num()]; }
   THREAD &current_thread() { return m_threads[current_thread_id()]; }
   const THREAD &current_thread() const { return m_threads[current_thread_id()]; }
-  uintptr_t current_cookie() const { return current_thread().cookie; }
-  uintptr_t current_caller_cookie() const {
-    return current_thread().caller_cookie;
-  }
   uint32_t current_depth() const { return current_thread().call_stack.depth; }
 
 private:
-  bool call_frame_push(THREAD &thread, CONTEXT *context, FRAME **frame);
+  bool call_frame_push(THREAD &thread, CONTEXT *context, FRAME **frame,
+                       bool handler_frame);
   bool call_frame_pop(THREAD &thread, CONTEXT *context, FRAME **frame);
-  // 保護されたサブルーチン呼び出しの本体。プリミティブ CALL と、オブジェクトランドの
-  // svc ハンドラへの引き渡し (トランポリン) の**両方**がこれ 1 本を通る —
-  // トランポリンは特別な機構ではなく「登録済みメソッドの呼び出し」であることを
-  // 実装でも保つため。
+
+  // 今の実行がハンドラの枠の中か (= プリミティブを実行してよいか)。
+  bool in_handler_frame(const THREAD &thread) const;
   kernel_error do_call(THREAD &thread, CONTEXT *context, FRAME **frame,
-                       const call_request &request, uintptr_t number);
+                       const call_request &request, bool handler_frame);
 
   THREAD m_threads[THREAD_COUNT];
   CONTEXT m_contexts[THREAD_COUNT];
   uint32_t m_current[CORE_COUNT];
-  // ★オブジェクトランドの svc ハンドラ (上の (2))。カーネルが持つのは登録された
-  //   entry が 1 個だけで、番号 → ハンドラの表ではない。
-  struct object_svc_handler_t {
-    uintptr_t entry_pc;
-    uintptr_t cookie;
-    uint32_t protection;
-  } m_object_svc_handler;
+  // オブジェクトランドの svc ハンドラの入口。表ではなく 1 個だけ。
+  uintptr_t m_object_svc_handler;
 };
 
 } // namespace templates

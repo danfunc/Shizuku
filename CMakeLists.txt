@@ -2,7 +2,9 @@ cmake_minimum_required(VERSION 3.26)
 set(CMAKE_CXX_STANDARD "23")
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/buildUtilities.cmake)
 preloadtoolchain()
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIE -fPIC")
+# ★-fPIE/-fPIC は付けない。ベアメタルのファームでは意味が無い上に、PIC だと関数の
+# アドレスがリンク時定数でなくなり、asm へシンボルを即値として埋められなくなる
+# (ハンドラの ABI シムがコンパイルできない)。Bazel 側も付けていない。
 project(Shizuku C CXX ASM)
 add_executable(Shizuku)
 add_library(Shizuku_internal_HEADERS INTERFACE)
