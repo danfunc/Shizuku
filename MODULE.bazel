@@ -1,0 +1,30 @@
+# Shizuku — Bazel ビルド (docs/03_porting_policy.md D15)
+# pico-sdk は公式 Bazel サポート (2.0+) を使う。ローカルの SDK 2.2.0 を
+# local_path_override で指す (レジストリ経由にしたい場合はこの override を外す)。
+module(
+    name = "shizuku",
+    version = "0.1.0",
+)
+
+bazel_dep(name = "platforms", version = "0.0.9")
+bazel_dep(name = "bazel_skylib", version = "1.6.1")
+bazel_dep(name = "rules_cc", version = "0.0.10")
+bazel_dep(name = "pico-sdk", version = "2.2.0")
+
+local_path_override(
+    module_name = "pico-sdk",
+    # VS Code Pico 拡張が展開する SDK。マシンが変わったらここを更新する。
+    path = "/Users/ishigakiyua/.pico-sdk/sdk/2.2.0",
+)
+
+# pico-sdk のツールチェーンは dev_dependency 登録なので、利用側が明示的に登録する。
+register_toolchains(
+    "@pico-sdk//bazel/toolchain:mac-aarch64-rp2040",
+    "@pico-sdk//bazel/toolchain:mac-aarch64-rp2350",
+    "@pico-sdk//bazel/toolchain:mac-x86_64-rp2040",
+    "@pico-sdk//bazel/toolchain:mac-x86_64-rp2350",
+    "@pico-sdk//bazel/toolchain:linux-x86_64-rp2040",
+    "@pico-sdk//bazel/toolchain:linux-x86_64-rp2350",
+    "@pico-sdk//bazel/toolchain:linux-aarch64-rp2040",
+    "@pico-sdk//bazel/toolchain:linux-aarch64-rp2350",
+)

@@ -1,0 +1,18 @@
+# 既定ターゲット: RP2350 / pico2 (CMake kit と同じ構成)
+build --platforms=@pico-sdk//bazel/platform:rp2350
+build --@pico-sdk//bazel/config:PICO_BOARD=pico2
+build --@pico-sdk//bazel/config:PICO_STDIO_USB=True
+
+# カーネルは C++23 (cxxopt は C++ 翻訳単位にのみ効く)
+build --cxxopt=-std=c++23
+
+# fastbuild の -O0 だと svc ラッパの inline asm (入力 5 + 出力 2 + r0-r3/ip/lr
+# clobber) がレジスタ割付不能になる。CMake の Debug (-Og) と揃える。
+build --copt=-Og
+
+# UF2 生成: 公式の uf2_aspect は picotool をソースビルドするが、Apple Silicon ホスト
+# では pico-sdk 2.2.0 の src/host/hardware_sync が clang builtin (__sev/__wfi/__wfe) と
+# 衝突してビルドできない (2026-08-19 実測)。代わりにローカル picotool を使う
+# //:shizuku_uf2 (genrule) で変換する。
+# build --aspects=@pico-sdk//tools:uf2_aspect.bzl%pico_uf2_aspect
+# build --output_groups=+pico_uf2_files

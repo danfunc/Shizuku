@@ -1,4 +1,9 @@
 /.DS_Store
-/.gitignore
 /build*/
 /bazel-*
+
+# ユーザーのグローバル gitignore が `.*` (ドットファイル全部) を除外しているため、
+# ビルドに必須のドットファイルはここで明示的に戻す。
+!.bazelrc
+!.bazelversion
+!.gitignore

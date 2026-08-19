@@ -1,0 +1,35 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+# モジュール提供ヘッダ (config.hpp が include するため、実装とは分けて公開する)
+cc_library(
+    name = "headers",
+    hdrs = glob(["internal_headers/**/*.hpp"]),
+    includes = ["internal_headers"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//:internal_headers",
+        "@pico-sdk//src/rp2_common/hardware_exception",
+        "@pico-sdk//src/rp2_common/pico_stdlib",
+    ],
+)
+
+cc_library(
+    name = "pico_sdk_support",
+    srcs = [
+        "armv8m_ctx.S",
+        "board.cpp",
+        "main.cpp",
+        "memory_manager.cpp",
+    ],
+    # main() がここに居るため、参照が無くてもリンクに含める
+    alwayslink = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        ":headers",
+        "//:internal_headers",
+        "//configs:config",
+        "@pico-sdk//src/rp2_common/hardware_exception",
+        "@pico-sdk//src/rp2_common/pico_stdio",
+        "@pico-sdk//src/rp2_common/pico_stdlib",
+    ],
+)
