@@ -5,18 +5,16 @@
             "PRELOAD_TOOLCHAIN_FILE":"${workspaceFolder}/cmake/pico_sdk/pico_sdk_import.cmake",
             "POSTLOAD_TOOLCHAIN_FILE":"${workspaceFolder}/cmake/pico_sdk/pico_sdk_setup.cmake",
             "CMAKE_CXX_STANDARD":"23",
-            "SHIZUKU_CPU_MANAGER":"rp2040",
-            "SHIZUKU_OBJECT":"shizuku::dummy::object",
-            "SHIZUKU_CPU_COUNT" : "2",
+            "SHIZUKU_ARCH":"armv8m",
+            "SHIZUKU_BOARD":"rp2350_pico2",
+            "SHIZUKU_CPU_COUNT" : "1",
             "CMAKE_EXPORT_COMPILE_COMMANDS":"ON",
-            "SHIZUKU_OBJECT_USE_THREAD_TABLE":"shizuku::templates::static_table<shizuku::dummy::thread,128>",
-            "SHIZUKU_OBJECT_USE_MEMORY_TABLE":"void",
-            "SHIZUKU_OBJECT_USE_METHOD_TABLE":"shizuku::templates::static_table<shizuku::abis::rp2040::method_t,128>"
-        },
-        "compilers": {
-            "C": "arm-none-eabi-gcc",
-            "CXX": "arm-none-eabi-g++",
-            "ASM": "arm-none-eabi-gcc"
+            "SHIZUKU_OBJECT_USE_THREAD_TABLE":"shizuku::templates::static_table<shizuku::THREAD,128>",
+            "SHIZUKU_OBJECT_USE_MEMORY_TABLE":"shizuku::templates::static_table<shizuku::MEMORY_MAP,128>",
+            "SHIZUKU_OBJECT_USE_METHOD_TABLE":"shizuku::templates::static_table<shizuku::METHOD,128>",
+            "SHIZUKU_MEMORY_MANAGER": "shizuku::memory_managers::pico_sdk",
+            "PICO_BOARD": "pico2",
+            "PICO_PLATFORM":"rp2350"
         }
     }
 ]
