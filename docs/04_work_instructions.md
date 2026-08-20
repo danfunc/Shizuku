@@ -330,6 +330,35 @@ HW-FAIL している。HANDOFF §0.7):
 MemManage ハンドラ (違反しても系が止まらない, §11.2.4) → per-object region (§11.3,
 CALL の protection 引数に region set を載せる)。
 
+### Phase 5.5 記録 — 資源の出どころ / flash FS / ライブラリ化 (2026-08-20・**実機確認済み**)
+
+実機出力: `35 passed / 0 failed`、`control unpriv=15 priv=14`、
+`[FLASHFS] probe.txt survived the power cycle: read 41 bytes straight from 10301000 -> matches`
+
+1. **スレッドの記憶をオブジェクトランドへ移した (D18/D19)**
+   - カーネルから固定長のスレッド配列が消えた。`set_thread_storage(memory, bytes)` で
+     借り、**何本作れるかは渡された量が決まる**。スタックも `spawn_request` で渡す。
+     スレッド 0 も `bootstrap(entry, stack_base, stack_bytes)` に揃えた
+   - 置き場所の条件はカーネルが**検査する**: `base >= BOARD::unprivileged_floor()`
+     なら panic。kobj は arena を 2 つ持ち、簿記は静的領域 (特権のみ)、
+     スタックとオブジェクトの作業領域はヒープ (非特権から届く) から出す
+   - 終わったスレッドの回収は `schedule()` で行う (走り終えた本人には自分のスタックを
+     返せない)。台帳も畳む — 枠は使い回されるので、前の住人の identity を残さない
+2. **メモリ授受 API (D20)**: `MEMORY_ALLOCATE/RELEASE/HAND_OVER/OWNER`。
+   持ち主を記録するので「他人のものは返せない」「渡したら以後返せない」が同時に立つ
+3. **flash FS オブジェクト (D21)**: `lookup` が**アドレスを返す**。写さない。
+   実機で再フラッシュを跨いで残っていることを確認済み
+4. **カーネルのライブラリ化 (D22)**: `shizuku_kernel` / `shizuku_kernel_object` /
+   `shizuku_selftest` / `firmware`。CMake・Bazel 両方で分割済み。
+   `nm libshizuku_kernel.a | grep -c kernel_object` = **0**
+
+★この段で踏んだ罠 (地雷一覧にも追加): **オブジェクト番号の衝突**。flash FS に 11 を
+振ったら自己テストの非特権プローブ (11) と衝突し、プローブが flash FS (特権宣言) の
+中身を呼んでしまって「非特権のはずが特権だった」という**まったく別の失敗に化けた**。
+拒否のテストのほうは通り続けた (0xD0000000 は特権でも落ちるため) ので、
+**保護が壊れたように見えて実は番号の取り合いだった**。番号表は 1 ヶ所
+(`shizuku/objects/flash_fs.hpp`) に集約した。
+
 ## Phase 6 以降 (順不同・必要に応じて)
 
 - ストリーム (制御プレーンのみ svc。connect + DMA ポンプは board 依存)
@@ -356,10 +385,12 @@ CALL の protection 引数に region set を載せる)。
 | exclusive handler の二重登録 (pico-sdk は panic) | 例外ハンドラ登録は board init の 1 ヶ所に集約。RAM ベクタは両コア共有な点に注意 (PendSV/SVC の登録は core0 の 1 回だけ、優先度・MPU・SysTick は per-core banked なので各コアで) |
 | 固まったファームは書き込みツールが「成功」のまま書かない | 書き込み完了は出力行で判定。焼く前にシリアル待ち受けを起動 |
 | ~~PICO_FLASH_SPI_CLKDIV で分周調整~~ 死んだつまみ | フラッシュクロックは flash_clock.cpp 方式 (目標周波数から導出) を将来移植 |
+| オブジェクト番号の衝突が「保護が壊れた」ように見える (2026-08-20 実際に踏んだ。flash FS の 11 が非特権プローブの 11 と衝突し、非特権のはずの呼び出しが特権オブジェクトの中身を実行した) | 番号表を 1 ヶ所に集約 (`objects/flash_fs.hpp`)。CREATE_OBJECT の ALREADY_EXISTS を無視しない |
+| フラッシュ書き込み元が flash 上にある (文字列リテラル等) → 書き込み中は XIP が止まっているので読めない | 1 ページずつ RAM の中継バッファへ写してから渡す。プローブはわざとリテラルを渡して経路を踏む |
 
 ## 進め方の作法
 
 - 各フェーズの完了時に本 docs (特にこのファイルと README の「現在地」) を更新する
 - 設計判断で DESIGN/PORT と矛盾しそうになったら、コードを曲げる前に 03 の
   D/Q リストに追記してユーザーに確認する
-- コミットは機能単位で小さく。ブランチは `0.1` (PR 先 `stable`)
+- コミットは機能単位で小さく。ブランチは `dev` (PR 先 `stable`)

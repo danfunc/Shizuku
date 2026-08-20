@@ -1,5 +1,10 @@
-# Shizuku 本体。層構造は docs/03_porting_policy.md §1 を参照。
-load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+# ===========================================================================
+#  Shizuku — カーネルは**ライブラリ**として提供する
+# ===========================================================================
+#  実行ファイルを作るのは //firmware だけ。カーネル / カーネルオブジェクト /
+#  自己テストはそれぞれ別のライブラリで、「どれを繋いで何を走らせるか」を決めるのは
+#  合成 (firmware/main.cpp) の仕事。XNO 側は同じ 3 つを引いて**自分の合成**を書く。
+load("@rules_cc//cc:defs.bzl", "cc_library")
 
 # ISA 非依存のカーネルヘッダ (CMake の Shizuku_internal_HEADERS に相当)
 cc_library(
@@ -9,40 +14,45 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# 書き込み: bazelisk run //:flash (ビルドしてから焼く)。
-sh_binary(
-    name = "flash",
-    srcs = ["tools/flash.sh"],
-    data = [":shizuku_uf2"],
-)
-
-# ローカルの picotool で ELF → UF2 変換 (.bazelrc のコメント参照。非 hermetic)。
-genrule(
-    name = "shizuku_uf2",
-    srcs = [":shizuku"],
-    outs = ["shizuku.uf2"],
-    cmd = "/opt/picotool/bin/picotool uf2 convert -t elf $(location :shizuku) $@",
-    tags = ["no-sandbox"],
-)
-
-cc_binary(
-    name = "shizuku",
+# カーネル = 機構だけの層。★資源を持たない (スレッドの記憶も貸してもらう) ので、
+# 実体としてはライブラリ以外になりようがない。
+cc_library(
+    name = "kernel",
     srcs = [
         "source/cpu_manager/init.cpp",
         "source/kernel/dispatch.cpp",
         "source/kernel/init.cpp",
         "source/kernel/thread.cpp",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":internal_headers",
+        "//configs:config",
+        "//modules/pico_sdk_support:headers",
+    ],
+)
+
+# カーネルオブジェクト = 方針の層。★カーネルとは別のライブラリにする。分けること
+# 自体が D1 (カーネルはオブジェクトを知らない) の検算になる — 依存は一方向しかない。
+cc_library(
+    name = "kernel_object",
+    srcs = [
         "source/kernel_object/handler.cpp",
         "source/kernel_object/memory.cpp",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [":kernel"],
+)
+
+# 自己テストは「カーネルの一部」ではなく、カーネルを使うオブジェクトの集合。
+cc_library(
+    name = "selftest",
+    srcs = [
         "source/selftest/call_ladder.cpp",
         "source/selftest/stress.cpp",
         "source/selftest/thread_ladder.cpp",
         "source/selftest/unprivileged.cpp",
     ],
-    deps = [
-        ":internal_headers",
-        "//configs:config",
-        "//modules/pico_sdk_support",
-        "@pico-sdk//src/rp2_common/pico_stdlib",
-    ],
+    visibility = ["//visibility:public"],
+    deps = [":kernel_object"],
 )

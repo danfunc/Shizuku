@@ -1,0 +1,31 @@
+# 実行ファイルを作るのはここだけ (BUILD.bazel の冒頭を参照)。
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+# 書き込み: bazelisk run //firmware:flash (ビルドしてから焼く)。
+sh_binary(
+    name = "flash",
+    srcs = ["//tools:flash.sh"],
+    data = [":shizuku_uf2"],
+)
+
+# ローカルの picotool で ELF → UF2 変換 (.bazelrc のコメント参照。非 hermetic)。
+genrule(
+    name = "shizuku_uf2",
+    srcs = [":shizuku"],
+    outs = ["shizuku.uf2"],
+    cmd = "/opt/picotool/bin/picotool uf2 convert -t elf $(location :shizuku) $@",
+    tags = ["no-sandbox"],
+)
+
+cc_binary(
+    name = "shizuku",
+    srcs = ["main.cpp"],
+    deps = [
+        "//:internal_headers",
+        "//:kernel_object",
+        "//:selftest",
+        "//configs:config",
+        "//modules/pico_sdk_support",
+        "@pico-sdk//src/rp2_common/pico_stdlib",
+    ],
+)

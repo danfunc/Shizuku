@@ -134,6 +134,11 @@ void directory_reset() {
 //   戻す。pico-sdk の flash_range_* は RAM 上で走る関数として置かれており、
 //   終わりに XIP のキャッシュも捨ててくれる (捨てないと、書いた直後に読んだとき
 //   古い中身が見える)。
+// ★将来オーバークロックを入れるときの注意 (docs/03 D23): 消去・書き込みは XIP を
+//   一度落として入り直す経路なので、**QMI のタイミング設定が ROM 既定へ戻る**恐れが
+//   ある。今は SDK 既定の 150MHz で ROM 既定のまま走っているので実害が無いだけで、
+//   フラッシュを速める設定を入れた瞬間にここが「書いた後だけ読み違える」経路になる。
+//   速すぎる QMI 設定は落ちずに**静かにデータを読み違える**ので、気づけない。
 void flash_write(uint32_t offset, const uint8_t *ram_data, uint32_t bytes,
                  bool erase_first, uint32_t erase_bytes) {
   const uint32_t interrupts = save_and_disable_interrupts();

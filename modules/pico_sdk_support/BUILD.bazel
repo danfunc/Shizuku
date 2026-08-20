@@ -19,17 +19,18 @@ cc_library(
         "arch_glue.cpp",
         "armv8m_ctx.S",
         "board.cpp",
-        "main.cpp",
         "memory_manager.cpp",
         "objects/flash_fs.cpp",
         "objects/peripherals.cpp",
     ],
-    # main() がここに居るため、参照が無くてもリンクに含める
+    # 例外ベクタから引かれるだけで、C++ 側から参照の無いシンボル (ISA の入口) が
+    # あるので、参照が無くてもリンクに含める。
     alwayslink = True,
     visibility = ["//visibility:public"],
     deps = [
         ":headers",
         "//:internal_headers",
+        "//:kernel",
         "//configs:config",
         "@pico-sdk//src/rp2_common/hardware_exception",
         "@pico-sdk//src/rp2_common/hardware_flash",

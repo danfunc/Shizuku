@@ -14,6 +14,7 @@ postloadtoolchain()
 add_subdirectory(modules)
 add_subdirectory(configs)
 add_subdirectory(source)
+add_subdirectory(firmware)
 # target_precompile_headers(Shizuku PRIVATE
 # "$<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/internal_headers/shizuku/kernel.hpp>")
 
