@@ -178,6 +178,53 @@ void thread_ladder() {
           (unsigned long)g_sleeper_woke, 1);
   }
 
+  // ---- 取り上げは「期限内」ではなく「期限のあと」に起きる -----------------
+  // ★ここを測らないと、貸し借りの保証を言い間違える。予算は「どれだけ**仕事**を
+  //   してよいか」なので、取り上げは仕事を使い切った**あと**に起きる。保証できるのは
+  //   「期限内に戻る」ではなく「**超過に上界がある**」のほう。その上界を数字で出す。
+  //   超過の内訳: 装填の下限による丸め + 割り込みの入り口 + 文脈の退避復元 +
+  //   借り手がハンドラの中に居たときの見送り (GRANT_RETRY_CYCLES)。
+  {
+    g_hog_stop = 0;
+    const api_result spawned =
+        api(object_api::SPAWN, OBJECT_HOG, METHOD_MAIN, 0);
+    check("overshoot: spawn hog", spawned.error == (uintptr_t)object_error::OK,
+          (unsigned long)spawned.error, 0);
+    constexpr uint32_t ROUNDS = 200;
+    constexpr uint32_t BUDGET_US = 200;
+    const uint32_t budget_cycles = BUDGET_US * BOARD::cycles_per_us();
+    uint64_t worst = 0;
+    uint64_t total = 0;
+    uint32_t expired = 0;
+    for (uint32_t round = 0; round < ROUNDS; ++round) {
+      const uint64_t started = BOARD::time_us();
+      const api_result granted =
+          api(object_api::RUN_FOR, spawned.value, budget_cycles);
+      const uint64_t elapsed = BOARD::time_us() - started;
+      if (granted.value == 0)
+        ++expired;
+      const uint64_t over = elapsed > BUDGET_US ? elapsed - BUDGET_US : 0;
+      if (over > worst)
+        worst = over;
+      total += over;
+    }
+    BOARD::diag_printf(
+        "[SELFTEST] overshoot over %lu grants of %luus: mean %luus, worst "
+        "%luus (%lu/%lu reclaimed by budget)\n",
+        (unsigned long)ROUNDS, (unsigned long)BUDGET_US,
+        (unsigned long)(total / ROUNDS), (unsigned long)worst,
+        (unsigned long)expired, (unsigned long)ROUNDS);
+    // ★毎回きっちり取り上げていること。1 回でも相手が自分から返していたら、
+    //   それは hog ではないので測定そのものが無意味になる。
+    check("overshoot: every grant was reclaimed", expired == ROUNDS,
+          (unsigned long)expired, (unsigned long)ROUNDS);
+    // ★上界を主張する。青天井なら「戻ってくる」と言えない。
+    check("overshoot: bounded", worst < BUDGET_US, (unsigned long)worst,
+          (unsigned long)BUDGET_US);
+    g_hog_stop = 1;
+    api(object_api::RUN_FOR, spawned.value, budget_cycles);
+  }
+
   // ---- 配れる持ち分が無いなら、貸さずに断る -------------------------------
   // ★装填には下限があるので、下限未満を「丸めて」貸すと借り手は貸された以上に
   //   走れる。少ししか残っていないときに黙って多めに貸すより、断るほうが正しい。

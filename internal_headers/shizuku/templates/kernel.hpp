@@ -201,6 +201,11 @@ private:
   grant_stack m_grants[CORE_COUNT];
   // 今タイマへ装填した刻みの大きさ [クロック]。残りから引くために覚えておく。
   uint32_t m_armed[CORE_COUNT];
+  // ★取り上げを見送ったときに、次に見に来るまでの間隔 [クロック]。
+  //   借り手がオブジェクトランドのハンドラの中に居る間は切り替えてはいけない
+  //   (下の pendsv_dispatch を参照)。短すぎると見送りの割り込みだけが増え、
+  //   長すぎると取り上げが遅れる。参照実装は 50µs 相当を使っていた。
+  static constexpr uint32_t GRANT_RETRY_CYCLES = 8192; // ≒55µs @150MHz
   // オブジェクトランドの svc ハンドラの入口。表ではなく 1 個だけ。
   uintptr_t m_object_svc_handler;
   uint32_t m_recovery_thread;
