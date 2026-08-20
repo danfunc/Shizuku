@@ -21,6 +21,7 @@ cc_library(
         "board.cpp",
         "main.cpp",
         "memory_manager.cpp",
+        "objects/peripherals.cpp",
     ],
     # main() がここに居るため、参照が無くてもリンクに含める
     alwayslink = True,
@@ -30,6 +31,8 @@ cc_library(
         "//:internal_headers",
         "//configs:config",
         "@pico-sdk//src/rp2_common/hardware_exception",
+        "@pico-sdk//src/rp2_common/hardware_gpio",
+        "@pico-sdk//src/rp2_common/hardware_spi",
         "@pico-sdk//src/rp2_common/pico_stdio",
         "@pico-sdk//src/rp2_common/pico_stdlib",
     ],

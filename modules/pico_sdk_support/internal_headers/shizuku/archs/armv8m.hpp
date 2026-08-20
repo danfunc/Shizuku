@@ -143,35 +143,12 @@ public:
   template <auto FUNCTION> static uintptr_t handler_entry() {
     return (uintptr_t)&handler_shim<FUNCTION>;
   }
-  // 信頼された活性化 (svc ハンドラ) 用の戻り口。RETURN を 1 段ぶん撃つ。
+  // 戻り口 (1 本だけ)。呼び先が普通に return するとここへ落ち、RETURN を撃つ。
+  // ハンドラから出ればプリミティブとして巻き戻し、オブジェクトから出れば経路判定で
+  // オブジェクトランドのハンドラへ「戻った」という知らせとして届く。
   static uintptr_t return_stub() {
     return (uintptr_t)&shizuku_armv8m_return_stub;
   }
-  // オブジェクトランド用の戻り口。呼び先は信頼されないので RETURN プリミティブを
-  // 撃てず、代わりに**オブジェクトランドの exit API** を撃って戻る。何段落とすかは
-  // その API を実装する側 (カーネルオブジェクト) が決める (D5)。
-  // ★番号はオブジェクトランドの持ち物なのでテンプレート引数で外から与える —
-  //   カーネルも arch も番号の意味を知らないままでいられる。
-  //   naked を共通ヘッダ 1 ヶ所に閉じ込めるのも意図的で、サブシステムごとに
-  //   自作させると必ず間違える (参照実装で実際に起きた)。
-  template <uintptr_t NUMBER>
-  __attribute__((naked, aligned(4))) static void object_exit_entry() {
-    asm volatile("mov  r1, r0\n"  // a1 = 呼び先の戻り値
-                 "movs r2, #0\n"  // a2 = 追加で落とす段数 (既定 0)
-                 "movs r3, #0\n"
-                 "ldr  r0, 1f\n"  // a0 = exit API 番号
-                 "svc  0\n"
-                 "b    shizuku_return_stub_failed\n" // 戻ってきた = 巻き戻し失敗
-                 ".align 2\n"
-                 "1: .word %c0\n"
-                 :
-                 : "i"(NUMBER)
-                 :);
-  }
-  template <uintptr_t NUMBER> static uintptr_t object_exit_stub() {
-    return (uintptr_t)&object_exit_entry<NUMBER>;
-  }
-
   // ---- 特権とスタック上限 -------------------------------------------------
   // 「今の実行が特権か」の自己申告 (CONTROL.nPRIV を実際に読む)。
   static bool current_priv() {

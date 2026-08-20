@@ -5,11 +5,12 @@
 //  持つ**オブジェクトランドの svc ハンドラ** (スレッドモードで走る方針側) とは
 //  別概念で、ここでは後者を「登録された entry」としてしか扱わない。
 //
-//  ★経路はカーネル自身が積んだフレームだけで決まる (I-1):
-//      ハンドラを起こすために積んだ枠の中 → プリミティブを実行
-//      それ以外                          → 登録済みハンドラをメソッドとして呼ぶ
-//    呼び出しの履歴を書けるのはカーネルだけなので偽装できない。identity も
-//    信頼ビットもカーネルは持たない。
+//  ★経路は呼び出しフレームの段数のパリティだけで決まる (I-1):
+//      偶数段 → オブジェクトが走っている → 登録済みハンドラをメソッドとして呼ぶ
+//      奇数段 → ハンドラが走っている     → プリミティブを実行
+//    積むのはトランポリン (オブジェクト→ハンドラ) と CALL (ハンドラ→オブジェクト)
+//    の 2 つだけで必ず交互になるので、パリティがそのまま実行主体になる。
+//    identity も信頼ビットも旗も持たない。
 //
 //  ★カーネルオブジェクト以外は RETURN を撃てないので、ハンドラを起こすときに
 //    今のネスト数を渡す。オブジェクトは exit API に何段戻すかを載せて撃ち、
@@ -29,15 +30,8 @@ template <> void KERNEL::set_object_handler(uintptr_t entry_pc) {
 }
 
 template <>
-bool KERNEL::in_handler_frame(const KERNEL::THREAD &thread) const {
-  if (thread.call_stack.top == 0)
-    return false; // 一度もフレームを積んでいない = 素のスレッド実行
-  return ((const call_frame_header *)thread.call_stack.top)->handler_frame != 0;
-}
-
-template <>
 bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
-                             KERNEL::FRAME **frame, bool handler_frame) {
+                             KERNEL::FRAME **frame) {
   const uint32_t frame_bytes = ARCH::exc_frame_bytes(*context);
   uint32_t total = (uint32_t)sizeof(call_frame_header) + frame_bytes;
   total = (total + 7u) & ~7u; // 8B 境界を保つ
@@ -56,8 +50,6 @@ bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   header->prev = thread.call_stack.top;
   header->total_bytes = total;
   header->frame_bytes = frame_bytes;
-  header->handler_frame = handler_frame ? 1u : 0u;
-  header->reserved = 0;
   header->saved = *context; // sp を含めて丸ごと (= 元フレームの位置も記録される)
 
   // ★元の例外フレームは動かさない (I-3)。下へ複製するのは書き換え用の作業コピー。
@@ -97,15 +89,16 @@ bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
 
 template <>
 kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
-                             KERNEL::FRAME **frame, const call_request &request,
-                             bool handler_frame) {
-  // 戻り口の指定も必須。呼び先は RETURN を撃てないので、「オブジェクトランドの
-  // exit API を撃つコード」を発行側が与える必要がある (D5)。
-  if (request.entry_pc == 0 || request.return_pc == 0)
+                             KERNEL::FRAME **frame,
+                             const call_request &request) {
+  if (request.entry_pc == 0)
     return kernel_error::BAD_REQUEST;
-  if (!call_frame_push(thread, context, frame, handler_frame))
+  if (!call_frame_push(thread, context, frame))
     return kernel_error::NO_STACK;
-  ARCH::set_entry(**frame, request.entry_pc, request.return_pc);
+  // 戻り口は常にカーネルの 1 本。撃つ svc は同じでも、そこから出たときの段数の
+  // パリティで「プリミティブとしての巻き戻し」か「メソッドが戻った知らせ」かが
+  // 決まる (発行側が戻り口を選ぶ必要は無い)。
+  ARCH::set_entry(**frame, request.entry_pc, ARCH::return_stub());
   ARCH::set_args(**frame, request.args);
   ARCH::set_priv(*context, (request.protection & PROTECTION_UNPRIVILEGED) == 0);
   return kernel_error::OK;
@@ -116,20 +109,18 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
   FRAME *frame = context->sp;
   const uintptr_t number = ARCH::arg(*frame, 0);
 
-  if (!in_handler_frame(thread)) {
-    // ハンドラの枠の外からの svc は、オブジェクトランドの svc ハンドラへの
+  if ((thread.call_stack.depth & 1u) == 0) {
+    // 偶数段 = オブジェクトが走っている。その svc はオブジェクトランドのハンドラへの
     // **メソッド呼び出し**として届けるだけ。カーネルは番号を解釈しない (I-1) し、
     // 誰が担当かも知らない。
     if (m_object_svc_handler == 0)
       BOARD::panic("no object-land svc handler registered");
     call_request request{};
     request.entry_pc = m_object_svc_handler;
-    // ハンドラは自分で RETURN を撃てるので、戻り口はカーネルの戻り口でよい。
-    request.return_pc = ARCH::return_stub();
     request.protection = PROTECTION_PRIVILEGED;
     for (unsigned index = 0; index < 4; ++index)
       request.args[index] = ARCH::arg(*frame, index); // 元の引数をそのまま渡す
-    const kernel_error error = do_call(thread, context, &frame, request, true);
+    const kernel_error error = do_call(thread, context, &frame, request);
     if (error != kernel_error::OK) {
       ARCH::set_result(*frame, (uintptr_t)error, 0);
       return;
@@ -140,8 +131,8 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
     return;
   }
 
-  // ここから先はハンドラの枠の中だけ。プリミティブを撃てるのがカーネル
-  // オブジェクトのハンドラに限られること (I-2) は、この分岐自体が保証している。
+  // ここから先は奇数段 = ハンドラだけ。プリミティブを撃てるのがカーネルオブジェクトの
+  // ハンドラに限られること (I-2) は、この分岐自体が保証している。
   switch ((primitive)number) {
   case primitive::CALL: {
     const call_request *pointer = (const call_request *)ARCH::arg(*frame, 1);
@@ -151,9 +142,9 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
     }
     // フレームを書き換える前に内容を控える。
     const call_request request = *pointer;
-    // ★呼び先の枠はハンドラ枠にしない。ハンドラから呼ばれただけの普通のメソッドが
-    //   プリミティブを撃てるようになってはいけない (I-8)。
-    const kernel_error error = do_call(thread, context, &frame, request, false);
+    // 呼び先は 1 段深くなる = 偶数段 = オブジェクトとして走る。ハンドラから
+    // 呼ばれただけの普通のメソッドがプリミティブを撃てるようにはならない (I-8)。
+    const kernel_error error = do_call(thread, context, &frame, request);
     // 成功時はこの syscall から戻らない (呼び先が戻ったときに、復元された
     // 呼び出し元フレームへ戻り値が載る)。失敗時だけその場でエラー復帰する。
     if (error != kernel_error::OK)

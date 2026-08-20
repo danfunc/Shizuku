@@ -21,12 +21,12 @@ namespace templates {
 //    (2) **オブジェクトランドの svc ハンドラ** = カーネルオブジェクトが持ち、
 //        **スレッドモードで**走る方針側。番号を解釈し、担当へ配る
 //
-//  ★経路は**カーネル自身が積んだフレーム**だけで決まる (I-1):
-//      今の実行が「ハンドラを起こすために積んだ枠」の中 → プリミティブを実行
-//      それ以外                                        → (2) をメソッドとして呼ぶ
-//    呼び出しの履歴を書けるのはカーネルだけなので、この判定は偽装できない。
-//    → カーネルは identity (cookie) も信頼ビットも持たない。オブジェクトが誰かは
-//      カーネルオブジェクトの台帳の話 (PORT §3.1)。
+//  ★経路は**呼び出しフレームの段数のパリティ**だけで決まる (I-1):
+//      偶数段 → オブジェクトが走っている → (2) をメソッドとして呼ぶ
+//      奇数段 → ハンドラが走っている     → プリミティブを実行
+//    積むのはトランポリンと CALL の 2 つだけで必ず交互になるので、パリティが
+//    そのまま実行主体を表す。旗も cookie も要らない。段数を書けるのはカーネル
+//    だけなので偽装もできない (オブジェクトが誰かは kobj の台帳の話。PORT §3.1)。
 //
 //  ★カーネルオブジェクト以外は RETURN を撃てない。そのため、ハンドラを起こすときに
 //    **今のネスト数を渡し** (ARCH::set_handler_info)、オブジェクトは exit API に
@@ -66,11 +66,6 @@ public:
     uintptr_t prev;       // 一つ外側のヘッダのアドレス (0 = 最外)
     uint32_t total_bytes; // 退避域の総バイト数 (8B 境界に丸め済み)
     uint32_t frame_bytes; // 例外フレーム実サイズ
-    // この枠が「ハンドラを起こすために積んだもの」か。**経路判定の唯一の材料**で、
-    // 書けるのはカーネルだけ。CALL で積む枠には立たないので、ハンドラから呼ばれた
-    // 普通のメソッドがプリミティブを撃てるようにはならない (I-8)。
-    uint32_t handler_frame;
-    uint32_t reserved; // 8B アライン維持
     CONTEXT saved; // 呼び出し元の文脈まるごと (sp を含む = 元フレームの位置)
   };
 
@@ -97,14 +92,11 @@ public:
   uint32_t current_depth() const { return current_thread().call_stack.depth; }
 
 private:
-  bool call_frame_push(THREAD &thread, CONTEXT *context, FRAME **frame,
-                       bool handler_frame);
+  bool call_frame_push(THREAD &thread, CONTEXT *context, FRAME **frame);
   bool call_frame_pop(THREAD &thread, CONTEXT *context, FRAME **frame);
 
-  // 今の実行がハンドラの枠の中か (= プリミティブを実行してよいか)。
-  bool in_handler_frame(const THREAD &thread) const;
   kernel_error do_call(THREAD &thread, CONTEXT *context, FRAME **frame,
-                       const call_request &request, bool handler_frame);
+                       const call_request &request);
 
   THREAD m_threads[THREAD_COUNT];
   CONTEXT m_contexts[THREAD_COUNT];

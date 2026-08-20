@@ -14,6 +14,11 @@ namespace shizuku {
 
 KERNEL_OBJECT kernel_object_instance;
 
+// ★戻り口が撃つのはカーネルの RETURN なので、オブジェクトランドの exit API の番号は
+//   それと同じ値でなければならない (経路判定だけが両者の意味を分ける)。
+static_assert((uintptr_t)object_api::EXIT_METHOD == (uintptr_t)primitive::RETURN,
+              "exit API の番号はカーネルの RETURN と一致させること");
+
 // 実装より前に使う (下の入口が handle を呼ぶ) ので、特殊化の宣言を先に置く。
 // これが無いと暗黙の実体化が先に起きて「実体化後の特殊化」になる。
 template <>
@@ -23,13 +28,16 @@ template <> void KERNEL_OBJECT::init();
 template <> uintptr_t KERNEL_OBJECT::handler_entry();
 template <> void KERNEL_OBJECT::reply(object_error, uintptr_t, uintptr_t);
 template <>
-uintptr_t KERNEL_OBJECT::create_object(uintptr_t, uintptr_t, object_error &);
+uintptr_t KERNEL_OBJECT::create_object(uintptr_t, uintptr_t, uintptr_t,
+                                       object_error &);
+template <> uint32_t KERNEL_OBJECT::object_protection(uintptr_t) const;
 template <>
 uintptr_t KERNEL_OBJECT::export_method(uintptr_t, uintptr_t, object_error &);
 template <>
 uintptr_t KERNEL_OBJECT::call_method(uintptr_t, uintptr_t, uintptr_t, uintptr_t,
                                      object_error &);
-template <> void KERNEL_OBJECT::exit_method(uintptr_t, uintptr_t, uintptr_t);
+template <>
+void KERNEL_OBJECT::exit_method(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 
 // カーネルが起こすハンドラの入口。ARCH の ABI シムが callee-saved で渡された情報を
 // 第 5..8 引数へ変換してくれるので、素の C++ 関数として書ける。
@@ -50,6 +58,7 @@ template <> uintptr_t KERNEL_OBJECT::handler_entry() {
 template <> void KERNEL_OBJECT::init() {
   for (uintptr_t id = 0; id < OBJECT_COUNT; ++id) {
     m_objects[id].created = false;
+    m_objects[id].flags = 0;
     for (uintptr_t method = 0; method < METHOD_COUNT; ++method)
       m_objects[id].methods[method] = nullptr;
   }
@@ -69,7 +78,7 @@ void KERNEL_OBJECT::reply(object_error error, uintptr_t value,
 
 template <>
 uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
-                                       object_error &error) {
+                                       uintptr_t flags, object_error &error) {
   if (id >= OBJECT_COUNT || id == ROOT_OBJECT) {
     error = object_error::BAD_OBJECT;
     return 0;
@@ -79,10 +88,21 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
     return 0;
   }
   m_objects[id].created = true;
+  m_objects[id].flags = (uint32_t)flags;
   // 最初のメソッドは生成側が与える (オブジェクト自身はまだ走っていないので
   // 自分では登録できない)。以後は EXPORT_METHOD で自分が増やす。
   m_objects[id].methods[0] = (method_t)entry;
   return id;
+}
+
+// そのオブジェクトを走らせるときの保護指定。
+// ★今は全オブジェクトを特権で走らせる。MPU がまだ無いので非特権にしても隔離には
+//   ならず、pico-sdk の一部が黙って壊れるだけ (DESIGN §11.2.1: 非特権化は per-object
+//   arena と region が揃ってから)。生成時の宣言はここで効かせる形にしてあるので、
+//   Phase 5 ではこの関数だけを直せばよい。
+template <> uint32_t KERNEL_OBJECT::object_protection(uintptr_t id) const {
+  (void)m_objects[id].flags;
+  return PROTECTION_PRIVILEGED;
 }
 
 template <>
@@ -127,10 +147,7 @@ uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
 
   call_request request{};
   request.entry_pc = (uintptr_t)entry;
-  // 呼び先は RETURN を撃てないので、戻り口は exit API を撃つコードにする (D5)。
-  request.return_pc =
-      ARCH::object_exit_stub<(uintptr_t)object_api::EXIT_METHOD>();
-  request.protection = PROTECTION_PRIVILEGED; // 非特権化は Phase 5
+  request.protection = object_protection(id);
   request.args[0] = argument;
 
   // 台帳へ先に積む (カーネルが失敗したら戻す)。
@@ -153,19 +170,19 @@ uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
 }
 
 template <>
-void KERNEL_OBJECT::exit_method(uintptr_t value, uintptr_t extra,
-                                uintptr_t depth) {
+void KERNEL_OBJECT::exit_method(uintptr_t levels, uintptr_t value,
+                                uintptr_t error, uintptr_t depth) {
   const uint32_t thread = kernel_instance.current_thread_id();
   shadow_t &shadow = m_shadow[thread];
-  // 落とすのは「この exit を運んだ枠」+「戻ろうとしている呼び先の枠」= 2 枚。
-  // 追加段数 (extra) は発行元が「もっと畳んでほしい」と申告した分 (異常系の
-  // 連鎖巻き戻し用)。段数は必ず申告して両側チェックを通す (§9.3)。
-  const uintptr_t count = 2 + extra;
-  const uintptr_t pops = 1 + extra; // 台帳から落ちるのは呼び先ぶんだけ
+  // 呼び出し 1 段につきフレームは 2 枚 (この戻りを運んだ枠 + 戻ろうとしている
+  // 呼び先の枠)。**枚数を知っているのは枠を積んだこちら側**なので、オブジェクトは
+  // 「何段畳むか」だけを言い、変換はここで行う (D5)。段数は必ず申告する (§9.3)。
+  const uintptr_t pops = levels == 0 ? 1 : levels;
+  const uintptr_t count = 2 * pops;
   // 巻き戻しに成功するとここへは戻らないので、台帳は**先に**落としておく。
   shadow.depth = shadow.depth >= pops ? shadow.depth - (uint32_t)pops : 0;
   const auto result =
-      ARCH::syscall((uintptr_t)primitive::RETURN, count, value, 0, depth);
+      ARCH::syscall((uintptr_t)primitive::RETURN, count, value, error, depth);
   // ★ここへ戻ってきた = 巻き戻しが検算で弾かれた。台帳を元へ戻し、発行元へ
   //   エラーとして返す (系は落とさない = I-9)。
   shadow.depth += (uint32_t)pops;
@@ -180,7 +197,7 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
   uintptr_t value = 0;
   switch ((object_api)number) {
   case object_api::CREATE_OBJECT:
-    value = create_object(a1, a2, error);
+    value = create_object(a1, a2, a3, error);
     break;
   case object_api::EXPORT_METHOD:
     value = export_method(a1, a2, error);
@@ -189,8 +206,9 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
     value = call_method(a1, a2, a3, depth, error);
     break;
   case object_api::EXIT_METHOD:
-    // 巻き戻しに成功すればここから戻らない。
-    exit_method(a1, a2, depth);
+    // カーネルの戻り口が撃った svc がここへ届く (a1 = 畳む段数, a2 = 戻り値,
+    // a3 = エラー)。巻き戻しに成功すればここから戻らない。
+    exit_method(a1, a2, a3, depth);
     return 0;
   case object_api::GET_CURRENT_OBJECT:
     value = current_object(kernel_instance.current_thread_id());

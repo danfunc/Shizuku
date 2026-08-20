@@ -50,7 +50,6 @@ public:
   }
   static void set_handler_info(context_t &, uintptr_t, uintptr_t) {}
   static uintptr_t return_stub() { return 0; }
-  template <uintptr_t NUMBER> static uintptr_t object_exit_stub() { return 0; }
   template <auto FUNCTION> static uintptr_t handler_entry() { return 0; }
   static bool current_priv() { return true; }
   static void set_priv(context_t &, bool) {}

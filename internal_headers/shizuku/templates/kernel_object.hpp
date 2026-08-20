@@ -61,6 +61,7 @@ public:
 private:
   struct object_t {
     bool created;
+    uint32_t flags; // OBJECT_* の宣言 (生成時に決まり、以後変わらない)
     method_t methods[METHOD_COUNT];
   };
   // per-thread の「今どのオブジェクトとして走っているか」の台帳。
@@ -71,13 +72,16 @@ private:
   };
 
   // 各 API。戻り値はそのまま発行元へ返る値。エラーは error 引数へ書く。
-  uintptr_t create_object(uintptr_t id, uintptr_t entry,
+  uintptr_t create_object(uintptr_t id, uintptr_t entry, uintptr_t flags,
                           object_error &error);
+  // そのオブジェクトを走らせるときの保護指定 (PROTECTION_*)。
+  uint32_t object_protection(uintptr_t id) const;
   uintptr_t export_method(uintptr_t method, uintptr_t entry,
                           object_error &error);
   uintptr_t call_method(uintptr_t id, uintptr_t method, uintptr_t argument,
                         uintptr_t depth, object_error &error);
-  void exit_method(uintptr_t value, uintptr_t extra, uintptr_t depth);
+  void exit_method(uintptr_t levels, uintptr_t value, uintptr_t error,
+                   uintptr_t depth);
   // 巻き戻さずにその場で答える (エラー返却)。
   void reply(object_error error, uintptr_t value, uintptr_t depth);
 
