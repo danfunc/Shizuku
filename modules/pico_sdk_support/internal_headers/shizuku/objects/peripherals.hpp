@@ -21,6 +21,10 @@ namespace objects {
 // オブジェクト ID (合成側が決める。自己テスト用の 1..3 と衝突させない)。
 constexpr uintptr_t GPIO_OBJECT = 8;
 constexpr uintptr_t SPI_OBJECT = 9;
+// ボード上の LED。**どのピンに繋がっているか (あるいは GPIO ですらないか) を
+// 隠す**のがこのオブジェクトの仕事: pico2 は GPIO 25、pico2_w は CYW43 チップの
+// WL_GPIO0 で、後者は GPIO を叩いても光らない。呼ぶ側はどちらか知らなくてよい。
+constexpr uintptr_t LED_OBJECT = 10;
 
 // メソッド番号。0 は main (生成側が据え、自分で残りを export する)。
 enum struct gpio_method : uintptr_t {
@@ -33,6 +37,16 @@ enum struct spi_method : uintptr_t {
   MAIN = 0,
   CONFIGURE = 1, // a0 = spi_config*
   TRANSFER = 2,  // a0 = spi_transfer* (戻り値 = 転送したバイト数)
+};
+
+enum struct led_method : uintptr_t {
+  MAIN = 0,
+  WRITE = 1, // a0 = led_request*
+  READ = 2,  // 戻り値 = 最後に書いた値
+};
+
+struct led_request {
+  uint32_t value;
 };
 
 struct gpio_request {
@@ -56,8 +70,10 @@ struct spi_transfer {
 };
 
 // 合成側 (ブート後のスレッドモード) から呼ぶ。オブジェクトを生成し、各自の main を
-// 一度呼んでメソッドを export させる。
-void register_peripherals();
+// 一度呼んでメソッドを export させる。戻り = 失敗した手数 (0 なら全部成功)。
+// ★戻り値を捨てないこと。ここが黙って失敗すると「呼んでいるのに何も起きない」に
+//   なり、原因の切り分けが一気に難しくなる (D12)。
+uint32_t register_peripherals();
 
 } // namespace objects
 } // namespace shizuku

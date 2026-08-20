@@ -9,6 +9,9 @@
 //    (名乗って他人のメソッドを生やすことはできない)。
 #include "hardware/gpio.h"
 #include "hardware/spi.h"
+#if defined(CYW43_WL_GPIO_LED_PIN)
+#include "pico/cyw43_arch.h" // pico2_w: LED は無線チップ側の GPIO
+#endif
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/objects/peripherals.hpp"
@@ -75,6 +78,51 @@ uintptr_t gpio_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   return failures; // 0 = 全部登録できた
 }
 
+// ---- LED ------------------------------------------------------------------
+// ★ボードによって「LED がどこにあるか」が違うので、その差をこのオブジェクトに
+//   閉じ込める。呼ぶ側 (合成側やドライバ) はピン番号も配線も知らなくてよい。
+//     pico2   : GPIO 25 (PICO_DEFAULT_LED_PIN)
+//     pico2_w : CYW43 チップの WL_GPIO0 — **GPIO を叩いても光らない**
+uint32_t g_led_state = 0;
+// main が返す失敗コード (0 = 成功)。合成側がそのまま印字できるよう意味を持たせる。
+constexpr uintptr_t LED_ARCH_INIT_FAILED = 1000;
+constexpr uintptr_t LED_ABSENT = 1001;
+
+uintptr_t led_write(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+  const led_request *request = (const led_request *)argument;
+  if (request == nullptr)
+    return 0;
+  g_led_state = request->value != 0 ? 1u : 0u;
+#if defined(CYW43_WL_GPIO_LED_PIN)
+  ::cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, g_led_state != 0);
+#elif defined(PICO_DEFAULT_LED_PIN)
+  ::gpio_put(PICO_DEFAULT_LED_PIN, g_led_state != 0);
+#endif
+  return g_led_state;
+}
+
+uintptr_t led_read(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  return g_led_state;
+}
+
+uintptr_t led_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  // ★自分のハードウェアは自分で立ち上げる。ここが特権を要る場所:
+  //   cyw43_arch_init は PIO/DMA/IRQ を掴んでチップへファームを送り込む。
+#if defined(CYW43_WL_GPIO_LED_PIN)
+  if (::cyw43_arch_init() != 0)
+    return LED_ARCH_INIT_FAILED; // 立ち上げ失敗をそのまま合成側へ返す
+#elif defined(PICO_DEFAULT_LED_PIN)
+  ::gpio_init(PICO_DEFAULT_LED_PIN);
+  ::gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
+#else
+  return LED_ABSENT; // ボードに LED が無い
+#endif
+  uintptr_t failures = 0;
+  failures += export_method((uintptr_t)led_method::WRITE, (uintptr_t)&led_write);
+  failures += export_method((uintptr_t)led_method::READ, (uintptr_t)&led_read);
+  return failures;
+}
+
 // ---- SPI ------------------------------------------------------------------
 uintptr_t spi_configure(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
   const spi_config *config = (const spi_config *)argument;
@@ -117,19 +165,37 @@ uintptr_t spi_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 
 } // namespace
 
-void register_peripherals() {
+uint32_t register_peripherals() {
   struct entry_t {
+    const char *name;
     uintptr_t object;
     uintptr_t (*main)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
-  } const entries[] = {{GPIO_OBJECT, gpio_main}, {SPI_OBJECT, spi_main}};
+  } const entries[] = {{"gpio", GPIO_OBJECT, gpio_main},
+                       {"spi", SPI_OBJECT, spi_main},
+                       {"led", LED_OBJECT, led_main}};
 
+  uint32_t failures = 0;
   for (const entry_t &entry : entries) {
     // ペリフェラルを直接叩くので特権を宣言する (上のドライバは非特権のままでよい)。
-    api(object_api::CREATE_OBJECT, entry.object, (uintptr_t)entry.main,
-        OBJECT_PRIVILEGED);
+    const call_result created =
+        api(object_api::CREATE_OBJECT, entry.object, (uintptr_t)entry.main,
+            OBJECT_PRIVILEGED);
     // main を 1 回呼んで、自分のメソッドを自分で export させる。
-    api(object_api::CALL_METHOD, entry.object, 0, 0);
+    // main の戻り値は「export に失敗した数」なので、そこも見る。
+    const call_result started =
+        api(object_api::CALL_METHOD, entry.object, 0, 0);
+    if (created.error != 0 || started.error != 0 || started.value != 0) {
+      ++failures;
+      KERNEL::BOARD::diag_printf(
+          "[PERIPH] %s FAILED: create=%lu call=%lu exports_failed=%lu\n",
+          entry.name, (unsigned long)created.error,
+          (unsigned long)started.error, (unsigned long)started.value);
+    } else {
+      KERNEL::BOARD::diag_printf("[PERIPH] %s ready (object %lu)\n", entry.name,
+                                 (unsigned long)entry.object);
+    }
   }
+  return failures;
 }
 
 } // namespace objects

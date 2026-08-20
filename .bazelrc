@@ -1,6 +1,6 @@
 # 既定ターゲット: RP2350 / pico2 (CMake kit と同じ構成)
 build --platforms=@pico-sdk//bazel/platform:rp2350
-build --@pico-sdk//bazel/config:PICO_BOARD=pico2
+build --@pico-sdk//bazel/config:PICO_BOARD=pico2_w
 build --@pico-sdk//bazel/config:PICO_STDIO_USB=True
 
 # カーネルは C++23 (cxxopt は C++ 翻訳単位にのみ効く)

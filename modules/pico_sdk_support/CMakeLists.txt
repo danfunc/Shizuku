@@ -11,6 +11,11 @@ set(config_need_headers
 target_link_libraries(Shizuku PRIVATE pico_sdk_support pico_stdio pico_stdlib)
 target_link_libraries(pico_sdk_support PUBLIC pico_stdlib pico_stdio hardware_exception
                                              hardware_gpio hardware_spi)
+# pico2_w は LED が無線チップ側にあるので、LED オブジェクトが cyw43_arch を使う。
+# (lwIP も BTstack も要らないので _none。ボードが pico2_w のときだけリンクする)
+if(PICO_CYW43_SUPPORTED)
+  target_link_libraries(pico_sdk_support PUBLIC pico_cyw43_arch_none)
+endif()
 target_link_libraries(pico_sdk_support PUBLIC Shizuku_internal_HEADERS)
 target_include_directories(pico_sdk_support PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/internal_headers)
 pico_enable_stdio_usb(Shizuku 1)
