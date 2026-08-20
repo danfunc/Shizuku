@@ -18,7 +18,8 @@
 namespace shizuku {
 namespace objects {
 
-// オブジェクト ID (合成側が決める。自己テスト用の 1..3 と衝突させない)。
+// オブジェクト ID (合成側が決める)。**埋まっている番号の表は
+// shizuku/objects/flash_fs.hpp に集約してある** — 散らすと衝突に気づけない。
 constexpr uintptr_t GPIO_OBJECT = 8;
 constexpr uintptr_t SPI_OBJECT = 9;
 // ボード上の LED。**どのピンに繋がっているか (あるいは GPIO ですらないか) を

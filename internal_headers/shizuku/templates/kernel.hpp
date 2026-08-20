@@ -31,8 +31,7 @@ namespace templates {
 //  ★カーネルオブジェクト以外は RETURN を撃てない。そのため、ハンドラを起こすときに
 //    **今のネスト数を渡し** (ARCH::set_handler_info)、オブジェクトは exit API に
 //    **何段戻すか**を載せて撃ち、ハンドラがその段数で巻き戻す (D5)。
-template <typename CPU_MANAGER_T, typename MEMORY_MANAGER_T,
-          uintptr_t THREAD_COUNT_T>
+template <typename CPU_MANAGER_T, typename MEMORY_MANAGER_T>
 class kernel {
 public:
   using CPU_MANAGER = CPU_MANAGER_T;
@@ -42,8 +41,24 @@ public:
   using CONTEXT = typename ARCH::context_t;
   using FRAME = typename ARCH::exception_frame_t;
   using THREAD = thread<CONTEXT>;
-  static constexpr uintptr_t THREAD_COUNT = THREAD_COUNT_T;
   static constexpr uintptr_t CORE_COUNT = CPU_MANAGER::CORE_COUNT;
+
+  // ★スレッドの記憶はカーネルの持ち物ではない。**オブジェクトランドが用意して貸す**
+  //   (DESIGN §4.1 ルール 1「オブジェクトが資源を持つ」)。カーネルは渡された記憶を
+  //   使うだけで、いくつ作れるかも渡された量が決める。
+  //   ★ただし置き場所には条件がある: カーネルの簿記は**非特権から到達できない場所**
+  //     でなければ、非特権オブジェクトが他スレッドの文脈を書き換えられてしまう。
+  //     所有 (誰が用意するか) と保護 (どこに置くか) は別の話なので、前者は
+  //     オブジェクトランドに渡し、後者はここで**検査する** (気をつけるでは守れない)。
+  struct thread_record {
+    THREAD thread;
+    CONTEXT context;
+  };
+  static constexpr uintptr_t thread_record_bytes() {
+    return sizeof(thread_record);
+  }
+  void set_thread_storage(void *memory, uintptr_t bytes);
+  uint32_t thread_count() const { return m_thread_count; }
 
   // -------------------------------------------------------------------------
   //  呼び出しフレーム — 退避先は**スレッド自身のスタック** (DESIGN §8)
@@ -78,8 +93,10 @@ public:
   // 実行時 API ではないため、ブート前に 1 回だけ呼ぶ。
   void set_object_handler(uintptr_t entry_pc);
   // 今の実行をスレッド 0 として採用し、entry へ移る (スレッドスタックへ
-  // 切り替えるので戻らない)。
-  [[noreturn]] void bootstrap(void (*entry)());
+  // 切り替えるので戻らない)。★最初の 1 本のスタックも貸してもらう — ここだけ
+  //   カーネルが自分で malloc すると「スレッドの記憶は誰のものか」が二枚舌になる。
+  [[noreturn]] void bootstrap(void (*entry)(), uintptr_t stack_base,
+                              uintptr_t stack_bytes);
 
   // -------------------------------------------------------------------------
   //  スレッドの生成 — カーネルオブジェクトが**スレッドモードから**呼ぶ C++ API
@@ -92,8 +109,19 @@ public:
     kernel_error error;
     uint32_t thread;
   };
-  spawn_result spawn(uintptr_t entry_pc, uintptr_t argument, uint32_t protection,
-                     uint32_t affinity);
+  // ★スタックも**呼ぶ側が用意して渡す**。どれだけの深さを許すかは方針であって、
+  //   カーネルが決めることではない (カーネルは溢れを検出して止めるだけ)。
+  struct spawn_request {
+    uintptr_t entry_pc;
+    uintptr_t argument;
+    uint32_t protection;
+    uint32_t affinity;
+    uintptr_t stack_base;
+    uintptr_t stack_bytes;
+  };
+  spawn_result spawn(const spawn_request &request);
+  // 終わったスレッドの枠を返す。記憶を返すのは貸し主 (オブジェクトランド) の仕事。
+  void release(uint32_t thread);
   // スレッドを終了させる (走り終えた / 隔離する)。今のコアが走らせているスレッドを
   // 終了させた場合は、次に誰かへ切り替わるまでこのコアは何もしない。
   void terminate(uint32_t thread);
@@ -112,12 +140,14 @@ public:
   void set_recovery_thread(uint32_t thread);
 
   uint32_t current_thread_id() const { return m_current[BOARD::core_num()]; }
-  THREAD &current_thread() { return m_threads[current_thread_id()]; }
-  const THREAD &current_thread() const { return m_threads[current_thread_id()]; }
+  THREAD &current_thread() { return m_threads[current_thread_id()].thread; }
+  const THREAD &current_thread() const {
+    return m_threads[current_thread_id()].thread;
+  }
   uint32_t current_depth() const { return current_thread().call_stack.depth; }
   // スケジューリング方針 (kobj 側) が候補を探すための読み出し。
   typename THREAD::state_t thread_state(uint32_t thread) const {
-    return (typename THREAD::state_t)m_threads[thread].state;
+    return (typename THREAD::state_t)m_threads[thread].thread.state;
   }
   // 今このコアで実行権を借りて走っているか (借り手の yield は貸し手への早期復帰)。
   bool grant_active() const { return m_grants[BOARD::core_num()].depth != 0; }
@@ -151,13 +181,11 @@ private:
     uint32_t depth;
   };
 
-  THREAD m_threads[THREAD_COUNT];
-  CONTEXT m_contexts[THREAD_COUNT];
+  // 貸してもらった記憶。カーネルはここを所有しない。
+  thread_record *m_threads;
+  uint32_t m_thread_count;
   uint32_t m_current[CORE_COUNT];
   grant_stack m_grants[CORE_COUNT];
-  // スレッドスタックの大きさ。実測で足りなくなったらここを上げる (溢れは
-  // スタック上限機構が当該スレッドだけを止めるので、黙って壊れはしない)。
-  static constexpr uintptr_t THREAD_STACK_BYTES = 4096;
   // オブジェクトランドの svc ハンドラの入口。表ではなく 1 個だけ。
   uintptr_t m_object_svc_handler;
   uint32_t m_recovery_thread;

@@ -25,7 +25,8 @@ namespace templates {
 //  ★identity の台帳は「影スタック」で持つ。呼び出しを積むのも巻き戻すのも自分なので
 //    追跡でき、カーネルの助けは要らない (PORT §3.1 の「カーネル支援不要」の実装形)。
 template <typename KERNEL_T, uintptr_t OBJECT_COUNT_T,
-          uintptr_t METHOD_COUNT_T, uintptr_t MAX_DEPTH_T>
+          uintptr_t METHOD_COUNT_T, uintptr_t MAX_DEPTH_T,
+          uintptr_t THREAD_COUNT_T>
 class kernel_object {
 public:
   using KERNEL = KERNEL_T;
@@ -34,6 +35,10 @@ public:
   static constexpr uintptr_t OBJECT_COUNT = OBJECT_COUNT_T;
   static constexpr uintptr_t METHOD_COUNT = METHOD_COUNT_T;
   static constexpr uintptr_t MAX_DEPTH = MAX_DEPTH_T;
+  // ★スレッドを何本まで作れるかは**こちらが決める** (記憶を出すのがこちらなので)。
+  static constexpr uintptr_t THREAD_COUNT = THREAD_COUNT_T;
+  // 1 スレッドあたりのスタック。深さの上限も方針。
+  static constexpr uintptr_t THREAD_STACK_BYTES = 4096;
   static constexpr uintptr_t ROOT_OBJECT = 0; // ブートスレッドが名乗るオブジェクト
   static constexpr uintptr_t NO_OBJECT = OBJECT_COUNT;
 
@@ -52,6 +57,31 @@ public:
   // スケジューリングの方針 (どのスレッドを次に走らせるか) はここが持つ。
   // カーネルは「渡す機構」しか持たない (D1)。
   bool schedule(uint32_t self);
+
+  // 最初の 1 本 (スレッド 0) のスタックを貸す。組み立ての一部で、bootstrap の
+  // 直前に 1 回だけ呼ぶ。**他のスレッドと同じ扱いにする**ためにここに置く。
+  struct lent_stack {
+    uintptr_t base;
+    uintptr_t bytes;
+  };
+  lent_stack lend_boot_stack();
+
+  // ---- メモリ (オブジェクトランドの資源) ----------------------------------
+  // ★カーネルはメモリを持たない。誰にどれだけ渡すかは方針なのでここが持つ。
+  //   arena は 2 つ: 簿記用 (非特権から到達できない場所) と、オブジェクト用
+  //   (非特権から届く必要があるのでヒープ)。**所有と保護は別の話**なので、
+  //   どちらもこちらが用意して貸す点は同じで、違うのは置き場所だけ。
+  struct block {
+    uintptr_t bytes; // ヘッダ込みの大きさ
+    uint16_t owner;  // 借りているオブジェクト (NO_OBJECT = 空き)
+    uint16_t used;
+    block *next;
+  };
+  struct arena {
+    uintptr_t base;
+    uintptr_t bytes;
+  };
+  static constexpr uintptr_t BLOCK_ALIGN = 8;
 
   // 台帳の読み出し (自己テスト・将来のアクセス制御用)。
   uintptr_t current_object(uint32_t thread) const {
@@ -100,16 +130,29 @@ private:
   // 巻き戻しで申告する「今のネスト数」を**自分の台帳から**計算する (§9.3)。
   uint32_t claimed_depth() const;
 
+  void arena_init(arena &target, uintptr_t base, uintptr_t bytes);
+  uintptr_t arena_allocate(arena &target, uintptr_t bytes, uintptr_t owner);
+  bool arena_release(arena &target, uintptr_t handle);
+  uintptr_t memory_allocate(uintptr_t bytes, object_error &error);
+  uintptr_t memory_release(uintptr_t handle, object_error &error);
+  uintptr_t memory_hand_over(uintptr_t handle, uintptr_t receiver,
+                             object_error &error);
+  uintptr_t memory_owner(uintptr_t handle, object_error &error);
+
   object_t m_objects[OBJECT_COUNT];
-  shadow_t m_shadow[KERNEL::THREAD_COUNT];
+  shadow_t m_shadow[THREAD_COUNT];
   // スレッドごとの「どのオブジェクトのために作ったか」。方針側の台帳なのでここ。
-  uint16_t m_thread_object[KERNEL::THREAD_COUNT];
+  uint16_t m_thread_object[THREAD_COUNT];
   // ★起床時刻と時限は**方針**なのでカーネルではなくここが持つ (D1)。
   //   カーネルは「渡す機構」しか持たず、誰をいつ走らせるかは知らない。
-  uint64_t m_wake_at[KERNEL::THREAD_COUNT];
-  uint32_t m_budget[KERNEL::THREAD_COUNT];
+  uint64_t m_wake_at[THREAD_COUNT];
+  uint32_t m_budget[THREAD_COUNT];
+  // 貸したスタック (終わったスレッドから返してもらうために覚えておく)。
+  uintptr_t m_thread_stack[THREAD_COUNT];
   // 次に見るスレッド (round-robin の回転子)。自分の直後だけを見ると飢餓が出る。
   uint32_t m_rotor;
+  arena m_bookkeeping; // カーネルの簿記へ貸す (非特権から届かない場所)
+  arena m_objects_arena; // オブジェクトが読み書きする (非特権から届く場所)
 };
 
 } // namespace templates

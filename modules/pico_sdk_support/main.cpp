@@ -4,6 +4,7 @@
 #include "shizuku/kernel.hpp"
 #include "shizuku/kernel_object.hpp"
 #include "shizuku/object_api.hpp"
+#include "shizuku/objects/flash_fs.hpp"
 #include "shizuku/objects/peripherals.hpp"
 #include "shizuku/selftest.hpp"
 #include "stdio.h"
@@ -18,6 +19,10 @@ void shizuku::app_entry() {
 
   // ボードが提供するペリフェラルオブジェクト (特権を宣言する数少ないオブジェクト)。
   const uint32_t peripheral_failures = shizuku::objects::register_peripherals();
+  // 媒体を持つオブジェクト。読むのは XIP のアドレスを配るだけなので安いが、
+  // 書くと XIP ごと止まるので、扱いはペリフェラルと同じく特権側。
+  shizuku::objects::register_flash_fs();
+  shizuku::objects::flash_fs_probe();
   shizuku::selftest::call_ladder();
   shizuku::selftest::thread_ladder();
   shizuku::selftest::unprivileged_probe();
@@ -42,5 +47,7 @@ int main() {
   shizuku::kernel_instance.set_object_handler(
       shizuku::KERNEL_OBJECT::handler_entry());
   // 今の実行をスレッド 0 として採用し、スレッドスタックへ移って app_entry へ。
-  shizuku::kernel_instance.bootstrap(shizuku::app_entry);
+  // ★最初の 1 本のスタックもオブジェクトランドから借りる (他のスレッドと同じ扱い)。
+  const auto boot = shizuku::kernel_object_instance.lend_boot_stack();
+  shizuku::kernel_instance.bootstrap(shizuku::app_entry, boot.base, boot.bytes);
 }

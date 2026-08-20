@@ -17,6 +17,8 @@ namespace concepts {
 // - cycles_per_us(): タイマの刻みを µs から換算するための実クロック。
 //                    ★クロックを知っているのは board だけ (PORT §2.3)。上位は
 //                      µs でしか話さないので、クロックを変えても上位は無傷
+// - unprivileged_floor() : 非特権から届く最下位アドレス。カーネルの簿記を置いて
+//                    よい場所の境界で、渡された記憶がここより上なら組み立ての誤り
 // - diag_printf()  : 診断出力。**系が固まっても出る経路**であること (PORT §7)。
 //                    カーネルと自己テストはここにしか出力しない
 // - panic()        : カーネル自身の不変条件が壊れたときだけ呼ぶ (D12 / I-9)。
@@ -29,6 +31,7 @@ concept board_requires = requires(uint32_t core, const char *text) {
   { BOARD::core_num() } -> std::same_as<uint32_t>;
   { BOARD::time_us() } -> std::same_as<uint64_t>;
   { BOARD::cycles_per_us() } -> std::same_as<uint32_t>;
+  { BOARD::unprivileged_floor() } -> std::same_as<uintptr_t>;
   { BOARD::diag_printf(text) };
   { BOARD::panic(text) };
 };

@@ -21,6 +21,7 @@ cc_library(
         "board.cpp",
         "main.cpp",
         "memory_manager.cpp",
+        "objects/flash_fs.cpp",
         "objects/peripherals.cpp",
     ],
     # main() がここに居るため、参照が無くてもリンクに含める
@@ -31,8 +32,10 @@ cc_library(
         "//:internal_headers",
         "//configs:config",
         "@pico-sdk//src/rp2_common/hardware_exception",
+        "@pico-sdk//src/rp2_common/hardware_flash",
         "@pico-sdk//src/rp2_common/hardware_gpio",
         "@pico-sdk//src/rp2_common/hardware_spi",
+        "@pico-sdk//src/rp2_common/hardware_sync",
         "@pico-sdk//src/rp2_common/pico_cyw43_arch:pico_cyw43_arch_none",
         "@pico-sdk//src/rp2_common/pico_stdio",
         "@pico-sdk//src/rp2_common/pico_stdio_usb",

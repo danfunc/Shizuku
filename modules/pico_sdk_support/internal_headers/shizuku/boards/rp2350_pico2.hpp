@@ -21,6 +21,9 @@ public:
   static uint64_t time_us() { return ::time_us_64(); }
   // ★クロックを知っているのは board (PORT §2.3)。上位は µs でしか話さない。
   static uint32_t cycles_per_us();
+  // ★非特権オブジェクトから届く最下位アドレス (= ヒープ先頭)。これより下 (静的領域)
+  //   は region の外なので特権のみ。カーネルの簿記をどこに置いてよいかの境界。
+  static uintptr_t unprivileged_floor();
   // 診断出力。現状は pico-sdk の printf 直行 (USB CDC)。
   // TODO(PORT §7): 「固まっても出る経路」(リング + タイマからの同期排出) へ置き換える。
   static void diag_printf(const char *format, ...) __attribute__((format(printf, 1, 2)));

@@ -97,6 +97,10 @@ void rp2350_pico2::protection_init() {
   ARCH_TYPE::protection_enable();
 }
 
+uintptr_t rp2350_pico2::unprivileged_floor() {
+  return ((uintptr_t)__end__ + 31u) & ~(uintptr_t)31; // region1 の先頭と同じ
+}
+
 uint32_t rp2350_pico2::cycles_per_us() {
   // 実クロックから毎回引く (クロックを変えても追従する。PORT §2.3)。
   return (uint32_t)(::clock_get_hz(clk_sys) / 1000000u);

@@ -18,46 +18,65 @@ template <> void KERNEL::grant_unwind(grant_end);
 template <> void KERNEL::arm_timer(uint64_t);
 template <> bool KERNEL::claim(uint32_t, kernel_error &);
 template <> void KERNEL::set_recovery_thread(uint32_t);
+template <> void KERNEL::set_thread_storage(void *, uintptr_t);
+template <> void KERNEL::release(uint32_t);
 template <> void KERNEL::fault_dispatch(KERNEL::CONTEXT *);
+
+// ---- 貸してもらった記憶をスレッド表として据える ----------------------------
+// ★所有はオブジェクトランド、保護はここで検査する。カーネルの簿記が非特権から
+//   届く場所にあると、非特権オブジェクトが他スレッドの文脈を書き換えられてしまう —
+//   「気をつける」では守れないので、組み立ての時点で弾く。
+template <> void KERNEL::set_thread_storage(void *memory, uintptr_t bytes) {
+  const uintptr_t base = (uintptr_t)memory;
+  if (base >= BOARD::unprivileged_floor())
+    BOARD::panic("thread storage must be out of reach of unprivileged objects");
+  m_threads = (thread_record *)base;
+  m_thread_count = (uint32_t)(bytes / sizeof(thread_record));
+  if (m_thread_count == 0)
+    BOARD::panic("thread storage too small");
+  for (uint32_t index = 0; index < m_thread_count; ++index) {
+    m_threads[index].thread = THREAD{};
+    m_threads[index].context = CONTEXT{};
+    m_threads[index].thread.context = &m_threads[index].context;
+  }
+}
 
 // ---- スレッドの生成 (スレッドモードから呼ぶ C++ API。syscall ではない) ------
 template <>
-KERNEL::spawn_result KERNEL::spawn(uintptr_t entry_pc, uintptr_t argument,
-                                   uint32_t protection, uint32_t affinity) {
+KERNEL::spawn_result KERNEL::spawn(const KERNEL::spawn_request &request) {
+  if (request.stack_base == 0 || request.stack_bytes < 256)
+    return {kernel_error::NO_MEMORY, 0};
   // ★「空いているか見てから作る」は 2 コアで TOCTOU になる。CAS で枠を予約してから
   //   中身を書く (参照実装はここで二重初期化検査に引っかかり panic していた = I-9 違反)。
-  uint32_t index = THREAD_COUNT;
-  for (uint32_t candidate = 1; candidate < THREAD_COUNT; ++candidate) {
-    if (ARCH::cas32(&m_threads[candidate].state,
+  uint32_t index = m_thread_count;
+  for (uint32_t candidate = 1; candidate < m_thread_count; ++candidate) {
+    if (ARCH::cas32(&m_threads[candidate].thread.state,
                     (uint32_t)THREAD::state_t::UNINITIALIZED,
                     (uint32_t)THREAD::state_t::RESERVED)) {
       index = candidate;
       break;
     }
   }
-  if (index == THREAD_COUNT)
+  if (index == m_thread_count)
     return {kernel_error::NO_THREAD, 0};
 
-  THREAD &thread = m_threads[index];
-  auto allocation = memory_manager.kernel_malloc(THREAD_STACK_BYTES);
-  if (!allocation) {
-    ARCH::store_release32(&thread.state,
-                          (uint32_t)THREAD::state_t::UNINITIALIZED);
-    return {kernel_error::NO_MEMORY, 0};
-  }
-  const uintptr_t base = (uintptr_t)allocation.value();
-  thread.context = &m_contexts[index];
+  THREAD &thread = m_threads[index].thread;
+  thread.context = &m_threads[index].context;
   *thread.context = CONTEXT{};
   thread.call_stack = {};
-  thread.affinity = affinity == 0 ? 0b1 : affinity;
-  ARCH::stack_limit_set(*thread.context, (base + 7) & ~(uintptr_t)7);
-  ARCH::set_priv(*thread.context, (protection & PROTECTION_UNPRIVILEGED) == 0);
+  thread.affinity = request.affinity == 0 ? 0b1 : request.affinity;
+  ARCH::stack_limit_set(*thread.context,
+                        (request.stack_base + 7) & ~(uintptr_t)7);
+  ARCH::set_priv(*thread.context,
+                 (request.protection & PROTECTION_UNPRIVILEGED) == 0);
   // 最初の 1 回は「例外から復帰してきた」ように見せかける必要があるので、
   // 例外フレームを自分で組み立てる。戻り口は普通の呼び出しと同じ 1 本
   // (スレッドの入口が return したときは戻り先が無いので、受け取ったカーネル
   //  オブジェクトが終了させる)。
-  ARCH::prepare_thread_entry(*thread.context, base + THREAD_STACK_BYTES,
-                             entry_pc, ARCH::return_stub(), argument);
+  ARCH::prepare_thread_entry(*thread.context,
+                             request.stack_base + request.stack_bytes,
+                             request.entry_pc, ARCH::return_stub(),
+                             request.argument);
   // ★READY は最後に release で公開する。ここまでの初期化が全部見えてから他コアが
   //   claim できるようにするため (先に公開すると途中初期化のまま走り出せる)。
   ARCH::store_release32(&thread.state, (uint32_t)THREAD::state_t::READY);
@@ -65,24 +84,36 @@ KERNEL::spawn_result KERNEL::spawn(uintptr_t entry_pc, uintptr_t argument,
 }
 
 template <> void KERNEL::terminate(uint32_t thread) {
-  if (thread >= THREAD_COUNT)
+  if (thread >= m_thread_count)
     return;
-  ARCH::store_release32(&m_threads[thread].state,
+  ARCH::store_release32(&m_threads[thread].thread.state,
                         (uint32_t)THREAD::state_t::TERMINATED);
+}
+
+// 枠を返す。記憶そのものを返すのは貸し主 (オブジェクトランド) の仕事で、
+// ここは「もう誰も使っていない」ことにするだけ。
+template <> void KERNEL::release(uint32_t thread) {
+  if (thread >= m_thread_count || thread == 0)
+    return;
+  if (m_threads[thread].thread.state !=
+      (uint32_t)THREAD::state_t::TERMINATED)
+    return;
+  ARCH::store_release32(&m_threads[thread].thread.state,
+                        (uint32_t)THREAD::state_t::UNINITIALIZED);
 }
 
 // ---- 実行権の受け渡し -------------------------------------------------------
 // READY → RUNNING を CAS で取る。これが「2 コアが同じ文脈を走らせない」根。
 template <> bool KERNEL::claim(uint32_t thread, kernel_error &error) {
-  if (thread >= THREAD_COUNT) {
+  if (thread >= m_thread_count) {
     error = kernel_error::NOT_READY;
     return false;
   }
-  if ((m_threads[thread].affinity & (1u << BOARD::core_num())) == 0) {
+  if ((m_threads[thread].thread.affinity & (1u << BOARD::core_num())) == 0) {
     error = kernel_error::BAD_AFFINITY;
     return false;
   }
-  if (!ARCH::cas32(&m_threads[thread].state, (uint32_t)THREAD::state_t::READY,
+  if (!ARCH::cas32(&m_threads[thread].thread.state, (uint32_t)THREAD::state_t::READY,
                    (uint32_t)THREAD::state_t::RUNNING)) {
     error = kernel_error::NOT_READY;
     return false;
@@ -107,7 +138,7 @@ template <> kernel_error KERNEL::do_switch(uint32_t target) {
   m_current[core] = target;
   // 渡した側は READY へ。release 以降、他コアが拾ってよい (自分の文脈の退避は
   // 例外入口が済ませている)。
-  ARCH::store_release32(&m_threads[current].state,
+  ARCH::store_release32(&m_threads[current].thread.state,
                         (uint32_t)THREAD::state_t::READY);
   return kernel_error::OK;
 }
@@ -131,7 +162,7 @@ kernel_error KERNEL::do_grant(uint32_t target, uint32_t microseconds) {
   grants.frames[grants.depth++] = {current, deadline};
   // 貸し手は WAIT_GRANT。READY ではないので他コアに拾われず、復帰はこのコアの
   // 巻き取り経路 (期限 or 早期復帰) だけになる。
-  m_threads[current].set_state(THREAD::state_t::WAIT_GRANT);
+  m_threads[current].thread.set_state(THREAD::state_t::WAIT_GRANT);
   m_current[core] = target;
   arm_timer(deadline);
   return kernel_error::OK;
@@ -147,13 +178,13 @@ template <> void KERNEL::grant_unwind(grant_end reason) {
   const uint32_t lender = grants.frames[grants.depth - 1].lender;
   grants.depth--;
   // 貸し手が待っていた syscall の戻り値を書く (a0 は貸した時点で OK 済み)。
-  ARCH::set_result(*m_threads[lender].context->sp, (uintptr_t)kernel_error::OK,
+  ARCH::set_result(*m_threads[lender].thread.context->sp, (uintptr_t)kernel_error::OK,
                    (uintptr_t)reason);
-  m_threads[lender].set_state(THREAD::state_t::RUNNING);
+  m_threads[lender].thread.set_state(THREAD::state_t::RUNNING);
   m_current[core] = lender;
   // 借り手を返す。走り終えていたらそのまま (終了させたスレッドを生き返らせない)。
-  if (m_threads[borrower].is_state(THREAD::state_t::RUNNING))
-    ARCH::store_release32(&m_threads[borrower].state,
+  if (m_threads[borrower].thread.is_state(THREAD::state_t::RUNNING))
+    ARCH::store_release32(&m_threads[borrower].thread.state,
                           (uint32_t)THREAD::state_t::READY);
   // 次の期限へ張り替える (空なら止める。既に過ぎていれば即もう一段巻き取らせる)。
   if (grants.depth == 0)
@@ -232,7 +263,7 @@ template <> void KERNEL::fault_dispatch(KERNEL::CONTEXT *context) {
                      (unsigned long)address,
                      (unsigned long)status, (unsigned long)(uintptr_t)context->sp);
 
-  ARCH::store_release32(&m_threads[thread].state,
+  ARCH::store_release32(&m_threads[thread].thread.state,
                         (uint32_t)THREAD::state_t::TERMINATED);
 
   // 借り手として走っていたなら、貸し手へ返すのが自然な復帰先 (貸した側は
@@ -244,7 +275,7 @@ template <> void KERNEL::fault_dispatch(KERNEL::CONTEXT *context) {
   // そうでなければ、あらかじめ教えられている復帰先へ渡す。誰に渡すかは方針なので
   // カーネルは選ばない — 教えられていないなら渡す先が無い。
   kernel_error error = kernel_error::OK;
-  if (m_recovery_thread < THREAD_COUNT && claim(m_recovery_thread, error)) {
+  if (m_recovery_thread < m_thread_count && claim(m_recovery_thread, error)) {
     m_current[core] = m_recovery_thread;
     return;
   }

@@ -46,6 +46,16 @@ template <>
 uintptr_t KERNEL_OBJECT::run_for(uintptr_t, uintptr_t, object_error &);
 template <> void KERNEL_OBJECT::exit_thread();
 template <> bool KERNEL_OBJECT::schedule(uint32_t);
+template <> KERNEL_OBJECT::lent_stack KERNEL_OBJECT::lend_boot_stack();
+template <> uintptr_t KERNEL_OBJECT::memory_allocate(uintptr_t, object_error &);
+template <> uintptr_t KERNEL_OBJECT::memory_release(uintptr_t, object_error &);
+template <>
+uintptr_t KERNEL_OBJECT::memory_hand_over(uintptr_t, uintptr_t, object_error &);
+template <> uintptr_t KERNEL_OBJECT::memory_owner(uintptr_t, object_error &);
+template <> void KERNEL_OBJECT::arena_init(arena &, uintptr_t, uintptr_t);
+template <>
+uintptr_t KERNEL_OBJECT::arena_allocate(arena &, uintptr_t, uintptr_t);
+template <> bool KERNEL_OBJECT::arena_release(arena &, uintptr_t);
 
 // カーネルが起こすハンドラの入口。**素の C 関数**でよい。
 // ★ネストした呼び出しの情報をレジスタで持ち回らない: 番号は引数スロット (a0) に
@@ -64,6 +74,11 @@ template <> uintptr_t KERNEL_OBJECT::handler_entry() {
   return (uintptr_t)&handler_entry_point;
 }
 
+// ★カーネルの簿記に貸す記憶。**静的領域に置く**のが要点で、ここは region の外
+//   (= 特権のみ) なので非特権オブジェクトから届かない。用意するのはこちら
+//   (オブジェクトランド) で、置き場所の条件はカーネルが検査する。
+alignas(8) static uint8_t g_bookkeeping_storage[8192];
+
 template <> void KERNEL_OBJECT::init() {
   for (uintptr_t id = 0; id < OBJECT_COUNT; ++id) {
     m_objects[id].created = false;
@@ -71,7 +86,7 @@ template <> void KERNEL_OBJECT::init() {
     for (uintptr_t method = 0; method < METHOD_COUNT; ++method)
       m_objects[id].methods[method] = nullptr;
   }
-  for (uintptr_t thread = 0; thread < KERNEL::THREAD_COUNT; ++thread) {
+  for (uintptr_t thread = 0; thread < THREAD_COUNT; ++thread) {
     m_shadow[thread].depth = 0;
     m_thread_object[thread] = (uint16_t)ROOT_OBJECT;
     m_wake_at[thread] = 0;
@@ -80,8 +95,43 @@ template <> void KERNEL_OBJECT::init() {
     m_budget[thread] = 2000;
   }
   m_rotor = 0;
+  for (uintptr_t thread = 0; thread < THREAD_COUNT; ++thread)
+    m_thread_stack[thread] = 0;
+
+  // 簿記用 arena: 静的領域 = 非特権から届かない場所。
+  arena_init(m_bookkeeping, (uintptr_t)g_bookkeeping_storage,
+             sizeof(g_bookkeeping_storage));
+  // ★スレッド表をカーネルへ貸す。カーネルはこれを所有せず、渡された量が
+  //   「何本作れるか」を決める (資源を持つのはオブジェクト = DESIGN §4.1 ルール 1)。
+  const uintptr_t table_bytes =
+      KERNEL::thread_record_bytes() * THREAD_COUNT;
+  const uintptr_t table =
+      arena_allocate(m_bookkeeping, table_bytes, ROOT_OBJECT);
+  if (table == 0)
+    KERNEL::BOARD::panic("no room for the thread table");
+  kernel_instance.set_thread_storage((void *)table, table_bytes);
+
+  // オブジェクト用 arena: 非特権からも届く必要があるのでヒープ側から取る。
+  constexpr uintptr_t OBJECT_ARENA_BYTES = 128 * 1024;
+  auto heap = kernel_instance.memory_manager.kernel_malloc(OBJECT_ARENA_BYTES);
+  if (!heap)
+    KERNEL::BOARD::panic("no room for the object arena");
+  arena_init(m_objects_arena, (uintptr_t)heap.value(), OBJECT_ARENA_BYTES);
   // ブートスレッドが名乗るオブジェクトだけは最初から在るものとして扱う。
   m_objects[ROOT_OBJECT].created = true;
+}
+
+// ★スレッド 0 のスタックも他と同じく arena から貸す。ここだけカーネルが自分で
+//   malloc していると「スレッドの記憶は誰のものか」が二枚舌になる。
+//   ブートスレッドは組み立てと自己テストを走らせるので少し厚めに取る。
+template <> KERNEL_OBJECT::lent_stack KERNEL_OBJECT::lend_boot_stack() {
+  constexpr uintptr_t BOOT_STACK_BYTES = 8192;
+  const uintptr_t base =
+      arena_allocate(m_objects_arena, BOOT_STACK_BYTES, ROOT_OBJECT);
+  if (base == 0)
+    KERNEL::BOARD::panic("no room for the boot stack");
+  m_thread_stack[0] = base; // 記録はするが、スレッド 0 は終わらないので返らない
+  return {base, BOOT_STACK_BYTES};
 }
 
 // ★両側チェックの申告値を**自分の台帳から**計算する (§9.3)。
@@ -239,12 +289,29 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
     error = object_error::UNDECLARED_METHOD;
     return 0;
   }
-  const auto spawned = kernel_instance.spawn(
-      (uintptr_t)entry, argument, object_protection(id), 0);
+  // ★スタックも**こちらが用意して貸す**。どれだけの深さを許すかは方針であって、
+  //   カーネルが決めることではない。非特権スレッドも自分のスタックには触れないと
+  //   困るので、オブジェクト用 arena (非特権から届く側) から取る。
+  const uintptr_t stack =
+      arena_allocate(m_objects_arena, THREAD_STACK_BYTES, id);
+  if (stack == 0) {
+    error = object_error::NO_MEMORY;
+    return 0;
+  }
+  KERNEL::spawn_request request{};
+  request.entry_pc = (uintptr_t)entry;
+  request.argument = argument;
+  request.protection = object_protection(id);
+  request.affinity = 0;
+  request.stack_base = stack;
+  request.stack_bytes = THREAD_STACK_BYTES;
+  const auto spawned = kernel_instance.spawn(request);
   if (spawned.error != kernel_error::OK) {
+    arena_release(m_objects_arena, stack); // 使わなかったので返す
     error = object_error::NO_THREAD;
     return 0;
   }
+  m_thread_stack[spawned.thread] = stack;
   // 新しいスレッドは「そのオブジェクトとして」走り始める。台帳の底をそう置く。
   m_thread_object[spawned.thread] = (uint16_t)id;
   m_shadow[spawned.thread].depth = 0;
@@ -262,10 +329,26 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
 template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
   using state_t = KERNEL::THREAD::state_t;
   const uint64_t now = KERNEL::BOARD::time_us();
-  for (uint32_t step = 1; step <= KERNEL::THREAD_COUNT; ++step) {
-    const uint32_t candidate = (m_rotor + step) % KERNEL::THREAD_COUNT;
+  for (uint32_t step = 1; step <= THREAD_COUNT; ++step) {
+    const uint32_t candidate = (m_rotor + step) % THREAD_COUNT;
     if (candidate == self)
       continue;
+    // ★終わったスレッドの記憶をここで回収する。貸したのはこちらなので、返させるのも
+    //   こちらの仕事 (DESIGN §4.1 ルール 3「自身が保有する資源を自由に開放できる」)。
+    //   走り終えた本人には自分のスタックを返せない (その上で走っているため)。
+    if (kernel_instance.thread_state(candidate) == state_t::TERMINATED &&
+        m_thread_stack[candidate] != 0) {
+      arena_release(m_objects_arena, m_thread_stack[candidate]);
+      m_thread_stack[candidate] = 0;
+      // 台帳も畳む。枠は使い回されるので、前の住人の名残りを残してはいけない
+      // (次の住人が他人の identity を継いでしまう)。
+      m_shadow[candidate].depth = 0;
+      m_thread_object[candidate] = (uint16_t)ROOT_OBJECT;
+      m_wake_at[candidate] = 0;
+      m_budget[candidate] = 2000;
+      kernel_instance.release(candidate); // 枠も返す (再利用できるようにする)
+      continue;
+    }
     if (kernel_instance.thread_state(candidate) != state_t::READY)
       continue;
     if (m_wake_at[candidate] > now)
@@ -354,6 +437,68 @@ template <> void KERNEL_OBJECT::exit_thread() {
   }
 }
 
+// ---- メモリの授受 -----------------------------------------------------------
+// ★参照実装の「オブジェクトごとに 16 語」は簡易な一形態でしかない。ここでは
+//   大きさを指定して借り、**持ち主を付け替えられる**形にする。持ち主が付いていれば
+//   「このオブジェクトが何を持っているか」が言えるので、会計にも解放にも使える。
+template <>
+uintptr_t KERNEL_OBJECT::memory_allocate(uintptr_t bytes, object_error &error) {
+  const uintptr_t self = current_object(kernel_instance.current_thread_id());
+  const uintptr_t handle = arena_allocate(m_objects_arena, bytes, self);
+  if (handle == 0)
+    error = object_error::NO_MEMORY;
+  return handle;
+}
+
+template <>
+uintptr_t KERNEL_OBJECT::memory_release(uintptr_t handle, object_error &error) {
+  const uintptr_t self = current_object(kernel_instance.current_thread_id());
+  // ★他人のものは返せない。持ち主を記録している意味はここに出る。
+  if (memory_owner(handle, error) != self) {
+    error = object_error::NOT_OWNER;
+    return 0;
+  }
+  if (!arena_release(m_objects_arena, handle)) {
+    error = object_error::BAD_MEMORY;
+    return 0;
+  }
+  return 1;
+}
+
+// 持ち主を付け替える = 渡す。**渡した側は以後それを返せない**ので、
+// 「渡したのにまだ自分のもの」という曖昧さが残らない。
+template <>
+uintptr_t KERNEL_OBJECT::memory_hand_over(uintptr_t handle, uintptr_t receiver,
+                                          object_error &error) {
+  const uintptr_t self = current_object(kernel_instance.current_thread_id());
+  if (receiver >= OBJECT_COUNT || !m_objects[receiver].created) {
+    error = object_error::BAD_OBJECT;
+    return 0;
+  }
+  if (memory_owner(handle, error) != self) {
+    error = object_error::NOT_OWNER;
+    return 0;
+  }
+  block *header = (block *)(handle - sizeof(block));
+  header->owner = (uint16_t)receiver;
+  return receiver;
+}
+
+template <>
+uintptr_t KERNEL_OBJECT::memory_owner(uintptr_t handle, object_error &error) {
+  if (handle <= m_objects_arena.base ||
+      handle >= m_objects_arena.base + m_objects_arena.bytes) {
+    error = object_error::BAD_MEMORY;
+    return NO_OBJECT;
+  }
+  const block *header = (const block *)(handle - sizeof(block));
+  if (!header->used) {
+    error = object_error::BAD_MEMORY;
+    return NO_OBJECT;
+  }
+  return header->owner;
+}
+
 template <>
 uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
                                 uintptr_t a3) {
@@ -395,8 +540,20 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
   case object_api::SLEEP_US:
     value = sleep_us(a1, error);
     break;
+  case object_api::MEMORY_ALLOCATE:
+    value = memory_allocate(a1, error);
+    break;
+  case object_api::MEMORY_RELEASE:
+    value = memory_release(a1, error);
+    break;
+  case object_api::MEMORY_HAND_OVER:
+    value = memory_hand_over(a1, a2, error);
+    break;
+  case object_api::MEMORY_OWNER:
+    value = memory_owner(a1, error);
+    break;
   case object_api::SET_BUDGET:
-    if (a1 < KERNEL::THREAD_COUNT)
+    if (a1 < THREAD_COUNT)
       m_budget[a1] = (uint32_t)a2;
     break;
   default:

@@ -33,6 +33,7 @@ cc_binary(
         "source/kernel/init.cpp",
         "source/kernel/thread.cpp",
         "source/kernel_object/handler.cpp",
+        "source/kernel_object/memory.cpp",
         "source/selftest/call_ladder.cpp",
         "source/selftest/stress.cpp",
         "source/selftest/thread_ladder.cpp",

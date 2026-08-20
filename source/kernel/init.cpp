@@ -8,8 +8,10 @@ namespace shizuku {
 KERNEL kernel_instance;
 
 template <> void KERNEL::init() {
-  for (uintptr_t index = 0; index < THREAD_COUNT; ++index)
-    m_threads[index].context = &m_contexts[index];
+  // ★スレッド表はここでは作らない。**オブジェクトランドが用意して貸す**ものなので、
+  //   set_thread_storage で渡されるまでスレッドは 1 本も存在しない。
+  m_threads = nullptr;
+  m_thread_count = 0;
   for (uintptr_t core = 0; core < CORE_COUNT; ++core)
     m_current[core] = 0;
   m_object_svc_handler = 0;
@@ -20,16 +22,18 @@ template <> void KERNEL::init() {
     BOARD::panic("memory manager init failed");
 }
 
-template <> void KERNEL::bootstrap(void (*entry)()) {
-  constexpr uintptr_t STACK_BYTES = 8192;
-  auto allocation = memory_manager.kernel_malloc(STACK_BYTES);
-  if (!allocation)
-    BOARD::panic("thread0 stack allocation failed");
-  const uintptr_t base = (uintptr_t)allocation.value();
-  const uintptr_t top = (base + STACK_BYTES) & ~(uintptr_t)7;
+template <> void KERNEL::bootstrap(void (*entry)(), uintptr_t stack_base,
+                                   uintptr_t stack_bytes) {
+  if (m_threads == nullptr)
+    BOARD::panic("thread storage not provided before bootstrap");
+  if (stack_base == 0 || stack_bytes < 256)
+    BOARD::panic("thread0 stack not provided before bootstrap");
+  const uintptr_t base = stack_base;
+  const uintptr_t top = (base + stack_bytes) & ~(uintptr_t)7;
   const uintptr_t limit = (base + 7) & ~(uintptr_t)7;
 
-  THREAD &thread = m_threads[0];
+  THREAD &thread = m_threads[0].thread;
+  thread.context = &m_threads[0].context;
   thread.call_stack = {};
   thread.set_state(THREAD::state_t::RUNNING);
   ARCH::stack_limit_set(*thread.context, limit);

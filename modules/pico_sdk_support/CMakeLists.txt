@@ -3,6 +3,7 @@ project(pico_sdk_support C CXX ASM)
 add_library(pico_sdk_support)
 target_sources(pico_sdk_support PRIVATE main.cpp board.cpp arch_glue.cpp
                                         memory_manager.cpp objects/peripherals.cpp
+                                        objects/flash_fs.cpp
                                         armv8m_ctx.S)
 target_compile_definitions(pico_sdk_support PUBLIC "$<$<CONFIG:DEBUG>:-DSHIZUKU_DEBUG>")
 set(config_need_headers
@@ -10,7 +11,7 @@ set(config_need_headers
     CACHE INTERNAL "")
 target_link_libraries(Shizuku PRIVATE pico_sdk_support pico_stdio pico_stdlib)
 target_link_libraries(pico_sdk_support PUBLIC pico_stdlib pico_stdio hardware_exception
-                                             hardware_gpio hardware_spi)
+                                             hardware_gpio hardware_spi hardware_flash hardware_sync)
 # pico2_w は LED が無線チップ側にあるので、LED オブジェクトが cyw43_arch を使う。
 # (lwIP も BTstack も要らないので _none。ボードが pico2_w のときだけリンクする)
 if(PICO_CYW43_SUPPORTED)
