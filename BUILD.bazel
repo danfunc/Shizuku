@@ -9,6 +9,13 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# 書き込み: bazelisk run //:flash (ビルドしてから焼く)。
+sh_binary(
+    name = "flash",
+    srcs = ["tools/flash.sh"],
+    data = [":shizuku_uf2"],
+)
+
 # ローカルの picotool で ELF → UF2 変換 (.bazelrc のコメント参照。非 hermetic)。
 genrule(
     name = "shizuku_uf2",
