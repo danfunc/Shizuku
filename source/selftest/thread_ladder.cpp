@@ -21,9 +21,6 @@ constexpr uintptr_t OBJECT_WORKER = 4; // 譲り合う相手
 constexpr uintptr_t OBJECT_HOG = 5;    // 実行権を返さない相手
 constexpr uintptr_t METHOD_MAIN = 0;
 
-uint32_t g_pass = 0;
-uint32_t g_fail = 0;
-
 volatile uint32_t g_worker_rounds = 0;
 volatile uint32_t g_worker_done = 0;
 volatile uint32_t g_hog_rounds = 0;
@@ -31,10 +28,10 @@ volatile uint32_t g_hog_stop = 0;
 
 void check(const char *name, bool ok, unsigned long got, unsigned long want) {
   if (ok) {
-    ++g_pass;
+    ++passed;
     BOARD::diag_printf("[SELFTEST] PASS %s (=%lu)\n", name, got);
   } else {
-    ++g_fail;
+    ++failed;
     BOARD::diag_printf("[SELFTEST] FAIL %s: got %lu want %lu\n", name, got, want);
   }
 }
@@ -125,7 +122,7 @@ void thread_ladder() {
   }
 
   BOARD::diag_printf("[SELFTEST] thread ladder done: %lu passed, %lu failed\n",
-                     (unsigned long)g_pass, (unsigned long)g_fail);
+                     (unsigned long)passed, (unsigned long)failed);
 }
 
 } // namespace selftest

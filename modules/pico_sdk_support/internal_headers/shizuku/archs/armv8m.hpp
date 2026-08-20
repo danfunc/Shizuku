@@ -18,6 +18,8 @@ void shizuku_armv8m_svc_entry();
 void shizuku_armv8m_pendsv_entry();
 // タイマ例外の入口。文脈は触らないので普通の C 関数でよい (切替を起票するだけ)。
 void shizuku_armv8m_systick_entry();
+// フォールト入口。落ちた側の例外フレームとスタック下限を渡して報告させる。
+[[noreturn]] void shizuku_armv8m_fault_entry();
 // 呼び先が普通に return したときの戻り口 (RETURN プリミティブを 1 段ぶん発行)。
 void shizuku_armv8m_return_stub();
 // スレッドスタック (PSP) へ移って entry を呼ぶ。戻らない。
@@ -44,9 +46,14 @@ public:
   // 現在値の bit0 だけをこの値で置き換える read-modify-write を行う。
   static constexpr uint32_t CONTROL_PRIV_PSP = 0b10;   // nPRIV=0 (特権)
   static constexpr uint32_t CONTROL_UNPRIV_PSP = 0b11; // nPRIV=1 (非特権)
-  // 呼び出しフレームを積むときスタック下限の手前に残す余裕。呼び先のプロローグと
-  // 最初の数フレームぶんを見込む (足りないと PSPLIM の UsageFault が先に出る)。
-  static constexpr uint32_t CALL_HEADROOM = 256;
+  // 呼び出しフレームを積むときスタック下限の手前に残す余白。
+  // ★これは「なんとなくの安全マージン」ではない。**呼び先が最低 1 回はカーネルを
+  //   呼び返せる**ことを保証する量でなければならない — 呼び先は戻るためにも
+  //   syscall を撃つので、ここが足りないと「戻ることすらできない」状態が作れて
+  //   しまう。内訳 (実測): 例外フレーム 32 + 退避域 (ヘッダ 124 + フレーム 32) +
+  //   カーネルオブジェクトのハンドラ連鎖の C フレーム約 120 = 約 310。
+  //   足りないと PSPLIM の UsageFault が先に出て無言で死ぬ。
+  static constexpr uint32_t CALL_HEADROOM = 512;
 
   // armv8m_ctx.S の .equ (CTX_*) と一致させること。下の static_assert が両縛りする。
   struct context_t {

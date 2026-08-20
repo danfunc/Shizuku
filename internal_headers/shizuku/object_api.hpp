@@ -75,6 +75,7 @@ enum struct object_error : uintptr_t {
   UNWIND_REJECTED,   // 巻き戻しがカーネルの検算で弾かれた
   NO_THREAD,         // スレッド枠かスタックが尽きた
   NOT_RUNNABLE,      // 対象スレッドが今は走れない (終了済み / 誰かが持っている)
+  KERNEL_REFUSED,    // カーネルがそもそも届けられなかった (KERNEL_ERROR_MARK 付き)
 };
 
 } // namespace shizuku

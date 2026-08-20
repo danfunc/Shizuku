@@ -19,3 +19,7 @@ endif()
 target_link_libraries(pico_sdk_support PUBLIC Shizuku_internal_HEADERS)
 target_include_directories(pico_sdk_support PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/internal_headers)
 pico_enable_stdio_usb(Shizuku 1)
+# ★起動直後の診断はホストがポートを開く前に流れてしまう (参照実装も同じ罠を踏んで
+#   いる: PORT §7「焼く前にシリアルキャプチャを張る」)。ホストの接続を少しだけ
+#   待つことで、自己テストの結果が**必ず**見えるようにする。
+target_compile_definitions(Shizuku PRIVATE PICO_STDIO_USB_CONNECT_WAIT_TIMEOUT_MS=2000)

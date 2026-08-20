@@ -10,6 +10,11 @@
 namespace shizuku {
 namespace selftest {
 
+// 梯子の通算結果。★起動時の出力はホストが繋ぐ前に流れて消えることがあるので
+// (PORT §7 の罠)、**いつ繋いでも結果が分かる**ように生存表示へ載せる。
+extern uint32_t passed;
+extern uint32_t failed;
+
 // メソッド呼び出しの梯子。結果は BOARD::diag_printf へ出す。
 void call_ladder();
 

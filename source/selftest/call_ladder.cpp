@@ -15,6 +15,10 @@
 
 namespace shizuku {
 namespace selftest {
+
+uint32_t passed = 0;
+uint32_t failed = 0;
+
 namespace {
 
 using ARCH = KERNEL::ARCH;
@@ -25,15 +29,12 @@ constexpr uintptr_t OBJECT_NEST = 2;
 constexpr uintptr_t OBJECT_DEEP = 3;
 constexpr uintptr_t METHOD_MAIN = 0;
 
-uint32_t g_pass = 0;
-uint32_t g_fail = 0;
-
 void check(const char *name, bool ok, unsigned long got, unsigned long want) {
   if (ok) {
-    ++g_pass;
+    ++passed;
     BOARD::diag_printf("[SELFTEST] PASS %s (=%lu)\n", name, got);
   } else {
-    ++g_fail;
+    ++failed;
     BOARD::diag_printf("[SELFTEST] FAIL %s: got %lu want %lu\n", name, got,
                        want);
   }
@@ -47,6 +48,10 @@ struct api_result {
 api_result api(object_api number, uintptr_t a1 = 0, uintptr_t a2 = 0,
                uintptr_t a3 = 0) {
   const auto result = ARCH::syscall((uintptr_t)number, a1, a2, a3);
+  // ★カーネルが直接返した答え (印つき) は自分の語彙で読まない。取り違えると
+  //   「別のエラーが起きた」ように見えて原因を見失う。
+  if (result.error & KERNEL_ERROR_MARK)
+    return {(uintptr_t)object_error::KERNEL_REFUSED, result.error};
   return {result.error, result.value};
 }
 
@@ -65,7 +70,23 @@ uintptr_t leaf(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
 }
 
 // ---- N 段ネスト: 各層が自分の 1 枚だけを落とす (I-6) --------------------------
+// ★ネストの各層で「自分は誰か」「誰に呼ばれたか」「今どれだけ深いか」を記録する。
+//   これが無いと、層をまたいで情報が入れ替わる類のバグ (§12.1 の「黙って化ける」) を
+//   検出できない。設計文書が identity の end-to-end 検証を必須にしているのはこのため。
+constexpr uint32_t MAX_LEVELS = 8;
+uintptr_t g_nest_self[MAX_LEVELS];
+uintptr_t g_nest_caller[MAX_LEVELS];
+uint32_t g_nest_depth[MAX_LEVELS];
+uint32_t g_nest_levels = 0;
+
 uintptr_t nest(uintptr_t remaining, uintptr_t, uintptr_t, uintptr_t) {
+  const uint32_t level = g_nest_levels;
+  if (level < MAX_LEVELS) {
+    g_nest_self[level] = api(object_api::GET_CURRENT_OBJECT).value;
+    g_nest_caller[level] = api(object_api::GET_CALLER_OBJECT).value;
+    g_nest_depth[level] = kernel_instance.current_depth();
+    g_nest_levels = level + 1;
+  }
   if (remaining == 0)
     return 0;
   const api_result result = call_method(OBJECT_NEST, remaining - 1);
@@ -136,12 +157,33 @@ void call_ladder() {
 
   // N 段ネスト (6 段)。6+5+4+3+2+1 = 21。
   {
+    g_nest_levels = 0;
     const api_result result = call_method(OBJECT_NEST, 6);
     check("call/6 nested: value", result.value == 21,
           (unsigned long)result.value, 21);
     check("call/6 nested: depth restored",
           kernel_instance.current_depth() == 0,
           (unsigned long)kernel_instance.current_depth(), 0);
+
+    // ★各層の identity と深さを突き合わせる。層をまたいで混ざっていないこと。
+    check("nested: levels entered", g_nest_levels == 7,
+          (unsigned long)g_nest_levels, 7);
+    uint32_t identity_bad = 0;
+    uint32_t depth_bad = 0;
+    for (uint32_t level = 0; level < g_nest_levels; ++level) {
+      // 呼び先は毎層 OBJECT_NEST。呼び出し元は 1 層目だけ根 (0)、以降は自分自身。
+      const uintptr_t expected_caller = level == 0 ? 0 : OBJECT_NEST;
+      if (g_nest_self[level] != OBJECT_NEST ||
+          g_nest_caller[level] != expected_caller)
+        ++identity_bad;
+      // 呼び出し 1 段はフレーム 2 枚 (呼び先の枠 + その中の svc を運ぶ枠)。
+      if (g_nest_depth[level] != 2u * (level + 1u))
+        ++depth_bad;
+    }
+    check("nested: identity at every level", identity_bad == 0,
+          (unsigned long)identity_bad, 0);
+    check("nested: depth grows by 2 per level", depth_bad == 0,
+          (unsigned long)depth_bad, 0);
   }
 
   // 未知の API 番号と未生成オブジェクト。黙って消えず、エラーで返ること。
@@ -171,7 +213,7 @@ void call_ladder() {
   }
 
   BOARD::diag_printf("[SELFTEST] call ladder done: %lu passed, %lu failed\n",
-                     (unsigned long)g_pass, (unsigned long)g_fail);
+                     (unsigned long)passed, (unsigned long)failed);
 }
 
 } // namespace selftest

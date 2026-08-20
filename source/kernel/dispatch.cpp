@@ -125,8 +125,12 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
     //   C 関数が callee-saved を潰しても壊れない (参照実装はここをレジスタで
     //   持ち回り、ABI シムの push 順を間違えて何度も溶かしている)。
     const kernel_error error = do_call(thread, context, &frame, request);
-    if (error != kernel_error::OK)
-      ARCH::set_result(*frame, (uintptr_t)error, 0);
+    if (error != kernel_error::OK) {
+      // ★ハンドラへ届けられなかった。答えるのはカーネルだが、受け取るのは
+      //   オブジェクト — 番号空間が違うので印を付ける (混ぜると受け取った側が
+      //   自分の語彙で読んで黙って別の意味になる)。
+      ARCH::set_result(*frame, KERNEL_ERROR_MARK | (uintptr_t)error, 0);
+    }
     return;
   }
 
@@ -229,13 +233,22 @@ template <> void KERNEL::pendsv_dispatch(KERNEL::CONTEXT *context) {
 //   a0 = kernel_error, a1 = 実際の深さ
 // ★panic しない。段数の申告はオブジェクト側の責任なので、間違えた者だけが止まるべきで、
 //   系全体を道連れにするのは方針として誤り (I-9)。記録を残してこのスレッドを隔離する。
+// ★ここへ来る典型的な原因は「スタックが尽きて戻ることすらできない」なので、
+//   **印字してはいけない** — printf は数百バイト使うので、その場で PSPLIM を
+//   割って HardFault になり、一番情報の少ない壊れ方をする (実際に踏んだ)。
+//   記録だけ残して止まり、報告は余裕のある側 (フォールトハンドラや他スレッド) に任せる。
+extern "C" {
+volatile uintptr_t shizuku_return_stub_failure_error;
+volatile uintptr_t shizuku_return_stub_failure_depth;
+volatile uint32_t shizuku_return_stub_failure_count;
+}
+
 extern "C" [[noreturn]] void shizuku_return_stub_failed(uintptr_t error,
                                                         uintptr_t depth) {
-  shizuku::KERNEL::BOARD::diag_printf(
-      "[KERNEL] return rejected: error=%lu depth=%lu (thread parked)\n",
-      (unsigned long)error, (unsigned long)depth);
+  shizuku_return_stub_failure_error = error;
+  shizuku_return_stub_failure_depth = depth;
+  shizuku_return_stub_failure_count = shizuku_return_stub_failure_count + 1;
   // TODO(Phase 2b): SWITCH を撃って他スレッドへ譲り、このスレッドだけを隔離する。
-  // 現状はスレッドが 1 本しかないのでスピンするしかない。
   while (true) {
   }
 }

@@ -43,8 +43,12 @@ void shizuku::app_entry() {
   while (true) {
     request.value ^= 1u;
     const auto written = call(led_method::WRITE);
-    printf("alive led=%lu err=%lu\n", (unsigned long)request.value,
-           (unsigned long)written.error);
+    // ★自己テストの結果を生存表示に載せる。起動時の出力はホストが繋ぐ前に流れて
+    //   消えることがあるので、いつ繋いでも「あのとき全部通ったのか」が分かる。
+    printf("alive led=%lu err=%lu selftest=%lu passed/%lu failed\n",
+           (unsigned long)request.value, (unsigned long)written.error,
+           (unsigned long)shizuku::selftest::passed,
+           (unsigned long)shizuku::selftest::failed);
     sleep_ms(500);
   }
 }

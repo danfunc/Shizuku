@@ -2,6 +2,8 @@
 build --platforms=@pico-sdk//bazel/platform:rp2350
 build --@pico-sdk//bazel/config:PICO_BOARD=pico2_w
 build --@pico-sdk//bazel/config:PICO_STDIO_USB=True
+# 起動直後の診断がホスト接続前に流れて消えないよう、少しだけ接続を待つ
+build --@pico-sdk//bazel/config:PICO_STDIO_USB_CONNECT_WAIT_TIMEOUT_MS=2000
 
 # カーネルは C++23 (cxxopt は C++ 翻訳単位にのみ効く)
 build --cxxopt=-std=c++23

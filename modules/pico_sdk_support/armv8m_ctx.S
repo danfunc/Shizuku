@@ -166,3 +166,22 @@ shizuku_armv8m_enter_thread_mode:
     isb
     blx  r2
 1:  b    1b
+
+// ---------------------------------------------------------------------------
+// フォールト入口。**無言で固まらせないための最後の砦** (PORT §7)。
+// 例外ハンドラは MSP で走るので、スレッドのスタックが尽きて落ちた場合でも
+// ここでは安全に印字できる (原因がスタック枯渇のときこそ重要)。
+//   EXC_RETURN bit2 = 1 なら落ちた側は PSP を使っていた。その例外フレームの
+//   アドレスを渡して、どこで落ちたか (pc/lr) を報告させる。
+// ---------------------------------------------------------------------------
+.thumb_func
+.global shizuku_armv8m_fault_entry
+.align 2
+.type shizuku_armv8m_fault_entry, %function
+shizuku_armv8m_fault_entry:
+    tst   lr, #4
+    ite   eq
+    mrseq r0, MSP
+    mrsne r0, PSP
+    mrs   r1, PSPLIM
+    b     shizuku_fault_report   // 戻らない
