@@ -17,40 +17,14 @@ void shizuku::app_entry() {
   shizuku::selftest::call_ladder();
   shizuku::selftest::thread_ladder();
 
-  // 生存表示。**オブジェクトのメソッド呼び出し経由で** LED を叩く。
-  // ★ここは LED がどのピンにあるか (そもそも GPIO かどうか) を知らない。
-  //   pico2 は GPIO 25、pico2_w は無線チップ側と実体が違うが、その差は LED
-  //   オブジェクトの中に閉じている。
-  // ★呼び出しの結果は必ず見る。捨てると「呼んでいるのに何も起きない」になり、
-  //   オブジェクト側かハードかを切り分けられなくなる (D12)。
-  using namespace shizuku::objects;
-  led_request request{0};
+  // 負荷試験を起動する。以後、点滅と報告は専用スレッドが行う。
+  shizuku::selftest::stress_launch();
 
-  auto call = [&](led_method method) {
-    return shizuku::KERNEL::ARCH::syscall(
-        (uintptr_t)shizuku::object_api::CALL_METHOD, LED_OBJECT,
-        (uintptr_t)method, (uintptr_t)&request);
-  };
-
-  request.value = 1;
-  const auto first = call(led_method::WRITE);
-  const auto read_back = call(led_method::READ);
-  // 書いた値を対象自身に読み戻させて突き合わせる (DESIGN §16)。
-  printf("[LED] write(err=%lu) read=%lu(err=%lu) peripheral_failures=%lu\n",
-         (unsigned long)first.error, (unsigned long)read_back.value,
-         (unsigned long)read_back.error, (unsigned long)peripheral_failures);
-
-  while (true) {
-    request.value ^= 1u;
-    const auto written = call(led_method::WRITE);
-    // ★自己テストの結果を生存表示に載せる。起動時の出力はホストが繋ぐ前に流れて
-    //   消えることがあるので、いつ繋いでも「あのとき全部通ったのか」が分かる。
-    printf("alive led=%lu err=%lu selftest=%lu passed/%lu failed\n",
-           (unsigned long)request.value, (unsigned long)written.error,
-           (unsigned long)shizuku::selftest::passed,
-           (unsigned long)shizuku::selftest::failed);
-    sleep_ms(500);
-  }
+  // ★スレッド 0 は以後アイドル役に徹する。誰かが走れるなら渡し、誰も居なければ
+  //   空回りするだけ。**ここで自分が仕事をしてはいけない** — アイドルが仕事を
+  //   持つと、その仕事が他の全部の遅れになる。
+  while (true)
+    shizuku::KERNEL::ARCH::syscall((uintptr_t)shizuku::object_api::YIELD);
 }
 
 int main() {

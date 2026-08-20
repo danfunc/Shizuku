@@ -41,6 +41,7 @@ template <>
 uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t, uintptr_t, uintptr_t,
                                       object_error &);
 template <> uintptr_t KERNEL_OBJECT::yield_to(uintptr_t, object_error &);
+template <> uintptr_t KERNEL_OBJECT::sleep_us(uintptr_t, object_error &);
 template <>
 uintptr_t KERNEL_OBJECT::run_for(uintptr_t, uintptr_t, object_error &);
 template <> void KERNEL_OBJECT::exit_thread();
@@ -73,6 +74,10 @@ template <> void KERNEL_OBJECT::init() {
   for (uintptr_t thread = 0; thread < KERNEL::THREAD_COUNT; ++thread) {
     m_shadow[thread].depth = 0;
     m_thread_object[thread] = (uint16_t)ROOT_OBJECT;
+    m_wake_at[thread] = 0;
+    // 既定は時限つき。自分から返さないスレッドがいても系が凍らないようにする
+    // (期限は quantum ではなく安全網 — 正常時はこれより早く返るので発火しない)。
+    m_budget[thread] = 2000;
   }
   m_rotor = 0;
   // ブートスレッドが名乗るオブジェクトだけは最初から在るものとして扱う。
@@ -243,26 +248,59 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
   // 新しいスレッドは「そのオブジェクトとして」走り始める。台帳の底をそう置く。
   m_thread_object[spawned.thread] = (uint16_t)id;
   m_shadow[spawned.thread].depth = 0;
+  m_wake_at[spawned.thread] = 0;
+  m_budget[spawned.thread] = 2000;
   return spawned.thread;
 }
 
 // 次に走らせるスレッドを選んで渡す。戻り = 誰かへ渡せたか。
+// ★ここが方針の中心。カーネルは「渡す機構」(バトン渡しと時限つきの貸し出し) しか
+//   持たず、どちらでどれだけ渡すかはここが決める:
+//     時限あり (既定) → 貸す。自分から返さないスレッドがいても期限で戻る
+//     時限 0          → バトン渡し。返ってこない可能性を承知で渡す相手だけに使う
 // ★回転子から順に見る。自分の直後だけを見ると同じ相手ばかり選ばれて飢餓が出る。
 template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
   using state_t = KERNEL::THREAD::state_t;
+  const uint64_t now = KERNEL::BOARD::time_us();
   for (uint32_t step = 1; step <= KERNEL::THREAD_COUNT; ++step) {
     const uint32_t candidate = (m_rotor + step) % KERNEL::THREAD_COUNT;
     if (candidate == self)
       continue;
     if (kernel_instance.thread_state(candidate) != state_t::READY)
       continue;
-    const auto result = ARCH::syscall((uintptr_t)primitive::SWITCH, candidate);
+    if (m_wake_at[candidate] > now)
+      continue; // 眠っている相手は起こさない
+    const uint32_t budget = m_budget[candidate];
+    const auto result =
+        budget == 0
+            ? ARCH::syscall((uintptr_t)primitive::SWITCH, candidate)
+            : ARCH::syscall((uintptr_t)primitive::GRANT, candidate, budget);
     if (result.error == (uintptr_t)kernel_error::OK) {
       m_rotor = candidate;
       return true;
     }
   }
   return false;
+}
+
+// 締切まで自分を走らせない。★待っている間は他へ CPU を渡す — 「待つ」ことで
+// 他の仕事が止まるなら、それは待ちではなく占有になってしまう。
+template <>
+uintptr_t KERNEL_OBJECT::sleep_us(uintptr_t microseconds, object_error &error) {
+  (void)error;
+  const uint32_t self = kernel_instance.current_thread_id();
+  const uint64_t deadline = KERNEL::BOARD::time_us() + (uint64_t)microseconds;
+  m_wake_at[self] = deadline;
+  while ((int64_t)(deadline - KERNEL::BOARD::time_us()) > 0) {
+    // 借り手として走っているなら、貸し手へ返すのが先 (又貸しはしない)。
+    if (kernel_instance.grant_active()) {
+      ARCH::syscall((uintptr_t)primitive::SWITCH, 0);
+      continue;
+    }
+    schedule(self); // 誰も居なければ締切まで空回りする
+  }
+  m_wake_at[self] = 0;
+  return 0;
 }
 
 template <>
@@ -354,6 +392,13 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
   case object_api::EXIT_THREAD:
     exit_thread();
     return 0;
+  case object_api::SLEEP_US:
+    value = sleep_us(a1, error);
+    break;
+  case object_api::SET_BUDGET:
+    if (a1 < KERNEL::THREAD_COUNT)
+      m_budget[a1] = (uint32_t)a2;
+    break;
   default:
     // ★未知の番号は**ここの語彙**。黙って捨てず必ずエラーで返す
     //   (DESIGN §11.2.0 の「無音で消えて誤認した」事故の対策)。

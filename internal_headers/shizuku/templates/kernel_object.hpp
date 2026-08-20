@@ -84,6 +84,7 @@ private:
   uintptr_t spawn_method(uintptr_t id, uintptr_t method, uintptr_t argument,
                          object_error &error);
   uintptr_t yield_to(uintptr_t target, object_error &error);
+  uintptr_t sleep_us(uintptr_t microseconds, object_error &error);
   uintptr_t run_for(uintptr_t thread, uintptr_t microseconds,
                     object_error &error);
   void exit_thread();
@@ -103,6 +104,10 @@ private:
   shadow_t m_shadow[KERNEL::THREAD_COUNT];
   // スレッドごとの「どのオブジェクトのために作ったか」。方針側の台帳なのでここ。
   uint16_t m_thread_object[KERNEL::THREAD_COUNT];
+  // ★起床時刻と時限は**方針**なのでカーネルではなくここが持つ (D1)。
+  //   カーネルは「渡す機構」しか持たず、誰をいつ走らせるかは知らない。
+  uint64_t m_wake_at[KERNEL::THREAD_COUNT];
+  uint32_t m_budget[KERNEL::THREAD_COUNT];
   // 次に見るスレッド (round-robin の回転子)。自分の直後だけを見ると飢餓が出る。
   uint32_t m_rotor;
 };
