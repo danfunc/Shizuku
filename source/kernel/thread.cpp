@@ -15,7 +15,8 @@ namespace shizuku {
 // 実装より前に使う (do_switch が grant_unwind を、grant_unwind が arm_timer を呼ぶ)
 // ので、特殊化の宣言を先に置く。無いと暗黙の実体化が先に起きる。
 template <> void KERNEL::grant_unwind(grant_end);
-template <> void KERNEL::arm_timer(uint64_t);
+template <> void KERNEL::arm_timer();
+template <> void KERNEL::grant_charge();
 template <> bool KERNEL::claim(uint32_t, kernel_error &);
 template <> void KERNEL::set_recovery_thread(uint32_t);
 template <> void KERNEL::set_thread_storage(void *, uintptr_t);
@@ -144,7 +145,7 @@ template <> kernel_error KERNEL::do_switch(uint32_t target) {
 }
 
 template <>
-kernel_error KERNEL::do_grant(uint32_t target, uint32_t microseconds) {
+kernel_error KERNEL::do_grant(uint32_t target, uint32_t cycles) {
   const uint32_t core = BOARD::core_num();
   const uint32_t current = m_current[core];
   if (target == current)
@@ -155,16 +156,19 @@ kernel_error KERNEL::do_grant(uint32_t target, uint32_t microseconds) {
   kernel_error error = kernel_error::OK;
   if (!claim(target, error))
     return error;
-  // ★期限は外側の期限でクランプする (I-7)。借りたものを又貸しで延長できない。
-  uint64_t deadline = BOARD::time_us() + (uint64_t)microseconds;
-  if (grants.depth != 0 && grants.frames[grants.depth - 1].deadline < deadline)
-    deadline = grants.frames[grants.depth - 1].deadline;
-  grants.frames[grants.depth++] = {current, deadline};
+  // ★外側の残りを読む前に、今の刻みで使ったぶんを引いておく。引かずに読むと
+  //   「外側はまだ丸ごと残っている」ことになり、又貸しで実質延長できてしまう。
+  grant_charge();
+  // ★残量は外側の残量でクランプする (I-7)。借りたものを又貸しで延長できない。
+  uint64_t budget = cycles;
+  if (grants.depth != 0 && grants.frames[grants.depth - 1].remaining < budget)
+    budget = grants.frames[grants.depth - 1].remaining;
+  grants.frames[grants.depth++] = {current, budget};
   // 貸し手は WAIT_GRANT。READY ではないので他コアに拾われず、復帰はこのコアの
   // 巻き取り経路 (期限 or 早期復帰) だけになる。
   m_threads[current].thread.set_state(THREAD::state_t::WAIT_GRANT);
   m_current[core] = target;
-  arm_timer(deadline);
+  arm_timer();
   return kernel_error::OK;
 }
 
@@ -174,6 +178,7 @@ template <> void KERNEL::grant_unwind(grant_end reason) {
   grant_stack &grants = m_grants[core];
   if (grants.depth == 0)
     return;
+  grant_charge(); // 巻き取る前に、今の刻みで使ったぶんを外側にも負担させる
   const uint32_t borrower = m_current[core];
   const uint32_t lender = grants.frames[grants.depth - 1].lender;
   grants.depth--;
@@ -186,25 +191,62 @@ template <> void KERNEL::grant_unwind(grant_end reason) {
   if (m_threads[borrower].thread.is_state(THREAD::state_t::RUNNING))
     ARCH::store_release32(&m_threads[borrower].thread.state,
                           (uint32_t)THREAD::state_t::READY);
-  // 次の期限へ張り替える (空なら止める。既に過ぎていれば即もう一段巻き取らせる)。
-  if (grants.depth == 0)
+  // 外側の残量へ張り替える (空なら止める。使い切っていれば即もう一段巻き取らせる)。
+  if (grants.depth == 0) {
     ARCH::timer_cancel();
-  else if (grants.frames[grants.depth - 1].deadline <= BOARD::time_us())
+    m_armed[core] = 0;
+  } else if (grants.frames[grants.depth - 1].remaining == 0) {
     ARCH::pend_context_switch();
-  else
-    arm_timer(grants.frames[grants.depth - 1].deadline);
+  } else {
+    arm_timer();
+  }
 }
 
-template <> void KERNEL::arm_timer(uint64_t deadline_us) {
-  const uint64_t now = BOARD::time_us();
-  uint64_t remaining = deadline_us > now ? deadline_us - now : 1;
-  uint64_t cycles = remaining * (uint64_t)BOARD::cycles_per_us();
-  // タイマは幅が有限なので、遠い期限は刻んで継ぎ足す (期限自体は変わらない)。
-  if (cycles > ARCH::TIMER_MAX_CYCLES)
-    cycles = ARCH::TIMER_MAX_CYCLES;
-  if (cycles < ARCH::TIMER_MIN_CYCLES)
-    cycles = ARCH::TIMER_MIN_CYCLES;
-  ARCH::timer_oneshot((uint32_t)cycles);
+// 今の刻みで使ったぶんを**全段から**引く。内側が走っている間は外側の時間も
+// 減っている (だから又貸しで延長できない) ので、一番内側だけ引くのでは足りない。
+// ★何度呼んでも壊れない: 引いたあと m_armed を「まだ引いていない残り」に
+//   更新するので、続けて呼べば 2 回目は 0 を引く。
+template <> void KERNEL::grant_charge() {
+  const uint32_t core = BOARD::core_num();
+  grant_stack &grants = m_grants[core];
+  if (grants.depth == 0 || m_armed[core] == 0) {
+    m_armed[core] = 0;
+    return;
+  }
+  bool wrapped = false;
+  const uint32_t left = ARCH::timer_remaining(wrapped);
+  // 折り返していた = 刻みは撃ち切った。多めに数える側へ倒す (少なく数えると
+  // 貸した実行権が予定より長く握られる)。
+  const uint64_t used =
+      (wrapped || left == 0) ? m_armed[core] : (uint64_t)(m_armed[core] - left);
+  for (uint32_t index = 0; index < grants.depth; ++index) {
+    grant_frame &frame = grants.frames[index];
+    frame.remaining = frame.remaining > used ? frame.remaining - used : 0;
+  }
+  m_armed[core] = wrapped ? 0 : left;
+}
+
+// 一番内側の残量をタイマへ装填する。★換算が要らない — 残量もタイマもクロックで
+// 数えているので、そのまま載る。µs で持っていたときは装填のたびに clk_sys で
+// 割り戻していて、その clk_sys が変わらない保証は無かった。
+template <> void KERNEL::arm_timer() {
+  const uint32_t core = BOARD::core_num();
+  grant_stack &grants = m_grants[core];
+  if (grants.depth == 0) {
+    ARCH::timer_cancel();
+    m_armed[core] = 0;
+    return;
+  }
+  uint64_t chunk = grants.frames[grants.depth - 1].remaining;
+  // タイマは幅が有限なので、長い貸しは刻んで継ぎ足す (残量自体は変わらない)。
+  if (chunk > ARCH::TIMER_MAX_CYCLES)
+    chunk = ARCH::TIMER_MAX_CYCLES;
+  // 装填直後に発火する設定は取りこぼすので下限がある。残りがこれ未満のときは
+  // わずかに超過して返ることになる (下限ぶんの誤差は仕様として飲む)。
+  if (chunk < ARCH::TIMER_MIN_CYCLES)
+    chunk = ARCH::TIMER_MIN_CYCLES;
+  m_armed[core] = (uint32_t)chunk;
+  ARCH::timer_oneshot((uint32_t)chunk);
 }
 
 // タイマ例外 (優先度は syscall より下、切替より上)。ここでは**切替を起票するだけ**で、
@@ -215,14 +257,17 @@ template <> void KERNEL::timer_expired() {
   grant_stack &grants = m_grants[core];
   if (grants.depth == 0) {
     ARCH::timer_cancel(); // 早期復帰と競合した後の遅れて来た発火
+    m_armed[core] = 0;
     return;
   }
-  const uint64_t deadline = grants.frames[grants.depth - 1].deadline;
-  if (BOARD::time_us() >= deadline) {
+  // ここへ来た時点で刻みは撃ち切っている (COUNTFLAG が立つので grant_charge が
+  // 丸ごと引く)。使い切っていなければ次の刻みを装填するだけ。
+  grant_charge();
+  if (grants.frames[grants.depth - 1].remaining == 0) {
     ARCH::timer_cancel();
     ARCH::pend_context_switch();
   } else {
-    arm_timer(deadline); // 刻みの継ぎ足し
+    arm_timer(); // 刻みの継ぎ足し
   }
 }
 

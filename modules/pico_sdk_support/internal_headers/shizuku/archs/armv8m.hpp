@@ -157,6 +157,21 @@ public:
     systick_hw->csr = 0x7; // ENABLE | TICKINT | プロセッサクロック
   }
   static void timer_cancel() { systick_hw->csr = 0; }
+  // 今の刻みで**まだ残っている**サイクル数。wrapped は「刻みを撃ち切った」印
+  // (COUNTFLAG)。★svc は SysTick より優先度が高いので、発火が保留されたまま
+  //   ここへ来ることがある。そのときカウンタは既に折り返して数え直しているので、
+  //   残りをそのまま信じると**使った時間を取りこぼす**。折り返していたら
+  //   「刻みは撃ち切った」と見なす (足りなく数えるより多く数えるほうが安全 —
+  //   貸した実行権が予定より長く握られる側に倒れない)。
+  static uint32_t timer_remaining(bool &wrapped) {
+    const uint32_t csr = systick_hw->csr; // ★読むと COUNTFLAG は落ちる。1 回だけ読む
+    wrapped = (csr & (1u << 16)) != 0;
+    if (!(csr & 0x1u)) { // 動いていない
+      wrapped = false;
+      return 0;
+    }
+    return systick_hw->cvr & 0x00FFFFFFu;
+  }
   // ★切替は最低優先度の遅延例外でしか起こさない (DESIGN §14.5.1 の規約)。
   //   これにより「syscall ハンドラの中にいる = そのコアでは切り替わらない」が
   //   取得コストゼロで手に入る。

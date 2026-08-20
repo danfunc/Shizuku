@@ -163,17 +163,30 @@ private:
                        const call_request &request);
 
   kernel_error do_switch(uint32_t target);
-  kernel_error do_grant(uint32_t target, uint32_t microseconds);
+  kernel_error do_grant(uint32_t target, uint32_t cycles);
   // 貸した実行権を 1 段巻き取って貸し手へ戻す (期限切れ / 早期復帰の共通経路)。
   void grant_unwind(grant_end reason);
-  void arm_timer(uint64_t deadline_us);
+  // 今の刻みで使ったぶんを全段から引く。**貸し借りに触る前に必ず呼ぶ**。
+  void grant_charge();
+  // 一番内側の残りをタイマへ装填する (幅が足りなければ刻んで継ぎ足す)。
+  void arm_timer();
   bool claim(uint32_t thread, kernel_error &error);
 
-  // 実行権の貸し出しスタック (per-core)。ネストできるが、内側の期限は外側の期限で
+  // 実行権の貸し出しスタック (per-core)。ネストできるが、内側の残量は外側の残量で
   // クランプされるので借りた以上は又貸しできない (I-7)。
+  // ★単位は**クロック** (µs ではない)。理由:
+  //   (1) SysTick が数えているのはクロックなので、µs で持つと装填のたびに
+  //       clk_sys で割り戻すことになる。**その clk_sys が変わらない保証がない**
+  //       (オーバークロック、将来の周波数切替)。貸している最中に変われば、
+  //       換算済みの期限は静かにずれ、予定どおりに返ってこない
+  //   (2) 貸し手が本当に縛りたいのは「どれだけ**仕事**をしてよいか」で、仕事は
+  //       おおよそクロック数。µs で書くとクロックを上げた瞬間に、同じ数字が
+  //       黙って倍の仕事を意味するようになる。クロックで書けば意味が動かない
+  //   ★対して SLEEP は µs のまま。あちらは壁時計の話 (「20ms 後に起こして」) で、
+  //     仕事量ではない。**別の量なので単位を揃えてはいけない**。
   struct grant_frame {
-    uint32_t lender;   // 貸し手 (WAIT_GRANT で待っている)
-    uint64_t deadline; // 期限 [µs] (外側でクランプ済み)
+    uint32_t lender;    // 貸し手 (WAIT_GRANT で待っている)
+    uint64_t remaining; // 残りクロック数 (外側でクランプ済み)
   };
   struct grant_stack {
     static constexpr uint32_t MAX_DEPTH = 8;
@@ -186,6 +199,8 @@ private:
   uint32_t m_thread_count;
   uint32_t m_current[CORE_COUNT];
   grant_stack m_grants[CORE_COUNT];
+  // 今タイマへ装填した刻みの大きさ [クロック]。残りから引くために覚えておく。
+  uint32_t m_armed[CORE_COUNT];
   // オブジェクトランドの svc ハンドラの入口。表ではなく 1 個だけ。
   uintptr_t m_object_svc_handler;
   uint32_t m_recovery_thread;

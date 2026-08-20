@@ -98,27 +98,35 @@ void thread_ladder() {
     check("grant: spawn hog", spawned.error == (uintptr_t)object_error::OK,
           (unsigned long)spawned.error, 0);
 
+    // ★貸す量は**クロック数**。壁時計で測るのはこちら (試験する側) の都合なので、
+    //   期待される経過時間はここで換算する。カーネルは換算を持たない。
+    const uint32_t lend_cycles = 2000u * BOARD::cycles_per_us(); // ≒2ms 相当
+    const uint64_t expected_us = lend_cycles / BOARD::cycles_per_us();
     const uint32_t before = g_hog_rounds;
     const uint64_t started = BOARD::time_us();
-    const api_result granted =
-        api(object_api::RUN_FOR, spawned.value, 2000); // 2ms 貸す
+    const api_result granted = api(object_api::RUN_FOR, spawned.value,
+                                   lend_cycles);
     const uint64_t elapsed = BOARD::time_us() - started;
 
     check("grant: returned", granted.error == (uintptr_t)object_error::OK,
           (unsigned long)granted.error, 0);
-    // 0 = 期限切れで取り上げ。相手は自分から返さないのでこれが期待値。
-    check("grant: reclaimed by deadline", granted.value == 0,
+    // 0 = 使い切って取り上げ。相手は自分から返さないのでこれが期待値。
+    check("grant: reclaimed by budget", granted.value == 0,
           (unsigned long)granted.value, 0);
-    // ★取り上げまでの時間が期限の桁に収まっていること。青天井なら取り上げは
+    // ★取り上げまでの時間が貸した量の桁に収まっていること。青天井なら取り上げは
     //   効いていない (「動いた」だけでは証拠にならない)。
-    check("grant: within deadline", elapsed >= 1000 && elapsed < 20000,
-          (unsigned long)elapsed, 2000);
+    //   ★下限も見る: クロックで数えているのだから、2ms ぶん貸したのに 0.5ms で
+    //     戻ってきたら「数え方が壊れている」証拠になる (上限だけ見ていると
+    //     早すぎる取り上げを見逃す)。
+    check("grant: within the lent budget",
+          elapsed >= expected_us / 2 && elapsed < expected_us * 10,
+          (unsigned long)elapsed, (unsigned long)expected_us);
     // 相手が実際に走ったこと (貸したのに走っていないなら別の壊れ方)。
     check("grant: borrower ran", g_hog_rounds > before,
           (unsigned long)(g_hog_rounds - before), 1);
 
     g_hog_stop = 1; // 片付け: 次に走ったら自分で終わる
-    api(object_api::RUN_FOR, spawned.value, 2000);
+    api(object_api::RUN_FOR, spawned.value, lend_cycles);
   }
 
   BOARD::diag_printf("[SELFTEST] thread ladder done: %lu passed, %lu failed\n",

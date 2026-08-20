@@ -90,9 +90,9 @@ template <> void KERNEL_OBJECT::init() {
     m_shadow[thread].depth = 0;
     m_thread_object[thread] = (uint16_t)ROOT_OBJECT;
     m_wake_at[thread] = 0;
-    // 既定は時限つき。自分から返さないスレッドがいても系が凍らないようにする
-    // (期限は quantum ではなく安全網 — 正常時はこれより早く返るので発火しない)。
-    m_budget[thread] = 2000;
+    // 既定は量つき。自分から返さないスレッドがいても系が凍らないようにする
+    // (量は quantum ではなく安全網 — 正常時はこれより早く返るので発火しない)。
+    m_budget[thread] = DEFAULT_BUDGET_CYCLES;
   }
   m_rotor = 0;
   for (uintptr_t thread = 0; thread < THREAD_COUNT; ++thread)
@@ -316,7 +316,7 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
   m_thread_object[spawned.thread] = (uint16_t)id;
   m_shadow[spawned.thread].depth = 0;
   m_wake_at[spawned.thread] = 0;
-  m_budget[spawned.thread] = 2000;
+  m_budget[spawned.thread] = DEFAULT_BUDGET_CYCLES;
   return spawned.thread;
 }
 
@@ -345,7 +345,7 @@ template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
       m_shadow[candidate].depth = 0;
       m_thread_object[candidate] = (uint16_t)ROOT_OBJECT;
       m_wake_at[candidate] = 0;
-      m_budget[candidate] = 2000;
+      m_budget[candidate] = DEFAULT_BUDGET_CYCLES;
       kernel_instance.release(candidate); // 枠も返す (再利用できるようにする)
       continue;
     }
@@ -407,10 +407,10 @@ uintptr_t KERNEL_OBJECT::yield_to(uintptr_t target, object_error &error) {
 }
 
 template <>
-uintptr_t KERNEL_OBJECT::run_for(uintptr_t thread, uintptr_t microseconds,
+uintptr_t KERNEL_OBJECT::run_for(uintptr_t thread, uintptr_t cycles,
                                  object_error &error) {
   const auto result =
-      ARCH::syscall((uintptr_t)primitive::GRANT, thread, microseconds);
+      ARCH::syscall((uintptr_t)primitive::GRANT, thread, cycles);
   if (result.error != (uintptr_t)kernel_error::OK) {
     error = object_error::NOT_RUNNABLE;
     return 0;

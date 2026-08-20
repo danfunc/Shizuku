@@ -12,8 +12,10 @@ template <> void KERNEL::init() {
   //   set_thread_storage で渡されるまでスレッドは 1 本も存在しない。
   m_threads = nullptr;
   m_thread_count = 0;
-  for (uintptr_t core = 0; core < CORE_COUNT; ++core)
+  for (uintptr_t core = 0; core < CORE_COUNT; ++core) {
     m_current[core] = 0;
+    m_armed[core] = 0;
+  }
   m_object_svc_handler = 0;
   m_recovery_thread = 0;
   m_faults = {};

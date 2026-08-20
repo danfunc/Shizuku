@@ -190,11 +190,12 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
   }
   case primitive::GRANT: {
     const uint32_t target = (uint32_t)ARCH::arg(*frame, 1);
-    const uint32_t microseconds = (uint32_t)ARCH::arg(*frame, 2);
+    // ★単位はクロック。µs ではない (kernel.hpp の grant_frame を参照)。
+    const uint32_t cycles = (uint32_t)ARCH::arg(*frame, 2);
     // 貸し手の戻り値は先に OK を置いておく (借り手が返してきたとき a1 に理由が入る)。
     ARCH::set_result(*frame, (uintptr_t)kernel_error::OK,
                      (uintptr_t)grant_end::YIELDED);
-    const kernel_error error = do_grant(target, microseconds);
+    const kernel_error error = do_grant(target, cycles);
     if (error != kernel_error::OK)
       ARCH::set_result(*frame, (uintptr_t)error, 0);
     break;
@@ -220,8 +221,9 @@ template <> void KERNEL::pendsv_dispatch(KERNEL::CONTEXT *context) {
   grant_stack &grants = m_grants[core];
   if (grants.depth == 0)
     return;
-  if (grants.frames[grants.depth - 1].deadline > BOARD::time_us()) {
-    arm_timer(grants.frames[grants.depth - 1].deadline);
+  grant_charge();
+  if (grants.frames[grants.depth - 1].remaining != 0) {
+    arm_timer();
     return;
   }
   grant_unwind(grant_end::EXPIRED);

@@ -39,6 +39,11 @@ public:
   static constexpr uintptr_t THREAD_COUNT = THREAD_COUNT_T;
   // 1 スレッドあたりのスタック。深さの上限も方針。
   static constexpr uintptr_t THREAD_STACK_BYTES = 4096;
+  // スレッドへ CPU を渡すときの既定の量 [クロック]。★時間ではなく仕事量で書く
+  //   (kernel.hpp の grant_frame を参照)。目安として 150MHz なら約 2ms だが、
+  //   **その換算はここの意味ではない** — クロックを上げれば同じ数字がより短い
+  //   時間になる。それでよい: 縛りたいのは仕事量のほう。
+  static constexpr uint32_t DEFAULT_BUDGET_CYCLES = 300000;
   static constexpr uintptr_t ROOT_OBJECT = 0; // ブートスレッドが名乗るオブジェクト
   static constexpr uintptr_t NO_OBJECT = OBJECT_COUNT;
 
@@ -115,7 +120,7 @@ private:
                          object_error &error);
   uintptr_t yield_to(uintptr_t target, object_error &error);
   uintptr_t sleep_us(uintptr_t microseconds, object_error &error);
-  uintptr_t run_for(uintptr_t thread, uintptr_t microseconds,
+  uintptr_t run_for(uintptr_t thread, uintptr_t cycles,
                     object_error &error);
   void exit_thread();
   // そのオブジェクトを走らせるときの保護指定 (PROTECTION_*)。
