@@ -19,12 +19,15 @@ using BOARD = KERNEL::BOARD;
 
 constexpr uintptr_t OBJECT_WORKER = 4; // 譲り合う相手
 constexpr uintptr_t OBJECT_HOG = 5;    // 実行権を返さない相手
+constexpr uintptr_t OBJECT_SLEEPER = 6; // 借りたまま眠ろうとする相手
 constexpr uintptr_t METHOD_MAIN = 0;
 
 volatile uint32_t g_worker_rounds = 0;
 volatile uint32_t g_worker_done = 0;
 volatile uint32_t g_hog_rounds = 0;
 volatile uint32_t g_hog_stop = 0;
+volatile uint32_t g_sleeper_woke = 0;
+constexpr uintptr_t SLEEPER_SLEEP_US = 50000; // 貸す量よりずっと長く眠る
 
 void check(const char *name, bool ok, unsigned long got, unsigned long want) {
   if (ok) {
@@ -55,6 +58,18 @@ uintptr_t worker(uintptr_t rounds, uintptr_t, uintptr_t, uintptr_t) {
   }
   g_worker_done = 1;
   return rounds; // return するとスレッドが終わる (戻り先が無い = exit)
+}
+
+// 借りている最中に眠ろうとする相手。★ここが「クロックで数える」ことの穴の
+//   受け皿になる: サイクルカウンタはコアが止まっている間は数えないので、借り手が
+//   そのまま眠れると予算が減らず、取り上げも起きない = 貸し手へ CPU が戻らない。
+//   Shizuku ではこれは機構の穴ではなく**契約の話**として閉じている — 眠るのは
+//   カーネルオブジェクトへの**要請**であって、要請した時点で実行権は返る。
+//   つまり「眠りに入る = 契約の終了」。それを下で実際に確かめる。
+uintptr_t sleeper(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  api(object_api::SLEEP_US, SLEEPER_SLEEP_US);
+  g_sleeper_woke = 1;
+  return 0;
 }
 
 // 実行権を返さない相手。**自分からは絶対に譲らない**。取り上げが効かなければ
@@ -127,6 +142,55 @@ void thread_ladder() {
 
     g_hog_stop = 1; // 片付け: 次に走ったら自分で終わる
     api(object_api::RUN_FOR, spawned.value, lend_cycles);
+  }
+
+  // ---- 借りたまま眠ろうとしたら、契約はそこで終わる ------------------------
+  // ★これを確かめないと「クロックで数える」設計に穴が開く: サイクルカウンタは
+  //   コアが止まっている間は数えないので、借り手がそのまま眠れると予算は減らず、
+  //   取り上げも起きない。Shizuku ではそれを機構ではなく契約で閉じている
+  //   (眠るのはカーネルオブジェクトへの要請で、要請した時点で実行権が返る)。
+  //   **契約は、破れていないことを見て初めて契約になる**。
+  {
+    api(object_api::CREATE_OBJECT, OBJECT_SLEEPER, (uintptr_t)&sleeper, 0);
+    const api_result spawned =
+        api(object_api::SPAWN, OBJECT_SLEEPER, METHOD_MAIN, 0);
+    check("sleep: spawn sleeper", spawned.error == (uintptr_t)object_error::OK,
+          (unsigned long)spawned.error, 0);
+
+    const uint32_t lend_cycles = 5000u * BOARD::cycles_per_us(); // ≒5ms 貸す
+    const uint64_t started = BOARD::time_us();
+    const api_result granted =
+        api(object_api::RUN_FOR, spawned.value, lend_cycles);
+    const uint64_t elapsed = BOARD::time_us() - started;
+
+    // 1 = 相手が自分から返した。0 (使い切り) なら「眠っても予算が減らない」まま
+    // 期限で取り上げたことになり、契約ではなく機構が救ったことになる。
+    check("sleep: the borrower gave the grant back", granted.value == 1,
+          (unsigned long)granted.value, 1);
+    // ★貸した量よりずっと早く戻ること。眠り (50ms) を待たされていないことも兼ねる。
+    check("sleep: the lender resumed at once", elapsed < 5000,
+          (unsigned long)elapsed, 5000);
+
+    // 眠り終えたら起きること (返したきり忘れられていないか)。
+    for (uint32_t guard = 0; guard < 5000 && g_sleeper_woke == 0; ++guard)
+      api(object_api::YIELD);
+    check("sleep: the sleeper woke up later", g_sleeper_woke == 1,
+          (unsigned long)g_sleeper_woke, 1);
+  }
+
+  // ---- 配れる持ち分が無いなら、貸さずに断る -------------------------------
+  // ★装填には下限があるので、下限未満を「丸めて」貸すと借り手は貸された以上に
+  //   走れる。少ししか残っていないときに黙って多めに貸すより、断るほうが正しい。
+  {
+    const api_result spawned =
+        api(object_api::SPAWN, OBJECT_WORKER, METHOD_MAIN, 1);
+    const api_result granted = api(object_api::RUN_FOR, spawned.value, 8);
+    check("grant: a budget too small to honour is refused",
+          granted.error == (uintptr_t)object_error::NO_TIME,
+          (unsigned long)granted.error, (unsigned long)object_error::NO_TIME);
+    // 断ったのだから相手は走っていない = まだ READY のまま片付けられる。
+    api(object_api::RUN_FOR, spawned.value,
+        2000u * BOARD::cycles_per_us());
   }
 
   BOARD::diag_printf("[SELFTEST] thread ladder done: %lu passed, %lu failed\n",

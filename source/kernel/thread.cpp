@@ -153,9 +153,6 @@ kernel_error KERNEL::do_grant(uint32_t target, uint32_t cycles) {
   grant_stack &grants = m_grants[core];
   if (grants.depth >= grant_stack::MAX_DEPTH)
     return kernel_error::GRANT_DEPTH;
-  kernel_error error = kernel_error::OK;
-  if (!claim(target, error))
-    return error;
   // ★外側の残りを読む前に、今の刻みで使ったぶんを引いておく。引かずに読むと
   //   「外側はまだ丸ごと残っている」ことになり、又貸しで実質延長できてしまう。
   grant_charge();
@@ -163,6 +160,16 @@ kernel_error KERNEL::do_grant(uint32_t target, uint32_t cycles) {
   uint64_t budget = cycles;
   if (grants.depth != 0 && grants.frames[grants.depth - 1].remaining < budget)
     budget = grants.frames[grants.depth - 1].remaining;
+  // ★タイマが正直に数えられる最小を下回るなら**貸さずに断る**。装填には下限が
+  //   あり (装填直後の発火は取りこぼす)、下限へ丸め上げて貸すと借り手は
+  //   **貸された以上に走れる** — 外側でクランプしている意味が消える。
+  //   ★claim より前に判定する。先に claim すると、断るときに相手を READY へ
+  //     戻す後始末が要る (戻し忘れると走れるスレッドが黙って消える)。
+  if (budget < ARCH::TIMER_MIN_CYCLES)
+    return kernel_error::GRANT_TOO_SMALL;
+  kernel_error error = kernel_error::OK;
+  if (!claim(target, error))
+    return error;
   grants.frames[grants.depth++] = {current, budget};
   // 貸し手は WAIT_GRANT。READY ではないので他コアに拾われず、復帰はこのコアの
   // 巻き取り経路 (期限 or 早期復帰) だけになる。

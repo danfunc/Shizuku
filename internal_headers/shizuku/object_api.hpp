@@ -107,6 +107,10 @@ enum struct object_error : uintptr_t {
   NO_MEMORY,         // 借りられる記憶が無い
   BAD_MEMORY,        // 取っ手が不正 (借りていない / 範囲外)
   NOT_OWNER,         // 自分のものではない記憶に触ろうとした
+  // 自分に残っている実行権が、貸すに足りるだけ無かった。★「相手が走れない」
+  // (NOT_RUNNABLE) とは別物 — 相手は走れるが**こちらに配れる持ち分が無い**。
+  // 区別しないと、スケジューラが次の候補を延々と試して空回りする。
+  NO_TIME,
 };
 
 } // namespace shizuku

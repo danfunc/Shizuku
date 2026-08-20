@@ -362,6 +362,10 @@ template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
       m_rotor = candidate;
       return true;
     }
+    // ★自分の持ち分が尽きたのなら、次の候補を試しても同じ答えしか返らない。
+    //   ここで諦めて戻り、外側の貸しが切れるに任せる (空回りしない)。
+    if (result.error == (uintptr_t)kernel_error::GRANT_TOO_SMALL)
+      return false;
   }
   return false;
 }
@@ -411,6 +415,12 @@ uintptr_t KERNEL_OBJECT::run_for(uintptr_t thread, uintptr_t cycles,
                                  object_error &error) {
   const auto result =
       ARCH::syscall((uintptr_t)primitive::GRANT, thread, cycles);
+  if (result.error == (uintptr_t)kernel_error::GRANT_TOO_SMALL) {
+    // ★「相手が走れない」ではなく「こちらに配れる持ち分が無い」。区別しないと、
+    //   スケジューラが次の候補を延々と試して空回りする。
+    error = object_error::NO_TIME;
+    return 0;
+  }
   if (result.error != (uintptr_t)kernel_error::OK) {
     error = object_error::NOT_RUNNABLE;
     return 0;
