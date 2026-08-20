@@ -54,6 +54,13 @@ void burn_microseconds(uint32_t microseconds) {
 }
 
 volatile uint32_t g_load_rounds[3];
+uintptr_t g_load_threads[3];
+
+// ★期限を振って揺らぎが追随するかを見る。追随するなら原因は方針 (期限) であり、
+//   ある値で頭打ちになるなら、そこから下は機構の費用 (取り上げ・切替・走査) か
+//   周辺デバイスの費用。1 回の書き込みで曲線が取れるよう、窓ごとに切り替える。
+constexpr uint32_t BUDGET_SWEEP[] = {2000, 1000, 500, 200, 100};
+constexpr uint32_t BUDGET_STEPS = sizeof(BUDGET_SWEEP) / sizeof(BUDGET_SWEEP[0]);
 
 // 負荷スレッド。a0 = 種別 (0/1/2)。**印字しない**。
 uintptr_t load(uintptr_t kind, uintptr_t, uintptr_t, uintptr_t) {
@@ -84,7 +91,9 @@ uintptr_t blink(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   uint64_t next = BOARD::time_us() + BLINK_PERIOD_US;
   uint64_t late_max = 0;      // 起動来の最大 (一過性の山も残る)
   uint64_t late_window = 0;   // 窓ごとの最大 (今も続いているかが分かる)
+  uint64_t led_window = 0;    // LED への書き込みにかかった時間 (窓の最大)
   uint32_t periods = 0;
+  uint32_t sweep = 0;
 
   while (true) {
     // 絶対グリッドで待つ。相対で待つとズレが積み上がって「遅れ」が測れない。
@@ -100,25 +109,44 @@ uintptr_t blink(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       late_window = late;
 
     request.value ^= 1u;
+    // ★LED への書き込み時間を別に測る。無線チップ側の LED は SPI 越しなので、
+    //   ここが大きいなら「揺らぎ」の一部は周辺デバイスの費用であって
+    //   スケジューリングの費用ではない — 混ぜると原因を取り違える。
+    const uint64_t led_started = BOARD::time_us();
     const auto written = ARCH::syscall((uintptr_t)object_api::CALL_METHOD,
                                        objects::LED_OBJECT,
                                        (uintptr_t)objects::led_method::WRITE,
                                        (uintptr_t)&request);
+    const uint64_t led_took = BOARD::time_us() - led_started;
+    if (led_took > led_window)
+      led_window = led_took;
     next += BLINK_PERIOD_US;
 
     if (++periods >= REPORT_PERIODS) {
       // ★「動いている」ではなく「どれだけ外したか」を出す。窓の値と起動来の値を
       //   分けるのは、回復したのに古い山が残って誤判定するのを避けるため
       //   (参照実装が late(max) だけ見て誤って FAIL と判定した罠)。
+      const uint32_t budget = BUDGET_SWEEP[sweep];
       BOARD::diag_printf(
-          "[STRESS] blink late win=%luus max=%luus led_err=%lu "
-          "load=%lu/%lu/%lu selftest=%lu passed/%lu failed\n",
-          (unsigned long)late_window, (unsigned long)late_max,
-          (unsigned long)written.error, (unsigned long)g_load_rounds[0],
-          (unsigned long)g_load_rounds[1], (unsigned long)g_load_rounds[2],
-          (unsigned long)passed, (unsigned long)failed);
+          "[STRESS] budget=%luus late win=%luus max=%luus led_write=%luus "
+          "load=%lu/%lu/%lu err=%lu | selftest=%lu passed/%lu failed "
+          "control unpriv=%lu priv=%lu\n",
+          (unsigned long)budget, (unsigned long)late_window,
+          (unsigned long)late_max, (unsigned long)led_window,
+          (unsigned long)g_load_rounds[0], (unsigned long)g_load_rounds[1],
+          (unsigned long)g_load_rounds[2], (unsigned long)written.error,
+          (unsigned long)passed, (unsigned long)failed,
+          (unsigned long)unprivileged_control,
+          (unsigned long)privileged_control);
       late_window = 0;
+      led_window = 0;
       periods = 0;
+      // 次の窓は別の期限で測る (同じ条件を続けて測るのではなく、条件を変えて
+      // 追随するかを見る。追随すれば原因は期限だと言い切れる)。
+      sweep = (sweep + 1) % BUDGET_STEPS;
+      for (uintptr_t index = 0; index < 3; ++index)
+        syscall_value(object_api::SET_BUDGET, g_load_threads[index],
+                      BUDGET_SWEEP[sweep]);
     }
   }
 }
@@ -148,7 +176,8 @@ void stress_launch() {
   syscall_value(object_api::SET_BUDGET, blink_thread, 500);
 
   for (uintptr_t kind = 0; kind < 3; ++kind)
-    syscall_value(object_api::SPAWN, OBJECT_LOAD, METHOD_MAIN, kind);
+    g_load_threads[kind] =
+        syscall_value(object_api::SPAWN, OBJECT_LOAD, METHOD_MAIN, kind);
 
   BOARD::diag_printf("[STRESS] blink thread=%lu, 3 load threads running\n",
                      (unsigned long)blink_thread);

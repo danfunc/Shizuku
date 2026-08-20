@@ -16,6 +16,7 @@ void shizuku::app_entry() {
   const uint32_t peripheral_failures = shizuku::objects::register_peripherals();
   shizuku::selftest::call_ladder();
   shizuku::selftest::thread_ladder();
+  shizuku::selftest::unprivileged_probe();
 
   // 負荷試験を起動する。以後、点滅と報告は専用スレッドが行う。
   shizuku::selftest::stress_launch();

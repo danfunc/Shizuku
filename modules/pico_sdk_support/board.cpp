@@ -1,10 +1,19 @@
 #include "hardware/clocks.h"
+#include "hardware/regs/addressmap.h"
 #include "hardware/exception.h"
 #include "hardware/irq.h"
 #include "hardware/structs/scb.h"
 #include "pico/stdlib.h"
 #include "shizuku/archs/armv8m.hpp"
 #include "shizuku/boards/rp2350_pico2.hpp"
+
+// board は「どの ISA の上に居るか」を知っている層でもある (region を張る機構は
+// arch 側)。ここだけの別名にして、上位のテンプレート引数とは混ぜない。
+using ARCH_TYPE = shizuku::archs::armv8m;
+
+// リンカが置く「静的データの終端 = ヒープの先頭」。名前空間の中で宣言すると
+// 名前が飾られて別物になるので、必ずファイル先頭で C リンケージとして宣言する。
+extern "C" char __end__[];
 #include <cstdarg>
 #include <cstdio>
 
@@ -48,6 +57,7 @@ void rp2350_pico2::init(uint32_t core) {
   exception_set_priority(SVCALL_EXCEPTION, 0x00);
   exception_set_priority(SYSTICK_EXCEPTION, 0x40);
   exception_set_priority(PENDSV_EXCEPTION, PICO_LOWEST_IRQ_PRIORITY);
+  protection_init(); // region は per-core banked なので各コアで張る
 
   // ---- 落ちたときに必ず声が出るようにする -------------------------------
   // ★診断が届くかどうかは優先度で決まる。報告している最中に USB の割り込みが
@@ -63,6 +73,28 @@ void rp2350_pico2::init(uint32_t core) {
   // 設定可能なフォールトを有効化する (無効のままだと全部 HardFault へ落ちて
   // 優先度 -1 になり、上の工夫が効かなくなる)。SHCSR の該当ビット。
   scb_hw->shcsr |= (1u << 16) | (1u << 17) | (1u << 18); // MEM/BUS/USG FAULTENA
+}
+
+// ★どこに何を張るかは board の知識 (SoC のメモリ地図を知っているのはここだけ)。
+//   狙いは 2 つ:
+//     (i)  データを実行させない / コードを書き換えさせない (W^X)
+//     (ii) region の外を特権だけに閉じる (PRIVDEFENA) — 単一アドレス空間で
+//          「カーネル空間」を作る唯一の方法 (DESIGN §11.1)
+//   ★静的データ (.bss/.data) は region の外に落ちる。つまり**非特権オブジェクトは
+//     自分のグローバルに触れない**。これは事故ではなく設計で、オブジェクトの状態は
+//     ヒープ上 (= region1) に置けという圧力になる (§11.2.2)。
+void rp2350_pico2::protection_init() {
+  // region0: XIP (フラッシュ窓) 全域 = 読み+実行のみ。フラッシュへの誤書き込みを止める。
+  ARCH_TYPE::region_set(0, XIP_BASE, XIP_END - 32u, ARCH_TYPE::ACCESS_RO_ALL,
+                        false, 0);
+  // region1: ヒープ先頭〜SRAM 終端 = 読み書き可・実行不可。スレッドスタックは
+  // ここに住むので、スタック上のデータを実行する事故が止まる。
+  const uintptr_t heap = ((uintptr_t)__end__ + 31u) & ~(uintptr_t)31;
+  ARCH_TYPE::region_set(1, heap, SRAM_END - 32u, ARCH_TYPE::ACCESS_RW_ALL, true,
+                        1);
+  for (uint32_t index = 2; index < 8; ++index)
+    ARCH_TYPE::region_disable(index);
+  ARCH_TYPE::protection_enable();
 }
 
 uint32_t rp2350_pico2::cycles_per_us() {

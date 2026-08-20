@@ -2,6 +2,7 @@
 #define SHIZUKU_ARCHS_ARMV8M_HPP
 #include <cstddef>
 #include <cstdint>
+#include "hardware/structs/mpu.h"
 #include "hardware/structs/scb.h"
 #include "hardware/structs/systick.h"
 #include "shizuku/concepts/arch.hpp"
@@ -159,6 +160,45 @@ public:
   //   取得コストゼロで手に入る。
   static void pend_context_switch() {
     scb_hw->icsr = 1u << 28; // PENDSVSET
+  }
+
+  // ---- メモリ保護 (機構だけ。どこに何を張るかは board の知識) ----------------
+  // ★PMSAv8 は有効 region の重なりを許さない。「広い RW に穴を開ける」ことが
+  //   できないので、配置で解くしかない (参照実装が PMSAv7 の知識を捨てろと
+  //   書いているのはこの点)。base/limit は 32B 粒度で limit は内包。
+  static constexpr uint32_t ACCESS_RW_ALL = 0b01; // 特権/非特権とも読み書き
+  static constexpr uint32_t ACCESS_RO_ALL = 0b11; // 特権/非特権とも読みだけ
+  static void region_set(uint32_t index, uintptr_t base, uintptr_t limit,
+                         uint32_t access, bool execute_never,
+                         uint32_t attribute) {
+    mpu_hw->rnr = index;
+    mpu_hw->rbar =
+        ((uint32_t)base & ~0x1Fu) | (access << 1) | (execute_never ? 1u : 0u);
+    mpu_hw->rlar = ((uint32_t)limit & ~0x1Fu) | (attribute << 1) | 1u;
+  }
+  static void region_disable(uint32_t index) {
+    mpu_hw->rnr = index;
+    mpu_hw->rlar = 0;
+  }
+  // attr0 = 通常メモリ (書き戻し), attr1 = 通常メモリ (キャッシュしない)。
+  static void protection_enable() {
+    mpu_hw->mair[0] = 0xFFu | (0x44u << 8);
+    // ★PRIVDEFENA: region で明示していない場所は「特権だけが触れる」。これが
+    //   単一アドレス空間における「カーネル空間」の実体で、MMU が無くても
+    //   非特権から見えない領域を作れる (DESIGN §11.1)。
+    mpu_hw->ctrl = M33_MPU_CTRL_PRIVDEFENA_BITS | M33_MPU_CTRL_ENABLE_BITS;
+    asm volatile("dsb\nisb" ::: "memory");
+  }
+  static void protection_disable() {
+    mpu_hw->ctrl = 0;
+    asm volatile("dsb\nisb" ::: "memory");
+  }
+  // 今の実行の CONTROL をそのまま返す。**状態は対象自身に申告させる** ための口
+  // (DESIGN §16 / §11.2.0: 「非特権で動いた」は自己申告なしには言えない)。
+  static uint32_t control_register() {
+    uint32_t control;
+    asm volatile("MRS %0, CONTROL" : "=r"(control));
+    return control;
   }
 
   // ---- 特権とスタック上限 -------------------------------------------------

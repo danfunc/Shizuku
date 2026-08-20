@@ -15,6 +15,8 @@ public:
   // ハンドラ登録は core0 の 1 回だけ、優先度 (SHPR, banked) は各コアで設定する。
   // ★優先度規約: SVC 最優先 > (タイマ) > PendSV 最低 (concepts/arch.hpp 参照)。
   static void init(uint32_t core);
+  // このコアのメモリ保護を張る (region は per-core banked なので各コアで呼ぶ)。
+  static void protection_init();
   static uint32_t core_num() { return (uint32_t)::get_core_num(); }
   static uint64_t time_us() { return ::time_us_64(); }
   // ★クロックを知っているのは board (PORT §2.3)。上位は µs でしか話さない。

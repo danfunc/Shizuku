@@ -22,6 +22,13 @@ void call_ladder();
 // 取り上げる。**取り上げが効くこと**が「1 つの暴走が全系を凍らせない」の証拠になる。
 void thread_ladder();
 
+// 非特権オブジェクトが本当に非特権で走っているかを、対象自身に申告させて確かめる。
+void unprivileged_probe();
+// プローブが自分で読んで持ち帰った CONTROL。定期報告に載せて、いつ繋いでも
+// 「本当に非特権で走ったのか」を確かめられるようにする。
+extern uintptr_t unprivileged_control;
+extern uintptr_t privileged_control;
+
 // 負荷試験: ランダムな長さの仕事をするスレッドを何本か走らせ、周期スレッドが
 // 締切をどれだけ外すか (揺らぎ) を測り続ける。目視ではなく数字で見る。
 void stress_launch();

@@ -121,13 +121,13 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
 }
 
 // そのオブジェクトを走らせるときの保護指定。
-// ★今は全オブジェクトを特権で走らせる。MPU がまだ無いので非特権にしても隔離には
-//   ならず、pico-sdk の一部が黙って壊れるだけ (DESIGN §11.2.1: 非特権化は per-object
-//   arena と region が揃ってから)。生成時の宣言はここで効かせる形にしてあるので、
-//   Phase 5 ではこの関数だけを直せばよい。
+// ★既定は特権のまま。非特権で走れるのは「状態をヒープに置き、標準ライブラリを
+//   直に呼ばない」オブジェクトだけで (静的データもペリフェラルも region の外 =
+//   特権のみになるため。DESIGN §11.2.2)、今それを満たすのは宣言した相手だけ。
+//   arena が入って既定を反転できるようになるまでは、opt-in にしておく。
 template <> uint32_t KERNEL_OBJECT::object_protection(uintptr_t id) const {
-  (void)m_objects[id].flags;
-  return PROTECTION_PRIVILEGED;
+  return (m_objects[id].flags & OBJECT_UNPRIVILEGED) ? PROTECTION_UNPRIVILEGED
+                                                     : PROTECTION_PRIVILEGED;
 }
 
 template <>
