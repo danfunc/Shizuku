@@ -50,9 +50,7 @@ public:
     frame.slot[6] = pc;
     frame.slot[5] = lr;
   }
-  static void set_handler_info(context_t &, uintptr_t, uintptr_t) {}
   static uintptr_t return_stub() { return 0; }
-  template <auto FUNCTION> static uintptr_t handler_entry() { return 0; }
   static bool current_priv() { return true; }
   static void set_priv(context_t &, bool) {}
   static void stack_limit_set(context_t &, uintptr_t) {}

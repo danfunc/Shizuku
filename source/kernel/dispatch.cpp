@@ -107,7 +107,6 @@ kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
 template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
   THREAD &thread = current_thread();
   FRAME *frame = context->sp;
-  const uintptr_t number = ARCH::arg(*frame, 0);
 
   if ((thread.call_stack.depth & 1u) == 0) {
     // 偶数段 = オブジェクトが走っている。その svc はオブジェクトランドのハンドラへの
@@ -120,17 +119,18 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
     request.protection = PROTECTION_PRIVILEGED;
     for (unsigned index = 0; index < 4; ++index)
       request.args[index] = ARCH::arg(*frame, index); // 元の引数をそのまま渡す
+    // ★ハンドラへ渡す情報はレジスタに散らさない。番号は引数スロット (a0) に
+    //   そのまま乗っており、ネストの深さはカーネルが積んだフレームの段数そのもの。
+    //   どちらも呼び出しフレーム側にあるので、ネストしても混ざらないし、呼び先の
+    //   C 関数が callee-saved を潰しても壊れない (参照実装はここをレジスタで
+    //   持ち回り、ABI シムの push 順を間違えて何度も溶かしている)。
     const kernel_error error = do_call(thread, context, &frame, request);
-    if (error != kernel_error::OK) {
+    if (error != kernel_error::OK)
       ARCH::set_result(*frame, (uintptr_t)error, 0);
-      return;
-    }
-    // ★ハンドラへ「今のネスト数」を渡す。オブジェクトは RETURN を撃てないので、
-    //   何段巻き戻すかを決めるのはハンドラであり、その検算材料がこの値になる。
-    ARCH::set_handler_info(*context, number, thread.call_stack.depth);
     return;
   }
 
+  const uintptr_t number = ARCH::arg(*frame, 0);
   // ここから先は奇数段 = ハンドラだけ。プリミティブを撃てるのがカーネルオブジェクトの
   // ハンドラに限られること (I-2) は、この分岐自体が保証している。
   switch ((primitive)number) {

@@ -26,14 +26,10 @@ namespace concepts {
 // - arg / set_args / set_result / set_entry :
 //                       syscall ABI のスロット (a0..a4 / 戻り a0,a1 / 入口 pc,lr) への
 //                       アクセス。番号と引数の載せ場所を ISA 側に閉じ込める
-// - set_handler_info  : ハンドラを起こすときにカーネルが渡す情報 (svc 番号と
-//                       **今のネスト数**) を、ハンドラが受け取れる場所 (callee-saved
-//                       レジスタ等) へ置く。ネスト数は「何段戻すか」の申告に使う
 // - return_stub       : 呼び先が普通に return したときの戻り口アドレス (系に 1 本)。
 //                       RETURN(段数=1, 値, 0, 申告) を撃つ。ハンドラから出れば
 //                       プリミティブ、オブジェクトから出れば経路判定でハンドラへ
 //                       届く — 同じコードで両方を賄う
-// - handler_shim<F>   : ハンドラの ABI シム。callee-saved で渡した情報を C の引数へ
 // - current_priv      : 「今の実行が特権か」の自己申告。自己テスト必須項目
 //                       (DESIGN §16「状態の主張は対象自身に申告させる」) の実装点
 // - set_priv          : 文脈が次に復帰するときの特権状態を設定する (即時ではない)
@@ -74,7 +70,6 @@ concept arch_requires =
       { ARCH::set_args(frame, args) };
       { ARCH::set_result(frame, address, address) };
       { ARCH::set_entry(frame, address, address) };
-      { ARCH::set_handler_info(context, address, address) };
       { ARCH::return_stub() } -> std::same_as<uintptr_t>;
       { ARCH::current_priv() } -> std::same_as<bool>;
       { ARCH::set_priv(context, flag) };

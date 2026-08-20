@@ -43,10 +43,11 @@ public:
   static uintptr_t handler_entry();
 
   // ---- ハンドラ本体 -------------------------------------------------------
-  // number/a1..a3 は発行元が撃った syscall の引数、depth はカーネルが渡した
-  // 「今のネスト数」。戻り値は発行元へ返る値 (エラーは 0)。
-  uintptr_t handle(uintptr_t number, uintptr_t a1, uintptr_t a2, uintptr_t a3,
-                   uintptr_t depth);
+  // 引数は発行元が撃った syscall の a0..a3 そのもの (a0 = 番号)。戻り値は発行元へ
+  // 返る値 (エラーは reply で返す)。
+  // ★ネストの情報はレジスタで受け取らない。今のネスト数はカーネルが積んだフレームの
+  //   段数として読め、こちらは自分の台帳から独立に数えた値を申告して突き合わせる。
+  uintptr_t handle(uintptr_t number, uintptr_t a1, uintptr_t a2, uintptr_t a3);
 
   // スケジューリングの方針 (どのスレッドを次に走らせるか) はここが持つ。
   // カーネルは「渡す機構」しか持たない (D1)。
@@ -85,17 +86,18 @@ private:
   uintptr_t yield_to(uintptr_t target, object_error &error);
   uintptr_t run_for(uintptr_t thread, uintptr_t microseconds,
                     object_error &error);
-  void exit_thread(uintptr_t depth);
+  void exit_thread();
   // そのオブジェクトを走らせるときの保護指定 (PROTECTION_*)。
   uint32_t object_protection(uintptr_t id) const;
   uintptr_t export_method(uintptr_t method, uintptr_t entry,
                           object_error &error);
   uintptr_t call_method(uintptr_t id, uintptr_t method, uintptr_t argument,
-                        uintptr_t depth, object_error &error);
-  void exit_method(uintptr_t levels, uintptr_t value, uintptr_t error,
-                   uintptr_t depth);
+                        object_error &error);
+  void exit_method(uintptr_t levels, uintptr_t value, uintptr_t error);
   // 巻き戻さずにその場で答える (エラー返却)。
-  void reply(object_error error, uintptr_t value, uintptr_t depth);
+  void reply(object_error error, uintptr_t value);
+  // 巻き戻しで申告する「今のネスト数」を**自分の台帳から**計算する (§9.3)。
+  uint32_t claimed_depth() const;
 
   object_t m_objects[OBJECT_COUNT];
   shadow_t m_shadow[KERNEL::THREAD_COUNT];

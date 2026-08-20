@@ -22,11 +22,11 @@ static_assert((uintptr_t)object_api::EXIT_METHOD == (uintptr_t)primitive::RETURN
 // 実装より前に使う (下の入口が handle を呼ぶ) ので、特殊化の宣言を先に置く。
 // これが無いと暗黙の実体化が先に起きて「実体化後の特殊化」になる。
 template <>
-uintptr_t KERNEL_OBJECT::handle(uintptr_t, uintptr_t, uintptr_t, uintptr_t,
-                                uintptr_t);
+uintptr_t KERNEL_OBJECT::handle(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+template <> uint32_t KERNEL_OBJECT::claimed_depth() const;
 template <> void KERNEL_OBJECT::init();
 template <> uintptr_t KERNEL_OBJECT::handler_entry();
-template <> void KERNEL_OBJECT::reply(object_error, uintptr_t, uintptr_t);
+template <> void KERNEL_OBJECT::reply(object_error, uintptr_t);
 template <>
 uintptr_t KERNEL_OBJECT::create_object(uintptr_t, uintptr_t, uintptr_t,
                                        object_error &);
@@ -34,33 +34,33 @@ template <> uint32_t KERNEL_OBJECT::object_protection(uintptr_t) const;
 template <>
 uintptr_t KERNEL_OBJECT::export_method(uintptr_t, uintptr_t, object_error &);
 template <>
-uintptr_t KERNEL_OBJECT::call_method(uintptr_t, uintptr_t, uintptr_t, uintptr_t,
+uintptr_t KERNEL_OBJECT::call_method(uintptr_t, uintptr_t, uintptr_t,
                                      object_error &);
-template <>
-void KERNEL_OBJECT::exit_method(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+template <> void KERNEL_OBJECT::exit_method(uintptr_t, uintptr_t, uintptr_t);
 template <>
 uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t, uintptr_t, uintptr_t,
                                       object_error &);
 template <> uintptr_t KERNEL_OBJECT::yield_to(uintptr_t, object_error &);
 template <>
 uintptr_t KERNEL_OBJECT::run_for(uintptr_t, uintptr_t, object_error &);
-template <> void KERNEL_OBJECT::exit_thread(uintptr_t);
+template <> void KERNEL_OBJECT::exit_thread();
 template <> bool KERNEL_OBJECT::schedule(uint32_t);
 
-// カーネルが起こすハンドラの入口。ARCH の ABI シムが callee-saved で渡された情報を
-// 第 5..8 引数へ変換してくれるので、素の C++ 関数として書ける。
-// (a0..a3 = 発行元の引数, 第 5 = svc 番号, 第 8 = 今のネスト数)
-// ★内部リンケージにしないこと — アドレスをシム内のリテラルへ即値として埋めるので、
-//   シンボルとして見える必要がある。
+// カーネルが起こすハンドラの入口。**素の C 関数**でよい。
+// ★ネストした呼び出しの情報をレジスタで持ち回らない: 番号は引数スロット (a0) に
+//   そのまま乗っており、今のネスト数はカーネルが積んだフレームの段数そのもの
+//   (kernel_instance.current_depth() で読める)。どちらも呼び出しフレーム側にあるので
+//   ネストしても混ざらず、C 関数が callee-saved を潰しても壊れない。
+//   参照実装はこれを callee-saved レジスタで渡し、C の引数へ変換する naked シムを
+//   必要としていた — push 順と引数位置の対応を何度も間違えた箇所なので、構造ごと
+//   無くすのが正しい。
 uintptr_t handler_entry_point(uintptr_t a0, uintptr_t a1, uintptr_t a2,
-                              uintptr_t a3, uintptr_t number, uintptr_t,
-                              uintptr_t, uintptr_t depth) {
-  (void)a0; // a0 は番号そのもの (レジスタ渡し ABI)。番号は第 5 引数で受ける
-  return kernel_object_instance.handle(number, a1, a2, a3, depth);
+                              uintptr_t a3) {
+  return kernel_object_instance.handle(a0, a1, a2, a3);
 }
 
 template <> uintptr_t KERNEL_OBJECT::handler_entry() {
-  return ARCH::handler_entry<&handler_entry_point>();
+  return (uintptr_t)&handler_entry_point;
 }
 
 template <> void KERNEL_OBJECT::init() {
@@ -79,11 +79,20 @@ template <> void KERNEL_OBJECT::init() {
   m_objects[ROOT_OBJECT].created = true;
 }
 
+// ★両側チェックの申告値を**自分の台帳から**計算する (§9.3)。
+//   カーネルのフレーム段数を写して返すのでは検算にならない。こちらは
+//   「呼び出しを何段積んだか」を独立に数えており、フレームは 1 段あたり 2 枚
+//   (呼び先の枠 + その中の svc を運ぶ枠) なので、ハンドラとして走っている今の
+//   段数は 2 * 呼び出し段数 + 1 になるはず。ここがズレたら台帳とカーネルの
+//   どちらかが壊れているので、カーネルが 1 枚も落とさずに弾く。
+template <> uint32_t KERNEL_OBJECT::claimed_depth() const {
+  return 2u * m_shadow[kernel_instance.current_thread_id()].depth + 1u;
+}
+
 // 巻き戻さずにその場で答える。**エラーを黙って捨てない**ための共通口 (D12)。
-template <>
-void KERNEL_OBJECT::reply(object_error error, uintptr_t value,
-                          uintptr_t depth) {
-  ARCH::syscall((uintptr_t)primitive::RETURN, 1, value, (uintptr_t)error, depth);
+template <> void KERNEL_OBJECT::reply(object_error error, uintptr_t value) {
+  ARCH::syscall((uintptr_t)primitive::RETURN, 1, value, (uintptr_t)error,
+                claimed_depth());
   // 成功すれば戻らない。
 }
 
@@ -132,8 +141,7 @@ uintptr_t KERNEL_OBJECT::export_method(uintptr_t method, uintptr_t entry,
 
 template <>
 uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
-                                     uintptr_t argument, uintptr_t depth,
-                                     object_error &error) {
+                                     uintptr_t argument, object_error &error) {
   const uint32_t thread = kernel_instance.current_thread_id();
   const uintptr_t caller = current_object(thread);
   if (id >= OBJECT_COUNT || !m_objects[id].created) {
@@ -176,14 +184,14 @@ uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
                 : object_error::BAD_OBJECT;
     return 0;
   }
-  (void)depth;
   return result.value;
 }
 
 template <>
 void KERNEL_OBJECT::exit_method(uintptr_t levels, uintptr_t value,
-                                uintptr_t error, uintptr_t depth) {
+                                uintptr_t error) {
   const uint32_t thread = kernel_instance.current_thread_id();
+  const uint32_t depth = claimed_depth(); // 台帳から申告する値 (落とす前に取る)
   shadow_t &shadow = m_shadow[thread];
   // 呼び出し 1 段につきフレームは 2 枚 (この戻りを運んだ枠 + 戻ろうとしている
   // 呼び先の枠)。**枚数を知っているのは枠を積んだこちら側**なので、オブジェクトは
@@ -193,8 +201,8 @@ void KERNEL_OBJECT::exit_method(uintptr_t levels, uintptr_t value,
   // ★戻り先が無い = スレッドの入口が return した。呼び出しを畳むのではなく
   //   「このスレッドが終わった」ということなので、そう扱う (§9.4 の exit)。
   //   自分の枠しか落とせないので、全オブジェクトに開放しても昇格にはならない。
-  if (depth < count) {
-    exit_thread(depth);
+  if (kernel_instance.current_depth() < count) {
+    exit_thread();
     return;
   }
   // 巻き戻しに成功するとここへは戻らないので、台帳は**先に**落としておく。
@@ -204,7 +212,7 @@ void KERNEL_OBJECT::exit_method(uintptr_t levels, uintptr_t value,
   // ★ここへ戻ってきた = 巻き戻しが検算で弾かれた。台帳を元へ戻し、発行元へ
   //   エラーとして返す (系は落とさない = I-9)。
   shadow.depth += (uint32_t)pops;
-  reply(object_error::UNWIND_REJECTED, (uintptr_t)result.error, depth);
+  reply(object_error::UNWIND_REJECTED, (uintptr_t)result.error);
 }
 
 // ---- スレッドと実行権の方針 -------------------------------------------------
@@ -292,7 +300,7 @@ uintptr_t KERNEL_OBJECT::run_for(uintptr_t thread, uintptr_t microseconds,
 // スレッドを終える。**このスレッドはもう走らない**ので、終える前に次の相手へ
 // 実行権を渡す。渡せなければ、この後カーネルが誰も選べないまま戻ることになるので、
 // 借り手として走っていたなら貸し手へ返す道が残っている。
-template <> void KERNEL_OBJECT::exit_thread(uintptr_t depth) {
+template <> void KERNEL_OBJECT::exit_thread() {
   const uint32_t self = kernel_instance.current_thread_id();
   m_shadow[self].depth = 0;
   kernel_instance.terminate(self);
@@ -304,14 +312,13 @@ template <> void KERNEL_OBJECT::exit_thread(uintptr_t depth) {
     // 誰も走れない。終わったスレッドの上で止まるしかないので、そのことを言う。
     KERNEL::BOARD::diag_printf("[KOBJ] thread %lu exited, nothing runnable\n",
                                (unsigned long)self);
-    reply(object_error::OK, 0, depth);
+    reply(object_error::OK, 0);
   }
 }
 
 template <>
 uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
-                                uintptr_t a3, uintptr_t depth) {
-  (void)a3;
+                                uintptr_t a3) {
   object_error error = object_error::OK;
   uintptr_t value = 0;
   switch ((object_api)number) {
@@ -322,12 +329,12 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
     value = export_method(a1, a2, error);
     break;
   case object_api::CALL_METHOD:
-    value = call_method(a1, a2, a3, depth, error);
+    value = call_method(a1, a2, a3, error);
     break;
   case object_api::EXIT_METHOD:
     // カーネルの戻り口が撃った svc がここへ届く (a1 = 畳む段数, a2 = 戻り値,
     // a3 = エラー)。巻き戻しに成功すればここから戻らない。
-    exit_method(a1, a2, a3, depth);
+    exit_method(a1, a2, a3);
     return 0;
   case object_api::GET_CURRENT_OBJECT:
     value = current_object(kernel_instance.current_thread_id());
@@ -345,7 +352,7 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
     value = run_for(a1, a2, error);
     break;
   case object_api::EXIT_THREAD:
-    exit_thread(depth);
+    exit_thread();
     return 0;
   default:
     // ★未知の番号は**ここの語彙**。黙って捨てず必ずエラーで返す
@@ -354,7 +361,7 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
     break;
   }
   if (error != object_error::OK)
-    reply(error, 0, depth);
+    reply(error, 0);
   // 普通に return すると、カーネルの戻り口が自分の枠を 1 枚落として発行元へ返る。
   return value;
 }
