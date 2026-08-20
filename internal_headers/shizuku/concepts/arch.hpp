@@ -46,9 +46,12 @@ namespace concepts {
 //                       チップで実現手段が真逆になるため、必ずここを経由する
 // - syscall           : オブジェクト側から見た syscall の発行口 (a0 = 番号)
 // - enter_thread_mode : ブート時にスレッドスタックへ移り entry を呼ぶ (戻らない)
-// - timer_oneshot / pend_context_switch : 時限実行権 (GRANT) の期限回収に使う
-//                       ワンショットタイマと、最低優先度の遅延切替例外の起票。
-//                       **GRANT 実装 (Phase 2b) で requires に追加する**。
+// - prepare_thread_entry : スレッドの最初の 1 回を「例外から復帰してきた」形に
+//                       組み立てる。最初の実行も普通の復帰経路に一本化するため
+// - timer_oneshot / timer_cancel / pend_context_switch :
+//                       時限つき実行権の期限回収に使うワンショットタイマと、
+//                       最低優先度の遅延切替例外の起票。タイマの幅は
+//                       TIMER_MAX_CYCLES で示し、足りない分は上位が刻んで継ぐ
 //   ★前提規約: スレッド切替は「最低優先度の遅延例外」でのみ起こすこと。
 //     syscall 例外 > タイマ例外 > 切替例外 の優先度順を board/arch 初期化で保証する。
 //     これが 1 コア内の相互排除を無償で与える (DESIGN §14.5.1)。移植時に静かに
@@ -82,6 +85,12 @@ concept arch_requires =
       { ARCH::store_release32(shared_word, value) };
       { ARCH::load_acquire32(shared_word) } -> std::same_as<uint32_t>;
       { ARCH::syscall(address, address, address, address, address) };
+      { ARCH::prepare_thread_entry(context, address, address, address, address) };
+      { ARCH::timer_oneshot(value) };
+      { ARCH::timer_cancel() };
+      { ARCH::pend_context_switch() };
+      { ARCH::TIMER_MAX_CYCLES } -> std::convertible_to<uint32_t>;
+      { ARCH::TIMER_MIN_CYCLES } -> std::convertible_to<uint32_t>;
     };
 
 } // namespace concepts

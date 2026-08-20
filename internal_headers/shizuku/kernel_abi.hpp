@@ -30,9 +30,15 @@ enum struct primitive : uintptr_t {
   // a1 = 落とす段数, a2 = 戻り値, a3 = エラーコード, a4 = ネスト数の申告。
   // 申告が実際の深さと違えば 1 枚も落とさずエラー。
   RETURN = 2,
-  // a1 = 対象スレッド ID。実行権のバトンパス (Phase 2b)。
+  // a1 = 対象スレッド ID。実行権のバトンパス (期限なしの移譲)。
+  // ★貸している最中 (GRANT の借り手として走っている) にこれを撃つと、対象は
+  //   無視して**貸し手へ早期復帰**する。借り手の yield は「早めの return」であって
+  //   勝手に第三者へ渡す権利ではない。
   SWITCH = 3,
-  // a1 = 対象スレッド ID, a2 = 期限 [µs]。時限実行権委譲 (Phase 2b)。
+  // a1 = 対象スレッド ID, a2 = 期限 [µs]。時限つきで実行権を貸す。
+  // 期限が来る (強制回収) か、借り手が yield する (早期復帰) と戻る。
+  // 戻り: a0 = kernel_error, a1 = grant_end (EXPIRED / YIELDED)。
+  // ★期限は外側の期限でクランプされる (I-7)。借りた以上は又貸しできない。
   GRANT = 4,
 };
 
@@ -59,14 +65,23 @@ struct call_request {
 // プリミティブが返す答え。受け取るのはカーネルオブジェクトだけ。
 // ★「未知の番号」「権限がない」という語彙はここに存在しない — 番号を解釈するのは
 //   オブジェクトランドであり、権限は経路の有無で決まるので判定する場面が無い。
+// GRANT がどう終わったか (a1 で返る)。
+enum struct grant_end : uintptr_t {
+  EXPIRED = 0, // 期限が来たので取り上げた
+  YIELDED = 1, // 借り手が自分から返した (早期復帰)
+};
+
 enum struct kernel_error : uintptr_t {
   OK = 0,
   BAD_REQUEST,    // entry_pc が 0
   NO_STACK,       // 呼び出しフレームを積むスタックが足りない (panic しない)
   DEPTH_MISMATCH, // 申告したネスト数が実際と違う (1 枚も落としていない)
   BAD_COUNT,      // 落とす段数が 0、または現在の深さを超えている (同上)
-  NOT_READY,      // 対象スレッドが READY でない / claim 競り負け (Phase 2b)
-  BAD_AFFINITY,   // 対象スレッドがこのコアで走ることを許されていない (Phase 2b)
+  NOT_READY,      // 対象スレッドが READY でない / claim 競り負け
+  BAD_AFFINITY,   // 対象スレッドがこのコアで走ることを許されていない
+  NO_THREAD,      // スレッド枠が尽きた
+  NO_MEMORY,      // スレッドスタックが確保できない
+  GRANT_DEPTH,    // 貸し出しのネストが深すぎる
 };
 
 } // namespace shizuku

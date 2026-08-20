@@ -15,6 +15,7 @@ void shizuku::app_entry() {
   // ボードが提供するペリフェラルオブジェクト (特権を宣言する数少ないオブジェクト)。
   const uint32_t peripheral_failures = shizuku::objects::register_peripherals();
   shizuku::selftest::call_ladder();
+  shizuku::selftest::thread_ladder();
 
   // 生存表示。**オブジェクトのメソッド呼び出し経由で** LED を叩く。
   // ★ここは LED がどのピンにあるか (そもそも GPIO かどうか) を知らない。

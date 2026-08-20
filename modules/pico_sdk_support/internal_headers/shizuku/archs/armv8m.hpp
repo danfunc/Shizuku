@@ -2,6 +2,8 @@
 #define SHIZUKU_ARCHS_ARMV8M_HPP
 #include <cstddef>
 #include <cstdint>
+#include "hardware/structs/scb.h"
+#include "hardware/structs/systick.h"
 #include "shizuku/concepts/arch.hpp"
 #include "shizuku/kernel_abi.hpp"
 
@@ -14,6 +16,8 @@ extern "C" {
 // armv8m_ctx.S の例外入口。board 層がベクタへ登録する。
 void shizuku_armv8m_svc_entry();
 void shizuku_armv8m_pendsv_entry();
+// タイマ例外の入口。文脈は触らないので普通の C 関数でよい (切替を起票するだけ)。
+void shizuku_armv8m_systick_entry();
 // 呼び先が普通に return したときの戻り口 (RETURN プリミティブを 1 段ぶん発行)。
 void shizuku_armv8m_return_stub();
 // スレッドスタック (PSP) へ移って entry を呼ぶ。戻らない。
@@ -149,6 +153,43 @@ public:
   static uintptr_t return_stub() {
     return (uintptr_t)&shizuku_armv8m_return_stub;
   }
+  // ---- スレッドの最初の 1 回 -----------------------------------------------
+  // 「例外から復帰してきた」ように見せかけた文脈を組み立てる。これで最初の実行も
+  // 普通の復帰経路 (CTX_RESTORE) に一本化でき、入口だけ別扱いにならずに済む。
+  static void prepare_thread_entry(context_t &context, uintptr_t stack_top,
+                                   uintptr_t entry_pc, uintptr_t return_pc,
+                                   uintptr_t argument) {
+    exception_frame_t *frame =
+        (exception_frame_t *)((stack_top - sizeof(exception_frame_t)) &
+                              ~(uintptr_t)7);
+    frame->r0 = (uint32_t)argument;
+    frame->r1 = frame->r2 = frame->r3 = frame->r12 = 0;
+    frame->lr = (uint32_t)return_pc;
+    frame->pc = (uint32_t)entry_pc;
+    frame->xPSR = (1u << 24); // Thumb ビット。整列パディングは無し
+    context.sp = frame;
+    // 基本フレーム (FP 無し) の Thread/PSP へ復帰する。0 のままだと初回復帰で
+    // bx 0 になって即 HardFault するので、必ず種を入れる。
+    context.exc_return = 0xFFFFFFFD;
+  }
+
+  // ---- 時限つき実行権のためのタイマと遅延切替 --------------------------------
+  // SysTick は per-core banked。24bit なので遠い期限は上位が刻んで継ぎ足す。
+  static constexpr uint32_t TIMER_MAX_CYCLES = 0x00FFFFFF;
+  static constexpr uint32_t TIMER_MIN_CYCLES = 100; // 装填直後発火を避ける下限
+  static void timer_oneshot(uint32_t cycles) {
+    systick_hw->rvr = cycles;
+    systick_hw->cvr = 0;   // 書き込みでカウンタをクリア (rvr から数え直す)
+    systick_hw->csr = 0x7; // ENABLE | TICKINT | プロセッサクロック
+  }
+  static void timer_cancel() { systick_hw->csr = 0; }
+  // ★切替は最低優先度の遅延例外でしか起こさない (DESIGN §14.5.1 の規約)。
+  //   これにより「syscall ハンドラの中にいる = そのコアでは切り替わらない」が
+  //   取得コストゼロで手に入る。
+  static void pend_context_switch() {
+    scb_hw->icsr = 1u << 28; // PENDSVSET
+  }
+
   // ---- 特権とスタック上限 -------------------------------------------------
   // 「今の実行が特権か」の自己申告 (CONTROL.nPRIV を実際に読む)。
   static bool current_priv() {

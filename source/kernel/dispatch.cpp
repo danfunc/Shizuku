@@ -178,6 +178,23 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
     ARCH::set_result(*frame, error, value);
     break;
   }
+  case primitive::SWITCH: {
+    const kernel_error error = do_switch((uint32_t)ARCH::arg(*frame, 1));
+    // 切り替わった場合、この結果を見るのは**次にこのスレッドが再開したとき**。
+    ARCH::set_result(*frame, (uintptr_t)error, 0);
+    break;
+  }
+  case primitive::GRANT: {
+    const uint32_t target = (uint32_t)ARCH::arg(*frame, 1);
+    const uint32_t microseconds = (uint32_t)ARCH::arg(*frame, 2);
+    // 貸し手の戻り値は先に OK を置いておく (借り手が返してきたとき a1 に理由が入る)。
+    ARCH::set_result(*frame, (uintptr_t)kernel_error::OK,
+                     (uintptr_t)grant_end::YIELDED);
+    const kernel_error error = do_grant(target, microseconds);
+    if (error != kernel_error::OK)
+      ARCH::set_result(*frame, (uintptr_t)error, 0);
+    break;
+  }
   default:
     // ★ここへ来るのはカーネルオブジェクトのハンドラだけ。存在しないプリミティブを
     //   撃つのは**カーネル自身の不変条件の破れ**なので panic してよい (§14)。
@@ -189,8 +206,21 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
   }
 }
 
+// 最低優先度の遅延例外 = 実行権の強制巻き取り。ここへ来た時点で全ての割り込みは
+// 捌けており、syscall の途中でもない (優先度規約が保証する)。
+// ★発火が余分でも壊れないようにガードは自己安定型にしてある — 早期復帰と期限が
+//   競っても「もう貸していない / まだ期限前」なら何もしないで戻るだけ。
 template <> void KERNEL::pendsv_dispatch(KERNEL::CONTEXT *context) {
-  (void)context; // 時限実行権 (GRANT) の期限回収は Phase 2b
+  (void)context; // 借り手の文脈退避は例外入口が済ませている
+  const uint32_t core = BOARD::core_num();
+  grant_stack &grants = m_grants[core];
+  if (grants.depth == 0)
+    return;
+  if (grants.frames[grants.depth - 1].deadline > BOARD::time_us()) {
+    arm_timer(grants.frames[grants.depth - 1].deadline);
+    return;
+  }
+  grant_unwind(grant_end::EXPIRED);
 }
 
 } // namespace shizuku

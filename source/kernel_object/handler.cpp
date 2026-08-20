@@ -38,6 +38,14 @@ uintptr_t KERNEL_OBJECT::call_method(uintptr_t, uintptr_t, uintptr_t, uintptr_t,
                                      object_error &);
 template <>
 void KERNEL_OBJECT::exit_method(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+template <>
+uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t, uintptr_t, uintptr_t,
+                                      object_error &);
+template <> uintptr_t KERNEL_OBJECT::yield_to(uintptr_t, object_error &);
+template <>
+uintptr_t KERNEL_OBJECT::run_for(uintptr_t, uintptr_t, object_error &);
+template <> void KERNEL_OBJECT::exit_thread(uintptr_t);
+template <> bool KERNEL_OBJECT::schedule(uint32_t);
 
 // カーネルが起こすハンドラの入口。ARCH の ABI シムが callee-saved で渡された情報を
 // 第 5..8 引数へ変換してくれるので、素の C++ 関数として書ける。
@@ -62,8 +70,11 @@ template <> void KERNEL_OBJECT::init() {
     for (uintptr_t method = 0; method < METHOD_COUNT; ++method)
       m_objects[id].methods[method] = nullptr;
   }
-  for (uintptr_t thread = 0; thread < KERNEL::THREAD_COUNT; ++thread)
+  for (uintptr_t thread = 0; thread < KERNEL::THREAD_COUNT; ++thread) {
     m_shadow[thread].depth = 0;
+    m_thread_object[thread] = (uint16_t)ROOT_OBJECT;
+  }
+  m_rotor = 0;
   // ブートスレッドが名乗るオブジェクトだけは最初から在るものとして扱う。
   m_objects[ROOT_OBJECT].created = true;
 }
@@ -179,6 +190,13 @@ void KERNEL_OBJECT::exit_method(uintptr_t levels, uintptr_t value,
   // 「何段畳むか」だけを言い、変換はここで行う (D5)。段数は必ず申告する (§9.3)。
   const uintptr_t pops = levels == 0 ? 1 : levels;
   const uintptr_t count = 2 * pops;
+  // ★戻り先が無い = スレッドの入口が return した。呼び出しを畳むのではなく
+  //   「このスレッドが終わった」ということなので、そう扱う (§9.4 の exit)。
+  //   自分の枠しか落とせないので、全オブジェクトに開放しても昇格にはならない。
+  if (depth < count) {
+    exit_thread(depth);
+    return;
+  }
   // 巻き戻しに成功するとここへは戻らないので、台帳は**先に**落としておく。
   shadow.depth = shadow.depth >= pops ? shadow.depth - (uint32_t)pops : 0;
   const auto result =
@@ -187,6 +205,107 @@ void KERNEL_OBJECT::exit_method(uintptr_t levels, uintptr_t value,
   //   エラーとして返す (系は落とさない = I-9)。
   shadow.depth += (uint32_t)pops;
   reply(object_error::UNWIND_REJECTED, (uintptr_t)result.error, depth);
+}
+
+// ---- スレッドと実行権の方針 -------------------------------------------------
+// ★カーネルは「渡す機構」しか持たない。誰にいつ渡すか、いつ取り上げるかを決めるのは
+//   ここ (D1 / DESIGN §2 P1「機構はカーネル、方針はオブジェクト」)。
+template <>
+uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
+                                      uintptr_t argument, object_error &error) {
+  if (id >= OBJECT_COUNT || !m_objects[id].created) {
+    error = object_error::BAD_OBJECT;
+    return 0;
+  }
+  if (method >= METHOD_COUNT) {
+    error = object_error::BAD_METHOD;
+    return 0;
+  }
+  const method_t entry = m_objects[id].methods[method];
+  if (entry == nullptr) {
+    error = object_error::UNDECLARED_METHOD;
+    return 0;
+  }
+  const auto spawned = kernel_instance.spawn(
+      (uintptr_t)entry, argument, object_protection(id), 0);
+  if (spawned.error != kernel_error::OK) {
+    error = object_error::NO_THREAD;
+    return 0;
+  }
+  // 新しいスレッドは「そのオブジェクトとして」走り始める。台帳の底をそう置く。
+  m_thread_object[spawned.thread] = (uint16_t)id;
+  m_shadow[spawned.thread].depth = 0;
+  return spawned.thread;
+}
+
+// 次に走らせるスレッドを選んで渡す。戻り = 誰かへ渡せたか。
+// ★回転子から順に見る。自分の直後だけを見ると同じ相手ばかり選ばれて飢餓が出る。
+template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
+  using state_t = KERNEL::THREAD::state_t;
+  for (uint32_t step = 1; step <= KERNEL::THREAD_COUNT; ++step) {
+    const uint32_t candidate = (m_rotor + step) % KERNEL::THREAD_COUNT;
+    if (candidate == self)
+      continue;
+    if (kernel_instance.thread_state(candidate) != state_t::READY)
+      continue;
+    const auto result = ARCH::syscall((uintptr_t)primitive::SWITCH, candidate);
+    if (result.error == (uintptr_t)kernel_error::OK) {
+      m_rotor = candidate;
+      return true;
+    }
+  }
+  return false;
+}
+
+template <>
+uintptr_t KERNEL_OBJECT::yield_to(uintptr_t target, object_error &error) {
+  const uint32_t self = kernel_instance.current_thread_id();
+  // 借り手として走っているなら、譲る先を選ぶ権利は無い — 貸し手へ返すだけ
+  // (カーネルの SWITCH が対象を無視してそう振る舞う)。
+  if (kernel_instance.grant_active()) {
+    ARCH::syscall((uintptr_t)primitive::SWITCH, 0);
+    return 0;
+  }
+  if (target != 0) {
+    const auto result = ARCH::syscall((uintptr_t)primitive::SWITCH, target);
+    if (result.error != (uintptr_t)kernel_error::OK) {
+      error = object_error::NOT_RUNNABLE;
+      return 0;
+    }
+    return target;
+  }
+  return schedule(self) ? 1 : 0; // 誰も居なければ自分が続ける
+}
+
+template <>
+uintptr_t KERNEL_OBJECT::run_for(uintptr_t thread, uintptr_t microseconds,
+                                 object_error &error) {
+  const auto result =
+      ARCH::syscall((uintptr_t)primitive::GRANT, thread, microseconds);
+  if (result.error != (uintptr_t)kernel_error::OK) {
+    error = object_error::NOT_RUNNABLE;
+    return 0;
+  }
+  return result.value; // grant_end (0 = 期限切れ, 1 = 相手が返した)
+}
+
+// スレッドを終える。**このスレッドはもう走らない**ので、終える前に次の相手へ
+// 実行権を渡す。渡せなければ、この後カーネルが誰も選べないまま戻ることになるので、
+// 借り手として走っていたなら貸し手へ返す道が残っている。
+template <> void KERNEL_OBJECT::exit_thread(uintptr_t depth) {
+  const uint32_t self = kernel_instance.current_thread_id();
+  m_shadow[self].depth = 0;
+  kernel_instance.terminate(self);
+  if (kernel_instance.grant_active()) {
+    ARCH::syscall((uintptr_t)primitive::SWITCH, 0); // 貸し手へ返す
+    return;
+  }
+  if (!schedule(self)) {
+    // 誰も走れない。終わったスレッドの上で止まるしかないので、そのことを言う。
+    KERNEL::BOARD::diag_printf("[KOBJ] thread %lu exited, nothing runnable\n",
+                               (unsigned long)self);
+    reply(object_error::OK, 0, depth);
+  }
 }
 
 template <>
@@ -216,6 +335,18 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
   case object_api::GET_CALLER_OBJECT:
     value = caller_object(kernel_instance.current_thread_id());
     break;
+  case object_api::SPAWN:
+    value = spawn_method(a1, a2, a3, error);
+    break;
+  case object_api::YIELD:
+    value = yield_to(a1, error);
+    break;
+  case object_api::RUN_FOR:
+    value = run_for(a1, a2, error);
+    break;
+  case object_api::EXIT_THREAD:
+    exit_thread(depth);
+    return 0;
   default:
     // ★未知の番号は**ここの語彙**。黙って捨てず必ずエラーで返す
     //   (DESIGN §11.2.0 の「無音で消えて誤認した」事故の対策)。

@@ -24,6 +24,8 @@ public:
     uintptr_t value;
   };
   static constexpr uint32_t CALL_HEADROOM = 0;
+  static constexpr uint32_t TIMER_MAX_CYCLES = 0xFFFFFFFF;
+  static constexpr uint32_t TIMER_MIN_CYCLES = 1;
 
   static uint32_t exc_frame_bytes(const context_t &) {
     return (uint32_t)sizeof(exception_frame_t);
@@ -72,6 +74,11 @@ public:
                                 uintptr_t = 0, uintptr_t = 0) {
     return {0, 0};
   }
+  static void prepare_thread_entry(context_t &, uintptr_t, uintptr_t, uintptr_t,
+                                   uintptr_t) {}
+  static void timer_oneshot(uint32_t) {}
+  static void timer_cancel() {}
+  static void pend_context_switch() {}
   [[noreturn]] static void enter_thread_mode(uintptr_t, uintptr_t,
                                              void (*)()) {
     while (true) {

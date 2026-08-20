@@ -13,6 +13,10 @@ namespace selftest {
 // メソッド呼び出しの梯子。結果は BOARD::diag_printf へ出す。
 void call_ladder();
 
+// スレッドと実行権の梯子: 1 本起こす → 譲り合う → 時限つきで貸す → 返さない相手を
+// 取り上げる。**取り上げが効くこと**が「1 つの暴走が全系を凍らせない」の証拠になる。
+void thread_ladder();
+
 } // namespace selftest
 } // namespace shizuku
 #endif // SHIZUKU_SELFTEST_HPP

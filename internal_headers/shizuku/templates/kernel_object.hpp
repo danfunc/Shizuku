@@ -48,10 +48,16 @@ public:
   uintptr_t handle(uintptr_t number, uintptr_t a1, uintptr_t a2, uintptr_t a3,
                    uintptr_t depth);
 
+  // スケジューリングの方針 (どのスレッドを次に走らせるか) はここが持つ。
+  // カーネルは「渡す機構」しか持たない (D1)。
+  bool schedule(uint32_t self);
+
   // 台帳の読み出し (自己テスト・将来のアクセス制御用)。
   uintptr_t current_object(uint32_t thread) const {
     const shadow_t &shadow = m_shadow[thread];
-    return shadow.depth == 0 ? ROOT_OBJECT : shadow.object[shadow.depth - 1];
+    // 呼び出しの中でなければ「そのスレッドを持っているオブジェクト」。
+    return shadow.depth == 0 ? m_thread_object[thread]
+                             : shadow.object[shadow.depth - 1];
   }
   uintptr_t caller_object(uint32_t thread) const {
     const shadow_t &shadow = m_shadow[thread];
@@ -74,6 +80,12 @@ private:
   // 各 API。戻り値はそのまま発行元へ返る値。エラーは error 引数へ書く。
   uintptr_t create_object(uintptr_t id, uintptr_t entry, uintptr_t flags,
                           object_error &error);
+  uintptr_t spawn_method(uintptr_t id, uintptr_t method, uintptr_t argument,
+                         object_error &error);
+  uintptr_t yield_to(uintptr_t target, object_error &error);
+  uintptr_t run_for(uintptr_t thread, uintptr_t microseconds,
+                    object_error &error);
+  void exit_thread(uintptr_t depth);
   // そのオブジェクトを走らせるときの保護指定 (PROTECTION_*)。
   uint32_t object_protection(uintptr_t id) const;
   uintptr_t export_method(uintptr_t method, uintptr_t entry,
@@ -87,6 +99,10 @@ private:
 
   object_t m_objects[OBJECT_COUNT];
   shadow_t m_shadow[KERNEL::THREAD_COUNT];
+  // スレッドごとの「どのオブジェクトのために作ったか」。方針側の台帳なのでここ。
+  uint16_t m_thread_object[KERNEL::THREAD_COUNT];
+  // 次に見るスレッド (round-robin の回転子)。自分の直後だけを見ると飢餓が出る。
+  uint32_t m_rotor;
 };
 
 } // namespace templates

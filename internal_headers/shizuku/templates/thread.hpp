@@ -17,7 +17,10 @@ template <typename CONTEXT> struct thread {
     READY,
     RUNNING,
     SUSPENDED,
-    WAIT_GRANT, // 実行権を貸して復帰を待っている (Phase 2b)
+    // 実行権を貸して復帰を待っている。READY ではないので他コアに拾われず、
+    // 復帰は貸した側のコアの巻き取り経路だけ。
+    WAIT_GRANT,
+    TERMINATED, // 走り終えた (メソッドが return して戻り先が無かった)
   };
 
   // 呼び出しフレームのスタック。実体はスレッド自身のスタック上にあり、ここは
@@ -31,8 +34,9 @@ template <typename CONTEXT> struct thread {
   uint32_t state = (uint32_t)state_t::UNINITIALIZED;
   CONTEXT *context = nullptr;
   call_stack_t call_stack;
-  uint32_t affinity = 0b1; // bit0 = core0
-  uint64_t wake_at = 0;    // sleep 中の起床時刻 (Phase 2b)
+  uint32_t affinity = 0b1; // bit0 = core0 (どのコアで走ってよいか)
+  // ★sleep の起床時刻やスケジューリングの優先度はここに無い。それは方針なので
+  //   カーネルオブジェクトが自分の表で持つ (D1)。
 
   bool is_state(state_t expected) const { return state == (uint32_t)expected; }
   void set_state(state_t next) { state = (uint32_t)next; }

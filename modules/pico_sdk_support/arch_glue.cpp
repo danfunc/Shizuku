@@ -18,3 +18,9 @@ extern "C" void shizuku_pendsv_dispatch(shizuku_armv8m_context *context) {
   shizuku::kernel_instance.pendsv_dispatch(
       reinterpret_cast<shizuku::KERNEL::CONTEXT *>(context));
 }
+
+// タイマ例外。文脈を触らないので普通の C 関数でよい — ここは期限を見て
+// 「切替を起票する」だけで、実際の切替は最低優先度の遅延例外が行う。
+extern "C" void shizuku_armv8m_systick_entry() {
+  shizuku::kernel_instance.timer_expired();
+}
