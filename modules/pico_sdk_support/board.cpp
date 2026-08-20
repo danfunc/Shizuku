@@ -102,37 +102,6 @@ uint32_t rp2350_pico2::cycles_per_us() {
   return (uint32_t)(::clock_get_hz(clk_sys) / 1000000u);
 }
 
-} // namespace boards
-} // namespace shizuku
-
-// 落ちた場所を報告する。例外は MSP で走るので、スレッドのスタックが尽きて落ちた
-// 場合でもここでは印字できる (原因がスタック枯渇のときこそ効く)。
-extern "C" [[noreturn]] void shizuku_fault_report(const uint32_t *frame,
-                                                  uint32_t stack_limit) {
-  // CFSR: どの種類の違反か (bit4 = スタック時のフォールト, bit5 = 復帰時)。
-  const uint32_t configurable_fault = *(volatile uint32_t *)0xE000ED28u;
-  const uint32_t hard_fault = *(volatile uint32_t *)0xE000ED2Cu;
-  ::printf("\n[FAULT] pc=%08lx lr=%08lx psr=%08lx sp=%08lx psplim=%08lx\n"
-           "[FAULT] cfsr=%08lx hfsr=%08lx%s\n",
-           (unsigned long)frame[6], (unsigned long)frame[5],
-           (unsigned long)frame[7], (unsigned long)(uintptr_t)frame,
-           (unsigned long)stack_limit, (unsigned long)configurable_fault,
-           (unsigned long)hard_fault,
-           ((uintptr_t)frame <= stack_limit + 64) ? " (スタック下限に接触)" : "");
-  // ★HardFault (優先度 -1) まで落ちてしまった場合、USB の割り込みは走れない。
-  //   それでも報告を届けるため、USB の割り込みハンドラを**自分で呼ぶ**。
-  //   割り込みハンドラはただの関数なので、ポーリングで回せば送信は進む。
-  //   これが無いと「書いたのに出ない」= 一番情報の少ない壊れ方に戻る。
-  //   (設定可能なフォールトとして入って来た場合は優先度で USB が走れるので、
-  //    この空回しは HardFault へ落ちたときの保険になる。)
-  while (true)
-    if (g_usb_irq_poll != nullptr)
-      g_usb_irq_poll();
-}
-
-namespace shizuku {
-namespace boards {
-
 void rp2350_pico2::diag_printf(const char *format, ...) {
   va_list args;
   va_start(args, format);

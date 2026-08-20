@@ -27,11 +27,22 @@ using BOARD = KERNEL::BOARD;
 
 constexpr uintptr_t OBJECT_UNPRIV_PROBE = 11;
 constexpr uintptr_t OBJECT_PRIV_PROBE = 12;
+constexpr uintptr_t OBJECT_TRESPASSER = 13;
 constexpr uintptr_t METHOD_MAIN = 0;
 
 // 自分の CONTROL を読んで返すだけ。触るのはレジスタと自分のスタックのみ。
 uintptr_t probe(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   return ARCH::control_register();
+}
+
+// ★拒否のテスト。許可のテストだけでは「保護が効いている」ことの証拠にならない
+//   (DESIGN §16)。非特権オブジェクトに**触れないはずの場所**を触らせ、
+//   (a) 落ちること (b) 落ちるのはこのスレッドだけで系は続くこと、を確かめる。
+//   触る先は region の外にあり、かつ読んでも副作用の無い場所を選ぶ:
+//   SIO の CPUID レジスタ (読み出し専用) — 万一通っても何も壊さない。
+uintptr_t trespass(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  const volatile uint32_t *forbidden = (const volatile uint32_t *)0xD0000000u;
+  return *forbidden; // ここで落ちるのが正しい
 }
 
 void check(const char *name, bool ok, unsigned long got, unsigned long want) {
@@ -77,6 +88,34 @@ void unprivileged_probe() {
   check("unpriv: caller still privileged",
         (ARCH::control_register() & 1u) == 0u,
         (unsigned long)ARCH::control_register(), 0);
+
+  // ---- 拒否のテスト: 触れないはずの場所を触ったら、そのスレッドだけが止まる ----
+  {
+    const auto faults_before = kernel_instance.faults().count;
+    ARCH::syscall((uintptr_t)object_api::CREATE_OBJECT, OBJECT_TRESPASSER,
+                  (uintptr_t)&trespass, OBJECT_UNPRIVILEGED);
+    // ★**別スレッドで**走らせる。落ちるのはスレッド単位なので、呼び出しで試すと
+    //   自分ごと止まってテストの続きが走れない。
+    const auto spawned = ARCH::syscall((uintptr_t)object_api::SPAWN,
+                                       OBJECT_TRESPASSER, METHOD_MAIN, 0);
+    // 相手が走って落ちるまで譲る。ここで系が固まるなら「止め方」が壊れている。
+    for (uint32_t guard = 0;
+         guard < 200 && kernel_instance.faults().count == faults_before;
+         ++guard)
+      ARCH::syscall((uintptr_t)object_api::YIELD);
+
+    const auto &record = kernel_instance.faults();
+    check("deny: violation detected", record.count == faults_before + 1,
+          (unsigned long)record.count, (unsigned long)(faults_before + 1));
+    check("deny: the offending thread was stopped",
+          record.thread == spawned.value, (unsigned long)record.thread,
+          (unsigned long)spawned.value);
+    check("deny: system still running", true, 1, 1);
+    BOARD::diag_printf("[SELFTEST] deny: stopped thread %lu at pc=%08lx "
+                       "cfsr=%08lx\n",
+                       (unsigned long)record.thread, (unsigned long)record.pc,
+                       (unsigned long)record.status);
+  }
 
   BOARD::diag_printf("[SELFTEST] unprivileged probe done (unpriv control=%lu "
                      "priv control=%lu)\n",

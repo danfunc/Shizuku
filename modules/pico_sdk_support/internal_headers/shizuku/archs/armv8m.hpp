@@ -19,8 +19,10 @@ void shizuku_armv8m_svc_entry();
 void shizuku_armv8m_pendsv_entry();
 // タイマ例外の入口。文脈は触らないので普通の C 関数でよい (切替を起票するだけ)。
 void shizuku_armv8m_systick_entry();
-// フォールト入口。落ちた側の例外フレームとスタック下限を渡して報告させる。
-[[noreturn]] void shizuku_armv8m_fault_entry();
+// フォールト入口 (退避 → 判断 → 復帰。普通の例外と同じ経路)。
+void shizuku_armv8m_fault_entry();
+struct shizuku_armv8m_context;
+void shizuku_fault_dispatch(shizuku_armv8m_context *context);
 // 呼び先が普通に return したときの戻り口 (RETURN プリミティブを 1 段ぶん発行)。
 void shizuku_armv8m_return_stub();
 // スレッドスタック (PSP) へ移って entry を呼ぶ。戻らない。
@@ -195,6 +197,22 @@ public:
   }
   // 今の実行の CONTROL をそのまま返す。**状態は対象自身に申告させる** ための口
   // (DESIGN §16 / §11.2.0: 「非特権で動いた」は自己申告なしには言えない)。
+  // 落ちたのがスレッドモードか (= そのスレッドを止めれば復帰できるか)。
+  // ハンドラモードで落ちたならカーネル自身の破れなので、止めても直らない。
+  static bool faulted_in_thread_mode(const context_t &context) {
+    return (context.exc_return & 0x4u) != 0;
+  }
+  // 落ちた場所と、触ろうとした先。★診断は「読み出す場所を間違えると静かに嘘を
+  //   吐く」ので、引数スロットの流用ではなく専用の口にする (実際 arg(6) は
+  //   引数の既定枝に落ちて r12 を返しており、pc が 0 に見えていた)。
+  static uintptr_t frame_pc(const exception_frame_t &frame) { return frame.pc; }
+  static uintptr_t frame_lr(const exception_frame_t &frame) { return frame.lr; }
+  static uintptr_t fault_address() { return *(volatile uint32_t *)0xE000ED34u; }
+  // どの違反だったか (CFSR)。読んだら書き戻して消す (sticky なので残る)。
+  static uint32_t fault_status() { return *(volatile uint32_t *)0xE000ED28u; }
+  static void fault_status_clear() {
+    *(volatile uint32_t *)0xE000ED28u = fault_status();
+  }
   static uint32_t control_register() {
     uint32_t control;
     asm volatile("MRS %0, CONTROL" : "=r"(control));

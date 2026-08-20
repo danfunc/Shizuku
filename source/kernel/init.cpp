@@ -13,6 +13,8 @@ template <> void KERNEL::init() {
   for (uintptr_t core = 0; core < CORE_COUNT; ++core)
     m_current[core] = 0;
   m_object_svc_handler = 0;
+  m_recovery_thread = 0;
+  m_faults = {};
   cpu_manager.init();
   if (auto result = memory_manager.init(); !result)
     BOARD::panic("memory manager init failed");

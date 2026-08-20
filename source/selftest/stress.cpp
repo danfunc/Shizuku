@@ -130,14 +130,16 @@ uintptr_t blink(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       BOARD::diag_printf(
           "[STRESS] budget=%luus late win=%luus max=%luus led_write=%luus "
           "load=%lu/%lu/%lu err=%lu | selftest=%lu passed/%lu failed "
-          "control unpriv=%lu priv=%lu\n",
+          "control unpriv=%lu priv=%lu | stopped_threads=%lu last_pc=%08lx\n",
           (unsigned long)budget, (unsigned long)late_window,
           (unsigned long)late_max, (unsigned long)led_window,
           (unsigned long)g_load_rounds[0], (unsigned long)g_load_rounds[1],
           (unsigned long)g_load_rounds[2], (unsigned long)written.error,
           (unsigned long)passed, (unsigned long)failed,
           (unsigned long)unprivileged_control,
-          (unsigned long)privileged_control);
+          (unsigned long)privileged_control,
+          (unsigned long)kernel_instance.faults().count,
+          (unsigned long)kernel_instance.faults().pc);
       late_window = 0;
       led_window = 0;
       periods = 0;

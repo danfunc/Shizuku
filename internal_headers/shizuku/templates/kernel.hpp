@@ -102,6 +102,14 @@ public:
   CONTEXT *current_context();
   void svc_dispatch(CONTEXT *context);
   void pendsv_dispatch(CONTEXT *context);
+  // 保護違反やスタック上限違反で落ちたときの受け口。
+  // ★**系を止めない**。落ちたのは 1 つのスレッドなので、そのスレッドだけを止めて
+  //   他は走り続けさせる (I-9 / DESIGN §11.2.4)。止めても直らないのは
+  //   「カーネル自身が落ちた」場合だけで、そこは区別する。
+  void fault_dispatch(CONTEXT *context);
+  // スレッドが落ちたときに実行権を渡す先。誰に渡すかは方針なので、composition の
+  // 段階でカーネルオブジェクトが教えておく (カーネルは選ばない)。
+  void set_recovery_thread(uint32_t thread);
 
   uint32_t current_thread_id() const { return m_current[BOARD::core_num()]; }
   THREAD &current_thread() { return m_threads[current_thread_id()]; }
@@ -152,6 +160,20 @@ private:
   static constexpr uintptr_t THREAD_STACK_BYTES = 4096;
   // オブジェクトランドの svc ハンドラの入口。表ではなく 1 個だけ。
   uintptr_t m_object_svc_handler;
+  uint32_t m_recovery_thread;
+
+public:
+  // 落ちたスレッドの記録 (自己テストと診断が読む)。
+  struct fault_record {
+    uint32_t count;    // 何本止めたか
+    uintptr_t pc;      // 最後に落ちた場所
+    uint32_t status;   // 違反の種類 (CFSR)
+    uint32_t thread;   // 止めたスレッド
+  };
+  const fault_record &faults() const { return m_faults; }
+
+private:
+  fault_record m_faults;
 };
 
 } // namespace templates

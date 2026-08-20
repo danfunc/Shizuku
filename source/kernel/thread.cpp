@@ -17,6 +17,8 @@ namespace shizuku {
 template <> void KERNEL::grant_unwind(grant_end);
 template <> void KERNEL::arm_timer(uint64_t);
 template <> bool KERNEL::claim(uint32_t, kernel_error &);
+template <> void KERNEL::set_recovery_thread(uint32_t);
+template <> void KERNEL::fault_dispatch(KERNEL::CONTEXT *);
 
 // ---- スレッドの生成 (スレッドモードから呼ぶ C++ API。syscall ではない) ------
 template <>
@@ -191,6 +193,64 @@ template <> void KERNEL::timer_expired() {
   } else {
     arm_timer(deadline); // 刻みの継ぎ足し
   }
+}
+
+template <> void KERNEL::set_recovery_thread(uint32_t thread) {
+  m_recovery_thread = thread;
+}
+
+// 保護違反やスタック上限違反の受け口。
+// ★系を止めない。落ちたのは 1 本のスレッドなので、そのスレッドだけを止めて他は
+//   走り続けさせる (I-9 / DESIGN §11.2.4「違反しても系は止まらない」)。
+//   ここを「全部止める」にすると、1 つのオブジェクトの誤りが全系を道連れにする —
+//   それは資源管理で「超過した者にだけ当たる」と決めたことと矛盾する。
+template <> void KERNEL::fault_dispatch(KERNEL::CONTEXT *context) {
+  const uint32_t core = BOARD::core_num();
+  const uint32_t thread = m_current[core];
+  const uint32_t status = ARCH::fault_status();
+  // ★触ろうとした先は**消す前に**読む。違反の記録を消すと同時に無効になるので、
+  //   順序を逆にすると意味のない値を報告してしまう (実際それで嘘の値が出た)。
+  const uintptr_t address = ARCH::fault_address();
+  const uintptr_t pc = ARCH::frame_pc(*context->sp);
+  m_faults.count++;
+  m_faults.pc = pc;
+  m_faults.status = status;
+  m_faults.thread = thread;
+  ARCH::fault_status_clear();
+
+  // ★止めても直らないのは「カーネル自身が落ちた」場合だけ。スレッドモードで
+  //   落ちたのなら、そのスレッドを止めれば系は続けられる。
+  if (!ARCH::faulted_in_thread_mode(*context)) {
+    BOARD::diag_printf("[FAULT] kernel itself faulted: pc=%08lx cfsr=%08lx\n",
+                       (unsigned long)pc, (unsigned long)status);
+    BOARD::panic("fault in kernel context");
+  }
+
+  BOARD::diag_printf("[FAULT] thread %lu stopped: pc=%08lx addr=%08lx "
+                     "cfsr=%08lx sp=%08lx (系は継続)\n",
+                     (unsigned long)thread, (unsigned long)pc,
+                     (unsigned long)address,
+                     (unsigned long)status, (unsigned long)(uintptr_t)context->sp);
+
+  ARCH::store_release32(&m_threads[thread].state,
+                        (uint32_t)THREAD::state_t::TERMINATED);
+
+  // 借り手として走っていたなら、貸し手へ返すのが自然な復帰先 (貸した側は
+  // 「期限が来た」のと同じ形で戻ってくる)。
+  if (m_grants[core].depth != 0) {
+    grant_unwind(grant_end::EXPIRED);
+    return;
+  }
+  // そうでなければ、あらかじめ教えられている復帰先へ渡す。誰に渡すかは方針なので
+  // カーネルは選ばない — 教えられていないなら渡す先が無い。
+  kernel_error error = kernel_error::OK;
+  if (m_recovery_thread < THREAD_COUNT && claim(m_recovery_thread, error)) {
+    m_current[core] = m_recovery_thread;
+    return;
+  }
+  BOARD::diag_printf("[FAULT] 渡す先が無い (recovery=%lu)\n",
+                     (unsigned long)m_recovery_thread);
+  BOARD::panic("no thread to run after fault");
 }
 
 } // namespace shizuku

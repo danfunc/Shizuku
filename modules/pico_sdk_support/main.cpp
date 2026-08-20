@@ -12,6 +12,10 @@
 // メソッドでもない (フレーム 0 段) ので、撃った svc はオブジェクトと同じ経路で
 // カーネルオブジェクトのハンドラへ届く。
 void shizuku::app_entry() {
+  // ★スレッドが落ちたときに実行権を渡す先を教えておく。誰に渡すかは方針なので
+  //   カーネルは選ばない。ここではブートスレッド (アイドル役) を指定する。
+  shizuku::kernel_instance.set_recovery_thread(0);
+
   // ボードが提供するペリフェラルオブジェクト (特権を宣言する数少ないオブジェクト)。
   const uint32_t peripheral_failures = shizuku::objects::register_peripherals();
   shizuku::selftest::call_ladder();

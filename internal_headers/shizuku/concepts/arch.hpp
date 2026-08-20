@@ -84,6 +84,7 @@ concept arch_requires =
       { ARCH::timer_oneshot(value) };
       { ARCH::timer_cancel() };
       { ARCH::pend_context_switch() };
+      { ARCH::frame_pc(const_frame) } -> std::same_as<uintptr_t>;
       { ARCH::TIMER_MAX_CYCLES } -> std::convertible_to<uint32_t>;
       { ARCH::TIMER_MIN_CYCLES } -> std::convertible_to<uint32_t>;
     };

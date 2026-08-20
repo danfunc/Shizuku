@@ -51,6 +51,9 @@ public:
     frame.slot[5] = lr;
   }
   static uintptr_t return_stub() { return 0; }
+  static uintptr_t frame_pc(const exception_frame_t &frame) {
+    return frame.slot[6];
+  }
   static bool current_priv() { return true; }
   static void set_priv(context_t &, bool) {}
   static void stack_limit_set(context_t &, uintptr_t) {}
