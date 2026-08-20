@@ -91,7 +91,12 @@ uintptr_t blink(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   uint64_t next = BOARD::time_us() + BLINK_PERIOD_US;
   uint64_t late_max = 0;      // 起動来の最大 (一過性の山も残る)
   uint64_t late_window = 0;   // 窓ごとの最大 (今も続いているかが分かる)
-  uint64_t led_window = 0;    // LED への書き込みにかかった時間 (窓の最大)
+  // ★LED 書き込みは**最大と最小の両方**を採る。最大だけ見ていたときは budget に
+  //   きれいに追従したので「SPI が重い」と読み違えかけたが、それは呼び出しの
+  //   途中でプリエンプトされた時間が混ざっていただけだった。最小 = 誰にも
+  //   邪魔されなかった 1 回 ≒ 本当にその操作にかかる時間。
+  uint64_t led_window = 0;      // 窓の最大 (プリエンプト込み)
+  uint64_t led_min = ~(uint64_t)0; // 窓の最小 (邪魔が入らなかった 1 回)
   uint32_t periods = 0;
   uint32_t sweep = 0;
 
@@ -120,6 +125,8 @@ uintptr_t blink(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
     const uint64_t led_took = BOARD::time_us() - led_started;
     if (led_took > led_window)
       led_window = led_took;
+    if (led_took < led_min)
+      led_min = led_took;
     next += BLINK_PERIOD_US;
 
     if (++periods >= REPORT_PERIODS) {
@@ -128,11 +135,12 @@ uintptr_t blink(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       //   (参照実装が late(max) だけ見て誤って FAIL と判定した罠)。
       const uint32_t budget = BUDGET_SWEEP[sweep];
       BOARD::diag_printf(
-          "[STRESS] budget=%luus late win=%luus max=%luus led_write=%luus "
+          "[STRESS] budget=%luus late win=%luus max=%luus led_write=%lu/%luus "
           "load=%lu/%lu/%lu err=%lu | selftest=%lu passed/%lu failed "
           "control unpriv=%lu priv=%lu | stopped_threads=%lu last_pc=%08lx\n",
           (unsigned long)budget, (unsigned long)late_window,
-          (unsigned long)late_max, (unsigned long)led_window,
+          (unsigned long)late_max, (unsigned long)led_min,
+          (unsigned long)led_window,
           (unsigned long)g_load_rounds[0], (unsigned long)g_load_rounds[1],
           (unsigned long)g_load_rounds[2], (unsigned long)written.error,
           (unsigned long)passed, (unsigned long)failed,
@@ -142,6 +150,7 @@ uintptr_t blink(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
           (unsigned long)kernel_instance.faults().pc);
       late_window = 0;
       led_window = 0;
+      led_min = ~(uint64_t)0;
       periods = 0;
       // 次の窓は別の期限で測る (同じ条件を続けて測るのではなく、条件を変えて
       // 追随するかを見る。追随すれば原因は期限だと言い切れる)。

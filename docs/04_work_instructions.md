@@ -388,6 +388,30 @@ CALL の protection 引数に region set を載せる)。
 | オブジェクト番号の衝突が「保護が壊れた」ように見える (2026-08-20 実際に踏んだ。flash FS の 11 が非特権プローブの 11 と衝突し、非特権のはずの呼び出しが特権オブジェクトの中身を実行した) | 番号表を 1 ヶ所に集約 (`objects/flash_fs.hpp`)。CREATE_OBJECT の ALREADY_EXISTS を無視しない |
 | フラッシュ書き込み元が flash 上にある (文字列リテラル等) → 書き込み中は XIP が止まっているので読めない | 1 ページずつ RAM の中継バッファへ写してから渡す。プローブはわざとリテラルを渡して経路を踏む |
 
+## build ディレクトリを作り直すとき (2026-08-20 に一度失って学んだ)
+
+`build/` は VS Code の kit (`.vscode/cmake-kits.json`) から設定を受け取っている。
+**消すと戻せなくなる**ので、コマンドラインから作り直すときは同じ値を渡すこと:
+
+```bash
+cmake -S . -B build -G Ninja \
+  -DPRELOAD_TOOLCHAIN_FILE=cmake/pico_sdk/pico_sdk_import.cmake \
+  -DPOSTLOAD_TOOLCHAIN_FILE=cmake/pico_sdk/pico_sdk_setup.cmake \
+  -DCMAKE_CXX_STANDARD=23 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+  -DSHIZUKU_ARCH=armv8m -DSHIZUKU_BOARD=rp2350_pico2 -DSHIZUKU_CPU_COUNT=1 \
+  -DSHIZUKU_MEMORY_MANAGER=shizuku::memory_managers::pico_sdk \
+  -DPICO_BOARD=pico2_w -DPICO_PLATFORM=rp2350
+```
+
+- **`PRELOAD_TOOLCHAIN_FILE` を渡し忘れると `project()` の前にツールチェインが
+  決まらず、ホストの `/usr/bin/cc` でクロスビルドしようとして boot_stage2 の
+  アセンブルで落ちる** (エラーが `.syntax unified: unknown directive` なので、
+  一見コードの問題に見える)
+- `~/.pico-sdk/cmake/pico-vscode.cmake` は **`CMAKE_TOOLCHAIN_FILE` ではない**。
+  include されることを前提にしたファイルで、toolchain file として渡すと
+  コンパイラを何も設定しないまま既定を上書きしてしまう
+- 環境変数 `PICO_SDK_PATH` / `PICO_TOOLCHAIN_PATH` も要る
+
 ## 進め方の作法
 
 - 各フェーズの完了時に本 docs (特にこのファイルと README の「現在地」) を更新する

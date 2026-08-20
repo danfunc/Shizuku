@@ -193,6 +193,15 @@ uint32_t register_peripherals() {
     } else {
       KERNEL::BOARD::diag_printf("[PERIPH] %s ready (object %lu)\n", entry.name,
                                  (unsigned long)entry.object);
+#if defined(CYW43_WL_GPIO_LED_PIN) && defined(SHIZUKU_CYW43_SCK_KHZ)
+      // ★どの速度で喋っているかを毎回出す。分周比は黙って効くつまみなので、
+      //   出力に残しておかないと後から「どの条件で測ったか」が分からなくなる。
+      if (entry.object == LED_OBJECT)
+        KERNEL::BOARD::diag_printf(
+            "[PERIPH] led talks to cyw43 over gSPI at %lu kHz (div %lu)\n",
+            (unsigned long)SHIZUKU_CYW43_SCK_KHZ,
+            (unsigned long)CYW43_PIO_CLOCK_DIV_INT);
+#endif
     }
   }
   return failures;
