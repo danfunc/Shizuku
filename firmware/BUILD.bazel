@@ -5,6 +5,10 @@ load("@rules_cc//cc:defs.bzl", "cc_binary")
 sh_binary(
     name = "flash",
     srcs = ["//tools:flash.sh"],
+    # ★場所を引数で渡す。スクリプト側の既定パスに頼ると、ターゲットを動かした
+    #   ときに黙って古い uf2 を焼く (実際に //:shizuku_uf2 -> //firmware: へ
+    #   移したときパスが取り残されていた)。
+    args = ["$(location :shizuku_uf2)"],
     data = [":shizuku_uf2"],
 )
 

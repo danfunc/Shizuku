@@ -2,6 +2,34 @@
 # TODO(Phase1 以降): 置換値を bazel/config の build setting に外出しする。
 load("@bazel_skylib//rules:expand_template.bzl", "expand_template")
 load("@rules_cc//cc:defs.bzl", "cc_library")
+load(
+    "//configs:cyw43_clock.bzl",
+    "CYW43_PIO_DIV",
+    "CYW43_SCK_ACTUAL_KHZ",
+    "CYW43_SPI_PROGRAM",
+    "SYS_CLOCK_KHZ",
+)
+
+# ★SDK 内部 (cyw43 ドライバ) にも届かせる必要があるので、コンパイルオプションでは
+#   なく pico-sdk の PICO_CONFIG_EXTRA_HEADER 経由で入れる。.bazelrc で指している。
+expand_template(
+    name = "pico_config_extra_headers",
+    out = "pico_config_extra_headers.h",
+    substitutions = {
+        "@DIV@": str(CYW43_PIO_DIV),
+        "@PROGRAM@": CYW43_SPI_PROGRAM,
+        "@SCK@": str(CYW43_SCK_ACTUAL_KHZ),
+        "@CLK@": str(SYS_CLOCK_KHZ),
+    },
+    template = "pico_config_extra_headers.h.in",
+)
+
+cc_library(
+    name = "pico_extra_config",
+    hdrs = [":pico_config_extra_headers"],
+    includes = ["."],
+    visibility = ["//visibility:public"],
+)
 
 expand_template(
     name = "config_hpp",
@@ -15,7 +43,7 @@ expand_template(
         ]),
         "${SHIZUKU_ARCH}": "armv8m",
         "${SHIZUKU_BOARD}": "rp2350_pico2",
-        "${SHIZUKU_CPU_COUNT}": "1",
+        "${SHIZUKU_CPU_COUNT}": "2",
         "${SHIZUKU_THREAD_COUNT}": "32",
         "${SHIZUKU_OBJECT_COUNT}": "32",
         "${SHIZUKU_METHOD_COUNT}": "16",

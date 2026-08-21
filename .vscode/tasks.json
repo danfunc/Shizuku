@@ -1,0 +1,51 @@
+{
+  // ===========================================================================
+  //  Shizuku のビルドは Bazel (docs/03_porting_policy.md D15 / D38)
+  // ===========================================================================
+  //  ★Cmd+Shift+B (Windows/Linux: Ctrl+Shift+B) が「焼く」に割り当ててある。
+  //    一覧から選ぶなら Terminal → Run Task。
+  //  ★ステータスバーに**本物のボタン**を出したい場合は
+  //    spencerwmiles.vscode-task-buttons を入れる (.vscode/extensions.json で
+  //    推奨に入れてある)。設定は .vscode/settings.json 側。
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Shizuku: 焼く",
+      "detail": "bazelisk run //firmware:flash — ビルドしてから書き込む",
+      "type": "shell",
+      "command": "bazelisk run //firmware:flash",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": ["$gcc"],
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "Shizuku: ビルド",
+      "detail": "bazelisk build //firmware:shizuku_uf2 — 焼かずに作るだけ",
+      "type": "shell",
+      "command": "bazelisk build //firmware:shizuku_uf2",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": ["$gcc"],
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "Shizuku: シリアルを見る",
+      "detail": "自己テストと [STRESS] の報告を読む (Ctrl+C で抜ける)",
+      "type": "shell",
+      "command": "for i in $(seq 1 20); do port=$(ls /dev/cu.usbmodem* 2>/dev/null | head -1); [ -n \"$port\" ] && break; sleep 1; done; if [ -z \"$port\" ]; then echo 'シリアルが出てこない (ファームが固まっている可能性)'; exit 1; fi; echo \"--- $port ---\"; cat \"$port\"",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "Shizuku: 掃除",
+      "detail": "bazelisk clean — 出力を捨てる (依存の取り直しは clean --expunge)",
+      "type": "shell",
+      "command": "bazelisk clean",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 // ★このファイルはビルドシステムが生成する。手で編集しない。
-//   番号を振っているのは cmake/shizukuObjects.cmake で、各コンポーネントは
+//   番号を振っているのは tools/gen_object_ids.py で、各コンポーネントは
 //   shizuku_declare_objects(<component> <name>...) で名前を宣言するだけ。
 //   **番号をどこにも書かない**ので、番号の衝突は起こり得ない (D28)。
 #ifndef SHIZUKU_OBJECT_IDS_HPP

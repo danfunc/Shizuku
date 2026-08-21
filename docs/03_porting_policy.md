@@ -705,6 +705,30 @@ objects/      ドライバ / アプリ
     瞬間に、同じディスクリプタが本物の capability になる
   - 未着手。やるなら `call_request` に region を載せる ABI 変更が要る
 
+- **D38. ビルドを Bazel へ完全移管し、CMake を削除した (2026-08-21 ユーザー指示:
+  「本格的にビルドを bazel に移管しよう。ついでに、flash 用の bazel を呼ぶ vscode
+  ボタンも作って欲しい」)**。
+  - D15 の「同等性確認後に削除」を実行した。**並存させ続けるのは危険**で、実際に
+    近いところまで来ていた: オブジェクト名の一覧を CMake と Bazel に二重に書きかけて、
+    片方だけ直せば焼いたものが黙って別物になる形になっていた (D28 で単一の
+    `objects.list` + `tools/gen_object_ids.py` に寄せて回避した)
+  - **移管で埋めた差**:
+    - `SHIZUKU_CPU_COUNT` が Bazel 側で 1 のままだった (CMake は 2)
+    - CYW43 の分周比と PIO プログラム。★`--copt` では **SDK 内部の cyw43 ドライバに
+      届かない**ので、pico-sdk の `PICO_CONFIG_EXTRA_HEADER` に `cc_library` を
+      渡す形にした。値は `configs/cyw43_clock.bzl` が clk_sys と目標 SCK から導出する
+      (直書きしない理由は D23)
+    - `tools/flash.sh` の既定パスが `bazel-bin/shizuku.uf2` のまま取り残されていた
+      (genrule は `//firmware` へ移っていた)。**場所は `args = ["$(location ...)"]`
+      で渡す**ようにした — 既定パスに頼ると、ターゲットを動かしたときに黙って
+      古い uf2 を焼く
+  - **同等性の確認**: Bazel 産のファームを実機へ焼いて
+    `78 passed / 0 failed`、2 コア、`gSPI at 37500 kHz (div 2)`、DMA 接続まで通過。
+    数字が CMake 版と一致することをもって移管完了とした
+  - **失ったもの**: Pico VS Code 拡張の CMake 由来のボタン / デバッグ設定。
+    代わりに `.vscode/tasks.json` を置いた (Cmd+Shift+B = 焼く)。SWD デバッグを
+    使うことになったら `launch.json` を書く必要がある (今まで無かったので実害なし)
+
 ## 3. 未決事項 (着手時にユーザー確認 or 暫定判断)
 
 - **Q1. svc 番号の渡し方** (PORT §2.1/§8-2): 即値ハイブリッド維持か、レジスタ統一か。

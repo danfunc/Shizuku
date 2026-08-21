@@ -388,29 +388,35 @@ CALL の protection 引数に region set を載せる)。
 | オブジェクト番号の衝突が「保護が壊れた」ように見える (2026-08-20 実際に踏んだ。flash FS の 11 が非特権プローブの 11 と衝突し、非特権のはずの呼び出しが特権オブジェクトの中身を実行した) | 番号表を 1 ヶ所に集約 (`objects/flash_fs.hpp`)。CREATE_OBJECT の ALREADY_EXISTS を無視しない |
 | フラッシュ書き込み元が flash 上にある (文字列リテラル等) → 書き込み中は XIP が止まっているので読めない | 1 ページずつ RAM の中継バッファへ写してから渡す。プローブはわざとリテラルを渡して経路を踏む |
 
-## build ディレクトリを作り直すとき (2026-08-20 に一度失って学んだ)
-
-`build/` は VS Code の kit (`.vscode/cmake-kits.json`) から設定を受け取っている。
-**消すと戻せなくなる**ので、コマンドラインから作り直すときは同じ値を渡すこと:
+## ビルドと書き込み (2026-08-21 から Bazel のみ)
 
 ```bash
-cmake -S . -B build -G Ninja \
-  -DPRELOAD_TOOLCHAIN_FILE=cmake/pico_sdk/pico_sdk_import.cmake \
-  -DPOSTLOAD_TOOLCHAIN_FILE=cmake/pico_sdk/pico_sdk_setup.cmake \
-  -DCMAKE_CXX_STANDARD=23 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-  -DSHIZUKU_ARCH=armv8m -DSHIZUKU_BOARD=rp2350_pico2 -DSHIZUKU_CPU_COUNT=1 \
-  -DSHIZUKU_MEMORY_MANAGER=shizuku::memory_managers::pico_sdk \
-  -DPICO_BOARD=pico2_w -DPICO_PLATFORM=rp2350
+bazelisk build //firmware:shizuku_uf2   # 作るだけ
+bazelisk run   //firmware:flash         # 作って焼く
+bazelisk clean                          # 出力を捨てる (依存ごとなら --expunge)
 ```
 
-- **`PRELOAD_TOOLCHAIN_FILE` を渡し忘れると `project()` の前にツールチェインが
-  決まらず、ホストの `/usr/bin/cc` でクロスビルドしようとして boot_stage2 の
-  アセンブルで落ちる** (エラーが `.syntax unified: unknown directive` なので、
-  一見コードの問題に見える)
-- `~/.pico-sdk/cmake/pico-vscode.cmake` は **`CMAKE_TOOLCHAIN_FILE` ではない**。
-  include されることを前提にしたファイルで、toolchain file として渡すと
-  コンパイラを何も設定しないまま既定を上書きしてしまう
-- 環境変数 `PICO_SDK_PATH` / `PICO_TOOLCHAIN_PATH` も要る
+VS Code からは `.vscode/tasks.json`:
+
+* **Cmd+Shift+B** = 「Shizuku: 焼く」(既定のビルドタスク)
+* Terminal → Run Task で「ビルド」「シリアルを見る」「掃除」も選べる
+* ステータスバーに本物のボタンを出したいなら
+  `spencerwmiles.vscode-task-buttons` を入れる (`.vscode/extensions.json` の推奨に
+  入れてある)。入れなくても Cmd+Shift+B で焼ける
+
+**構成のつまみはどこにあるか** (CMake の `-D` に相当するもの):
+
+| 何を | どこで |
+|---|---|
+| ボード / stdio / 接続待ち | `.bazelrc` の `--@pico-sdk//bazel/config:...` |
+| コア数・オブジェクト数・メソッド数など | `configs/BUILD.bazel` の `substitutions` |
+| CYW43 の gSPI クロック | `configs/cyw43_clock.bzl` (目標 SCK を宣言し、分周比と PIO プログラムを導出する) |
+| オブジェクト番号 | 各コンポーネントの `objects.list` (番号は書かない) |
+
+★`cyw43_clock.bzl` の値は **SDK 内部の cyw43 ドライバにも届く**必要があるので、
+`PICO_CONFIG_EXTRA_HEADER` 経由で入れている (コンパイルオプションでは SDK まで
+届かない)。効いているかは起動ログの
+`[PERIPH] led talks to cyw43 over gSPI at 37500 kHz (div 2)` で確認できる。
 
 ## 進め方の作法
 

@@ -1,6 +1,6 @@
 #!/bin/sh
 # ===========================================================================
-#  ファーム書き込み (bazel run //:flash [uf2])
+#  ファーム書き込み (bazelisk run //firmware:flash [uf2])
 # ===========================================================================
 #  picotool は BOOTSEL で挿したデバイスにも、-f で「動いているファームを再起動させて」
 #  も書ける (このファームは USB CDC を出しているのでリセット要求を受けられる)。
@@ -12,15 +12,15 @@ uf2="${1:-}"
 if [ -z "${uf2}" ]; then
   # bazel run から呼ばれたときは、ワークスペースの bazel-bin を見る。
   if [ -n "${BUILD_WORKSPACE_DIRECTORY:-}" ]; then
-    uf2="${BUILD_WORKSPACE_DIRECTORY}/bazel-bin/shizuku.uf2"
+    uf2="${BUILD_WORKSPACE_DIRECTORY}/bazel-bin/firmware/shizuku.uf2"
   else
-    uf2="bazel-bin/shizuku.uf2"
+    uf2="bazel-bin/firmware/shizuku.uf2"
   fi
 fi
 
 if [ ! -f "${uf2}" ]; then
   echo "書き込む uf2 が無い: ${uf2}" >&2
-  echo "  先に: bazelisk build //:shizuku_uf2" >&2
+  echo "  先に: bazelisk build //firmware:shizuku_uf2" >&2
   exit 1
 fi
 

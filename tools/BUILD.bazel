@@ -1,3 +1,5 @@
 exports_files(["flash.sh"])
 
 exports_files(["gen_object_ids.py"])
+
+exports_files(["object_ids.hpp.in"])

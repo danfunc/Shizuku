@@ -7,3 +7,7 @@
 !.bazelrc
 !.bazelversion
 !.gitignore
+# ★ビルドと書き込みのタスクはここ (Cmd+Shift+B で焼ける)。CMake を捨てたので
+#   Pico 拡張のボタンの代わりになっている = リポジトリに要る。
+!.vscode/
+!.vscode/*

@@ -1,0 +1,15 @@
+{
+  // ステータスバーの本物のボタン (spencerwmiles.vscode-task-buttons が要る)。
+  // ★拡張が入っていなければこの設定は無視されるだけで害は無い。拡張なしでも
+  //   Cmd+Shift+B で「焼く」は動く (tasks.json の既定ビルドタスク)。
+  "VsCodeTaskButtons.showCounter": false,
+  "VsCodeTaskButtons.tasks": [
+    { "label": "$(zap) 焼く", "task": "Shizuku: 焼く", "tooltip": "bazelisk run //firmware:flash" },
+    { "label": "$(tools) ビルド", "task": "Shizuku: ビルド", "tooltip": "bazelisk build //firmware:shizuku_uf2" },
+    { "label": "$(plug) シリアル", "task": "Shizuku: シリアルを見る", "tooltip": "自己テストと [STRESS] の報告を読む" }
+  ],
+  // ビルドは Bazel なので、Pico 拡張の CMake 自動設定は止めておく
+  // (走らせると CMakeLists.txt が無いと言って騒ぐだけになる)。
+  "cmake.configureOnOpen": false,
+  "cmake.automaticReconfigure": false
+}

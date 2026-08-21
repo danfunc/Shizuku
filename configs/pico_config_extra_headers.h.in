@@ -1,0 +1,13 @@
+// ★このファイルはビルドシステムが生成する。手で編集しない。
+//   値を決めているのは configs/cyw43_clock.bzl (D23)。
+//   pico-sdk が全翻訳単位に読ませるので、SDK 内部の cyw43 ドライバにも効く。
+#ifndef SHIZUKU_PICO_CONFIG_EXTRA_HEADERS_H
+#define SHIZUKU_PICO_CONFIG_EXTRA_HEADERS_H
+
+// CYW43 の gSPI: clk_sys @CLK@ kHz / div @DIV@ -> SCK @SCK@ kHz
+#define CYW43_PIO_CLOCK_DIV_INT @DIV@
+#define CYW43_SPI_PROGRAM_NAME @PROGRAM@
+// 診断で「どの速度で喋っているか」を出すために持たせる。
+#define SHIZUKU_CYW43_SCK_KHZ @SCK@
+
+#endif // SHIZUKU_PICO_CONFIG_EXTRA_HEADERS_H
