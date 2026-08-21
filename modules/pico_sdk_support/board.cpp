@@ -3,6 +3,7 @@
 #include "hardware/exception.h"
 #include "hardware/irq.h"
 #include "hardware/structs/scb.h"
+#include "pico/multicore.h"
 #include "pico/stdlib.h"
 #include "shizuku/archs/armv8m.hpp"
 #include "shizuku/boards/rp2350_pico2.hpp"
@@ -115,6 +116,16 @@ void rp2350_pico2::diag_printf(const char *format, ...) {
 
 void rp2350_pico2::panic(const char *message) {
   ::panic("%s", message);
+}
+
+// ★もう一方のコアを起こす。起こされた側の入口は「自分で BOARD::init(core) を
+//   呼んでからスレッドモードへ移る」責任を持つ — 優先度・MPU・SysTick は
+//   per-core banked なので、起こす側から設定してやることができない。
+//   ★pico-sdk の multicore_launch_core1 は core1 に自前のスタックを与えて C 関数を
+//     呼ばせる。そのスタックは**起動の足場**にすぎず、スレッドとしてのスタックは
+//     オブジェクトランドから借りたものへ移る (D18)。
+void rp2350_pico2::launch_core(void (*entry)()) {
+  ::multicore_launch_core1(entry);
 }
 
 } // namespace boards

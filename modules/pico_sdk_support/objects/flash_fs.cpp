@@ -24,8 +24,11 @@ using ARCH = KERNEL::ARCH;
 //   (pico-sdk の flash_safe_execute) 必要がある。今の構成は 1 コアなので割り込みを
 //   落とすだけで足りる — が、「足りる理由」は構成に依存しているので、構成が
 //   変わったらここで気づけるようにしておく。
-static_assert(KERNEL::CORE_COUNT == 1,
-              "多コアで flash を書くなら、もう一方のコアを止める算段が要る");
+// ★多コアでは割り込みを落とすだけでは足りない。もう一方のコアが消去中に flash を
+//   踏むと即死するので、相手を RAM 上のコードへ退避させて止める必要がある
+//   (pico-sdk の flash_safe_execute)。**まだ入れていない**ので、多コア構成では
+//   書き込みを断る (黙って壊れるより断る)。読みは XIP なので多コアでも安全。
+constexpr bool FLASH_WRITE_IS_SAFE = (KERNEL::CORE_COUNT == 1);
 
 struct call_result {
   uintptr_t error;
@@ -182,6 +185,8 @@ uintptr_t flash_store_method(uintptr_t argument, uintptr_t, uintptr_t,
     return 0;
   if (request->data == nullptr || request->bytes == 0)
     return 0;
+  if (!FLASH_WRITE_IS_SAFE)
+    return 0; // 多コアではもう一方を止める算段が要る (上の注記)
 
   const uint32_t reserved = sector_round_up(request->bytes);
   const uint32_t bump = g_directory.header.bump;

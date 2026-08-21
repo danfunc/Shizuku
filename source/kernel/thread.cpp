@@ -21,6 +21,7 @@ template <> bool KERNEL::claim(uint32_t, kernel_error &);
 template <> void KERNEL::set_recovery_thread(uint32_t);
 template <> void KERNEL::set_thread_storage(void *, uintptr_t);
 template <> void KERNEL::release(uint32_t);
+template <> KERNEL::spawn_result KERNEL::reserve_thread();
 template <> void KERNEL::fault_dispatch(KERNEL::CONTEXT *);
 
 // ---- 貸してもらった記憶をスレッド表として据える ----------------------------
@@ -65,7 +66,11 @@ KERNEL::spawn_result KERNEL::spawn(const KERNEL::spawn_request &request) {
   thread.context = &m_threads[index].context;
   *thread.context = CONTEXT{};
   thread.call_stack = {};
-  thread.affinity = request.affinity == 0 ? 0b1 : request.affinity;
+  // ★既定は**全コア**。core0 固定を既定にすると「渡す機構が効いている」ことを
+  //   確かめられない (決めた通りに動いただけになる)。固定したい相手は明示する。
+  thread.affinity = request.affinity == 0
+                        ? (uint32_t)((1u << CORE_COUNT) - 1u)
+                        : request.affinity;
   ARCH::stack_limit_set(*thread.context,
                         (request.stack_base + 7) & ~(uintptr_t)7);
   ARCH::set_priv(*thread.context,
@@ -82,6 +87,20 @@ KERNEL::spawn_result KERNEL::spawn(const KERNEL::spawn_request &request) {
   //   claim できるようにするため (先に公開すると途中初期化のまま走り出せる)。
   ARCH::store_release32(&thread.state, (uint32_t)THREAD::state_t::READY);
   return {kernel_error::OK, index};
+}
+
+// 走らせずに枠だけ取る。★spawn と同じ CAS で取るので、他コアと競っても二重取りに
+//   ならない。採用する側が RUNNING にするまで RESERVED のまま = 誰にも拾われない。
+template <> KERNEL::spawn_result KERNEL::reserve_thread() {
+  for (uint32_t candidate = 1; candidate < m_thread_count; ++candidate) {
+    if (ARCH::cas32(&m_threads[candidate].thread.state,
+                    (uint32_t)THREAD::state_t::UNINITIALIZED,
+                    (uint32_t)THREAD::state_t::RESERVED)) {
+      m_threads[candidate].thread.context = &m_threads[candidate].context;
+      return {kernel_error::OK, candidate};
+    }
+  }
+  return {kernel_error::NO_THREAD, 0};
 }
 
 template <> void KERNEL::terminate(uint32_t thread) {

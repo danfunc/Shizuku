@@ -7,7 +7,7 @@
             "CMAKE_CXX_STANDARD":"23",
             "SHIZUKU_ARCH":"armv8m",
             "SHIZUKU_BOARD":"rp2350_pico2",
-            "SHIZUKU_CPU_COUNT" : "1",
+            "SHIZUKU_CPU_COUNT" : "2",
             "CMAKE_EXPORT_COMPILE_COMMANDS":"ON",
             "SHIZUKU_OBJECT_USE_THREAD_TABLE":"shizuku::templates::static_table<shizuku::THREAD,128>",
             "SHIZUKU_OBJECT_USE_MEMORY_TABLE":"shizuku::templates::static_table<shizuku::MEMORY_MAP,128>",

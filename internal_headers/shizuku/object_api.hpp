@@ -100,6 +100,19 @@ constexpr uintptr_t OBJECT_PRIVILEGED = 1u << 0;
 //   直に呼ばない」ものに限られる (DESIGN §11.2.2)。当面は宣言した相手だけ。
 constexpr uintptr_t OBJECT_UNPRIVILEGED = 1u << 1;
 
+// ★このオブジェクトのスレッドを走らせてよいコアの集合 (0 = どこでもよい)。
+//   flags の上位に載せる。**必要なのは「機械の都合で固定されている」相手だけ**で、
+//   既定はどこでも走れる — 固定を既定にすると、渡す機構が効いていることを
+//   確かめられなくなる (決めた通りに動いただけになる)。
+//   実例 (2026-08-21 実測): CYW43 は初期化したコアからしか触れない。blink スレッドが
+//   core1 へ移った瞬間に pico-sdk の assert が発火し、そのスレッドが止まった。
+//   「気をつけて core0 に置く」ではなく、**オブジェクトの性質として宣言する**。
+constexpr uintptr_t OBJECT_AFFINITY_SHIFT = 8;
+constexpr uintptr_t OBJECT_AFFINITY_MASK = 0xFFu << OBJECT_AFFINITY_SHIFT;
+constexpr uintptr_t OBJECT_ON_CORE(uintptr_t core) {
+  return (1u << core) << OBJECT_AFFINITY_SHIFT;
+}
+
 // オブジェクトへ返るエラー (a0)。0 = 成功はワイヤ規約 (D12)。
 // ★「未知の番号」はここに居る — 番号を解釈するのがオブジェクトランドだから。
 //   黙って捨てず必ずこれを返す (DESIGN §11.2.0 の計測事故の教訓)。

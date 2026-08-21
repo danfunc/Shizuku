@@ -34,6 +34,9 @@ void unprivileged_probe();
 extern uintptr_t unprivileged_control;
 extern uintptr_t privileged_control;
 
+// 2 コア目が本当にスレッドを走らせているかを、そのスレッド自身に申告させる。
+void multicore_probe();
+
 // 負荷試験: ランダムな長さの仕事をするスレッドを何本か走らせ、周期スレッドが
 // 締切をどれだけ外すか (揺らぎ) を測り続ける。目視ではなく数字で見る。
 void stress_launch();

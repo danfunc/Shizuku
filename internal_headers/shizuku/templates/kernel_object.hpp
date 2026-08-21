@@ -88,6 +88,11 @@ public:
   };
   lent_stack lend_boot_stack();
 
+  // 2 本目のコアを起こす。★スタックも枠もこちらが用意する (D18) ので、
+  //   起こすのが方針側の仕事になるのは自然。合成の一部で、ブート後に 1 回だけ呼ぶ。
+  //   CORE_COUNT == 1 の構成では何もしないで false を返す。
+  bool start_secondary_core();
+
   // ---- メモリ (オブジェクトランドの資源) ----------------------------------
   // ★カーネルはメモリを持たない。誰にどれだけ渡すかは方針なのでここが持つ。
   //   arena は 2 つ: 簿記用 (非特権から到達できない場所) と、オブジェクト用
@@ -172,6 +177,8 @@ private:
   void exit_thread();
   // そのオブジェクトを走らせるときの保護指定 (PROTECTION_*)。
   uint32_t object_protection(uintptr_t id) const;
+  // そのオブジェクトのスレッドを走らせてよいコア (0 = どこでもよい)。
+  uint32_t object_affinity(uintptr_t id) const;
   uintptr_t export_method(uintptr_t method, uintptr_t entry,
                           object_error &error);
   uintptr_t call_method(uintptr_t id, uintptr_t method, uintptr_t argument,

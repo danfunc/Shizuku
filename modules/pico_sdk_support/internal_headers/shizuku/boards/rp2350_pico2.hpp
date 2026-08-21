@@ -17,6 +17,10 @@ public:
   static void init(uint32_t core);
   // このコアのメモリ保護を張る (region は per-core banked なので各コアで呼ぶ)。
   static void protection_init();
+  // ★もう一方のコアを起こす。起こされた側は自分で BOARD::init(core) を呼んでから
+  //   スレッドモードへ移る (優先度・MPU・SysTick は per-core banked なので、
+  //   起こす側から設定してやることはできない)。
+  static void launch_core(void (*entry)());
   static uint32_t core_num() { return (uint32_t)::get_core_num(); }
   static uint64_t time_us() { return ::time_us_64(); }
   // ★クロックを知っているのは board (PORT §2.3)。上位は µs でしか話さない。

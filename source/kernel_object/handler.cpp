@@ -31,6 +31,7 @@ template <>
 uintptr_t KERNEL_OBJECT::create_object(uintptr_t, uintptr_t, uintptr_t,
                                        object_error &);
 template <> uint32_t KERNEL_OBJECT::object_protection(uintptr_t) const;
+template <> uint32_t KERNEL_OBJECT::object_affinity(uintptr_t) const;
 template <>
 uintptr_t KERNEL_OBJECT::export_method(uintptr_t, uintptr_t, object_error &);
 template <>
@@ -63,6 +64,7 @@ struct table_guard {
 template <> uintptr_t KERNEL_OBJECT::declare_name(uintptr_t, object_error &);
 template <> uintptr_t KERNEL_OBJECT::object_name(uintptr_t, object_error &);
 template <> KERNEL_OBJECT::lent_stack KERNEL_OBJECT::lend_boot_stack();
+template <> bool KERNEL_OBJECT::start_secondary_core();
 template <> uintptr_t KERNEL_OBJECT::memory_allocate(uintptr_t, object_error &);
 template <> uintptr_t KERNEL_OBJECT::memory_release(uintptr_t, object_error &);
 template <>
@@ -154,6 +156,56 @@ template <> KERNEL_OBJECT::lent_stack KERNEL_OBJECT::lend_boot_stack() {
   return {base, BOOT_STACK_BYTES};
 }
 
+// ---- 2 本目のコア -----------------------------------------------------------
+// ★このコアの「最初の 1 本」は他のスレッドと同じ扱い: 枠もスタックもここが用意する。
+//   走らせる中身は**アイドル役** — 自分では何もせず、走れる相手が居れば渡すだけ。
+//   ★アイドルが仕事を持つと、その仕事が他の全部の遅れになる (thread 0 と同じ規律)。
+namespace {
+uintptr_t g_secondary_stack = 0;
+uintptr_t g_secondary_bytes = 0;
+uint32_t g_secondary_thread = 0;
+
+// 採用されたあとに走る本体。
+void secondary_idle() {
+  while (true)
+    KERNEL::ARCH::syscall((uintptr_t)object_api::YIELD);
+}
+
+// core1 の入口。まだ pico-sdk が用意した足場の上に居るので、ここで自分を
+// スレッドとして採用し、借りたスタックへ移る。
+void secondary_boot() {
+  kernel_instance.bootstrap_secondary(g_secondary_thread, secondary_idle,
+                                      g_secondary_stack, g_secondary_bytes);
+}
+} // namespace
+
+template <> bool KERNEL_OBJECT::start_secondary_core() {
+  if (KERNEL::CORE_COUNT < 2)
+    return false;
+  const auto reserved = kernel_instance.reserve_thread();
+  if (reserved.error != kernel_error::OK)
+    return false;
+  uintptr_t stack;
+  {
+    table_guard guard;
+    stack = arena_allocate(m_objects_arena, THREAD_STACK_BYTES, ROOT_OBJECT);
+    if (stack != 0)
+      m_thread_stack[reserved.thread] = stack;
+  }
+  if (stack == 0) {
+    kernel_instance.release(reserved.thread);
+    return false;
+  }
+  g_secondary_thread = reserved.thread;
+  g_secondary_stack = stack;
+  g_secondary_bytes = THREAD_STACK_BYTES;
+  m_thread_object[reserved.thread] = (uint16_t)ROOT_OBJECT;
+  // ★アイドルは時限を持たない。持ち分を渡す側であって、借りる側ではない。
+  m_budget[reserved.thread] = DEFAULT_BUDGET_CYCLES;
+  KERNEL::BOARD::launch_core(secondary_boot);
+  return true;
+}
+
 // ★両側チェックの申告値を**自分の台帳から**計算する (§9.3)。
 //   カーネルのフレーム段数を写して返すのでは検算にならない。こちらは
 //   「呼び出しを何段積んだか」を独立に数えており、フレームは 1 段あたり 2 枚
@@ -216,6 +268,13 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
 template <> uint32_t KERNEL_OBJECT::object_protection(uintptr_t id) const {
   return (m_objects[id].flags & OBJECT_UNPRIVILEGED) ? PROTECTION_UNPRIVILEGED
                                                      : PROTECTION_PRIVILEGED;
+}
+
+// ★どこでも走れるのが既定。固定されているのは「機械の都合でそうなっている」
+//   相手だけで、それは宣言してもらう (気をつけて置く、では守れない)。
+template <> uint32_t KERNEL_OBJECT::object_affinity(uintptr_t id) const {
+  return (uint32_t)((m_objects[id].flags & OBJECT_AFFINITY_MASK) >>
+                    OBJECT_AFFINITY_SHIFT);
 }
 
 template <>
@@ -343,7 +402,7 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
   request.entry_pc = (uintptr_t)entry;
   request.argument = argument;
   request.protection = object_protection(id);
-  request.affinity = 0;
+  request.affinity = object_affinity(id);
   request.stack_base = stack;
   request.stack_bytes = THREAD_STACK_BYTES;
   const auto spawned = kernel_instance.spawn(request);
@@ -405,6 +464,10 @@ template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
       continue;
     }
     if (kernel_instance.thread_state(candidate) != state_t::READY)
+      continue;
+    // ★このコアで走ってよい相手だけを候補にする。claim も弾いてくれるが、
+    //   弾かれてから次を探すのは無駄で、しかも相手の枠を一瞬 CAS で叩くことになる。
+    if ((kernel_instance.thread_affinity(candidate) & (1u << core)) == 0)
       continue;
     if (m_wake_at[candidate] > now)
       continue; // 眠っている相手は起こさない

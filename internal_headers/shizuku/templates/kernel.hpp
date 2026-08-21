@@ -97,6 +97,12 @@ public:
   //   カーネルが自分で malloc すると「スレッドの記憶は誰のものか」が二枚舌になる。
   [[noreturn]] void bootstrap(void (*entry)(), uintptr_t stack_base,
                               uintptr_t stack_bytes);
+  // 2 本目以降のコアが自分で呼ぶ。今の実行を **指定されたスレッド** として採用し、
+  // entry へ移る。★スレッド 0 を使えないので枠を指定する形になる — 誰をそのコアの
+  // 最初の 1 本にするかは方針なので、決めるのはオブジェクトランド。
+  [[noreturn]] void bootstrap_secondary(uint32_t thread, void (*entry)(),
+                                        uintptr_t stack_base,
+                                        uintptr_t stack_bytes);
 
   // -------------------------------------------------------------------------
   //  スレッドの生成 — カーネルオブジェクトが**スレッドモードから**呼ぶ C++ API
@@ -120,6 +126,9 @@ public:
     uintptr_t stack_bytes;
   };
   spawn_result spawn(const spawn_request &request);
+  // 走らせずに枠だけ取る。2 本目以降のコアが「今の実行」を採用するために使う
+  // (spawn は入口から走らせる形なので、採用には使えない)。
+  spawn_result reserve_thread();
   // 終わったスレッドの枠を返す。記憶を返すのは貸し主 (オブジェクトランド) の仕事。
   void release(uint32_t thread);
   // スレッドを終了させる (走り終えた / 隔離する)。今のコアが走らせているスレッドを
@@ -146,6 +155,10 @@ public:
   }
   uint32_t current_depth() const { return current_thread().call_stack.depth; }
   // スケジューリング方針 (kobj 側) が候補を探すための読み出し。
+  // そのスレッドを走らせてよいコアの集合 (方針側が候補を絞るために読む)。
+  uint32_t thread_affinity(uint32_t thread) const {
+    return m_threads[thread].thread.affinity;
+  }
   typename THREAD::state_t thread_state(uint32_t thread) const {
     return (typename THREAD::state_t)m_threads[thread].thread.state;
   }

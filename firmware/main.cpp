@@ -28,6 +28,13 @@ void shizuku::app_entry() {
   shizuku::selftest::memory_ladder();
   shizuku::selftest::unprivileged_probe();
 
+  // ★2 本目のコアを起こす。ここまでの自己テストが 1 コアで通っていることを
+  //   確かめてから起こす — 先に起こすと、失敗したときに「並行のせいか元からか」を
+  //   切り分けられない (梯子式の作法。DESIGN §16)。
+  if (shizuku::kernel_object_instance.start_secondary_core())
+    shizuku::KERNEL::BOARD::diag_printf("[BOOT] secondary core launched\n");
+  shizuku::selftest::multicore_probe();
+
   // 負荷試験を起動する。以後、点滅と報告は専用スレッドが行う。
   shizuku::selftest::stress_launch();
 

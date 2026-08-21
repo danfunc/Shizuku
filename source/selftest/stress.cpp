@@ -172,7 +172,11 @@ uintptr_t blink(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 } // namespace
 
 void stress_launch() {
-  syscall_value(object_api::CREATE_OBJECT, OBJECT_BLINK, (uintptr_t)&blink, 0);
+  // ★blink は LED = CYW43 を叩く。CYW43 は**初期化したコアからしか触れない**ので
+  //   core0 に固定する。実測でここを外すと、blink が core1 へ移った瞬間に
+  //   pico-sdk の assert が発火してそのスレッドが止まった (系は継続した)。
+  syscall_value(object_api::CREATE_OBJECT, OBJECT_BLINK, (uintptr_t)&blink,
+                OBJECT_ON_CORE(0));
   syscall_value(object_api::CREATE_OBJECT, OBJECT_LOAD, (uintptr_t)&load, 0);
 
   // ★測る前に一度叩いておく。無線チップ側の LED は最初の 1 回でチップの立ち上げ
