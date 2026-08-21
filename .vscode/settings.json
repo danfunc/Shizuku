@@ -1,7 +1,10 @@
 {
-  // ステータスバーの本物のボタン (spencerwmiles.vscode-task-buttons が要る)。
-  // ★拡張が入っていなければこの設定は無視されるだけで害は無い。拡張なしでも
-  //   Cmd+Shift+B で「焼く」は動く (tasks.json の既定ビルドタスク)。
+  // ★ボタンの整理 (2026-08-21):
+  //   ・ステップ実行 = VS Code 標準の「Run and Debug」パネル (F5 / 緑の ▶)。
+  //     設定は .vscode/launch.json。第三者拡張は要らない
+  //   ・焼くだけ = Cmd+Shift+B (tasks.json の既定ビルドタスク)
+  //   下の設定は「焼く」をステータスバーにも出したい人向けの**任意**。
+  //   拡張 (spencerwmiles.vscode-task-buttons) が無ければ無視されるだけ。
   "VsCodeTaskButtons.showCounter": false,
   "VsCodeTaskButtons.tasks": [
     { "label": "$(zap) 焼く", "task": "Shizuku: 焼く", "tooltip": "bazelisk run //firmware:flash" },

@@ -1,6 +1,6 @@
 {
-  // ★必須ではない。入れるとステータスバーに「焼く」ボタンが出る
-  //   (設定は .vscode/settings.json の VsCodeTaskButtons.tasks)。
-  //   入れなくても Cmd+Shift+B で焼ける。
-  "recommendations": ["spencerwmiles.vscode-task-buttons"]
+  // ★ステップ実行に要るのは C/C++ 拡張 (cppdbg)。ボタンは VS Code 標準の
+  //   「Run and Debug」パネル (緑の ▶ / F5 / ステップのツールバー) を使う。
+  //   cortex-debug は要らないが、あると SVD でレジスタを覗ける。
+  "recommendations": ["ms-vscode.cpptools", "marus25.cortex-debug"]
 }

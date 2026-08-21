@@ -1,0 +1,52 @@
+{
+  // ===========================================================================
+  //  ステップ実行 (docs/03_porting_policy.md D39)
+  // ===========================================================================
+  //  ★VS Code の「Run and Debug」パネルの緑の ▶ と F5、そして継続/ステップの
+  //    ツールバーが**そのままボタンになる**。タスク用の拡張を入れるより素直。
+  //
+  //  ★★この設定は**プローブが無いので未検証**。手元 (2026-08-21 時点) には
+  //    CMSIS-DAP なプローブが繋がっていないため、動かして確かめられていない。
+  //    OpenOCD (rp2350.cfg あり) と arm-none-eabi-gdb は揃っていることは確認済み。
+  //
+  //  【要るもの】
+  //    ・SWD のプローブ (Raspberry Pi Debug Probe か、debugprobe を焼いた別の Pico)
+  //    ・pico2_w の SWCLK / SWDIO / GND を繋ぐ
+  //  【この系ならではの注意】
+  //    ・**2 コア動いている**。片方だけ止めると、もう片方が
+  //      park_other_cores() (flash 書き込み) で応答を待って固まる。止めるなら
+  //      両方止める (rp2350.cfg は既定で両コアを見る)
+  //    ・止まっている間 USB CDC も止まるので、ホスト側のシリアルは切れる
+  //    ・カーネルオブジェクトのハンドラの中で止めると、共有台帳の錠を握ったまま
+  //      止まることがある。そこで再開しないと相手のコアが進めない
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Shizuku: SWD でステップ実行 (プローブが要る)",
+      "type": "cppdbg",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      // ★焼くのは uf2 だが、デバッガに食わせるのは**行番号を持っている ELF**。
+      "program": "${workspaceFolder}/bazel-bin/firmware/shizuku",
+      "MIMode": "gdb",
+      "miDebuggerPath": "${env:HOME}/.pico-sdk/toolchain/14_2_Rel1/bin/arm-none-eabi-gdb",
+      "miDebuggerServerAddress": "localhost:3333",
+      "debugServerPath": "${env:HOME}/.pico-sdk/openocd/0.12.0+dev/openocd",
+      "debugServerArgs": "-s ${env:HOME}/.pico-sdk/openocd/0.12.0+dev/scripts -f interface/cmsis-dap.cfg -f target/rp2350.cfg -c \"adapter speed 5000\"",
+      "serverStarted": "Listening on port 3333",
+      "preLaunchTask": "Shizuku: ビルド",
+      "externalConsole": false,
+      "setupCommands": [
+        // ★Bazel はサンドボックスの中でコンパイルするので、DWARF の comp_dir が
+        //   ここには無い場所を指す。相対名で引けるようにワークスペースを教える。
+        { "text": "directory ${workspaceFolder}" },
+        { "text": "set mem inaccessible-by-default off" }
+      ],
+      "postRemoteConnectCommands": [
+        { "text": "monitor reset init" },
+        { "text": "load" }
+      ],
+      "stopAtEntry": true
+    }
+  ]
+}

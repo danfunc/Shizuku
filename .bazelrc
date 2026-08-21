@@ -11,6 +11,15 @@ build --@pico-sdk//bazel/config:PICO_CONFIG_EXTRA_HEADER=//configs:pico_extra_co
 # カーネルは C++23 (cxxopt は C++ 翻訳単位にのみ効く)
 build --cxxopt=-std=c++23
 
+# ★行番号を必ず入れる。DWARF は**焼くものには入らない** (uf2 に載るのは loadable な
+#   セクションだけ) ので、デバイス側の費用はゼロ。入れていなかったせいで、フォールトの
+#   pc を addr2line に食わせても `unprivileged.cpp:?` と関数名しか出ず、行が分からな
+#   かった。ステップ実行にも要る。
+build --copt=-g3
+# ★Bazel の既定は --strip=sometimes = **fastbuild では剥がす**。-g3 を足しただけでは
+#   リンクで消えるので、剥がさないと明示する。焼くものには載らないので害は無い。
+build --strip=never
+
 # fastbuild の -O0 だと svc ラッパの inline asm (入力 5 + 出力 2 + r0-r3/ip/lr
 # clobber) がレジスタ割付不能になる。CMake の Debug (-Og) と揃える。
 build --copt=-Og
