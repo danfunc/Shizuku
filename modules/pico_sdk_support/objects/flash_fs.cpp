@@ -318,7 +318,7 @@ uintptr_t flash_fs_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   }
   g_mounted = true;
 
-  uintptr_t failures = 0;
+  uintptr_t failures = api(object_api::DECLARE_NAME, (uintptr_t) "flashfs").error;
   failures += export_method((uintptr_t)flash_fs_method::LOOKUP,
                             (uintptr_t)&flash_lookup_method);
   failures += export_method((uintptr_t)flash_fs_method::STORE,

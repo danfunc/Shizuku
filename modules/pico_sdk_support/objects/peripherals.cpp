@@ -37,6 +37,12 @@ uintptr_t export_method(uintptr_t method, uintptr_t entry) {
   return api(object_api::EXPORT_METHOD, method, entry).error;
 }
 
+// ★自分で名乗る。誰として登録されるかは発行元から導出されるので、他人の名は騙れない。
+//   名前はコピーされないため、文字列リテラル (flash 上 = 常に見える) を渡すこと。
+uintptr_t declare_name(const char *name) {
+  return api(object_api::DECLARE_NAME, (uintptr_t)name).error;
+}
+
 spi_inst_t *instance_of(uint32_t instance) {
   return instance == 0 ? spi0 : spi1;
 }
@@ -68,7 +74,7 @@ uintptr_t gpio_read(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
 }
 
 uintptr_t gpio_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
-  uintptr_t failures = 0;
+  uintptr_t failures = declare_name("gpio");
   failures += export_method((uintptr_t)gpio_method::CONFIGURE,
                             (uintptr_t)&gpio_configure);
   failures += export_method((uintptr_t)gpio_method::WRITE,
@@ -117,7 +123,7 @@ uintptr_t led_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 #else
   return LED_ABSENT; // ボードに LED が無い
 #endif
-  uintptr_t failures = 0;
+  uintptr_t failures = declare_name("led");
   failures += export_method((uintptr_t)led_method::WRITE, (uintptr_t)&led_write);
   failures += export_method((uintptr_t)led_method::READ, (uintptr_t)&led_read);
   return failures;
@@ -155,7 +161,7 @@ uintptr_t spi_transfer_method(uintptr_t argument, uintptr_t, uintptr_t,
 }
 
 uintptr_t spi_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
-  uintptr_t failures = 0;
+  uintptr_t failures = declare_name("spi");
   failures += export_method((uintptr_t)spi_method::CONFIGURE,
                             (uintptr_t)&spi_configure);
   failures += export_method((uintptr_t)spi_method::TRANSFER,

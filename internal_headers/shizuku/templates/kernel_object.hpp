@@ -124,9 +124,15 @@ public:
 private:
   struct object_t {
     bool created;
+    // ★名前はここではなく別配列に置く。object_t は呼び出し経路 (created / flags /
+    //   methods) で毎回触るので、経路に関係ない名前を混ぜてキャッシュ行を汚さない。
+
     uint32_t flags; // OBJECT_* の宣言 (生成時に決まり、以後変わらない)
     method_t methods[METHOD_COUNT];
   };
+  // 名前の置き場。**コピーではなくポインタ**を持つ (kobj は文字列を触らない)。
+  const char *m_object_name[OBJECT_COUNT_T];
+
   // per-thread の「今どのオブジェクトとして走っているか」の台帳。
   struct shadow_t {
     uint16_t object[MAX_DEPTH]; // 呼び出しごとの呼び先
@@ -137,6 +143,9 @@ private:
   // 各 API。戻り値はそのまま発行元へ返る値。エラーは error 引数へ書く。
   uintptr_t create_object(uintptr_t id, uintptr_t entry, uintptr_t flags,
                           object_error &error);
+  // 名乗り。★保持して返すだけで、比較はしない (D26)。
+  uintptr_t declare_name(uintptr_t name, object_error &error);
+  uintptr_t object_name(uintptr_t id, object_error &error);
   uintptr_t spawn_method(uintptr_t id, uintptr_t method, uintptr_t argument,
                          object_error &error);
   uintptr_t yield_to(uintptr_t target, object_error &error);

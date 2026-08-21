@@ -90,6 +90,7 @@ uintptr_t load(uintptr_t kind, uintptr_t, uintptr_t, uintptr_t) {
 
 // 周期スレッド。締切のズレを測り、LED をオブジェクト経由で叩く。
 uintptr_t blink(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  syscall_value(object_api::DECLARE_NAME, (uintptr_t) "blink");
   objects::led_request request{0};
   uint64_t next = BOARD::time_us() + BLINK_PERIOD_US;
   uint64_t late_max = 0;      // 起動来の最大 (一過性の山も残る)

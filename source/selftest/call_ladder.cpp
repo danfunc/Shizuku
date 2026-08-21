@@ -27,6 +27,11 @@ using BOARD = KERNEL::BOARD;
 constexpr uintptr_t OBJECT_LEAF = 1;
 constexpr uintptr_t OBJECT_NEST = 2;
 constexpr uintptr_t OBJECT_DEEP = 3;
+// ★15 番。空いている番号を**目で探して**振っている — これが今日 2 回事故った
+//   やり方そのもの。名乗りはその対策の第一歩で、次は System Object が番号を
+//   配るようにして、この行を消す。
+constexpr uintptr_t OBJECT_NAMER = 15;
+constexpr uintptr_t OBJECT_COUNT_PROBE = 31; // 居ないことが確かな番号
 constexpr uintptr_t METHOD_MAIN = 0;
 
 void check(const char *name, bool ok, unsigned long got, unsigned long want) {
@@ -53,6 +58,11 @@ api_result api(object_api number, uintptr_t a1 = 0, uintptr_t a2 = 0,
   if (result.error & KERNEL_ERROR_MARK)
     return {(uintptr_t)object_error::KERNEL_REFUSED, result.error};
   return {result.error, result.value};
+}
+
+// 自分で名乗るだけのオブジェクト。
+uintptr_t namer(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  return api(object_api::DECLARE_NAME, (uintptr_t) "namer").error;
 }
 
 api_result call_method(uintptr_t object, uintptr_t argument) {
@@ -210,6 +220,42 @@ void call_ladder() {
           (unsigned long)kernel_instance.current_depth(), 0);
     BOARD::diag_printf("[SELFTEST] max nesting before NO_STACK: %lu\n",
                        (unsigned long)g_deep_max);
+  }
+
+  // ---- 名乗り (System Object が起動するまでの暫定の宿) --------------------
+  // ★名前は診断のためだけではない。番号の衝突が**声を出す**ようになるのが本命で、
+  //   今日はそれが無かったせいで 2 回とも黙って別物が動いた。
+  {
+    api(object_api::CREATE_OBJECT, OBJECT_NAMER, (uintptr_t)&namer, 0);
+    const api_result named = api(object_api::CALL_METHOD, OBJECT_NAMER, 0, 0);
+    check("name: the object named itself",
+          named.error == 0 && named.value == 0, (unsigned long)named.value, 0);
+    const api_result read = api(object_api::OBJECT_NAME, OBJECT_NAMER);
+    check("name: it can be read back", read.value != 0 &&
+              ((const char *)read.value)[0] == 'n',
+          (unsigned long)read.value, 1);
+    // ★付け直しは断ること。控えた名が別物を指すようになると、名前を頼りにした側が
+    //   静かに間違った相手を掴む — 番号の衝突とまったく同じ壊れ方になる。
+    const api_result again = api(object_api::CALL_METHOD, OBJECT_NAMER, 0, 0);
+    check("name: renaming is refused",
+          again.value == (uintptr_t)object_error::ALREADY_NAMED,
+          (unsigned long)again.value,
+          (unsigned long)object_error::ALREADY_NAMED);
+    // ★衝突が**声を出す**ことの確認。今日の 2 件はどちらもここが黙っていたせいで
+    //   別物が動き続けた。上のログに
+    //   「[KOBJ] object 15 is already taken by 'namer'」が出ていること。
+    const api_result clash =
+        api(object_api::CREATE_OBJECT, OBJECT_NAMER, (uintptr_t)&namer, 0);
+    check("name: a colliding id is refused, loudly",
+          clash.error == (uintptr_t)object_error::ALREADY_EXISTS,
+          (unsigned long)clash.error,
+          (unsigned long)object_error::ALREADY_EXISTS);
+    // 居ないオブジェクトの名は無い。
+    const api_result absent = api(object_api::OBJECT_NAME, OBJECT_COUNT_PROBE);
+    check("name: an absent object has no name",
+          absent.error == (uintptr_t)object_error::BAD_OBJECT,
+          (unsigned long)absent.error,
+          (unsigned long)object_error::BAD_OBJECT);
   }
 
   BOARD::diag_printf("[SELFTEST] call ladder done: %lu passed, %lu failed\n",

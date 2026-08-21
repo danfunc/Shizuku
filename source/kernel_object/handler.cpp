@@ -46,6 +46,8 @@ template <>
 uintptr_t KERNEL_OBJECT::run_for(uintptr_t, uintptr_t, object_error &);
 template <> void KERNEL_OBJECT::exit_thread();
 template <> bool KERNEL_OBJECT::schedule(uint32_t);
+template <> uintptr_t KERNEL_OBJECT::declare_name(uintptr_t, object_error &);
+template <> uintptr_t KERNEL_OBJECT::object_name(uintptr_t, object_error &);
 template <> KERNEL_OBJECT::lent_stack KERNEL_OBJECT::lend_boot_stack();
 template <> uintptr_t KERNEL_OBJECT::memory_allocate(uintptr_t, object_error &);
 template <> uintptr_t KERNEL_OBJECT::memory_release(uintptr_t, object_error &);
@@ -83,6 +85,7 @@ template <> void KERNEL_OBJECT::init() {
   for (uintptr_t id = 0; id < OBJECT_COUNT; ++id) {
     m_objects[id].created = false;
     m_objects[id].flags = 0;
+    m_object_name[id] = nullptr;
     for (uintptr_t method = 0; method < METHOD_COUNT; ++method)
       m_objects[id].methods[method] = nullptr;
   }
@@ -119,6 +122,7 @@ template <> void KERNEL_OBJECT::init() {
   arena_init(m_objects_arena, (uintptr_t)heap.value(), OBJECT_ARENA_BYTES);
   // ブートスレッドが名乗るオブジェクトだけは最初から在るものとして扱う。
   m_objects[ROOT_OBJECT].created = true;
+  m_object_name[ROOT_OBJECT] = "root";
 }
 
 // ★スレッド 0 のスタックも他と同じく arena から貸す。ここだけカーネルが自分で
@@ -159,6 +163,16 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
     return 0;
   }
   if (m_objects[id].created) {
+    // ★**無音で失敗させない**。番号の衝突は今日 2 回起きて 2 回とも黙っていた
+    //   (flash_fs 11 × 非特権プローブ 11 → 「非特権のはずが特権」という別物の
+    //   失敗に化けた。sleeper 6 × blink 6 → 揺らぎの計測が止まったのに
+    //   36 passed/0 failed のまま)。**戻り値を見ない呼び出し側が必ず居る**ので、
+    //   気づけるかどうかを呼び出し側の行儀に賭けない。名乗りがここで効く —
+    //   「6 は既に誰それが持っている」と言えるようになる。
+    KERNEL::BOARD::diag_printf(
+        "[KOBJ] object %lu is already taken by '%s' — create refused\n",
+        (unsigned long)id,
+        m_object_name[id] != nullptr ? m_object_name[id] : "(unnamed)");
     error = object_error::ALREADY_EXISTS;
     return 0;
   }
@@ -447,6 +461,38 @@ template <> void KERNEL_OBJECT::exit_thread() {
   }
 }
 
+// ---- 名乗り ----------------------------------------------------------------
+// ★誰として登録するかは**発行元から導出する** (EXPORT_METHOD と同じ作法)。
+//   引数で対象を指定させると他人の名を騙れてしまう。
+// ★★保持するだけで**比較しない**。比較 = 文字列処理を入れた瞬間に、オブジェクト
+//   システムが定数時間で抜けられなくなる (D26)。名前で引くのは System Object の
+//   仕事で、起動したら OBJECT_NAME で読み出して自分の索引を作り、引き継ぐ。
+template <>
+uintptr_t KERNEL_OBJECT::declare_name(uintptr_t name, object_error &error) {
+  const uintptr_t self = current_object(kernel_instance.current_thread_id());
+  if (name == 0) {
+    error = object_error::BAD_OBJECT;
+    return 0;
+  }
+  // 付け直しは断る。控えた名が別物を指すようになると、名前を頼りにした側が
+  // 静かに間違った相手を掴む。
+  if (m_object_name[self] != nullptr) {
+    error = object_error::ALREADY_NAMED;
+    return 0;
+  }
+  m_object_name[self] = (const char *)name;
+  return self;
+}
+
+template <>
+uintptr_t KERNEL_OBJECT::object_name(uintptr_t id, object_error &error) {
+  if (id >= OBJECT_COUNT || !m_objects[id].created) {
+    error = object_error::BAD_OBJECT;
+    return 0;
+  }
+  return (uintptr_t)m_object_name[id]; // 0 = 無名
+}
+
 // ---- メモリの授受 -----------------------------------------------------------
 // ★参照実装の「オブジェクトごとに 16 語」は簡易な一形態でしかない。ここでは
 //   大きさを指定して借り、**持ち主を付け替えられる**形にする。持ち主が付いていれば
@@ -561,6 +607,12 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
     break;
   case object_api::MEMORY_OWNER:
     value = memory_owner(a1, error);
+    break;
+  case object_api::DECLARE_NAME:
+    value = declare_name(a1, error);
+    break;
+  case object_api::OBJECT_NAME:
+    value = object_name(a1, error);
     break;
   case object_api::SET_BUDGET:
     if (a1 < THREAD_COUNT)
