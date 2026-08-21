@@ -10,6 +10,7 @@
 //  ★使うのはオブジェクトランドの API だけ。カーネルのプリミティブはオブジェクトから
 //    撃てないので、テストも撃たない = 実経路をそのまま検査することになる。
 #include "shizuku/kernel.hpp"
+#include "shizuku/object_ids.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/selftest.hpp"
 
@@ -24,14 +25,12 @@ namespace {
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
-constexpr uintptr_t OBJECT_LEAF = 1;
-constexpr uintptr_t OBJECT_NEST = 2;
-constexpr uintptr_t OBJECT_DEEP = 3;
-// ★15 番。空いている番号を**目で探して**振っている — これが今日 2 回事故った
-//   やり方そのもの。名乗りはその対策の第一歩で、次は System Object が番号を
-//   配るようにして、この行を消す。
-constexpr uintptr_t OBJECT_NAMER = 15;
-constexpr uintptr_t OBJECT_COUNT_PROBE = 31; // 居ないことが確かな番号
+constexpr uintptr_t OBJECT_LEAF = object_id::leaf;
+constexpr uintptr_t OBJECT_NEST = object_id::nest;
+constexpr uintptr_t OBJECT_DEEP = object_id::deep;
+constexpr uintptr_t OBJECT_NAMER = object_id::namer;
+// 居ないことが確かな番号 (割り当ての最後より後ろ)。
+constexpr uintptr_t OBJECT_COUNT_PROBE = object_id::count;
 constexpr uintptr_t METHOD_MAIN = 0;
 
 void check(const char *name, bool ok, unsigned long got, unsigned long want) {

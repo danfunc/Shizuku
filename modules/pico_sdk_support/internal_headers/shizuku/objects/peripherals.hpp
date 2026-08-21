@@ -1,6 +1,7 @@
 #ifndef SHIZUKU_OBJECTS_PERIPHERALS_HPP
 #define SHIZUKU_OBJECTS_PERIPHERALS_HPP
 #include <cstdint>
+#include "shizuku/object_ids.hpp"
 
 // ===========================================================================
 //  ペリフェラルオブジェクト — ボードが提供する、ハードウェアを持つオブジェクト
@@ -20,12 +21,12 @@ namespace objects {
 
 // オブジェクト ID (合成側が決める)。**埋まっている番号の表は
 // shizuku/objects/flash_fs.hpp に集約してある** — 散らすと衝突に気づけない。
-constexpr uintptr_t GPIO_OBJECT = 8;
-constexpr uintptr_t SPI_OBJECT = 9;
+constexpr uintptr_t GPIO_OBJECT = object_id::gpio;
+constexpr uintptr_t SPI_OBJECT = object_id::spi;
 // ボード上の LED。**どのピンに繋がっているか (あるいは GPIO ですらないか) を
 // 隠す**のがこのオブジェクトの仕事: pico2 は GPIO 25、pico2_w は CYW43 チップの
 // WL_GPIO0 で、後者は GPIO を叩いても光らない。呼ぶ側はどちらか知らなくてよい。
-constexpr uintptr_t LED_OBJECT = 10;
+constexpr uintptr_t LED_OBJECT = object_id::led;
 
 // メソッド番号。0 は main (生成側が据え、自分で残りを export する)。
 enum struct gpio_method : uintptr_t {

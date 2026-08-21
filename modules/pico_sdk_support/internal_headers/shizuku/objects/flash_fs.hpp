@@ -1,6 +1,7 @@
 #ifndef SHIZUKU_OBJECTS_FLASH_FS_HPP
 #define SHIZUKU_OBJECTS_FLASH_FS_HPP
 #include <cstdint>
+#include "shizuku/object_ids.hpp"
 
 // ===========================================================================
 //  flash FS オブジェクト — **XIP 前提**の、アドレスを返すファイル系
@@ -30,15 +31,10 @@
 namespace shizuku {
 namespace objects {
 
-// オブジェクト ID。**番号は取り合いになる**ので、埋まっている番号をここに書く:
-//   1..3   自己テストの呼び出し梯子
-//   8..10  GPIO / SPI / LED (peripherals.hpp)
-//   11..13 自己テストの非特権プローブ (unprivileged.cpp)
-//   16     ここ
-// ★一度これで踏んだ: 11 を取ったら非特権プローブと衝突し、プローブが flash FS
-//   (特権宣言) の中身を呼んでしまって「非特権のはずが特権だった」という**別物の
-//   失敗に化けた**。番号の衝突は静かに嘘の観測を作るので、表を散らさない。
-constexpr uintptr_t FLASH_FS_OBJECT = 16;
+// ★番号は書かない。ビルドシステムが振る (cmake/shizukuObjects.cmake, D28)。
+//   以前はここに「埋まっている番号の表」を手で書いていたが、それは今日 2 回
+//   事故った — 表を見て空きを探す作業そのものが事故の原因だった。
+constexpr uintptr_t FLASH_FS_OBJECT = object_id::flashfs;
 
 // メソッド番号。0 は main (生成側が据え、自分で残りを export する)。
 enum struct flash_fs_method : uintptr_t {

@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.26)
 set(CMAKE_CXX_STANDARD "23")
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/buildUtilities.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/shizukuObjects.cmake)
 preloadtoolchain()
 # ★-fPIE/-fPIC は付けない。ベアメタルのファームでは意味が無い上に、PIC だと関数の
 # アドレスがリンク時定数でなくなり、asm へシンボルを即値として埋められなくなる
@@ -65,6 +66,12 @@ add_subdirectory(modules)
 add_subdirectory(configs)
 add_subdirectory(source)
 add_subdirectory(firmware)
+
+# ★オブジェクト番号の生成は**全部の宣言を集め終えてから**。ここより前に
+#   add_subdirectory を足したら、その中の宣言も自動的に拾われる。
+shizuku_generate_object_ids(${CMAKE_BINARY_DIR}/generated_object_ids)
+target_include_directories(Shizuku_internal_HEADERS
+                           INTERFACE ${CMAKE_BINARY_DIR}/generated_object_ids)
 # target_precompile_headers(Shizuku PRIVATE
 # "$<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/internal_headers/shizuku/kernel.hpp>")
 

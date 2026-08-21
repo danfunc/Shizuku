@@ -7,6 +7,7 @@
 //  ★カウンタは期待値と突き合わせる。前進しているかだけを見ない — 生存カウンタは
 //    機能の証拠にならない (DESIGN §16 の CYW43 の実例)。
 #include "shizuku/kernel.hpp"
+#include "shizuku/object_ids.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/selftest.hpp"
 
@@ -17,13 +18,9 @@ namespace {
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
-constexpr uintptr_t OBJECT_WORKER = 4; // 譲り合う相手
-constexpr uintptr_t OBJECT_HOG = 5;    // 実行権を返さない相手
-// ★14 番。6 は stress.cpp の OBJECT_BLINK が使っている — 最初 6 を取ってしまい、
-//   CREATE_OBJECT が ALREADY_EXISTS を返した結果「blink スレッド」が sleeper の
-//   コードを走らせ、揺らぎの計測が**黙って止まった** (それでも 36 passed/0 failed)。
-//   手で番号を振っている限りこの事故は繰り返す (今日 2 回目だった)。
-constexpr uintptr_t OBJECT_SLEEPER = 14; // 借りたまま眠ろうとする相手
+constexpr uintptr_t OBJECT_WORKER = object_id::worker; // 譲り合う相手
+constexpr uintptr_t OBJECT_HOG = object_id::hog; // 実行権を返さない相手
+constexpr uintptr_t OBJECT_SLEEPER = object_id::sleeper;
 constexpr uintptr_t METHOD_MAIN = 0;
 
 volatile uint32_t g_worker_rounds = 0;

@@ -10,6 +10,7 @@
 namespace shizuku {
 namespace selftest {
 
+
 // 梯子の通算結果。★起動時の出力はホストが繋ぐ前に流れて消えることがあるので
 // (PORT §7 の罠)、**いつ繋いでも結果が分かる**ように生存表示へ載せる。
 extern uint32_t passed;

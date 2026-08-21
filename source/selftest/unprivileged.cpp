@@ -11,6 +11,7 @@
 //    触れば落ちる。落ちること自体は正しい動作だが、それを確かめるのは次の段
 //    (拒否のテスト) で、まずは「非特権で走って戻ってこられる」ことだけを見る。
 #include "shizuku/kernel.hpp"
+#include "shizuku/object_ids.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/selftest.hpp"
 
@@ -25,9 +26,9 @@ namespace {
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
-constexpr uintptr_t OBJECT_UNPRIV_PROBE = 11;
-constexpr uintptr_t OBJECT_PRIV_PROBE = 12;
-constexpr uintptr_t OBJECT_TRESPASSER = 13;
+constexpr uintptr_t OBJECT_UNPRIV_PROBE = object_id::unpriv_probe;
+constexpr uintptr_t OBJECT_PRIV_PROBE = object_id::priv_probe;
+constexpr uintptr_t OBJECT_TRESPASSER = object_id::trespasser;
 constexpr uintptr_t METHOD_MAIN = 0;
 
 // 自分の CONTROL を読んで返すだけ。触るのはレジスタと自分のスタックのみ。

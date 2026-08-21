@@ -14,6 +14,7 @@
 //    取り上げられる相手にやらせると、ロックを持ったまま止まって系が固まる
 //    (参照実装が「借り手は printf を避けよ」と書いている理由そのもの)。
 #include "shizuku/kernel.hpp"
+#include "shizuku/object_ids.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/objects/peripherals.hpp"
 #include "shizuku/selftest.hpp"
@@ -25,8 +26,8 @@ namespace {
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
-constexpr uintptr_t OBJECT_BLINK = 6;
-constexpr uintptr_t OBJECT_LOAD = 7;
+constexpr uintptr_t OBJECT_BLINK = object_id::blink;
+constexpr uintptr_t OBJECT_LOAD = object_id::load;
 constexpr uintptr_t METHOD_MAIN = 0;
 
 // 点滅の周期。人が見て分かる速さで、かつ測定の分解能も確保できるところ。
