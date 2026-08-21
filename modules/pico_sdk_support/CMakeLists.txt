@@ -1,4 +1,4 @@
-shizuku_declare_objects(pico_sdk_support gpio spi led flashfs)
+shizuku_declare_objects(${CMAKE_CURRENT_SOURCE_DIR}/objects.list)
 cmake_minimum_required(VERSION 3.26)
 project(pico_sdk_support C CXX ASM)
 # ★型の継ぎ目 (arch / board / memory manager のクラス) と、その**実装**を分ける。

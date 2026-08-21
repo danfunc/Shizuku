@@ -426,10 +426,16 @@ objects/      ドライバ / アプリ
     (`USE_SHIZUKU_MODULES`) ので、そこが消える。各モジュールは自分の名前を
     宣言するだけでよく、他モジュールのヘッダを見なくてよい —
     XNO を別リポジトリに分ける D17 とも噛み合う
-  - 仕組み: `shizuku_declare_objects(<component> <name>...)` で名前を積み、
-    全部の `add_subdirectory` の後に `shizuku_generate_object_ids()` が
-    `shizuku/object_ids.hpp` を生成する。**番号はソースのどこにも書かれない**。
-    二重宣言と `SHIZUKU_OBJECT_COUNT` 超過は configure で落ちる
+  - 仕組み: 各コンポーネントが `objects.list` (1 行 1 名) を置き、
+    `shizuku_declare_objects(<path>)` / Bazel の genrule がそれを渡す。
+    **番号はソースのどこにも書かれない**。二重宣言と `SHIZUKU_OBJECT_COUNT` 超過は
+    生成の時点で落ちる
+  - ★**CMake と Bazel が同じスクリプト (`tools/gen_object_ids.py`) と同じ
+    `objects.list` を使う**。番号を振る規則や名前の一覧を 2 つ持つと、片方だけ
+    直して番号がずれる — 焼いたものが黙って別物になる類の壊れ方なので、
+    二重に書く場所をどこにも作らない。入力の `.list` は**パス順に並べ替えてから**
+    読むので、呼ぶ側が渡す順にも依存しない。両者の生成物が一致することは
+    `diff` で確認済み
   - 実機 (pico2_w): `[PERIPH] gpio ready (object 1)` のようにビルドが振った番号が
     そのまま出る。call ladder 24 / thread ladder 41 passed / 0 failed
   - ★**実行時の名前解決 (`resolve`) が要るのは、作った時点で何が居るか分からない系

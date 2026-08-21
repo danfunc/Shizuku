@@ -1,3 +1,5 @@
+exports_files(["objects.list"])
+
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
 # モジュール提供ヘッダ (config.hpp が include するため、実装とは分けて公開する)
@@ -8,6 +10,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//:internal_headers",
+        "//:object_ids",
         "@pico-sdk//src/rp2_common/hardware_exception",
         "@pico-sdk//src/rp2_common/pico_stdlib",
     ],

@@ -7,7 +7,10 @@ if(NOT SHIZUKU_CPU_COUNT)
   set(SHIZUKU_CPU_COUNT 1)
 endif()
 if(NOT SHIZUKU_OBJECT_COUNT)
-  set(SHIZUKU_OBJECT_COUNT 32)
+  # ★キャッシュへ置く。オブジェクト番号の生成 (トップの
+  #   shizuku_generate_object_ids) が上限の検査に使うので、この下位ディレクトリの
+  #   外からも見えている必要がある。既定値を 2 か所に書かないための置き方。
+  set(SHIZUKU_OBJECT_COUNT 32 CACHE INTERNAL "オブジェクト表の大きさ")
 endif()
 if(NOT SHIZUKU_METHOD_COUNT)
   set(SHIZUKU_METHOD_COUNT 8)

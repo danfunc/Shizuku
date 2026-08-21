@@ -17,42 +17,40 @@
 #  そこが消える。各モジュールは自分の名前を宣言するだけでよく、他モジュールの
 #  ヘッダを見る必要が無い (XNO を別リポジトリに分ける D17 とも噛み合う)。
 #
+#  ★番号を振る規則そのものは tools/gen_object_ids.py に 1 つだけ置き、
+#    **CMake も Bazel もそれを呼ぶ**。規則を 2 つ持つと片方だけ直して番号がずれる。
+#
 #  【使い方】各コンポーネントの CMakeLists で:
-#      shizuku_declare_objects(peripherals gpio spi led)
-#  すると生成ヘッダに shizuku::object_id::gpio などが出る。番号は宣言順。
+#      shizuku_declare_objects(${CMAKE_CURRENT_SOURCE_DIR}/objects.list)
 
-# 名前を 1 つ以上、大域リストへ積む。同じ名前が 2 度来たらその場で落とす。
-function(shizuku_declare_objects component)
-  get_property(known GLOBAL PROPERTY SHIZUKU_OBJECT_NAMES)
-  foreach(name IN LISTS ARGN)
-    if("${name}" IN_LIST known)
-      message(FATAL_ERROR
-              "オブジェクト名 '${name}' が二重に宣言された (${component})")
-    endif()
-    list(APPEND known "${name}")
-  endforeach()
-  set_property(GLOBAL PROPERTY SHIZUKU_OBJECT_NAMES "${known}")
+function(shizuku_declare_objects list_file)
+  if(NOT EXISTS "${list_file}")
+    message(FATAL_ERROR "オブジェクト一覧が無い: ${list_file}")
+  endif()
+  get_property(files GLOBAL PROPERTY SHIZUKU_OBJECT_LISTS)
+  list(APPEND files "${list_file}")
+  set_property(GLOBAL PROPERTY SHIZUKU_OBJECT_LISTS "${files}")
+  # 一覧を書き換えたら configure からやり直す (書き換えても効かない、が無いように)。
+  set_property(DIRECTORY "${CMAKE_SOURCE_DIR}"
+               APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${list_file}")
 endfunction()
 
-# 宣言を集め終えてから 1 回だけ呼ぶ。番号は宣言順に 1 から振る
-# (0 はブートスレッドが名乗る root で予約)。
+# 宣言を集め終えてから 1 回だけ呼ぶ。
 function(shizuku_generate_object_ids output_dir)
-  get_property(names GLOBAL PROPERTY SHIZUKU_OBJECT_NAMES)
-  list(LENGTH names count)
-  math(EXPR needed "${count} + 1")
-  if(needed GREATER SHIZUKU_OBJECT_COUNT)
-    message(FATAL_ERROR
-            "オブジェクトが ${needed} 個あるが SHIZUKU_OBJECT_COUNT=${SHIZUKU_OBJECT_COUNT}")
+  get_property(files GLOBAL PROPERTY SHIZUKU_OBJECT_LISTS)
+  file(MAKE_DIRECTORY "${output_dir}/shizuku")
+  execute_process(
+    COMMAND ${CMAKE_COMMAND} -E env python3
+            ${CMAKE_SOURCE_DIR}/tools/gen_object_ids.py
+            --template ${CMAKE_SOURCE_DIR}/cmake/object_ids.hpp.in
+            --out ${output_dir}/shizuku/object_ids.hpp
+            --limit ${SHIZUKU_OBJECT_COUNT}
+            ${files}
+    RESULT_VARIABLE status
+    ERROR_VARIABLE  message)
+  if(NOT status EQUAL 0)
+    message(FATAL_ERROR "オブジェクト番号の生成に失敗: ${message}")
   endif()
-  set(body "")
-  set(index 1)
-  foreach(name IN LISTS names)
-    string(APPEND body "constexpr uintptr_t ${name} = ${index};\n")
-    math(EXPR index "${index} + 1")
-  endforeach()
-  set(SHIZUKU_OBJECT_ID_BODY "${body}")
-  set(SHIZUKU_OBJECT_ID_COUNT "${needed}")
-  configure_file(${CMAKE_SOURCE_DIR}/cmake/object_ids.hpp.in
-                 ${output_dir}/shizuku/object_ids.hpp @ONLY)
-  message(STATUS "object ids: ${count} declared (${names})")
+  list(LENGTH files how_many)
+  message(STATUS "object ids: generated from ${how_many} list(s)")
 endfunction()

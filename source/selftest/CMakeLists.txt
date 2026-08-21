@@ -1,5 +1,4 @@
-shizuku_declare_objects(selftest leaf nest deep namer worker hog sleeper
-                                 unpriv_probe priv_probe trespasser blink load)
+shizuku_declare_objects(${CMAKE_CURRENT_SOURCE_DIR}/objects.list)
 # 自己テストは「カーネルの一部」ではなく、カーネルを使う**オブジェクトの集合**。
 # ライブラリとして分けておくと、合成側が入れるか入れないかを選べる。
 add_library(shizuku_selftest STATIC call_ladder.cpp thread_ladder.cpp stress.cpp

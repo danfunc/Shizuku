@@ -6,12 +6,39 @@
 #  合成 (firmware/main.cpp) の仕事。XNO 側は同じ 3 つを引いて**自分の合成**を書く。
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
+# オブジェクト番号の生成。★**CMake とまったく同じスクリプトを呼ぶ** —
+# 番号を振る規則を 2 つ持つと、片方だけ直して番号がずれる。名前の一覧も
+# objects.list を共有するので、二重に書く場所がどこにも無い (D28)。
+genrule(
+    name = "object_ids_hpp",
+    srcs = [
+        "cmake/object_ids.hpp.in",
+        "source/selftest/objects.list",
+        "//modules/pico_sdk_support:objects.list",
+    ],
+    outs = ["generated_object_ids/shizuku/object_ids.hpp"],
+    cmd = "python3 $(location //tools:gen_object_ids.py)" +
+          " --template $(location cmake/object_ids.hpp.in)" +
+          " --out $@ --limit 32" +
+          " $(location source/selftest/objects.list)" +
+          " $(location //modules/pico_sdk_support:objects.list)",
+    tools = ["//tools:gen_object_ids.py"],
+)
+
+cc_library(
+    name = "object_ids",
+    hdrs = [":object_ids_hpp"],
+    includes = ["generated_object_ids"],
+    visibility = ["//visibility:public"],
+)
+
 # ISA 非依存のカーネルヘッダ (CMake の Shizuku_internal_HEADERS に相当)
 cc_library(
     name = "internal_headers",
     hdrs = glob(["internal_headers/**/*.hpp"]),
     includes = ["internal_headers"],
     visibility = ["//visibility:public"],
+    deps = [":object_ids"],
 )
 
 # カーネル = 機構だけの層。★資源を持たない (スレッドの記憶も貸してもらう) ので、
