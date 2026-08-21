@@ -50,6 +50,11 @@ void rp2350_pico2::init(uint32_t core) {
     exception_set_exclusive_handler(USAGEFAULT_EXCEPTION,
                                     shizuku_armv8m_fault_entry);
   }
+  if (core != 0) {
+    // ★このコアを「止められる側」として仕込む。FIFO 割り込みのハンドラは RAM に
+    //   置かれており、止められている間 flash を 1 バイトも読まない。
+    ::multicore_lockout_victim_init();
+  }
   // 優先度は banked なので各コアで設定する。SVC 最優先 = プリミティブの原子性、
   // PendSV 最低 = 全 IRQ が捌けてからのスレッド切替 (DESIGN §14.5.1)。
   // ★この順序が 1 コア内の相互排除を無償で与える (DESIGN §14.5.1)。
@@ -126,6 +131,32 @@ void rp2350_pico2::panic(const char *message) {
 //     オブジェクトランドから借りたものへ移る (D18)。
 void rp2350_pico2::launch_core(void (*entry)()) {
   ::multicore_launch_core1(entry);
+}
+
+// ★止め方は「イベントを送って相手をブロックさせる」。pico-sdk の lockout は
+//   SIO の FIFO 割り込みで相手を**今やっていることから引き剥がし**、RAM 上に
+//   置かれたハンドラの中で待たせる。割り込みで引き剥がすところが要点で、
+//   「相手が自分から確認しに来るのを待つ」形にすると、相手が flash 上のコードを
+//   回している間は永久に来ない。
+//   ★被害者側の仕込み (multicore_lockout_victim_init) は init(core != 0) で行う。
+// ★「2 コア構成か」をビルド旗で判定しない。**実際に起きているかを実行時に見る** —
+//   起こす前に呼ばれても、1 コア構成でも、同じコードで正しく振る舞う
+//   (旗で分けると「旗は立っているがまだ起きていない」瞬間に固まる)。
+static bool g_parked = false;
+
+void rp2350_pico2::park_other_cores() {
+  const uint32_t other = ::get_core_num() == 0 ? 1u : 0u;
+  if (!::multicore_lockout_victim_is_initialized(other))
+    return; // 相手はまだ居ない = 止めるものが無い
+  ::multicore_lockout_start_blocking();
+  g_parked = true;
+}
+
+void rp2350_pico2::resume_other_cores() {
+  if (!g_parked)
+    return;
+  g_parked = false;
+  ::multicore_lockout_end_blocking();
 }
 
 } // namespace boards

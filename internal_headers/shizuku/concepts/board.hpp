@@ -14,6 +14,7 @@ namespace concepts {
 //                    共有の場合、登録自体を 1 回に抑える責務も board が持つ
 // - core_num()     : 自コア番号 (0 起点)
 // - launch_core()  : もう一方のコアを起こす
+// - park/resume_other_cores() : 他コアを一時停止 / 再開 (XIP が止まる操作のため)
 // - time_us()      : 単調増加のマイクロ秒時刻 (全コア共通基準)
 // - cycles_per_us(): タイマの刻みを µs から換算するための実クロック。
 //                    ★クロックを知っているのは board だけ (PORT §2.3)。上位は
@@ -32,6 +33,9 @@ concept board_requires = requires(uint32_t core, const char *text) {
   { BOARD::core_num() } -> std::same_as<uint32_t>;
   // もう一方のコアを起こす (CORE_COUNT == 1 の構成でも口は要る)。
   { BOARD::launch_core((void (*)())nullptr) };
+  // 他コアを一時停止させる (flash の消去・書き込みのように、XIP ごと止まる操作用)。
+  { BOARD::park_other_cores() };
+  { BOARD::resume_other_cores() };
   { BOARD::time_us() } -> std::same_as<uint64_t>;
   { BOARD::cycles_per_us() } -> std::same_as<uint32_t>;
   { BOARD::unprivileged_floor() } -> std::same_as<uintptr_t>;

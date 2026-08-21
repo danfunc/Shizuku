@@ -22,7 +22,6 @@ void shizuku::app_entry() {
   // 媒体を持つオブジェクト。読むのは XIP のアドレスを配るだけなので安いが、
   // 書くと XIP ごと止まるので、扱いはペリフェラルと同じく特権側。
   shizuku::objects::register_flash_fs();
-  shizuku::objects::flash_fs_probe();
   shizuku::selftest::call_ladder();
   shizuku::selftest::thread_ladder();
   shizuku::selftest::memory_ladder();
@@ -34,6 +33,10 @@ void shizuku::app_entry() {
   if (shizuku::kernel_object_instance.start_secondary_core())
     shizuku::KERNEL::BOARD::diag_printf("[BOOT] secondary core launched\n");
   shizuku::selftest::multicore_probe();
+  // ★flash の書き込みは 2 コア目を起こした**後**に試す。消去中は XIP が止まるので、
+  //   相手が止められていなければそのコアは flash 上のコードを踏んで即死する。
+  //   つまりここで書けること自体が「止められている」ことの証拠になる。
+  shizuku::objects::flash_fs_probe();
 
   // 負荷試験を起動する。以後、点滅と報告は専用スレッドが行う。
   shizuku::selftest::stress_launch();

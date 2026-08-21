@@ -24,11 +24,11 @@ using ARCH = KERNEL::ARCH;
 //   (pico-sdk の flash_safe_execute) 必要がある。今の構成は 1 コアなので割り込みを
 //   落とすだけで足りる — が、「足りる理由」は構成に依存しているので、構成が
 //   変わったらここで気づけるようにしておく。
-// ★多コアでは割り込みを落とすだけでは足りない。もう一方のコアが消去中に flash を
-//   踏むと即死するので、相手を RAM 上のコードへ退避させて止める必要がある
-//   (pico-sdk の flash_safe_execute)。**まだ入れていない**ので、多コア構成では
-//   書き込みを断る (黙って壊れるより断る)。読みは XIP なので多コアでも安全。
-constexpr bool FLASH_WRITE_IS_SAFE = (KERNEL::CORE_COUNT == 1);
+// ★多コアでは割り込みを落とすだけでは足りない。消去中は XIP そのものが止まるので、
+//   もう一方のコアが flash を踏んだ瞬間に死ぬ。BOARD::park_other_cores() が
+//   相手を RAM 上のコードへ引き剥がして待たせる (board.cpp の注記を参照)。
+//   ★止めるのは「行儀」ではなく機械の要求。そして止めている間、相手のコアは
+//     何も進まない — **書き込みは両方のコアを止める操作**。
 
 struct call_result {
   uintptr_t error;
@@ -144,12 +144,17 @@ void directory_reset() {
 //   速すぎる QMI 設定は落ちずに**静かにデータを読み違える**ので、気づけない。
 void flash_write(uint32_t offset, const uint8_t *ram_data, uint32_t bytes,
                  bool erase_first, uint32_t erase_bytes) {
+  // ★順序が大事: **先に相手を止めてから**自分の割り込みを落とす。逆にすると、
+  //   相手を止めるための往復 (FIFO と応答待ち) が割り込みを落とした状態で走る
+  //   ことになり、応答が来ないまま固まり得る。
+  KERNEL::BOARD::park_other_cores();
   const uint32_t interrupts = save_and_disable_interrupts();
   if (erase_first)
     ::flash_range_erase(offset, erase_bytes);
   if (bytes != 0)
     ::flash_range_program(offset, ram_data, bytes);
   restore_interrupts(interrupts);
+  KERNEL::BOARD::resume_other_cores();
 }
 
 // 目録を焼き直す。作業コピーは RAM にあるのでそのまま渡せる。
@@ -185,8 +190,6 @@ uintptr_t flash_store_method(uintptr_t argument, uintptr_t, uintptr_t,
     return 0;
   if (request->data == nullptr || request->bytes == 0)
     return 0;
-  if (!FLASH_WRITE_IS_SAFE)
-    return 0; // 多コアではもう一方を止める算段が要る (上の注記)
 
   const uint32_t reserved = sector_round_up(request->bytes);
   const uint32_t bump = g_directory.header.bump;
@@ -387,49 +390,59 @@ uint32_t flash_fs_probe() {
   constexpr uint32_t PAYLOAD_BYTES = sizeof(PAYLOAD);
   uint32_t failures = 0;
 
+  // (1) 前回焼いたものが残っているか。★これは「今書いて今読む」では確かめられない
+  //     ので、**書く前に**見る。
   flash_lookup lookup{"probe.txt", 0, 0};
   api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
       (uintptr_t)flash_fs_method::LOOKUP, (uintptr_t)&lookup);
-  const bool was_there = lookup.address != 0 && lookup.bytes == PAYLOAD_BYTES;
+  bool survived = lookup.address != 0 && lookup.bytes == PAYLOAD_BYTES;
+  if (survived) {
+    const char *previous = (const char *)lookup.address;
+    for (uint32_t index = 0; index < PAYLOAD_BYTES; ++index)
+      if (previous[index] != PAYLOAD[index]) {
+        survived = false;
+        break;
+      }
+  }
+  KERNEL::BOARD::diag_printf(
+      "[FLASHFS] probe.txt from the previous boot: %s\n",
+      survived ? "found and matches" : "absent or different");
 
-  if (!was_there) {
-    // ★書き込み元は flash 上の文字列リテラル。**わざとそうしている** —
-    //   XIP が止まっている間に読めないバッファを渡された場合でも壊れないことを、
-    //   ここで実際に確かめておく (中継ページを通しているので通るはず)。
-    flash_store store{"probe.txt", PAYLOAD, PAYLOAD_BYTES, 0};
-    const uint64_t began = KERNEL::BOARD::time_us();
-    api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
-        (uintptr_t)flash_fs_method::STORE, (uintptr_t)&store);
-    const uint64_t took = KERNEL::BOARD::time_us() - began;
-    if (store.address == 0) {
-      KERNEL::BOARD::diag_printf("[FLASHFS] store failed\n");
-      return 1;
-    }
-    // ★「系が止まる時間」を数字で残す。周期スレッドの隣で呼べる操作かどうかは、
-    //   この数字を見てから決める話 (揺らぎを測ったときと同じ作法)。
-    KERNEL::BOARD::diag_printf(
-        "[FLASHFS] stored probe.txt at %p (%lu bytes), the system was stopped "
-        "for %lu us\n",
-        (void *)store.address, (unsigned long)PAYLOAD_BYTES,
-        (unsigned long)took);
-    lookup.address = store.address;
-    lookup.bytes = PAYLOAD_BYTES;
+  // (2) 空きを取り戻してから書き直す。★削除では領域が戻らない (配ったアドレスを
+  //     動かせないため — D21)。毎回焼くのに空きを食い潰さない唯一の道が FORMAT。
+  api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
+      (uintptr_t)flash_fs_method::FORMAT, 0);
+
+  // (3) ★ここが多コアの試験でもある。消去中は XIP が止まるので、もう一方のコアが
+  //     止められていなければ、そのコアは flash 上のコードを踏んで即死する。
+  //     **core1 が走っている状態で書けたこと自体が、止められている証拠**になる。
+  //     書き込み元は flash 上の文字列リテラルで、これもわざと (XIP が止まっている
+  //     間に読めないバッファを渡された場合でも壊れないことを確かめる)。
+  flash_store store{"probe.txt", PAYLOAD, PAYLOAD_BYTES, 0};
+  const uint64_t began = KERNEL::BOARD::time_us();
+  api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
+      (uintptr_t)flash_fs_method::STORE, (uintptr_t)&store);
+  const uint64_t took = KERNEL::BOARD::time_us() - began;
+  if (store.address == 0) {
+    KERNEL::BOARD::diag_printf("[FLASHFS] store failed\n");
+    return 1;
   }
 
-  // (1) 引いたアドレスから直接読む。写していないので、これが一致すれば
-  //     「XIP をそのまま渡している」ことの確認になる。
-  const char *contents = (const char *)lookup.address;
-  for (uint32_t index = 0; index < PAYLOAD_BYTES; ++index) {
+  // (4) 引いたアドレスから直接読む。写していないので、一致すれば「XIP をそのまま
+  //     渡している」ことの確認になる。
+  const char *contents = (const char *)store.address;
+  for (uint32_t index = 0; index < PAYLOAD_BYTES; ++index)
     if (contents[index] != PAYLOAD[index]) {
       ++failures;
       break;
     }
-  }
+  // ★「系が止まる時間」を数字で残す。周期スレッドの隣で呼べる操作かどうかは、
+  //   この数字を見てから決める話。**両方のコアが止まる**時間である点に注意。
   KERNEL::BOARD::diag_printf(
-      "[FLASHFS] probe.txt %s: read %lu bytes straight from %p -> %s\n",
-      was_there ? "survived the power cycle" : "written this boot",
-      (unsigned long)lookup.bytes, (void *)lookup.address,
-      failures == 0 ? "matches" : "MISMATCH");
+      "[FLASHFS] wrote %lu bytes at %p and read them straight back: %s "
+      "(both cores were stopped for %lu us)\n",
+      (unsigned long)PAYLOAD_BYTES, (void *)store.address,
+      failures == 0 ? "matches" : "MISMATCH", (unsigned long)took);
   return failures;
 }
 

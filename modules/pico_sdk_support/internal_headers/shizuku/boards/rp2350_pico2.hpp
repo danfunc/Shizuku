@@ -21,6 +21,13 @@ public:
   //   スレッドモードへ移る (優先度・MPU・SysTick は per-core banked なので、
   //   起こす側から設定してやることはできない)。
   static void launch_core(void (*entry)());
+  // ★flash を消す/焼く間だけ、もう一方のコアを**RAM 上のコードで止める**。
+  //   消去中は XIP そのものが止まる = flash 上のコードを誰も実行できないので、
+  //   相手が flash を踏んだ瞬間に死ぬ。止めるのは「行儀」ではなく機械の要求。
+  //   ★止まっている間、相手のコアは何も進まない。**書き込みは両方のコアを
+  //     止める操作**であって、周期スレッドの隣で気軽に呼ぶものではない。
+  static void park_other_cores();
+  static void resume_other_cores();
   static uint32_t core_num() { return (uint32_t)::get_core_num(); }
   static uint64_t time_us() { return ::time_us_64(); }
   // ★クロックを知っているのは board (PORT §2.3)。上位は µs でしか話さない。
