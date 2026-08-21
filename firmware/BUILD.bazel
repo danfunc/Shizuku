@@ -22,6 +22,7 @@ cc_binary(
     srcs = ["main.cpp"],
     deps = [
         "//:internal_headers",
+        "//:apps",
         "//:kernel_object",
         "//:selftest",
         "//configs:config",

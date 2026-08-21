@@ -5,3 +5,4 @@ gpio
 spi
 led
 flashfs
+temperature

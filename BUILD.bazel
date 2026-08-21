@@ -13,6 +13,7 @@ genrule(
     name = "object_ids_hpp",
     srcs = [
         "cmake/object_ids.hpp.in",
+        "source/apps/objects.list",
         "source/selftest/objects.list",
         "//modules/pico_sdk_support:objects.list",
     ],
@@ -20,6 +21,7 @@ genrule(
     cmd = "python3 $(location //tools:gen_object_ids.py)" +
           " --template $(location cmake/object_ids.hpp.in)" +
           " --out $@ --limit 32" +
+          " $(location source/apps/objects.list)" +
           " $(location source/selftest/objects.list)" +
           " $(location //modules/pico_sdk_support:objects.list)",
     tools = ["//tools:gen_object_ids.py"],
@@ -69,6 +71,14 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [":kernel"],
+)
+
+# アプリ。★いずれ XNO 側へ移す (D17) が、今は動かす場所がここしか無い。
+cc_library(
+    name = "apps",
+    srcs = ["source/apps/thermal.cpp"],
+    visibility = ["//visibility:public"],
+    deps = [":kernel_object"],
 )
 
 # 自己テストは「カーネルの一部」ではなく、カーネルを使うオブジェクトの集合。

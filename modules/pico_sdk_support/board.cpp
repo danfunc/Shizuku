@@ -143,20 +143,37 @@ void rp2350_pico2::launch_core(void (*entry)()) {
 //   起こす前に呼ばれても、1 コア構成でも、同じコードで正しく振る舞う
 //   (旗で分けると「旗は立っているがまだ起きていない」瞬間に固まる)。
 static bool g_parked = false;
+// ★入れ子にできるようにする。「外側で 1 回だけ呼ぶよう気をつける」形にすると、
+//   いつか必ず 1 本落とす (落とすと相手が止まったまま戻らない)。数えておけば、
+//   1 ページごとに呼ぼうが 1 操作でまとめて囲もうが、実際に止まるのは 1 回で済む。
+static uint32_t g_park_depth = 0;
+// ★止める側は同時に 1 コアだけ。**2 コアが互いを止めようとすると即デッドロック**
+//   する (どちらも相手の応答を待つ)。錠を取ってから止めるので、負けた側は
+//   相手に止められて待ち、解放後に自分の番になる — 待ちは相手の操作 1 つぶんで有界。
+static volatile uint32_t g_park_lock = 0;
 
 void rp2350_pico2::park_other_cores() {
+  if (g_park_depth++ != 0)
+    return; // 既に止めてある (入れ子)
   const uint32_t other = ::get_core_num() == 0 ? 1u : 0u;
   if (!::multicore_lockout_victim_is_initialized(other))
     return; // 相手はまだ居ない = 止めるものが無い
+  while (!ARCH_TYPE::cas32(&g_park_lock, 0u, 1u)) {
+  }
   ::multicore_lockout_start_blocking();
   g_parked = true;
 }
 
 void rp2350_pico2::resume_other_cores() {
+  if (g_park_depth == 0)
+    return; // 対になっていない呼び出し (何もしない)
+  if (--g_park_depth != 0)
+    return; // まだ外側が握っている
   if (!g_parked)
     return;
   g_parked = false;
   ::multicore_lockout_end_blocking();
+  ARCH_TYPE::store_release32(&g_park_lock, 0u);
 }
 
 } // namespace boards

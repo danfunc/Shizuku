@@ -7,6 +7,7 @@
 //  ★各オブジェクトの main は「自分のメソッドを export する」だけ。export は発行元
 //    から所有者を導出するので、**自分として走っている間**にしか登録できない
 //    (名乗って他人のメソッドを生やすことはできない)。
+#include "hardware/adc.h"
 #include "hardware/gpio.h"
 #include "hardware/spi.h"
 #if defined(CYW43_WL_GPIO_LED_PIN)
@@ -129,6 +130,33 @@ uintptr_t led_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   return failures;
 }
 
+// ---- 温度 (SoC 内蔵センサ) --------------------------------------------------
+// ★整数だけで換算する。データシートの式は
+//     T = 27 - (V - 0.706) / 0.001721   [℃]
+//   これを 1/100 ℃ の整数へ直す。**浮動小数を使わない**のは、呼び出し側が
+//   非特権だったり割り込み文脈だったりしても同じ費用で済ませたいため
+//   (FP 文脈の退避はフレームが伸びる)。
+uintptr_t temperature_read(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  const uint32_t raw = ::adc_read(); // 12bit
+  // 参照電圧 3.3V を µV で持つ (raw * 3300000 / 4096)。32bit では溢れるので 64bit。
+  const int64_t microvolts = ((int64_t)raw * 3300000) / 4096;
+  // 1721 µV / ℃。27℃ のとき 706000 µV。
+  const int32_t centi =
+      2700 - (int32_t)(((microvolts - 706000) * 100) / 1721);
+  return (uintptr_t)centi;
+}
+
+uintptr_t temperature_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  uintptr_t failures = declare_name("temperature");
+  // ★ここが特権を要る場所: adc_init は RESETS を解除しクロックを設定する。
+  ::adc_init();
+  ::adc_set_temp_sensor_enabled(true);
+  ::adc_select_input(4); // ch4 = 内蔵温度センサ
+  failures += export_method((uintptr_t)temperature_method::READ,
+                            (uintptr_t)&temperature_read);
+  return failures;
+}
+
 // ---- SPI ------------------------------------------------------------------
 uintptr_t spi_configure(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
   const spi_config *config = (const spi_config *)argument;
@@ -178,7 +206,8 @@ uint32_t register_peripherals() {
     uintptr_t (*main)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
   } const entries[] = {{"gpio", GPIO_OBJECT, gpio_main},
                        {"spi", SPI_OBJECT, spi_main},
-                       {"led", LED_OBJECT, led_main}};
+                       {"led", LED_OBJECT, led_main},
+                       {"temperature", TEMPERATURE_OBJECT, temperature_main}};
 
   uint32_t failures = 0;
   for (const entry_t &entry : entries) {

@@ -7,7 +7,7 @@
 #    **自分で書く** — それが「ライブラリとして提供する」ということ。
 target_sources(Shizuku PRIVATE main.cpp)
 target_link_libraries(Shizuku PRIVATE
-                      shizuku_kernel shizuku_kernel_object shizuku_selftest
+                      shizuku_kernel shizuku_kernel_object shizuku_selftest shizuku_apps
                       pico_sdk_support pico_stdio pico_stdlib)
 pico_enable_stdio_usb(Shizuku 1)
 # ★起動直後の診断はホストがポートを開く前に流れてしまう (参照実装も同じ罠を踏んで

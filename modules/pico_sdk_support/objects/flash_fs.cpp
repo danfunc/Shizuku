@@ -183,6 +183,17 @@ uint32_t g_erase_count = 0;
 uint32_t g_program_count = 0;
 uint32_t g_erased_bytes = 0;
 
+// ★論理的な 1 操作 (store / remove / format) を丸ごと囲むための入れ物。
+//   囲まなくても flash_write が個別に止めるので**正しさは変わらない** — 変わるのは
+//   止め直す回数だけ (1 回の store で 3 回 → 1 回)。正しさを「気をつけて囲むこと」に
+//   依存させないために、入れ子で数える形にしてある (board.cpp の注記)。
+struct stop_the_world {
+  stop_the_world() { KERNEL::BOARD::park_other_cores(); }
+  ~stop_the_world() { KERNEL::BOARD::resume_other_cores(); }
+  stop_the_world(const stop_the_world &) = delete;
+  stop_the_world &operator=(const stop_the_world &) = delete;
+};
+
 void flash_write(uint32_t offset, const uint8_t *ram_data, uint32_t bytes,
                  bool erase_first, uint32_t erase_bytes) {
   // ★順序が大事: **先に相手を止めてから**自分の割り込みを落とす。逆にすると、
@@ -237,6 +248,7 @@ int free_slot() {
 // 目録セクタを消して、名乗りと生きている項目だけを書き直す。
 // ★これは消去を伴う唯一の目録操作で、枠が尽きたときと FORMAT のときだけ走る。
 void directory_rebuild(bool keep_live) {
+  stop_the_world stopped; // 消去 + 書き直しをまとめて 1 回の停止で済ませる
   directory_entry saved[ENTRY_COUNT];
   uint32_t kept = 0;
   if (keep_live)
@@ -289,6 +301,10 @@ uintptr_t flash_store_method(uintptr_t argument, uintptr_t, uintptr_t,
   if (request->data == nullptr || request->bytes == 0)
     return 0;
 
+  // ★1 回の store は「中身のページ + 古い項目を殺す + 新項目」で最大 3 回書く。
+  //   ここで囲むと止めるのは 1 回で済む (囲まなくても正しいが、止め直す往復が
+  //   そのぶん減る)。
+  stop_the_world stopped;
   const uint32_t reserved = sector_round_up(request->bytes);
   const uint32_t bump = derive_bump();
   if (bump + reserved > REGION_ADDRESS + REGION_BYTES)
@@ -355,6 +371,7 @@ uintptr_t flash_remove_method(uintptr_t argument, uintptr_t, uintptr_t,
   // ★消えるのは**名前だけ**。領域は返らない。返すには後ろを詰めるしかなく、
   //   詰めればアドレスが動く — アドレスこそがこの FS の API なので、動かせない。
   //   ★殺すのはビットを落とす向きの遷移なので、消去は要らない。
+  stop_the_world stopped;
   directory_entry dead = g_directory[slot];
   dead.state = ENTRY_DEAD;
   write_entry((uint32_t)slot, dead);

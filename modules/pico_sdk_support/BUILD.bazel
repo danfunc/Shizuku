@@ -11,6 +11,7 @@ cc_library(
     deps = [
         "//:internal_headers",
         "//:object_ids",
+        "@pico-sdk//src/rp2_common/hardware_adc",
         "@pico-sdk//src/rp2_common/hardware_exception",
         "@pico-sdk//src/rp2_common/pico_stdlib",
     ],
@@ -35,6 +36,7 @@ cc_library(
         "//:internal_headers",
         "//:kernel",
         "//configs:config",
+        "@pico-sdk//src/rp2_common/hardware_adc",
         "@pico-sdk//src/rp2_common/hardware_exception",
         "@pico-sdk//src/rp2_common/hardware_flash",
         "@pico-sdk//src/rp2_common/hardware_gpio",
