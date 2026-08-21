@@ -34,6 +34,7 @@ void shizuku::app_entry() {
   if (shizuku::kernel_object_instance.start_secondary_core())
     shizuku::KERNEL::BOARD::diag_printf("[BOOT] secondary core launched\n");
   shizuku::selftest::multicore_probe();
+  shizuku::selftest::stream_ladder();
   // ★flash の書き込みは 2 コア目を起こした**後**に試す。消去中は XIP が止まるので、
   //   相手が止められていなければそのコアは flash 上のコードを踏んで即死する。
   //   つまりここで書けること自体が「止められている」ことの証拠になる。

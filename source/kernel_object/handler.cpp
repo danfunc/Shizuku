@@ -63,6 +63,10 @@ struct table_guard {
 } // namespace
 template <> uintptr_t KERNEL_OBJECT::declare_name(uintptr_t, object_error &);
 template <> uintptr_t KERNEL_OBJECT::object_name(uintptr_t, object_error &);
+template <> uintptr_t KERNEL_OBJECT::stream_create(uintptr_t, object_error &);
+template <> uintptr_t KERNEL_OBJECT::stream_open(uintptr_t, object_error &);
+template <>
+uintptr_t KERNEL_OBJECT::stream_bind(uintptr_t, uintptr_t, object_error &);
 template <> KERNEL_OBJECT::lent_stack KERNEL_OBJECT::lend_boot_stack();
 template <> bool KERNEL_OBJECT::start_secondary_core();
 template <> uintptr_t KERNEL_OBJECT::memory_allocate(uintptr_t, object_error &);
@@ -141,6 +145,8 @@ template <> void KERNEL_OBJECT::init() {
   // ブートスレッドが名乗るオブジェクトだけは最初から在るものとして扱う。
   m_objects[ROOT_OBJECT].created = true;
   m_object_name[ROOT_OBJECT] = "root";
+  for (uintptr_t index = 0; index < STREAM_COUNT; ++index)
+    m_streams[index] = nullptr;
 }
 
 // ★スレッド 0 のスタックも他と同じく arena から貸す。ここだけカーネルが自分で
@@ -616,6 +622,60 @@ uintptr_t KERNEL_OBJECT::object_name(uintptr_t id, object_error &error) {
   return (uintptr_t)m_object_name[id]; // 0 = 無名
 }
 
+// ---- ストリームの制御プレーン ----------------------------------------------
+// ★番号は**こちらが割り当てる**。呼ぶ側に選ばせると、オブジェクト番号で 2 回
+//   踏んだのと同じ衝突が起きる (D28)。返した番号を使ってもらう。
+template <>
+uintptr_t KERNEL_OBJECT::stream_create(uintptr_t desc, object_error &error) {
+  if (desc == 0) {
+    error = object_error::BAD_STREAM;
+    return 0;
+  }
+  table_guard guard;
+  for (uintptr_t index = 0; index < STREAM_COUNT; ++index) {
+    if (m_streams[index] != nullptr)
+      continue;
+    m_streams[index] = (stream::descriptor *)desc;
+    return index;
+  }
+  error = object_error::NO_STREAM;
+  return 0;
+}
+
+template <>
+uintptr_t KERNEL_OBJECT::stream_open(uintptr_t id, object_error &error) {
+  table_guard guard;
+  if (id >= STREAM_COUNT || m_streams[id] == nullptr) {
+    error = object_error::BAD_STREAM;
+    return 0;
+  }
+  return (uintptr_t)m_streams[id];
+}
+
+// ★席は 1 つずつしか無い。埋まっていたら断る — これが SPSC の強制で、
+//   「規約で守る」形にしないための唯一の仕掛け (参照実装の直接ハンドル型は
+//   ここが無く、役割を規約で守れと書いてあった)。
+template <>
+uintptr_t KERNEL_OBJECT::stream_bind(uintptr_t id, uintptr_t which,
+                                     object_error &error) {
+  const uintptr_t self = current_object(kernel_instance.current_thread_id());
+  table_guard guard;
+  if (id >= STREAM_COUNT || m_streams[id] == nullptr) {
+    error = object_error::BAD_STREAM;
+    return 0;
+  }
+  stream::descriptor *target = m_streams[id];
+  uint32_t &seat = which == (uintptr_t)stream::role::PRODUCER
+                       ? target->producer
+                       : target->consumer;
+  if (seat != stream::NO_OWNER && seat != (uint32_t)self) {
+    error = object_error::SEAT_TAKEN;
+    return 0;
+  }
+  seat = (uint32_t)self;
+  return self;
+}
+
 // ---- メモリの授受 -----------------------------------------------------------
 // ★参照実装の「オブジェクトごとに 16 語」は簡易な一形態でしかない。ここでは
 //   大きさを指定して借り、**持ち主を付け替えられる**形にする。持ち主が付いていれば
@@ -746,6 +806,15 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
     break;
   case object_api::OBJECT_NAME:
     value = object_name(a1, error);
+    break;
+  case object_api::STREAM_CREATE:
+    value = stream_create(a1, error);
+    break;
+  case object_api::STREAM_OPEN:
+    value = stream_open(a1, error);
+    break;
+  case object_api::STREAM_BIND:
+    value = stream_bind(a1, a2, error);
     break;
   case object_api::SET_BUDGET:
     if (a1 < THREAD_COUNT)

@@ -2,6 +2,7 @@
 #define SHIZUKU_TEMPLATES_KERNEL_OBJECT_HPP
 #include <cstdint>
 #include "shizuku/object_api.hpp"
+#include "shizuku/stream.hpp"
 
 namespace shizuku {
 namespace templates {
@@ -154,6 +155,10 @@ private:
   };
   // 名前の置き場。**コピーではなくポインタ**を持つ (kobj は文字列を触らない)。
   const char *m_object_name[OBJECT_COUNT_T];
+  // ストリームの登録簿。番号は**こちらが割り当てる** (呼ぶ側が選ぶと、
+  // オブジェクト番号で 2 回踏んだのと同じ衝突が起きる。D28)。
+  static constexpr uintptr_t STREAM_COUNT = 16;
+  stream::descriptor *m_streams[STREAM_COUNT];
 
   // per-thread の「今どのオブジェクトとして走っているか」の台帳。
   struct shadow_t {
@@ -167,6 +172,12 @@ private:
                           object_error &error);
   // 名乗り。★保持して返すだけで、比較はしない (D26)。
   uintptr_t declare_name(uintptr_t name, object_error &error);
+  // ---- ストリームの制御プレーン ------------------------------------------
+  // ★持つのは**ディスクリプタを指すだけ**。記憶は生成したオブジェクトのもので、
+  //   ここは「誰が producer / consumer か」を強制するためだけに居る。
+  uintptr_t stream_create(uintptr_t desc, object_error &error);
+  uintptr_t stream_open(uintptr_t id, object_error &error);
+  uintptr_t stream_bind(uintptr_t id, uintptr_t which, object_error &error);
   uintptr_t object_name(uintptr_t id, object_error &error);
   uintptr_t spawn_method(uintptr_t id, uintptr_t method, uintptr_t argument,
                          object_error &error);

@@ -87,6 +87,15 @@ enum struct object_api : uintptr_t {
   //   (flash 上のリテラルは XIP で常に見えており、非特権からも読める)。
   DECLARE_NAME = 17, // a1 = const char*。自分に名を付ける (付け直しは不可)
   OBJECT_NAME = 18,  // a1 = オブジェクト ID → a1(戻) = const char* (0 = 無名)
+  // ---- ストリーム (制御プレーンだけ。push/pop は svc を通らない) ----
+  // ★ここに居るのは登録・discovery・席の強制だけ。データを運ぶ操作は
+  //   ライブラリ (shizuku/stream.hpp) にある — 単一アドレス空間で push/pop を
+  //   svc 化しても保護は 1bit も増えず、体裁代を払うだけになるため。
+  STREAM_CREATE = 19, // a1 = descriptor* → a1(戻) = 番号 (割り当てられる)
+  STREAM_OPEN = 20,   // a1 = 番号 → a1(戻) = descriptor*
+  // a1 = 番号, a2 = role。★席は 1 つずつしか無い (SPSC の強制)。
+  //   誰が座るかは発行元から導出するので、他人の席は取れない。
+  STREAM_BIND = 21,
 };
 
 // 生成時に宣言する、そのオブジェクトが必要とする走らせ方。
@@ -135,6 +144,9 @@ enum struct object_error : uintptr_t {
   // (NOT_RUNNABLE) とは別物 — 相手は走れるが**こちらに配れる持ち分が無い**。
   // 区別しないと、スケジューラが次の候補を延々と試して空回りする。
   NO_TIME,
+  BAD_STREAM,    // ストリーム番号が範囲外 / 未登録
+  SEAT_TAKEN,    // その席は既に埋まっている (SPSC を壊さないため断る)
+  NO_STREAM,     // ストリームの枠が尽きた
   ALREADY_NAMED, // 名は付け直せない (誰かが控えた名が別物を指すようになるため)
 };
 
