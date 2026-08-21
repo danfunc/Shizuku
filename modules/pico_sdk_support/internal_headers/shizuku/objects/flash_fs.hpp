@@ -45,6 +45,11 @@ enum struct flash_fs_method : uintptr_t {
   LIST = 4,   // a0 = flash_entry*    戻り値 = 1 = その番号に居た
   FORMAT = 5, // 全部捨てて空き領域を取り戻す (配ったアドレスは全部腐る)
   STATUS = 6, // a0 = flash_status*   戻り値 = 使用バイト数
+  // ★これから書く先を**先に消しておく**。消去は 1 セクタ約 33ms かかり、その間
+  //   系全体が止まる — 締切のある系ではこれを書き込みの経路に置けない。
+  //   置く前に空けておけば、書き込みは「まだ 0xFF の場所へ書くだけ」= 消去ゼロ。
+  //   **いつ払うかを選べるようにする**のがこの API の役目 (費用は消えない)。
+  PREPARE = 7, // a0 = flash_prepare*
 };
 
 // 名前は媒体に焼くので長さを固定する (可変長にすると、名前を伸ばすたびに
@@ -72,6 +77,13 @@ struct flash_entry {
   char name[FLASH_NAME_BYTES];  // [out]
   uintptr_t address;            // [out]
   uint32_t bytes;               // [out]
+};
+
+// 先に空けておく要求。
+struct flash_prepare {
+  uint32_t bytes;   // [in] 置き場所の先をどれだけ空けておくか
+  uint32_t erased;  // [out] 実際に消したバイト数 (0 = 既に空いていた)
+  uint32_t took_us; // [out] かかった時間 = 系が止まった時間
 };
 
 struct flash_status {

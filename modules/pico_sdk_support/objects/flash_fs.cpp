@@ -406,6 +406,43 @@ uintptr_t flash_format_method(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   return 1;
 }
 
+// ★これから書く先を先に消しておく。消去そのものの費用は消えないが、**いつ払うかを
+//   選べる**ようになる。締切のある系では、締切の無い時間帯 (離陸前・整備時) に
+//   まとめて払っておき、走行中の書き込みは消去ゼロにする。
+//   ★連続した「まだ消えていない区間」をまとめて 1 回で渡す。ROM は 64KB 境界で
+//     ブロック消去 (0xD8) に切り替えるので、まとめるほど 1 バイトあたりが安くなる。
+uintptr_t flash_prepare_method(uintptr_t argument, uintptr_t, uintptr_t,
+                               uintptr_t) {
+  flash_prepare *request = (flash_prepare *)argument;
+  if (request == nullptr || !g_mounted)
+    return 0;
+  request->erased = 0;
+  const uint32_t from = derive_bump();
+  uint32_t limit = from + sector_round_up(request->bytes);
+  if (limit > REGION_ADDRESS + REGION_BYTES)
+    limit = REGION_ADDRESS + REGION_BYTES;
+
+  stop_the_world stopped; // 一続きの操作として 1 回だけ止める
+  const uint64_t began = KERNEL::BOARD::time_us();
+  uint32_t run_start = 0;
+  for (uint32_t at = from; at < limit; at += FLASH_SECTOR_SIZE) {
+    const bool blank = is_blank(at, FLASH_SECTOR_SIZE);
+    if (!blank && run_start == 0)
+      run_start = at;
+    if (blank && run_start != 0) {
+      flash_write(run_start - XIP_BASE, nullptr, 0, true, at - run_start);
+      request->erased += at - run_start;
+      run_start = 0;
+    }
+  }
+  if (run_start != 0) {
+    flash_write(run_start - XIP_BASE, nullptr, 0, true, limit - run_start);
+    request->erased += limit - run_start;
+  }
+  request->took_us = (uint32_t)(KERNEL::BOARD::time_us() - began);
+  return request->erased;
+}
+
 uintptr_t flash_status_method(uintptr_t argument, uintptr_t, uintptr_t,
                               uintptr_t) {
   const uint32_t used = derive_bump() - (uint32_t)REGION_ADDRESS;
@@ -460,6 +497,8 @@ uintptr_t flash_fs_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
                             (uintptr_t)&flash_format_method);
   failures += export_method((uintptr_t)flash_fs_method::STATUS,
                             (uintptr_t)&flash_status_method);
+  failures += export_method((uintptr_t)flash_fs_method::PREPARE,
+                            (uintptr_t)&flash_prepare_method);
   return failures;
 }
 
@@ -573,7 +612,54 @@ uint32_t flash_fs_probe() {
       return failures;
   }
 
-  // (4) 引いたアドレスから直接読む。写していないので、一致すれば「XIP をそのまま
+  // (4) ★消去の粒度ごとの費用を測る。締切のある系で「10ms を超えるとまずい」と
+  //     いう話は、**どの単位で消すか**で答えが変わる (ROM は 64KB 境界で
+  //     ブロック消去へ切り替わるので、まとめるほど 1 バイトあたりが安い)。
+  // ★空いている場所は消さないので、測るにはわざと汚す必要がある。1 セクタにつき
+  //   1 ページ書けば「空いていない」ことになる (書き込みは安い)。
+  //   ★消去の粒度で 1 バイトあたりの費用が桁で変わる — ROM は 64KB 境界で
+  //     ブロック消去 (0xD8) に切り替わるため。締切のある系で「10ms を超えるとまずい」
+  //     という話は、**どの単位で、いつ消すか**で答えが変わる。
+  static const uint32_t GRANULARITIES[] = {4u, 64u};
+  for (uint32_t which = 0; which < 2; ++which) {
+    const uint32_t kib = GRANULARITIES[which];
+    const uint32_t sectors = kib * 1024u / FLASH_SECTOR_SIZE;
+    // ★★64KB 境界へ揃える。ROM がブロック消去 (0xD8) に切り替わるのは
+    //   **範囲が 64KB 境界に乗っているとき**だけで、途中から始まる 64KB は
+    //   全部セクタ消去になる。最初これを揃えずに測って「ブロック消去にしても
+    //   速くならない」と読み違えかけた。
+    uint32_t base = derive_bump();
+    if (kib >= 64)
+      base = (base + FLASH_BLOCK_SIZE - 1) & ~(uint32_t)(FLASH_BLOCK_SIZE - 1);
+    if (base + kib * 1024u > REGION_ADDRESS + REGION_BYTES)
+      break;
+    {
+      stop_the_world stopped;
+      for (uint32_t at = 0; at < sectors; ++at) {
+        for (uint32_t index = 0; index < FLASH_PAGE_SIZE; ++index)
+          g_page[index] = 0x00; // 全ビットを落とす = 確実に「空いていない」
+        flash_write(base - XIP_BASE + at * FLASH_SECTOR_SIZE, g_page,
+                    FLASH_PAGE_SIZE, false, 0);
+      }
+    }
+    flash_prepare prepare{};
+    {
+      stop_the_world stopped;
+      const uint64_t began = KERNEL::BOARD::time_us();
+      flash_write(base - XIP_BASE, nullptr, 0, true, kib * 1024u);
+      prepare.took_us = (uint32_t)(KERNEL::BOARD::time_us() - began);
+      prepare.erased = kib * 1024u;
+    }
+    KERNEL::BOARD::diag_printf(
+        "[FLASHFS] erase %lu KiB at %p (%lu sector(s)) took %lu us "
+        "= %lu us per 4 KiB\n",
+        (unsigned long)kib, (void *)base, (unsigned long)sectors,
+        (unsigned long)prepare.took_us,
+        (unsigned long)(prepare.erased ? prepare.took_us / (prepare.erased / 4096)
+                                       : 0));
+  }
+
+  // (5) 引いたアドレスから直接読む。写していないので、一致すれば「XIP をそのまま
   //     渡している」ことの確認になる。
   const char *contents = (const char *)first;
   for (uint32_t index = 0; index < PAYLOAD_BYTES; ++index)
