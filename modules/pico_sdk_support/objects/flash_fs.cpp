@@ -4,6 +4,7 @@
 //  設計の理由は shizuku/objects/flash_fs.hpp を参照。ここは機械の都合を書く。
 #include "hardware/flash.h"
 #include "hardware/sync.h"
+#include "pico/time.h"
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/objects/flash_fs.hpp"
@@ -53,33 +54,48 @@ constexpr uint32_t REGION_OFFSET = PICO_FLASH_SIZE_BYTES - REGION_BYTES;
 constexpr uintptr_t REGION_ADDRESS = XIP_BASE + REGION_OFFSET;
 
 constexpr uint32_t DIRECTORY_MAGIC = 0x5A4B4653; // 'ZKFS'
-constexpr uint32_t DIRECTORY_VERSION = 1;
+constexpr uint32_t DIRECTORY_VERSION = 2;
 
-// 目録は 1 セクタに収める。可変長にすると目録が育つたびに引っ越しが要るが、
-// 引っ越しはアドレスを動かすことなので、この FS では**やってはいけない**操作。
-struct directory_header {
-  uint32_t magic;
-  uint32_t version;
-  uint32_t bump;    // 次に置ける XIP アドレス (セクタ境界)
-  uint32_t entries; // 居るファイル数 (走査を早く終わらせるためだけの数)
-};
+// ===========================================================================
+//  目録は**追記式** (2026-08-21 の実測を受けて書き直した)
+// ===========================================================================
+//  ★実測: 41 バイトのファイル 1 つを書くのに消去が 65,697µs (全体の 89%) かかって
+//    いた。内訳は 4KB セクタの消去 × 2 回で、1 回あたり約 33ms。33ms は W25Q の
+//    物理的な限界 (typ 45ms なのでむしろ速い側) なので、**媒体を責める話ではなく
+//    「要らない消去を 2 回している」という手順の話**だった。
+//
+//  ★NOR フラッシュは**書き込みが 1→0 しかしない**。消去が 0xFF に戻す操作で、
+//    書き込みはビットを落とすだけ。したがって:
+//      - **まだ 0xFF の場所へは、消さずに書ける**
+//      - 状態の遷移も「ビットを落とす向き」なら消さずに書ける
+//    この 2 つを使うと、普通の store から消去が丸ごと消える。
+//
+//  【目録の形】ヘッダ 1 枠 + 追記される項目。**書き換えない**のが要点:
+//    枠 0      : 名乗り (magic/version)。セクタを消した直後に 1 度だけ書く
+//    枠 1..127 : 項目。空き (0xFF) の枠へ**追記**する。書き換えは一切しない
+//  - 置き場所の先頭 (bump) は**持たない**。項目から導出する — 持つと store の
+//    たびに書き換えが要り、書き換えには消去が要る (それが 2 回目の消去だった)
+//  - 削除は state の**ビットを落とす**だけ (LIVE → DEAD)。0xFF へ戻さないので
+//    消去が要らない
+//  - 同じ名前を置き直すときも、古い項目を DEAD にして新しい項目を追記する
 struct directory_entry {
-  char name[FLASH_NAME_BYTES];
-  uint32_t address; // XIP アドレスそのもの。**引いた結果がこれ**
-  uint32_t bytes;   // 実バイト数 (セクタ境界まで丸めた分は含めない)
+  uint32_t state; // FREE(全 1) → LIVE → DEAD。ビットを落とす向きにしか動かない
+  uint32_t address;
+  uint32_t bytes;
+  char name[FLASH_NAME_BYTES - 4]; // 32 バイトに収める
 };
-constexpr uint32_t ENTRY_COUNT =
-    (FLASH_SECTOR_SIZE - sizeof(directory_header)) / sizeof(directory_entry);
+static_assert(sizeof(directory_entry) == 32, "1 枠 32 バイト");
 
-// 目録の作業コピー。**RAM に無いといけない**理由が 2 つある:
+constexpr uint32_t ENTRY_FREE = 0xFFFFFFFFu;
+constexpr uint32_t ENTRY_LIVE = 0xFFFFFFFEu;
+constexpr uint32_t ENTRY_DEAD = 0xFFFFFFFCu;
+constexpr uint32_t ENTRY_COUNT = FLASH_SECTOR_SIZE / sizeof(directory_entry);
+constexpr uint32_t FIRST_ENTRY = 1; // 枠 0 は名乗り
+
+// 目録の作業コピー。**RAM に無いといけない**理由は 2 つ:
 //   (1) 書き込み中は XIP が止まるので、書き込み元が flash 上にあると読めない
-//   (2) 消去は目録セクタごと消すので、消す前に中身を持っていないと復元できない
-struct directory_image {
-  directory_header header;
-  directory_entry entries[ENTRY_COUNT];
-};
-static_assert(sizeof(directory_image) <= FLASH_SECTOR_SIZE, "目録は 1 セクタ");
-directory_image g_directory;
+//   (2) 引くたびに flash を舐めると、XIP キャッシュを汚して他が遅くなる
+directory_entry g_directory[ENTRY_COUNT];
 bool g_mounted = false;
 
 // 書き込み元を 1 ページずつ RAM へ写すための中継。**XIP が止まっている間に
@@ -92,56 +108,81 @@ constexpr uint32_t sector_round_up(uint32_t bytes) {
 }
 
 bool name_equal(const char *left, const char *right) {
-  for (uintptr_t index = 0; index < FLASH_NAME_BYTES; ++index) {
+  for (uintptr_t index = 0; index < sizeof(directory_entry::name); ++index) {
     if (left[index] != right[index])
       return false;
     if (left[index] == '\0')
       return true;
   }
-  return true; // 24 文字ぴったりまで一致 (終端無しで焼かれている)
+  return true;
 }
 
 void name_copy(char *destination, const char *source) {
   uintptr_t index = 0;
-  for (; index + 1 < FLASH_NAME_BYTES && source[index] != '\0'; ++index)
+  const uintptr_t limit = sizeof(directory_entry::name);
+  for (; index + 1 < limit && source[index] != '\0'; ++index)
     destination[index] = source[index];
-  for (; index < FLASH_NAME_BYTES; ++index)
+  for (; index < limit; ++index)
     destination[index] = '\0';
 }
 
 int find_entry(const char *name) {
-  for (uint32_t index = 0; index < ENTRY_COUNT; ++index) {
-    if (g_directory.entries[index].address == 0)
+  for (uint32_t index = FIRST_ENTRY; index < ENTRY_COUNT; ++index) {
+    if (g_directory[index].state != ENTRY_LIVE)
       continue;
-    if (name_equal(g_directory.entries[index].name, name))
+    if (name_equal(g_directory[index].name, name))
       return (int)index;
   }
   return -1;
 }
 
-void directory_reset() {
-  g_directory.header.magic = DIRECTORY_MAGIC;
-  g_directory.header.version = DIRECTORY_VERSION;
-  // 目録が先頭 1 セクタを使うので、置き場所はその次から。
-  g_directory.header.bump = (uint32_t)(REGION_ADDRESS + FLASH_SECTOR_SIZE);
-  g_directory.header.entries = 0;
-  for (uint32_t index = 0; index < ENTRY_COUNT; ++index) {
-    g_directory.entries[index].address = 0;
-    g_directory.entries[index].bytes = 0;
-    g_directory.entries[index].name[0] = '\0';
+// 置き場所の先頭は**項目から導出する**。持たない理由は上の注記のとおり。
+uint32_t derive_bump() {
+  uint32_t bump = (uint32_t)(REGION_ADDRESS + FLASH_SECTOR_SIZE);
+  for (uint32_t index = FIRST_ENTRY; index < ENTRY_COUNT; ++index) {
+    // ★DEAD も数える。**領域は返らない** — 配ったアドレスを動かせないので
+    //   詰め直しができない (D21)。死んだ項目の場所を再利用すると、まだそのアドレスを
+    //   持っている誰かの足元を書き換えることになる。
+    if (g_directory[index].state == ENTRY_FREE)
+      continue;
+    const uint32_t end =
+        g_directory[index].address + sector_round_up(g_directory[index].bytes);
+    if (end > bump)
+      bump = end;
   }
+  return bump;
+}
+
+uint32_t live_count() {
+  uint32_t live = 0;
+  for (uint32_t index = FIRST_ENTRY; index < ENTRY_COUNT; ++index)
+    if (g_directory[index].state == ENTRY_LIVE)
+      ++live;
+  return live;
+}
+
+// ★まだ 0xFF か。0xFF なら**消さずに書ける** (書き込みはビットを落とすだけ)。
+//   読むのは XIP なのでただのメモリ走査 = 消去 33ms に比べれば無視できる。
+bool is_blank(uint32_t address, uint32_t bytes) {
+  const uint32_t *word = (const uint32_t *)address;
+  for (uint32_t index = 0; index < bytes / 4; ++index)
+    if (word[index] != 0xFFFFFFFFu)
+      return false;
+  return true;
 }
 
 // ---- 媒体へ書く ------------------------------------------------------------
-// ★ここが「系を止める」区間。割り込みを落としてから消去・書き込みを行い、必ず
-//   戻す。pico-sdk の flash_range_* は RAM 上で走る関数として置かれており、
-//   終わりに XIP のキャッシュも捨ててくれる (捨てないと、書いた直後に読んだとき
-//   古い中身が見える)。
-// ★将来オーバークロックを入れるときの注意 (docs/03 D23): 消去・書き込みは XIP を
-//   一度落として入り直す経路なので、**QMI のタイミング設定が ROM 既定へ戻る**恐れが
-//   ある。今は SDK 既定の 150MHz で ROM 既定のまま走っているので実害が無いだけで、
-//   フラッシュを速める設定を入れた瞬間にここが「書いた後だけ読み違える」経路になる。
-//   速すぎる QMI 設定は落ちずに**静かにデータを読み違える**ので、気づけない。
+// ★ここが「系を止める」区間。**両方のコア**を止め、割り込みを落としてから消去・
+//   書き込みを行い、必ず戻す。pico-sdk の flash_range_* は RAM 上で走る関数として
+//   置かれており、終わりに XIP のキャッシュも捨ててくれる (捨てないと、書いた
+//   直後に読んだとき古い中身が見える)。
+// ★内訳を測る。「遅い」だけでは、媒体の限界なのか手順が悪いのかを言い分けられない。
+uint64_t g_erase_us = 0;
+uint64_t g_program_us = 0;
+uint32_t g_erase_count = 0;
+uint32_t g_program_count = 0;
+uint32_t g_erased_bytes = 0;
+
 void flash_write(uint32_t offset, const uint8_t *ram_data, uint32_t bytes,
                  bool erase_first, uint32_t erase_bytes) {
   // ★順序が大事: **先に相手を止めてから**自分の割り込みを落とす。逆にすると、
@@ -149,18 +190,75 @@ void flash_write(uint32_t offset, const uint8_t *ram_data, uint32_t bytes,
   //   ことになり、応答が来ないまま固まり得る。
   KERNEL::BOARD::park_other_cores();
   const uint32_t interrupts = save_and_disable_interrupts();
-  if (erase_first)
+  if (erase_first) {
+    const uint64_t began = ::time_us_64();
     ::flash_range_erase(offset, erase_bytes);
-  if (bytes != 0)
+    g_erase_us += ::time_us_64() - began;
+    ++g_erase_count;
+    g_erased_bytes += erase_bytes;
+  }
+  if (bytes != 0) {
+    const uint64_t began = ::time_us_64();
     ::flash_range_program(offset, ram_data, bytes);
+    g_program_us += ::time_us_64() - began;
+    ++g_program_count;
+  }
   restore_interrupts(interrupts);
   KERNEL::BOARD::resume_other_cores();
 }
 
-// 目録を焼き直す。作業コピーは RAM にあるのでそのまま渡せる。
-void directory_flush() {
-  flash_write(REGION_OFFSET, (const uint8_t *)&g_directory,
-              FLASH_SECTOR_SIZE, true, FLASH_SECTOR_SIZE);
+// 目録の 1 枠を焼く。★ページ単位でしか書けないので、その枠を含む 256 バイトを
+//   組み立てて書く。**同じページの他の枠には 0xFF を書く** — 0xFF は「ビットを
+//   1 つも落とさない」ので、既に焼かれている隣の枠は変わらない。これが
+//   「書き換えずに追記する」の実際の姿。
+void write_entry(uint32_t index, const directory_entry &value) {
+  const uint32_t byte_offset = index * sizeof(directory_entry);
+  const uint32_t page = byte_offset / FLASH_PAGE_SIZE;
+  const uint32_t within = byte_offset % FLASH_PAGE_SIZE;
+  for (uint32_t at = 0; at < FLASH_PAGE_SIZE; ++at)
+    g_page[at] = 0xFF;
+  const uint8_t *source = (const uint8_t *)&value;
+  for (uint32_t at = 0; at < sizeof(directory_entry); ++at)
+    g_page[within + at] = source[at];
+  flash_write(REGION_OFFSET + page * FLASH_PAGE_SIZE, g_page, FLASH_PAGE_SIZE,
+              false, 0);
+  g_directory[index] = value;
+}
+
+// 空いている枠を探す。★追記なので「一度使った枠は二度と空かない」。埋まったら
+//   目録だけ詰め直す (中身のアドレスは動かないので、これは安全な操作)。
+int free_slot() {
+  for (uint32_t index = FIRST_ENTRY; index < ENTRY_COUNT; ++index)
+    if (g_directory[index].state == ENTRY_FREE)
+      return (int)index;
+  return -1;
+}
+
+// 目録セクタを消して、名乗りと生きている項目だけを書き直す。
+// ★これは消去を伴う唯一の目録操作で、枠が尽きたときと FORMAT のときだけ走る。
+void directory_rebuild(bool keep_live) {
+  directory_entry saved[ENTRY_COUNT];
+  uint32_t kept = 0;
+  if (keep_live)
+    for (uint32_t index = FIRST_ENTRY; index < ENTRY_COUNT; ++index)
+      if (g_directory[index].state == ENTRY_LIVE)
+        saved[kept++] = g_directory[index];
+
+  flash_write(REGION_OFFSET, nullptr, 0, true, FLASH_SECTOR_SIZE);
+  for (uint32_t index = 0; index < ENTRY_COUNT; ++index) {
+    g_directory[index].state = ENTRY_FREE;
+    g_directory[index].address = 0xFFFFFFFFu;
+    g_directory[index].bytes = 0xFFFFFFFFu;
+  }
+  directory_entry header{};
+  header.state = DIRECTORY_MAGIC;
+  header.address = DIRECTORY_VERSION;
+  header.bytes = 0xFFFFFFFFu;
+  for (uintptr_t at = 0; at < sizeof(header.name); ++at)
+    header.name[at] = (char)0xFF;
+  write_entry(0, header);
+  for (uint32_t index = 0; index < kept; ++index)
+    write_entry(FIRST_ENTRY + index, saved[index]);
 }
 
 // ---- メソッド --------------------------------------------------------------
@@ -178,8 +276,8 @@ uintptr_t flash_lookup_method(uintptr_t argument, uintptr_t, uintptr_t,
   // ★写さない。返すのはアドレスそのもので、呼ぶ側はここから直接読む。
   //   XIP 領域は MPU 上も読み出し + 実行が許してあるので、**非特権の呼び出し元でも
   //   この先は自分で読める** (引くところだけが特権)。
-  request->address = g_directory.entries[slot].address;
-  request->bytes = g_directory.entries[slot].bytes;
+  request->address = g_directory[slot].address;
+  request->bytes = g_directory[slot].bytes;
   return request->address;
 }
 
@@ -192,28 +290,27 @@ uintptr_t flash_store_method(uintptr_t argument, uintptr_t, uintptr_t,
     return 0;
 
   const uint32_t reserved = sector_round_up(request->bytes);
-  const uint32_t bump = g_directory.header.bump;
+  const uint32_t bump = derive_bump();
   if (bump + reserved > REGION_ADDRESS + REGION_BYTES)
     return 0; // 空きが無い。詰め直しはしない (アドレスが動くので)
 
-  int slot = find_entry(request->name);
+  int slot = free_slot();
   if (slot < 0) {
-    for (uint32_t index = 0; index < ENTRY_COUNT; ++index) {
-      if (g_directory.entries[index].address == 0) {
-        slot = (int)index;
-        break;
-      }
-    }
+    // 枠が尽きた。目録だけ詰め直す — **中身のアドレスは動かないので安全**
+    // (動かせないのは中身のほうで、目録は動かしてよい)。
+    directory_rebuild(true);
+    slot = free_slot();
     if (slot < 0)
-      return 0; // 目録が満杯
-    ++g_directory.header.entries;
+      return 0;
   }
-  // 同じ名前が既に居た場合、古い領域は**捨てる**。上書きしないのは、上書きには
-  // 消去が要り、消去の単位はセクタなので、大きさが変われば結局引っ越すため。
 
   const uint32_t offset = bump - XIP_BASE;
-  // まず置き場所を空ける (セクタ単位)。
-  flash_write(offset, nullptr, 0, true, reserved);
+  // ★★まだ 0xFF なら**消さない**。書き込みはビットを落とすだけなので、消去は
+  //   「1 へ戻したいとき」にしか要らない。実測ではこの消去 1 回が 33ms で、
+  //   store 全体の大半を占めていた。読んで確かめる費用は XIP のメモリ走査だけ。
+  if (!is_blank(bump, reserved))
+    flash_write(offset, nullptr, 0, true, reserved);
+
   // 中身を 1 ページずつ写しながら焼く。**呼び出し側のバッファが flash 上にある
   // かもしれない**ので、直接渡さずに必ず RAM を経由する (XIP が止まっている間は
   // flash が読めない = 書き込み元が消える)。
@@ -228,11 +325,20 @@ uintptr_t flash_store_method(uintptr_t argument, uintptr_t, uintptr_t,
     flash_write(offset + written, g_page, FLASH_PAGE_SIZE, false, 0);
   }
 
-  g_directory.entries[slot].address = bump;
-  g_directory.entries[slot].bytes = request->bytes;
-  name_copy(g_directory.entries[slot].name, request->name);
-  g_directory.header.bump = bump + reserved;
-  directory_flush();
+  // 同じ名前が既に居たら、その項目を**殺してから**新しい項目を追記する。
+  // 殺すのはビットを落とすだけなので消去が要らない。
+  const int previous = find_entry(request->name);
+  if (previous >= 0) {
+    directory_entry dead = g_directory[previous];
+    dead.state = ENTRY_DEAD;
+    write_entry((uint32_t)previous, dead);
+  }
+  directory_entry fresh{};
+  fresh.state = ENTRY_LIVE;
+  fresh.address = bump;
+  fresh.bytes = request->bytes;
+  name_copy(fresh.name, request->name);
+  write_entry((uint32_t)slot, fresh);
 
   request->address = bump;
   return bump;
@@ -246,14 +352,12 @@ uintptr_t flash_remove_method(uintptr_t argument, uintptr_t, uintptr_t,
   const int slot = find_entry(request->name);
   if (slot < 0)
     return 0;
-  // ★空くのは**名前だけ**。領域は返らない。返すには後ろを詰めるしかなく、
+  // ★消えるのは**名前だけ**。領域は返らない。返すには後ろを詰めるしかなく、
   //   詰めればアドレスが動く — アドレスこそがこの FS の API なので、動かせない。
-  g_directory.entries[slot].address = 0;
-  g_directory.entries[slot].bytes = 0;
-  g_directory.entries[slot].name[0] = '\0';
-  if (g_directory.header.entries != 0)
-    --g_directory.header.entries;
-  directory_flush();
+  //   ★殺すのはビットを落とす向きの遷移なので、消去は要らない。
+  directory_entry dead = g_directory[slot];
+  dead.state = ENTRY_DEAD;
+  write_entry((uint32_t)slot, dead);
   return 1;
 }
 
@@ -263,67 +367,67 @@ uintptr_t flash_list_method(uintptr_t argument, uintptr_t, uintptr_t,
   if (request == nullptr || !g_mounted || request->index >= ENTRY_COUNT)
     return 0;
   uint32_t seen = 0;
-  for (uint32_t index = 0; index < ENTRY_COUNT; ++index) {
-    if (g_directory.entries[index].address == 0)
+  for (uint32_t index = FIRST_ENTRY; index < ENTRY_COUNT; ++index) {
+    if (g_directory[index].state != ENTRY_LIVE)
       continue;
     if (seen++ != request->index)
       continue;
-    name_copy(request->name, g_directory.entries[index].name);
-    request->address = g_directory.entries[index].address;
-    request->bytes = g_directory.entries[index].bytes;
+    name_copy(request->name, g_directory[index].name);
+    request->address = g_directory[index].address;
+    request->bytes = g_directory[index].bytes;
     return 1;
   }
   return 0;
 }
 
 uintptr_t flash_format_method(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
-  directory_reset();
-  directory_flush();
+  // ★中身のセクタは消さない。消すと 1MB ぶんで 8 秒以上かかる (256 セクタ ×
+  //   33ms)。代わりに、置くときに「まだ 0xFF か」を見て要るときだけ消す
+  //   (遅延消去)。FORMAT が速いのはそのため。
+  directory_rebuild(false);
   g_mounted = true;
   return 1;
 }
 
 uintptr_t flash_status_method(uintptr_t argument, uintptr_t, uintptr_t,
                               uintptr_t) {
+  const uint32_t used = derive_bump() - (uint32_t)REGION_ADDRESS;
   flash_status *request = (flash_status *)argument;
-  const uint32_t used = g_directory.header.bump - (uint32_t)REGION_ADDRESS;
   if (request != nullptr) {
     request->region_address = REGION_ADDRESS;
     request->region_bytes = REGION_BYTES;
     request->used_bytes = used;
     request->free_bytes = REGION_BYTES - used;
-    request->entries = g_directory.header.entries;
+    request->entries = live_count();
   }
   return used;
 }
 
 // ---- mount ----------------------------------------------------------------
-// main は「自分の媒体を自分で立ち上げる」。目録を XIP からそのまま読み、名乗りが
-// 合わなければ初期化する。**空の flash は 0xFF なので、初期化済みかどうかは
-// magic で判る** (0 埋めを期待すると、消去直後の媒体を誤って読む)。
+// 目録を XIP からそのまま読み、名乗りが合わなければ作り直す。**空の flash は
+// 0xFF なので、初期化済みかどうかは名乗りで判る** (0 埋めを期待すると、消去直後の
+// 媒体を誤って読む)。
 uintptr_t flash_fs_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
-  const directory_image *media = (const directory_image *)REGION_ADDRESS;
-  if (media->header.magic == DIRECTORY_MAGIC &&
-      media->header.version == DIRECTORY_VERSION) {
-    g_directory = *media;
+  const directory_entry *media = (const directory_entry *)REGION_ADDRESS;
+  bool sane = media[0].state == DIRECTORY_MAGIC &&
+              media[0].address == DIRECTORY_VERSION;
+  if (sane) {
+    for (uint32_t index = 0; index < ENTRY_COUNT; ++index)
+      g_directory[index] = media[index];
     // ★焼かれているのは**絶対アドレス**なので、他所で作った像を読むと外を指す
     //   ポインタを配ってしまう。範囲に収まっているかをここで確かめ、収まって
     //   いなければ知らない媒体として扱う (黙って配らない)。
-    bool sane = g_directory.header.bump >= REGION_ADDRESS + FLASH_SECTOR_SIZE &&
-                g_directory.header.bump <= REGION_ADDRESS + REGION_BYTES;
-    for (uint32_t index = 0; sane && index < ENTRY_COUNT; ++index) {
-      const directory_entry &entry = g_directory.entries[index];
-      if (entry.address == 0)
+    for (uint32_t index = FIRST_ENTRY; sane && index < ENTRY_COUNT; ++index) {
+      const directory_entry &entry = g_directory[index];
+      if (entry.state != ENTRY_LIVE)
         continue;
       if (entry.address < REGION_ADDRESS + FLASH_SECTOR_SIZE ||
-          entry.address + entry.bytes > REGION_ADDRESS + REGION_BYTES)
+          (uint64_t)entry.address + entry.bytes > REGION_ADDRESS + REGION_BYTES)
         sane = false;
     }
-    if (!sane)
-      directory_reset();
-  } else {
-    directory_reset(); // まだ何も焼かれていない (あるいは別物)
   }
+  if (!sane)
+    directory_rebuild(false); // まだ何も焼かれていない (あるいは別物)
   g_mounted = true;
 
   uintptr_t failures = api(object_api::DECLARE_NAME, (uintptr_t) "flashfs").error;
@@ -385,6 +489,31 @@ uint32_t register_flash_fs() {
 //  (2) は「今書いて今読む」では確かめられない。なので、既に置いてあるときは
 //  **書かずに読むだけ**にして、2 回目以降の起動が前回の書き込みを見ていることを
 //  そのまま証拠にする (ついでに flash の寿命も削らない)。
+// 1 回置いて、内訳を印字する。★消去の回数を出すのが要点 — 「速い/遅い」ではなく
+//   「消したかどうか」で説明がつくことを見えるようにする。
+static uint32_t store_and_report(const char *name, const char *payload,
+                                 uint32_t bytes, uintptr_t &address) {
+  g_erase_us = g_program_us = 0;
+  g_erase_count = g_program_count = g_erased_bytes = 0;
+  flash_store store{name, payload, bytes, 0};
+  const uint64_t began = KERNEL::BOARD::time_us();
+  api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
+      (uintptr_t)flash_fs_method::STORE, (uintptr_t)&store);
+  const uint64_t took = KERNEL::BOARD::time_us() - began;
+  address = store.address;
+  if (store.address == 0) {
+    KERNEL::BOARD::diag_printf("[FLASHFS] store '%s' failed\n", name);
+    return 1;
+  }
+  KERNEL::BOARD::diag_printf(
+      "[FLASHFS] stored '%s' at %p in %lu us "
+      "(erase %lu us x%lu, program %lu us x%lu)\n",
+      name, (void *)store.address, (unsigned long)took,
+      (unsigned long)g_erase_us, (unsigned long)g_erase_count,
+      (unsigned long)g_program_us, (unsigned long)g_program_count);
+  return 0;
+}
+
 uint32_t flash_fs_probe() {
   static const char PAYLOAD[] = "shizuku: an object is a thing that runs.";
   constexpr uint32_t PAYLOAD_BYTES = sizeof(PAYLOAD);
@@ -408,41 +537,37 @@ uint32_t flash_fs_probe() {
       "[FLASHFS] probe.txt from the previous boot: %s\n",
       survived ? "found and matches" : "absent or different");
 
-  // (2) 空きを取り戻してから書き直す。★削除では領域が戻らない (配ったアドレスを
-  //     動かせないため — D21)。毎回焼くのに空きを食い潰さない唯一の道が FORMAT。
-  api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
-      (uintptr_t)flash_fs_method::FORMAT, 0);
-
-  // (3) ★ここが多コアの試験でもある。消去中は XIP が止まるので、もう一方のコアが
-  //     止められていなければ、そのコアは flash 上のコードを踏んで即死する。
-  //     **core1 が走っている状態で書けたこと自体が、止められている証拠**になる。
-  //     書き込み元は flash 上の文字列リテラルで、これもわざと (XIP が止まっている
-  //     間に読めないバッファを渡された場合でも壊れないことを確かめる)。
-  flash_store store{"probe.txt", PAYLOAD, PAYLOAD_BYTES, 0};
-  const uint64_t began = KERNEL::BOARD::time_us();
-  api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
-      (uintptr_t)flash_fs_method::STORE, (uintptr_t)&store);
-  const uint64_t took = KERNEL::BOARD::time_us() - began;
-  if (store.address == 0) {
-    KERNEL::BOARD::diag_printf("[FLASHFS] store failed\n");
-    return 1;
+  // (2) ★**前へ進み続ける**。同じ名前で置き直しても、古い項目を殺して新しい場所へ
+  //     書くだけなので、行き先はまだ 0xFF = 消去が要らない。ここで毎回 FORMAT すると
+  //     行き先が前回使ったセクタへ巻き戻り、追記式にした意味が消える (実測で
+  //     そうなった: 毎回 33ms の消去が復活した)。
+  //     ★これは多コアの試験でもある: 消去中は XIP が止まるので、もう一方のコアが
+  //       止められていなければそのコアは flash 上のコードを踏んで即死する。
+  uintptr_t first = 0;
+  failures += store_and_report("probe.txt", PAYLOAD, PAYLOAD_BYTES, first);
+  if (first == 0) {
+    // 空きが尽きた。★ここが「詰め直さない」設計の代償を払う場所 —
+    //   配ったアドレスを動かせない以上、まとめて捨てる以外に回収の道が無い (D21)。
+    KERNEL::BOARD::diag_printf("[FLASHFS] region full, formatting\n");
+    api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
+        (uintptr_t)flash_fs_method::FORMAT, 0);
+    failures = store_and_report("probe.txt", PAYLOAD, PAYLOAD_BYTES, first);
+    if (first == 0)
+      return failures;
   }
 
   // (4) 引いたアドレスから直接読む。写していないので、一致すれば「XIP をそのまま
   //     渡している」ことの確認になる。
-  const char *contents = (const char *)store.address;
+  const char *contents = (const char *)first;
   for (uint32_t index = 0; index < PAYLOAD_BYTES; ++index)
     if (contents[index] != PAYLOAD[index]) {
       ++failures;
       break;
     }
-  // ★「系が止まる時間」を数字で残す。周期スレッドの隣で呼べる操作かどうかは、
-  //   この数字を見てから決める話。**両方のコアが止まる**時間である点に注意。
   KERNEL::BOARD::diag_printf(
-      "[FLASHFS] wrote %lu bytes at %p and read them straight back: %s "
-      "(both cores were stopped for %lu us)\n",
-      (unsigned long)PAYLOAD_BYTES, (void *)store.address,
-      failures == 0 ? "matches" : "MISMATCH", (unsigned long)took);
+      "[FLASHFS] read %lu bytes straight from %p -> %s\n",
+      (unsigned long)PAYLOAD_BYTES, (void *)first,
+      failures == 0 ? "matches" : "MISMATCH");
   return failures;
 }
 
