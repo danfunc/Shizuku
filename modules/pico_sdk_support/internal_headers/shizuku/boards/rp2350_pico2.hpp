@@ -28,6 +28,14 @@ public:
   //     止める操作**であって、周期スレッドの隣で気軽に呼ぶものではない。
   static void park_other_cores();
   static void resume_other_cores();
+  // ---- DMA -----------------------------------------------------------------
+  // ★DMA は **MPU を素通りする**。チャネルをオブジェクトへ渡すと、非特権の
+  //   オブジェクトが任意の番地を読み書きできてしまい、region を張った意味が消える。
+  //   だからチャネルはここ (特権側) が握り、オブジェクトには「繋いでくれ」という
+  //   要求しか許さない。
+  static int dma_claim();
+  static void dma_copy(int channel, const void *from, void *to, uint32_t bytes);
+  static bool dma_busy(int channel);
   static uint32_t core_num() { return (uint32_t)::get_core_num(); }
   static uint64_t time_us() { return ::time_us_64(); }
   // ★クロックを知っているのは board (PORT §2.3)。上位は µs でしか話さない。

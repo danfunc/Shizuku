@@ -25,6 +25,7 @@ using BOARD = KERNEL::BOARD;
 
 constexpr uintptr_t OBJECT_WRITER = object_id::unpriv_writer;
 constexpr uintptr_t OBJECT_READER = object_id::unpriv_reader;
+constexpr uintptr_t OBJECT_SINK = object_id::unpriv_sink;
 constexpr uint32_t PAYLOAD_BYTES = 300; // ページ 1 枚を跨がせる
 
 struct api_result {
@@ -61,21 +62,32 @@ uintptr_t unprivileged_writer(uintptr_t descriptor, uintptr_t, uintptr_t,
   return ARCH::control_register(); // 自分が非特権だったかを申告する
 }
 
-// ★非特権で走る読み手。extent を受け取り、**XIP から直接**読んで足し合わせる。
-//   1 バイトも写していないことが、返る和が合うことで分かる。
+// ★非特権で走る読み手。**ストリームの実体は flash そのもの** — pop は XIP から
+//   直に 1 レコード読む。中継の環はどこにも無いので、写す仕事も一貫性の心配も無い。
+//   非特権のまま読めるのは、ディスクリプタが arena (書ける側) にあり、
+//   base が XIP (読める側) にあるから。
 uintptr_t unprivileged_reader(uintptr_t descriptor, uintptr_t, uintptr_t,
                               uintptr_t) {
-  stream::handle<stream::extent> in((stream::descriptor *)descriptor);
-  stream::extent piece{};
-  if (!in.pop(&piece))
-    return 0;
+  stream::handle<uint8_t> in((stream::descriptor *)descriptor);
   uint32_t sum = 0;
-  const uint8_t *bytes = (const uint8_t *)piece.address;
-  for (uint32_t index = 0; index < piece.bytes; ++index)
-    sum += bytes[index];
+  uint8_t byte = 0;
+  while (in.pop(&byte))
+    sum += byte;
   // 上位に CONTROL、下位に和。1 語で両方持ち帰るのは、非特権が触れる置き場所が
   // 戻り値しか無いため。
   return (ARCH::control_register() << 24) | (sum & 0x00FFFFFFu);
+}
+
+// ★非特権で走る受け手。**DMA が運んできた**環から汲む。運んだのはカーネル側の
+//   DMA で、途中に中継オブジェクトは 1 つも居ない。
+uintptr_t unprivileged_sink(uintptr_t descriptor, uintptr_t, uintptr_t,
+                            uintptr_t) {
+  stream::handle<uint8_t> in((stream::descriptor *)descriptor);
+  uint32_t sum = 0;
+  uint8_t byte = 0;
+  while (in.pop(&byte))
+    sum += byte;
+  return sum;
 }
 
 void check(const char *name, bool ok, unsigned long got, unsigned long want) {
@@ -98,9 +110,11 @@ void flash_stream_ladder() {
       OBJECT_UNPRIVILEGED);
   api(object_api::CREATE_OBJECT, OBJECT_READER, (uintptr_t)&unprivileged_reader,
       OBJECT_UNPRIVILEGED);
+  api(object_api::CREATE_OBJECT, OBJECT_SINK, (uintptr_t)&unprivileged_sink,
+      OBJECT_UNPRIVILEGED);
 
   // ---- 書き: 非特権がバイトを流し、特権側が焼く ----------------------------
-  flash_open opening{"unpriv.bin", 4096, 0};
+  flash_open opening{"unpriv.bin", 4096, 0, 0, 0, 0};
   const api_result opened =
       api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
           (uintptr_t)flash_fs_method::OPEN_WRITE, (uintptr_t)&opening);
@@ -122,12 +136,16 @@ void flash_stream_ladder() {
         (unsigned long)PAYLOAD_BYTES);
 
   // ---- 読み: 非特権が XIP から直接読む -------------------------------------
-  flash_open reading{"unpriv.bin", 0, 0};
+  flash_open reading{"unpriv.bin", 0, 1, 0, 0, 0};
   const api_result opened_read =
       api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
           (uintptr_t)flash_fs_method::OPEN_READ, (uintptr_t)&reading);
   check("flash stream: opened for reading", opened_read.value != 0,
         (unsigned long)opened_read.value, 1);
+  // ★環を持たないので、レコード数はファイルの大きさそのもの。
+  check("flash stream: the file itself is the stream",
+        reading.records == PAYLOAD_BYTES, (unsigned long)reading.records,
+        (unsigned long)PAYLOAD_BYTES);
   if (opened_read.value == 0)
     return;
   const api_result read_desc = api(object_api::STREAM_OPEN, reading.stream);
@@ -143,6 +161,60 @@ void flash_stream_ladder() {
   check("flash stream: the unprivileged reader saw the real bytes",
         (got.value & 0x00FFFFFFu) == (want & 0x00FFFFFFu),
         (unsigned long)(got.value & 0x00FFFFFFu), (unsigned long)want);
+
+  // ---- 接続: flash から DMA で直に汲む ------------------------------------
+  // ★これが「中継オブジェクトの pop/push が消える」ことの実証。src は XIP を
+  //   実体とする読みストリームなので、**DMA はフラッシュから直接読んで**受け手の
+  //   環へ書く。CPU は 1 バイトも写していない。
+  {
+    flash_open again{"unpriv.bin", 0, 1, 0, 0, 0};
+    api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
+        (uintptr_t)flash_fs_method::OPEN_READ, (uintptr_t)&again);
+    // 受け側の環はオブジェクト arena に置く (非特権が汲める側)。
+    using sink_ring = stream::storage<uint8_t, 128>;
+    const api_result memory = api(object_api::MEMORY_ALLOCATE, sizeof(sink_ring));
+    check("connect: room for the sink", memory.value != 0,
+          (unsigned long)memory.value, 1);
+    if (memory.value == 0)
+      return;
+    sink_ring *sink = (sink_ring *)memory.value;
+    sink->init(stream::LOSSLESS);
+    const api_result sink_id = api(object_api::STREAM_CREATE,
+                                   (uintptr_t)&sink->desc);
+    const api_result linked =
+        api(object_api::STREAM_CONNECT, again.stream, sink_id.value);
+    check("connect: the two streams were joined", linked.error == 0,
+          (unsigned long)linked.error, 0);
+    // ★繋いだ席は埋まる。手押しとの二重供給を機構で防いでいるか。
+    const api_result intruder = api(object_api::STREAM_BIND, sink_id.value,
+                                    (uintptr_t)stream::role::PRODUCER);
+    check("connect: a hand-fed producer is refused on a joined stream",
+          intruder.error == (uintptr_t)object_error::SEAT_TAKEN,
+          (unsigned long)intruder.error,
+          (unsigned long)object_error::SEAT_TAKEN);
+
+    // ★汲むのは**非特権のオブジェクト**にやらせる。譲るたびにポンプが 1 歩進むので、
+    //   「少し汲む → 譲る」を繰り返す。受け手が特権だと、非特権から使えることの
+    //   証明にならない。
+    uint32_t sum = 0;
+    for (uint32_t spin = 0; spin < 20000; ++spin) {
+      const api_result got =
+          api(object_api::CALL_METHOD, OBJECT_SINK, 0, (uintptr_t)&sink->desc);
+      sum += (uint32_t)got.value;
+      api(object_api::YIELD); // ポンプに 1 歩進ませる
+      if (sink->desc.rd >= PAYLOAD_BYTES)
+        break;
+    }
+    const uint32_t drained = sink->desc.rd;
+    uint32_t want = 0;
+    for (uint32_t index = 0; index < PAYLOAD_BYTES; ++index)
+      want += expected_byte(index);
+    check("connect: every byte arrived through DMA", drained == PAYLOAD_BYTES,
+          (unsigned long)drained, (unsigned long)PAYLOAD_BYTES);
+    // ★★本命。CPU が 1 バイトも写さずに、flash の中身が受け手の環まで届いた。
+    check("connect: the bytes are the ones in flash", sum == want,
+          (unsigned long)sum, (unsigned long)want);
+  }
 
   BOARD::diag_printf("[SELFTEST] flash stream ladder done\n");
 }

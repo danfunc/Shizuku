@@ -159,6 +159,24 @@ private:
   // オブジェクト番号で 2 回踏んだのと同じ衝突が起きる。D28)。
   static constexpr uintptr_t STREAM_COUNT = 16;
   stream::descriptor *m_streams[STREAM_COUNT];
+  // 接続 (DMA ポンプ)。★1 本につき DMA チャネルを 1 つ握る。チャネルは
+  //   オブジェクトへは渡さない — DMA は MPU を素通りするため。
+  static constexpr uintptr_t CONNECTION_COUNT = 4;
+  struct connection {
+    volatile uint32_t active;
+    uint32_t src;
+    uint32_t dst;
+    int32_t channel;
+    uint32_t inflight; // 転送中のレコード数 (0 = 待機)
+    uint32_t src_rd;   // 転送開始時の値 (完了時にここから進める)
+    uint32_t dst_wr;
+    uint32_t moved;    // 累計 (計装)
+  };
+  connection m_connections[CONNECTION_COUNT];
+  volatile uint32_t m_connection_count;
+  // ★ポンプは 1 コアだけが回す。両コアが同時に回すと、同じ接続に 2 本の
+  //   転送を仕掛けてしまう。取れなかった側は**待たずに諦める** (次の周回で回る)。
+  volatile uint32_t m_pump_lock;
 
   // per-thread の「今どのオブジェクトとして走っているか」の台帳。
   struct shadow_t {
@@ -178,6 +196,12 @@ private:
   uintptr_t stream_create(uintptr_t desc, object_error &error);
   uintptr_t stream_open(uintptr_t id, object_error &error);
   uintptr_t stream_bind(uintptr_t id, uintptr_t which, object_error &error);
+  // ★src の consumer 席と dst の producer 席を **DMA で直結する**。以後 src へ
+  //   流れたものは「途中のオブジェクトが pop して push する」段を通らずに dst へ届く。
+  //   中継オブジェクトが要らなくなるのが眼目で、そのために DMA を使う。
+  uintptr_t stream_connect(uintptr_t src, uintptr_t dst, object_error &error);
+  // 接続を進める。★schedule() から呼ばれる。接続が 0 本なら数語読んで即戻る。
+  void pump_connections();
   uintptr_t object_name(uintptr_t id, object_error &error);
   uintptr_t spawn_method(uintptr_t id, uintptr_t method, uintptr_t argument,
                          object_error &error);

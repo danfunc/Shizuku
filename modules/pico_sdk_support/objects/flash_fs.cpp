@@ -415,7 +415,6 @@ uintptr_t flash_format_method(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 // ★実体は**オブジェクト arena** から借りる。静的領域に置くと region の外 =
 //   特権のみになり、非特権オブジェクトが push/pop できない。ここが
 //   「非特権からも読み書きできる」ことの土台。
-using read_ring = stream::storage<stream::extent, 8>;
 using write_ring = stream::storage<flash_chunk, 32>;
 
 // 今開いている書き込み。★1 本だけにする — 複数同時に開けるようにすると、
@@ -440,20 +439,33 @@ uintptr_t flash_open_read_method(uintptr_t argument, uintptr_t, uintptr_t,
   const int slot = find_entry(request->name);
   if (slot < 0)
     return 0;
-  const auto memory = api(object_api::MEMORY_ALLOCATE, sizeof(read_ring));
+  // ★★環を持たない。**ディスクリプタだけ**を借り、その base をファイルの XIP
+  //   アドレスにする。つまり「ストリームの実体は flash そのもの」。
+  //   ・写す仕事が消える (中継の環が無いので、写す先も無い)
+  //   ・一貫性の心配も消える (書き換わらないものを読んでいるだけ)
+  //   ・pop が進めるのは rd だけで、それはディスクリプタ = RAM 側にある
+  //   ★ディスクリプタは**オブジェクト arena** (非特権が書ける側)、base は XIP
+  //     (非特権が読める側)。この 2 つの置き分けが「非特権が読める」の正体。
+  const uint32_t rec_size = request->rec_size != 0 ? request->rec_size : 1u;
+  const auto memory = api(object_api::MEMORY_ALLOCATE, sizeof(stream::descriptor));
   if (memory.value == 0)
     return 0;
-  read_ring *ring = (read_ring *)memory.value;
-  ring->init(stream::LOSSLESS);
-  const auto created = api(object_api::STREAM_CREATE, (uintptr_t)&ring->desc);
+  stream::descriptor *desc = (stream::descriptor *)memory.value;
+  desc->base = (void *)(uintptr_t)g_directory[slot].address;
+  desc->rec_size = rec_size;
+  desc->capacity = g_directory[slot].bytes / rec_size;
+  desc->flags = stream::LOSSLESS;
+  // ★中身は最初から全部そこに在る。wr は「もう全部公開済み」を意味する。
+  desc->wr = desc->capacity;
+  desc->rd = 0;
+  desc->producer = 0; // 生み出したのは媒体であって、走っているオブジェクトではない
+  desc->consumer = stream::NO_OWNER;
+  const auto created = api(object_api::STREAM_CREATE, (uintptr_t)desc);
   if (created.error != 0)
     return 0;
-  api(object_api::STREAM_BIND, created.value,
-      (uintptr_t)stream::role::PRODUCER);
-  // ★運ぶのは在り処だけ。**1 バイトも写さない** — これが XIP 前提の取り柄 (D21)。
-  stream::extent piece{g_directory[slot].address, g_directory[slot].bytes, 0};
-  ring->hdl().push(piece);
   request->stream = created.value;
+  request->address = g_directory[slot].address;
+  request->records = desc->capacity;
   return created.value;
 }
 

@@ -15,6 +15,7 @@ namespace concepts {
 // - core_num()     : 自コア番号 (0 起点)
 // - launch_core()  : もう一方のコアを起こす
 // - park/resume_other_cores() : 他コアを一時停止 / 再開 (XIP が止まる操作のため)
+// - dma_claim/copy/busy : ストリームの接続に使う DMA (特権側が握る)
 // - time_us()      : 単調増加のマイクロ秒時刻 (全コア共通基準)
 // - cycles_per_us(): タイマの刻みを µs から換算するための実クロック。
 //                    ★クロックを知っているのは board だけ (PORT §2.3)。上位は
@@ -36,6 +37,9 @@ concept board_requires = requires(uint32_t core, const char *text) {
   // 他コアを一時停止させる (flash の消去・書き込みのように、XIP ごと止まる操作用)。
   { BOARD::park_other_cores() };
   { BOARD::resume_other_cores() };
+  // DMA (ストリームの接続に使う)。★チャネルは特権側が握る — MPU を素通りするため。
+  { BOARD::dma_claim() } -> std::same_as<int>;
+  { BOARD::dma_busy(0) } -> std::same_as<bool>;
   { BOARD::time_us() } -> std::same_as<uint64_t>;
   { BOARD::cycles_per_us() } -> std::same_as<uint32_t>;
   { BOARD::unprivileged_floor() } -> std::same_as<uintptr_t>;

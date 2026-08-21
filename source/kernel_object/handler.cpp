@@ -67,6 +67,9 @@ template <> uintptr_t KERNEL_OBJECT::stream_create(uintptr_t, object_error &);
 template <> uintptr_t KERNEL_OBJECT::stream_open(uintptr_t, object_error &);
 template <>
 uintptr_t KERNEL_OBJECT::stream_bind(uintptr_t, uintptr_t, object_error &);
+template <>
+uintptr_t KERNEL_OBJECT::stream_connect(uintptr_t, uintptr_t, object_error &);
+template <> void KERNEL_OBJECT::pump_connections();
 template <> KERNEL_OBJECT::lent_stack KERNEL_OBJECT::lend_boot_stack();
 template <> bool KERNEL_OBJECT::start_secondary_core();
 template <> uintptr_t KERNEL_OBJECT::memory_allocate(uintptr_t, object_error &);
@@ -147,6 +150,10 @@ template <> void KERNEL_OBJECT::init() {
   m_object_name[ROOT_OBJECT] = "root";
   for (uintptr_t index = 0; index < STREAM_COUNT; ++index)
     m_streams[index] = nullptr;
+  for (uintptr_t index = 0; index < CONNECTION_COUNT; ++index)
+    m_connections[index] = {};
+  m_connection_count = 0;
+  m_pump_lock = 0;
 }
 
 // ★スレッド 0 のスタックも他と同じく arena から貸す。ここだけカーネルが自分で
@@ -441,6 +448,9 @@ template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
   using state_t = KERNEL::THREAD::state_t;
   const uint32_t core = KERNEL::BOARD::core_num();
   const uint64_t now = KERNEL::BOARD::time_us();
+  // ★接続を進めるのはここ。譲るたびに 1 歩進むので、専用スレッドが要らない
+  //   (専用スレッドにすると、それ自体が予算を食う口になる)。
+  pump_connections();
   for (uint32_t step = 1; step <= THREAD_COUNT; ++step) {
   const uint32_t candidate = (m_rotor[core] + step) % THREAD_COUNT;
     if (candidate == self)
@@ -676,6 +686,114 @@ uintptr_t KERNEL_OBJECT::stream_bind(uintptr_t id, uintptr_t which,
   return self;
 }
 
+// ★src の consumer 席と dst の producer 席を DMA で直結する。
+//   以後 src へ流れたものは、**途中のオブジェクトが pop して push する段を通らずに**
+//   dst へ届く。中継が要らなくなるのが眼目。
+template <>
+uintptr_t KERNEL_OBJECT::stream_connect(uintptr_t src, uintptr_t dst,
+                                        object_error &error) {
+  table_guard guard;
+  if (src >= STREAM_COUNT || dst >= STREAM_COUNT || src == dst ||
+      m_streams[src] == nullptr || m_streams[dst] == nullptr) {
+    error = object_error::BAD_STREAM;
+    return 0;
+  }
+  stream::descriptor *from = m_streams[src];
+  stream::descriptor *to = m_streams[dst];
+  // ★レコードの大きさが違うものは繋げない。詰め替えは「変換」であって「接続」では
+  //   ないので、要るなら中継オブジェクトを書くべき (黙って詰め替えない)。
+  if (from->rec_size != to->rec_size) {
+    error = object_error::BAD_STREAM;
+    return 0;
+  }
+  if (from->consumer != stream::NO_OWNER || to->producer != stream::NO_OWNER) {
+    error = object_error::SEAT_TAKEN;
+    return 0;
+  }
+  uintptr_t slot = CONNECTION_COUNT;
+  for (uintptr_t index = 0; index < CONNECTION_COUNT; ++index)
+    if (m_connections[index].active == 0) {
+      slot = index;
+      break;
+    }
+  if (slot == CONNECTION_COUNT) {
+    error = object_error::NO_STREAM;
+    return 0;
+  }
+  const int channel = KERNEL::BOARD::dma_claim();
+  if (channel < 0) {
+    error = object_error::NO_STREAM;
+    return 0;
+  }
+  // ★席を接続が占める。以後オブジェクトは bind できない — 接続と手押しの
+  //   二重供給を機構で防ぐ。
+  from->consumer = stream::CONNECTED;
+  to->producer = stream::CONNECTED;
+  connection &link = m_connections[slot];
+  link.src = (uint32_t)src;
+  link.dst = (uint32_t)dst;
+  link.channel = channel;
+  link.inflight = 0;
+  link.moved = 0;
+  ARCH::store_release32(&link.active, 1u);
+  ++m_connection_count;
+  return slot;
+}
+
+// 接続を 1 歩進める。★schedule() から呼ばれるので、接続が 0 本なら数語読んで即戻る。
+//   両コアが同時に回さないよう、取れなければ**待たずに諦める** (次の周回で回る)。
+template <> void KERNEL_OBJECT::pump_connections() {
+  if (m_connection_count == 0)
+    return;
+  if (!ARCH::cas32(&m_pump_lock, 0u, 1u))
+    return;
+  for (uintptr_t index = 0; index < CONNECTION_COUNT; ++index) {
+    connection &link = m_connections[index];
+    if (ARCH::load_acquire32(&link.active) == 0)
+      continue;
+    stream::descriptor *from = m_streams[link.src];
+    stream::descriptor *to = m_streams[link.dst];
+    if (link.inflight != 0) {
+      if (KERNEL::BOARD::dma_busy((int)link.channel))
+        continue; // まだ運んでいる
+      // ★中身が届いてから番号を進める。逆にすると、揃う前の場所を読ませてしまう
+      //   (push と同じ規律を、ポンプが producer として守る)。
+      from->rd = link.src_rd + link.inflight;
+      ARCH::store_release32(&to->wr, link.dst_wr + link.inflight);
+      link.moved += link.inflight;
+      link.inflight = 0;
+    }
+    const uint32_t src_rd = from->rd;
+    const uint32_t src_wr = ARCH::load_acquire32(&from->wr);
+    uint32_t count = src_wr - src_rd;
+    if (count == 0)
+      continue;
+    const uint32_t dst_wr = to->wr;
+    const uint32_t dst_rd = ARCH::load_acquire32(&to->rd);
+    const uint32_t room = to->capacity - (dst_wr - dst_rd);
+    if (room == 0)
+      continue; // 受け側が満杯。**押し戻す** (溢れは src 側に溜まる)
+    if (count > room)
+      count = room;
+    // 環なので、端をまたぐぶんは次の周回へ回す (1 回の転送は連続領域だけ)。
+    const uint32_t src_run = from->capacity - (src_rd % from->capacity);
+    const uint32_t dst_run = to->capacity - (dst_wr % to->capacity);
+    if (count > src_run)
+      count = src_run;
+    if (count > dst_run)
+      count = dst_run;
+    const uint32_t rec = from->rec_size;
+    const uint8_t *source =
+        (const uint8_t *)from->base + (src_rd % from->capacity) * rec;
+    uint8_t *target = (uint8_t *)to->base + (dst_wr % to->capacity) * rec;
+    link.src_rd = src_rd;
+    link.dst_wr = dst_wr;
+    link.inflight = count;
+    KERNEL::BOARD::dma_copy((int)link.channel, source, target, count * rec);
+  }
+  ARCH::store_release32(&m_pump_lock, 0u);
+}
+
 // ---- メモリの授受 -----------------------------------------------------------
 // ★参照実装の「オブジェクトごとに 16 語」は簡易な一形態でしかない。ここでは
 //   大きさを指定して借り、**持ち主を付け替えられる**形にする。持ち主が付いていれば
@@ -815,6 +933,9 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
     break;
   case object_api::STREAM_BIND:
     value = stream_bind(a1, a2, error);
+    break;
+  case object_api::STREAM_CONNECT:
+    value = stream_connect(a1, a2, error);
     break;
   case object_api::SET_BUDGET:
     if (a1 < THREAD_COUNT)

@@ -3,6 +3,7 @@
 #include "hardware/exception.h"
 #include "hardware/irq.h"
 #include "hardware/structs/scb.h"
+#include "hardware/dma.h"
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
 #include "shizuku/archs/armv8m.hpp"
@@ -174,6 +175,27 @@ void rp2350_pico2::resume_other_cores() {
   g_parked = false;
   ::multicore_lockout_end_blocking();
   ARCH_TYPE::store_release32(&g_park_lock, 0u);
+}
+
+// ★転送幅は「揃っていれば 32bit、でなければ 8bit」。揃っていない場所へ 32bit で
+//   投げると転送そのものがずれるので、幅を上げるのは条件が揃ったときだけ。
+void rp2350_pico2::dma_copy(int channel, const void *from, void *to,
+                            uint32_t bytes) {
+  const bool wide = ((uintptr_t)from % 4 == 0) && ((uintptr_t)to % 4 == 0) &&
+                    (bytes % 4 == 0);
+  dma_channel_config config = ::dma_channel_get_default_config(channel);
+  ::channel_config_set_transfer_data_size(
+      &config, wide ? DMA_SIZE_32 : DMA_SIZE_8);
+  ::channel_config_set_read_increment(&config, true);
+  ::channel_config_set_write_increment(&config, true);
+  ::dma_channel_configure(channel, &config, to, from,
+                          wide ? bytes / 4 : bytes, true);
+}
+
+int rp2350_pico2::dma_claim() { return ::dma_claim_unused_channel(false); }
+
+bool rp2350_pico2::dma_busy(int channel) {
+  return ::dma_channel_is_busy(channel);
 }
 
 } // namespace boards

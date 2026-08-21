@@ -45,6 +45,9 @@ struct descriptor {
 };
 
 constexpr uint32_t NO_OWNER = 0xFFFFFFFFu;
+// ★接続が席に座っている印。実オブジェクトの番号と衝突しない値にしてある —
+//   座っている限りオブジェクトは bind できない (接続と手押しの二重供給を防ぐ)。
+constexpr uint32_t CONNECTED = 0xFFFFFFFEu;
 
 enum struct role : uint32_t { PRODUCER = 0, CONSUMER = 1 };
 

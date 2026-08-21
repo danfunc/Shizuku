@@ -96,6 +96,10 @@ enum struct object_api : uintptr_t {
   // a1 = 番号, a2 = role。★席は 1 つずつしか無い (SPSC の強制)。
   //   誰が座るかは発行元から導出するので、他人の席は取れない。
   STREAM_BIND = 21,
+  // a1 = src, a2 = dst。★src の consumer 席と dst の producer 席を DMA で直結する。
+  //   以後 src へ流れたものは**中継オブジェクトの pop/push を通らずに** dst へ届く。
+  //   DMA チャネルはカーネル側が握る (MPU を素通りするのでオブジェクトへ渡さない)。
+  STREAM_CONNECT = 22,
 };
 
 // 生成時に宣言する、そのオブジェクトが必要とする走らせ方。

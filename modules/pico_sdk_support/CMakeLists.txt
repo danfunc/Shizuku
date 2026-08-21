@@ -22,7 +22,7 @@ set(config_need_headers
     "shizuku/archs/armv8m.hpp;shizuku/boards/rp2350_pico2.hpp;shizuku/memory_managers/pico_sdk.hpp;shizuku/app_entry.hpp;${config_need_headers}"
     CACHE INTERNAL "")
 target_link_libraries(pico_sdk_support PUBLIC pico_stdlib pico_stdio hardware_exception
-                                             hardware_gpio hardware_spi hardware_flash hardware_sync hardware_adc
+                                             hardware_gpio hardware_spi hardware_flash hardware_sync hardware_adc hardware_dma
                                              pico_multicore)
 # pico2_w は LED が無線チップ側にあるので、LED オブジェクトが cyw43_arch を使う。
 # (lwIP も BTstack も要らないので _none。ボードが pico2_w のときだけリンクする)
