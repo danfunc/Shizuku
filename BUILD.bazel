@@ -86,6 +86,7 @@ cc_library(
     name = "selftest",
     srcs = [
         "source/selftest/call_ladder.cpp",
+        "source/selftest/flash_stream.cpp",
         "source/selftest/memory_ladder.cpp",
         "source/selftest/multicore.cpp",
         "source/selftest/stream_ladder.cpp",

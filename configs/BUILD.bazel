@@ -18,7 +18,7 @@ expand_template(
         "${SHIZUKU_CPU_COUNT}": "1",
         "${SHIZUKU_THREAD_COUNT}": "32",
         "${SHIZUKU_OBJECT_COUNT}": "32",
-        "${SHIZUKU_METHOD_COUNT}": "8",
+        "${SHIZUKU_METHOD_COUNT}": "16",
         "${SHIZUKU_CALL_DEPTH}": "32",
         "${SHIZUKU_MEMORY_MANAGER}": "shizuku::memory_managers::pico_sdk",
     },

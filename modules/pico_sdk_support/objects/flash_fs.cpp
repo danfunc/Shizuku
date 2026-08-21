@@ -411,6 +411,148 @@ uintptr_t flash_format_method(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 //   まとめて払っておき、走行中の書き込みは消去ゼロにする。
 //   ★連続した「まだ消えていない区間」をまとめて 1 回で渡す。ROM は 64KB 境界で
 //     ブロック消去 (0xD8) に切り替えるので、まとめるほど 1 バイトあたりが安くなる。
+// ---- ストリーム経由の読み書き ----------------------------------------------
+// ★実体は**オブジェクト arena** から借りる。静的領域に置くと region の外 =
+//   特権のみになり、非特権オブジェクトが push/pop できない。ここが
+//   「非特権からも読み書きできる」ことの土台。
+using read_ring = stream::storage<stream::extent, 8>;
+using write_ring = stream::storage<flash_chunk, 32>;
+
+// 今開いている書き込み。★1 本だけにする — 複数同時に開けるようにすると、
+//   置き場所の先頭をどう分けるかという別の設計が要る (今は要らない)。
+struct write_session {
+  bool open;
+  write_ring *ring;
+  uintptr_t base;    // 焼き先の先頭
+  uint32_t reserved; // 確保したバイト数
+  uint32_t written;  // 焼き終わったバイト数
+  uint32_t staged;   // ページ緩衝に溜まっている量
+  char name[sizeof(directory_entry::name)];
+  uint8_t staging[FLASH_PAGE_SIZE];
+};
+write_session g_write{};
+
+uintptr_t flash_open_read_method(uintptr_t argument, uintptr_t, uintptr_t,
+                                 uintptr_t) {
+  flash_open *request = (flash_open *)argument;
+  if (request == nullptr || request->name == nullptr || !g_mounted)
+    return 0;
+  const int slot = find_entry(request->name);
+  if (slot < 0)
+    return 0;
+  const auto memory = api(object_api::MEMORY_ALLOCATE, sizeof(read_ring));
+  if (memory.value == 0)
+    return 0;
+  read_ring *ring = (read_ring *)memory.value;
+  ring->init(stream::LOSSLESS);
+  const auto created = api(object_api::STREAM_CREATE, (uintptr_t)&ring->desc);
+  if (created.error != 0)
+    return 0;
+  api(object_api::STREAM_BIND, created.value,
+      (uintptr_t)stream::role::PRODUCER);
+  // ★運ぶのは在り処だけ。**1 バイトも写さない** — これが XIP 前提の取り柄 (D21)。
+  stream::extent piece{g_directory[slot].address, g_directory[slot].bytes, 0};
+  ring->hdl().push(piece);
+  request->stream = created.value;
+  return created.value;
+}
+
+uintptr_t flash_open_write_method(uintptr_t argument, uintptr_t, uintptr_t,
+                                  uintptr_t) {
+  flash_open *request = (flash_open *)argument;
+  if (request == nullptr || request->name == nullptr || !g_mounted)
+    return 0;
+  if (g_write.open)
+    return 0; // 既に 1 本開いている
+  const uint32_t reserved = sector_round_up(
+      request->reserve != 0 ? request->reserve : FLASH_SECTOR_SIZE);
+  const uint32_t base = derive_bump();
+  if (base + reserved > REGION_ADDRESS + REGION_BYTES)
+    return 0;
+  const auto memory = api(object_api::MEMORY_ALLOCATE, sizeof(write_ring));
+  if (memory.value == 0)
+    return 0;
+  write_ring *ring = (write_ring *)memory.value;
+  ring->init(stream::LOSSLESS);
+  const auto created = api(object_api::STREAM_CREATE, (uintptr_t)&ring->desc);
+  if (created.error != 0)
+    return 0;
+  api(object_api::STREAM_BIND, created.value,
+      (uintptr_t)stream::role::CONSUMER);
+
+  g_write.open = true;
+  g_write.ring = ring;
+  g_write.base = base;
+  g_write.reserved = reserved;
+  g_write.written = 0;
+  g_write.staged = 0;
+  name_copy(g_write.name, request->name);
+  // ★開けた時点で消しておく。書いている最中に 33ms を挟むと、流し込む側が
+  //   その間ずっと押し戻される (D34: 消去は締切のある経路に置かない)。
+  if (!is_blank(base, reserved)) {
+    stop_the_world stopped;
+    flash_write(base - XIP_BASE, nullptr, 0, true, reserved);
+  }
+  request->stream = created.value;
+  return created.value;
+}
+
+// ストリームから汲んで焼く。★ページ単位でしか焼けないので、溜めてから出す。
+//   呼ぶのは特権側 (このオブジェクト) だけで、流し込む側は非特権でよい。
+void drain_write() {
+  if (!g_write.open)
+    return;
+  auto in = g_write.ring->hdl();
+  flash_chunk chunk{};
+  while (in.pop(&chunk)) {
+    for (uint32_t index = 0; index < chunk.bytes; ++index) {
+      g_write.staging[g_write.staged++] = chunk.data[index];
+      if (g_write.staged == FLASH_PAGE_SIZE) {
+        if (g_write.written + FLASH_PAGE_SIZE <= g_write.reserved)
+          flash_write(g_write.base - XIP_BASE + g_write.written,
+                      g_write.staging, FLASH_PAGE_SIZE, false, 0);
+        g_write.written += FLASH_PAGE_SIZE;
+        g_write.staged = 0;
+      }
+    }
+  }
+}
+
+uintptr_t flash_close_write_method(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  if (!g_write.open)
+    return 0;
+  drain_write();
+  stop_the_world stopped;
+  const uint32_t length = g_write.written + g_write.staged;
+  if (g_write.staged != 0) {
+    // 半端なページは 0xFF で埋めて出す (0xFF はビットを落とさないので後続に無害)。
+    for (uint32_t at = g_write.staged; at < FLASH_PAGE_SIZE; ++at)
+      g_write.staging[at] = 0xFF;
+    flash_write(g_write.base - XIP_BASE + g_write.written, g_write.staging,
+                FLASH_PAGE_SIZE, false, 0);
+    g_write.staged = 0;
+  }
+  // 目録に載せて初めて「在る」ことになる。★中身を焼き終えてから載せる —
+  //   逆にすると、途中で電源が落ちたとき「在るのに中身が無い」項目が残る。
+  const int previous = find_entry(g_write.name);
+  if (previous >= 0) {
+    directory_entry dead = g_directory[previous];
+    dead.state = ENTRY_DEAD;
+    write_entry((uint32_t)previous, dead);
+  }
+  const int slot = free_slot();
+  if (slot < 0)
+    return 0;
+  directory_entry fresh{};
+  fresh.state = ENTRY_LIVE;
+  fresh.address = (uint32_t)g_write.base;
+  fresh.bytes = length;
+  name_copy(fresh.name, g_write.name);
+  write_entry((uint32_t)slot, fresh);
+  g_write.open = false;
+  return length;
+}
+
 uintptr_t flash_prepare_method(uintptr_t argument, uintptr_t, uintptr_t,
                                uintptr_t) {
   flash_prepare *request = (flash_prepare *)argument;
@@ -499,6 +641,12 @@ uintptr_t flash_fs_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
                             (uintptr_t)&flash_status_method);
   failures += export_method((uintptr_t)flash_fs_method::PREPARE,
                             (uintptr_t)&flash_prepare_method);
+  failures += export_method((uintptr_t)flash_fs_method::OPEN_READ,
+                            (uintptr_t)&flash_open_read_method);
+  failures += export_method((uintptr_t)flash_fs_method::OPEN_WRITE,
+                            (uintptr_t)&flash_open_write_method);
+  failures += export_method((uintptr_t)flash_fs_method::CLOSE_WRITE,
+                            (uintptr_t)&flash_close_write_method);
   return failures;
 }
 

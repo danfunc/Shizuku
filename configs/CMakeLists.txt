@@ -13,7 +13,9 @@ if(NOT SHIZUKU_OBJECT_COUNT)
   set(SHIZUKU_OBJECT_COUNT 32 CACHE INTERNAL "オブジェクト表の大きさ")
 endif()
 if(NOT SHIZUKU_METHOD_COUNT)
-  set(SHIZUKU_METHOD_COUNT 8)
+  # ★flash FS だけで 10 個 export する。8 だと足りず、export が黙って断られる
+  #   (register が exports_failed を見ているので気づけるが、余裕を持たせる)。
+  set(SHIZUKU_METHOD_COUNT 16)
 endif()
 if(NOT SHIZUKU_CALL_DEPTH)
   set(SHIZUKU_CALL_DEPTH 32)

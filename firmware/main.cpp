@@ -39,6 +39,7 @@ void shizuku::app_entry() {
   //   相手が止められていなければそのコアは flash 上のコードを踏んで即死する。
   //   つまりここで書けること自体が「止められている」ことの証拠になる。
   shizuku::objects::flash_fs_probe();
+  shizuku::selftest::flash_stream_ladder();
 
   // 温度の履歴アプリ。★負荷試験より前に起こして、負荷の下で周期がどれだけ
   //   揺らぐかを見る (静かな系で測っても揺らぎの話にならない)。

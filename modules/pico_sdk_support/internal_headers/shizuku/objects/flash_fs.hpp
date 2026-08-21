@@ -2,6 +2,7 @@
 #define SHIZUKU_OBJECTS_FLASH_FS_HPP
 #include <cstdint>
 #include "shizuku/object_ids.hpp"
+#include "shizuku/stream.hpp"
 
 // ===========================================================================
 //  flash FS オブジェクト — **XIP 前提**の、アドレスを返すファイル系
@@ -50,6 +51,33 @@ enum struct flash_fs_method : uintptr_t {
   //   置く前に空けておけば、書き込みは「まだ 0xFF の場所へ書くだけ」= 消去ゼロ。
   //   **いつ払うかを選べるようにする**のがこの API の役目 (費用は消えない)。
   PREPARE = 7, // a0 = flash_prepare*
+  // ---- ストリーム経由の読み書き (制御はメソッド、データはストリーム) ----
+  // ★メソッド呼び出しは ioctl 相当として残す。開け閉めは制御であって、
+  //   1 レコードごとに svc を撃つ話ではない。
+  // ★★**非特権オブジェクトから読み書きできる**ことが要点:
+  //   - 読み: 運ぶのは extent (XIP アドレス + 長さ)。XIP は region0 が
+  //     読み出し + 実行を全員に許しているので、**非特権のまま直接読める**。写さない
+  //   - 書き: 非特権はフラッシュを焼けない。だから**バイトをストリームへ流し**、
+  //     特権側の書き手が汲んで焼く。締切のある側は 33ms を待たされない (D34)
+  //   ★ストリームの実体は**オブジェクト arena** (非特権から届く側) に置く。
+  //     静的領域に置くと region の外 = 特権のみになり、非特権が push できない。
+  OPEN_READ = 8,   // a0 = flash_open*  → 戻り値 = ストリーム番号 (extent が流れる)
+  OPEN_WRITE = 9,  // a0 = flash_open*  → 戻り値 = ストリーム番号 (chunk を流す)
+  CLOSE_WRITE = 10, // 書き終わりを告げ、目録に載せる
+};
+
+// 書きのストリームが運ぶ 1 片。★大きさを固定するのは、ストリームが固定長
+//   レコードの列だから (可変長にすると場所の計算が剰余で出せなくなる)。
+constexpr uint32_t FLASH_CHUNK_BYTES = 64;
+struct flash_chunk {
+  uint32_t bytes; // 実際に詰まっている量 (最後の 1 片は半端になる)
+  uint8_t data[FLASH_CHUNK_BYTES];
+};
+
+struct flash_open {
+  const char *name;
+  uint32_t reserve; // OPEN_WRITE のとき: 見込みの最大バイト数
+  uintptr_t stream; // [out] ストリーム番号
 };
 
 // 名前は媒体に焼くので長さを固定する (可変長にすると、名前を伸ばすたびに
