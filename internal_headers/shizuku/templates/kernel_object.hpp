@@ -76,17 +76,38 @@ public:
   //   arena は 2 つ: 簿記用 (非特権から到達できない場所) と、オブジェクト用
   //   (非特権から届く必要があるのでヒープ)。**所有と保護は別の話**なので、
   //   どちらもこちらが用意して貸す点は同じで、違うのは置き場所だけ。
+  // ★空きは**大きさの階級ごとのリスト**で持つ。first-fit の線形探索だと、借りる
+  //   たびに「それまでの借り方」に依存して歩く距離が変わる = **定数時間で抜けられない**。
+  //   svc ハンドラが定数時間で抜けるのに、その先の方針側が入力履歴で伸びるのでは
+  //   意味が無い (最悪値が読めないと、貸した実行権の見積もりも立たない)。
   struct block {
-    uintptr_t bytes; // ヘッダ込みの大きさ
-    uint16_t owner;  // 借りているオブジェクト (NO_OBJECT = 空き)
+    uintptr_t bytes;      // ヘッダ込みの大きさ (BLOCK_ALIGN 境界)
+    // ★直前の**物理**ブロックの大きさ (0 = arena の先頭)。境界タグ。
+    //   これがあると左隣を O(1) で見つけられる — 解放時の併合のために
+    //   リストを頭から歩く必要が消える (それが旧実装で一番重かった)。
+    uintptr_t prev_bytes;
+    block *next; // 同じ階級の空きリスト (used のときは意味を持たない)
+    block *prev; // ★双方向にするのは、併合のとき**途中の要素**を O(1) で
+                 //   外す必要があるため (片方向だと前を探して歩くことになる)
+    uint16_t owner; // 借りているオブジェクト (NO_OBJECT = 空き)
     uint16_t used;
-    block *next;
+    // ★詰め物。**貸す先頭 (= ヘッダの直後) を BLOCK_ALIGN 境界に乗せる**ために要る。
+    //   ここが崩れると、借りた側が 8B 境界を仮定した書き込み (double / LDRD) で
+    //   落ちる。memory.cpp の static_assert が実際にこれを捕まえた。
+    uint32_t _align;
   };
+  static constexpr uintptr_t BLOCK_ALIGN = 8;
+  // 階級は 2 冪ごと。24 階級 = 16MB まで。arena がこれを超えないことは
+  // arena_init が確かめる (超えると最上位階級が飽和し、そこだけ線形探索になる)。
+  static constexpr uint32_t FREE_CLASSES = 24;
   struct arena {
     uintptr_t base;
     uintptr_t bytes;
+    block *free_list[FREE_CLASSES];
+    // ★空でない階級のビット。「要求以上で最小の空き階級」を、階級を順に舐めずに
+    //   **1 命令 (ctz)** で引くために持つ。これが無いと階級の数だけ歩く。
+    uint32_t free_map;
   };
-  static constexpr uintptr_t BLOCK_ALIGN = 8;
 
   // 台帳の読み出し (自己テスト・将来のアクセス制御用)。
   uintptr_t current_object(uint32_t thread) const {

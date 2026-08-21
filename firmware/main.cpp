@@ -25,6 +25,7 @@ void shizuku::app_entry() {
   shizuku::objects::flash_fs_probe();
   shizuku::selftest::call_ladder();
   shizuku::selftest::thread_ladder();
+  shizuku::selftest::memory_ladder();
   shizuku::selftest::unprivileged_probe();
 
   // 負荷試験を起動する。以後、点滅と報告は専用スレッドが行う。

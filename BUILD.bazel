@@ -49,6 +49,7 @@ cc_library(
     name = "selftest",
     srcs = [
         "source/selftest/call_ladder.cpp",
+        "source/selftest/memory_ladder.cpp",
         "source/selftest/stress.cpp",
         "source/selftest/thread_ladder.cpp",
         "source/selftest/unprivileged.cpp",
