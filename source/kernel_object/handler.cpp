@@ -46,6 +46,20 @@ template <>
 uintptr_t KERNEL_OBJECT::run_for(uintptr_t, uintptr_t, object_error &);
 template <> void KERNEL_OBJECT::exit_thread();
 template <> bool KERNEL_OBJECT::schedule(uint32_t);
+template <> void KERNEL_OBJECT::table_lock();
+template <> void KERNEL_OBJECT::table_unlock();
+template <> uintptr_t KERNEL_OBJECT::owner_of(uintptr_t, object_error &) const;
+
+namespace {
+// 錠の取り忘れ・放し忘れを型で防ぐ。この層は早期 return が多いので、手で放す形は
+// いつか必ず 1 本落とす (落とすと系全体が止まるので、静かに壊れるより悪い)。
+struct table_guard {
+  table_guard() { kernel_object_instance.table_lock(); }
+  ~table_guard() { kernel_object_instance.table_unlock(); }
+  table_guard(const table_guard &) = delete;
+  table_guard &operator=(const table_guard &) = delete;
+};
+} // namespace
 template <> uintptr_t KERNEL_OBJECT::declare_name(uintptr_t, object_error &);
 template <> uintptr_t KERNEL_OBJECT::object_name(uintptr_t, object_error &);
 template <> KERNEL_OBJECT::lent_stack KERNEL_OBJECT::lend_boot_stack();
@@ -97,7 +111,9 @@ template <> void KERNEL_OBJECT::init() {
     // (量は quantum ではなく安全網 — 正常時はこれより早く返るので発火しない)。
     m_budget[thread] = DEFAULT_BUDGET_CYCLES;
   }
-  m_rotor = 0;
+  for (uintptr_t core = 0; core < KERNEL::CORE_COUNT; ++core)
+    m_rotor[core] = 0;
+  m_table_lock = 0;
   for (uintptr_t thread = 0; thread < THREAD_COUNT; ++thread)
     m_thread_stack[thread] = 0;
 
@@ -162,26 +178,34 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
     error = object_error::BAD_OBJECT;
     return 0;
   }
-  if (m_objects[id].created) {
+  const char *taken_by = nullptr;
+  {
+    table_guard guard;
+    if (!m_objects[id].created) {
+      m_objects[id].created = true;
+      m_objects[id].flags = (uint32_t)flags;
+      // 最初のメソッドは生成側が与える (オブジェクト自身はまだ走っていないので
+      // 自分では登録できない)。以後は EXPORT_METHOD で自分が増やす。
+      m_objects[id].methods[0] = (method_t)entry;
+      return id;
+    }
+    taken_by = m_object_name[id];
+  }
+  {
     // ★**無音で失敗させない**。番号の衝突は今日 2 回起きて 2 回とも黙っていた
     //   (flash_fs 11 × 非特権プローブ 11 → 「非特権のはずが特権」という別物の
     //   失敗に化けた。sleeper 6 × blink 6 → 揺らぎの計測が止まったのに
     //   36 passed/0 failed のまま)。**戻り値を見ない呼び出し側が必ず居る**ので、
     //   気づけるかどうかを呼び出し側の行儀に賭けない。名乗りがここで効く —
     //   「6 は既に誰それが持っている」と言えるようになる。
+    // ★印字は錠の**外**で行う。診断は遅く、ときに待つ (USB) ので、握ったまま
+    //   呼ぶと相手のコアがその間ずっと錠を待つことになる。
     KERNEL::BOARD::diag_printf(
         "[KOBJ] object %lu is already taken by '%s' — create refused\n",
-        (unsigned long)id,
-        m_object_name[id] != nullptr ? m_object_name[id] : "(unnamed)");
+        (unsigned long)id, taken_by != nullptr ? taken_by : "(unnamed)");
     error = object_error::ALREADY_EXISTS;
     return 0;
   }
-  m_objects[id].created = true;
-  m_objects[id].flags = (uint32_t)flags;
-  // 最初のメソッドは生成側が与える (オブジェクト自身はまだ走っていないので
-  // 自分では登録できない)。以後は EXPORT_METHOD で自分が増やす。
-  m_objects[id].methods[0] = (method_t)entry;
-  return id;
 }
 
 // そのオブジェクトを走らせるときの保護指定。
@@ -204,6 +228,7 @@ uintptr_t KERNEL_OBJECT::export_method(uintptr_t method, uintptr_t entry,
     error = object_error::BAD_METHOD;
     return 0;
   }
+  table_guard guard;
   m_objects[self].methods[method] = (method_t)entry;
   return self;
 }
@@ -306,8 +331,10 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
   // ★スタックも**こちらが用意して貸す**。どれだけの深さを許すかは方針であって、
   //   カーネルが決めることではない。非特権スレッドも自分のスタックには触れないと
   //   困るので、オブジェクト用 arena (非特権から届く側) から取る。
+  table_lock();
   const uintptr_t stack =
       arena_allocate(m_objects_arena, THREAD_STACK_BYTES, id);
+  table_unlock();
   if (stack == 0) {
     error = object_error::NO_MEMORY;
     return 0;
@@ -321,11 +348,16 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
   request.stack_bytes = THREAD_STACK_BYTES;
   const auto spawned = kernel_instance.spawn(request);
   if (spawned.error != kernel_error::OK) {
+    table_lock();
     arena_release(m_objects_arena, stack); // 使わなかったので返す
+    table_unlock();
     error = object_error::NO_THREAD;
     return 0;
   }
-  m_thread_stack[spawned.thread] = stack;
+  {
+    table_guard guard;
+    m_thread_stack[spawned.thread] = stack;
+  }
   // 新しいスレッドは「そのオブジェクトとして」走り始める。台帳の底をそう置く。
   m_thread_object[spawned.thread] = (uint16_t)id;
   m_shadow[spawned.thread].depth = 0;
@@ -342,9 +374,10 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
 // ★回転子から順に見る。自分の直後だけを見ると同じ相手ばかり選ばれて飢餓が出る。
 template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
   using state_t = KERNEL::THREAD::state_t;
+  const uint32_t core = KERNEL::BOARD::core_num();
   const uint64_t now = KERNEL::BOARD::time_us();
   for (uint32_t step = 1; step <= THREAD_COUNT; ++step) {
-    const uint32_t candidate = (m_rotor + step) % THREAD_COUNT;
+  const uint32_t candidate = (m_rotor[core] + step) % THREAD_COUNT;
     if (candidate == self)
       continue;
     // ★終わったスレッドの記憶をここで回収する。貸したのはこちらなので、返させるのも
@@ -352,6 +385,13 @@ template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
     //   走り終えた本人には自分のスタックを返せない (その上で走っているため)。
     if (kernel_instance.thread_state(candidate) == state_t::TERMINATED &&
         m_thread_stack[candidate] != 0) {
+      // ★arena は共有なので錠が要る。この区間に syscall は 1 つも無い
+      //   (握ったまま実行権を手放すと、相手のコアが走っていない持ち主を待つ)。
+      table_lock();
+      if (m_thread_stack[candidate] == 0) { // 別のコアが先に回収していた
+        table_unlock();
+        continue;
+      }
       arena_release(m_objects_arena, m_thread_stack[candidate]);
       m_thread_stack[candidate] = 0;
       // 台帳も畳む。枠は使い回されるので、前の住人の名残りを残してはいけない
@@ -361,6 +401,7 @@ template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
       m_wake_at[candidate] = 0;
       m_budget[candidate] = DEFAULT_BUDGET_CYCLES;
       kernel_instance.release(candidate); // 枠も返す (再利用できるようにする)
+      table_unlock();
       continue;
     }
     if (kernel_instance.thread_state(candidate) != state_t::READY)
@@ -373,7 +414,7 @@ template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
             ? ARCH::syscall((uintptr_t)primitive::SWITCH, candidate)
             : ARCH::syscall((uintptr_t)primitive::GRANT, candidate, budget);
     if (result.error == (uintptr_t)kernel_error::OK) {
-      m_rotor = candidate;
+      m_rotor[core] = candidate;
       return true;
     }
     // ★自分の持ち分が尽きたのなら、次の候補を試しても同じ答えしか返らない。
@@ -461,6 +502,24 @@ template <> void KERNEL_OBJECT::exit_thread() {
   }
 }
 
+// ---- 共有台帳の錠 ----------------------------------------------------------
+// ★1 コアのときは無償だった相互排除を、2 コアでは明示的に取る (kernel_object.hpp)。
+//   区間は短く、**syscall を含まない**ものだけ。握ったまま実行権を手放すと、
+//   相手のコアが「走っていない持ち主」を待って回り続ける。
+template <> void KERNEL_OBJECT::table_lock() {
+  while (!ARCH::cas32(&m_table_lock, 0u, 1u)) {
+    // 待つ。★ここで yield しない — 錠を待っている相手は必ず走っており
+    //   (握ったまま手放さない規律があるので)、待ちは有界。yield すると
+    //   「錠を待つために実行権を配る」ことになり、順序が絡んで長くなる。
+  }
+}
+
+template <> void KERNEL_OBJECT::table_unlock() {
+  ARCH::store_release32(&m_table_lock, 0u);
+}
+
+
+
 // ---- 名乗り ----------------------------------------------------------------
 // ★誰として登録するかは**発行元から導出する** (EXPORT_METHOD と同じ作法)。
 //   引数で対象を指定させると他人の名を騙れてしまう。
@@ -476,6 +535,7 @@ uintptr_t KERNEL_OBJECT::declare_name(uintptr_t name, object_error &error) {
   }
   // 付け直しは断る。控えた名が別物を指すようになると、名前を頼りにした側が
   // 静かに間違った相手を掴む。
+  table_guard guard;
   if (m_object_name[self] != nullptr) {
     error = object_error::ALREADY_NAMED;
     return 0;
@@ -500,6 +560,7 @@ uintptr_t KERNEL_OBJECT::object_name(uintptr_t id, object_error &error) {
 template <>
 uintptr_t KERNEL_OBJECT::memory_allocate(uintptr_t bytes, object_error &error) {
   const uintptr_t self = current_object(kernel_instance.current_thread_id());
+  table_guard guard;
   const uintptr_t handle = arena_allocate(m_objects_arena, bytes, self);
   if (handle == 0)
     error = object_error::NO_MEMORY;
@@ -509,8 +570,9 @@ uintptr_t KERNEL_OBJECT::memory_allocate(uintptr_t bytes, object_error &error) {
 template <>
 uintptr_t KERNEL_OBJECT::memory_release(uintptr_t handle, object_error &error) {
   const uintptr_t self = current_object(kernel_instance.current_thread_id());
+  table_guard guard;
   // ★他人のものは返せない。持ち主を記録している意味はここに出る。
-  if (memory_owner(handle, error) != self) {
+  if (owner_of(handle, error) != self) {
     error = object_error::NOT_OWNER;
     return 0;
   }
@@ -527,11 +589,12 @@ template <>
 uintptr_t KERNEL_OBJECT::memory_hand_over(uintptr_t handle, uintptr_t receiver,
                                           object_error &error) {
   const uintptr_t self = current_object(kernel_instance.current_thread_id());
+  table_guard guard;
   if (receiver >= OBJECT_COUNT || !m_objects[receiver].created) {
     error = object_error::BAD_OBJECT;
     return 0;
   }
-  if (memory_owner(handle, error) != self) {
+  if (owner_of(handle, error) != self) {
     error = object_error::NOT_OWNER;
     return 0;
   }
@@ -540,8 +603,9 @@ uintptr_t KERNEL_OBJECT::memory_hand_over(uintptr_t handle, uintptr_t receiver,
   return receiver;
 }
 
+// 錠を持っている前提の素の実装 (kernel_object.hpp の注記を参照)。
 template <>
-uintptr_t KERNEL_OBJECT::memory_owner(uintptr_t handle, object_error &error) {
+uintptr_t KERNEL_OBJECT::owner_of(uintptr_t handle, object_error &error) const {
   if (handle <= m_objects_arena.base ||
       handle >= m_objects_arena.base + m_objects_arena.bytes) {
     error = object_error::BAD_MEMORY;
@@ -553,6 +617,12 @@ uintptr_t KERNEL_OBJECT::memory_owner(uintptr_t handle, object_error &error) {
     return NO_OBJECT;
   }
   return header->owner;
+}
+
+template <>
+uintptr_t KERNEL_OBJECT::memory_owner(uintptr_t handle, object_error &error) {
+  table_guard guard;
+  return owner_of(handle, error);
 }
 
 template <>

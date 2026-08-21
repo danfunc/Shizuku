@@ -59,6 +59,23 @@ public:
   //   段数として読め、こちらは自分の台帳から独立に数えた値を申告して突き合わせる。
   uintptr_t handle(uintptr_t number, uintptr_t a1, uintptr_t a2, uintptr_t a3);
 
+  // -------------------------------------------------------------------------
+  //  共有台帳の相互排除 (2 コア用)
+  // -------------------------------------------------------------------------
+  //  ★1 コアのときは無償だった。svc は最優先、切替は最低優先度、さらに
+  //    「ハンドラ走行中は取り上げを見送る」(pendsv のパリティ判定) があるので、
+  //    ハンドラの中は誰にも割り込まれなかった。**2 コアになるとこれが消える** —
+  //    両方のコアが同時にハンドラへ入れる。参照実装も同じ罠を踏んで
+  //    「協調型単一コアだから実質直列」に依存していた (デュアルコア化で崩れる)。
+  //  ★守る対象はオブジェクト表・arena・名前・スレッドスタックの控え。
+  //    per-thread の台帳 (shadow / wake_at / budget) は持ち主しか触らないので要らない。
+  //  ★★**握ったまま実行権を手放さないこと**。schedule() は中で SWITCH/GRANT を
+  //    撃つので、その前に必ず放す。握ったまま切り替えると、相手のコアは
+  //    「走っていない持ち主」を待って回り続ける (デッドロック)。
+  //    そのため保護区間は**短く、syscall を含まない**ものだけにしてある。
+  void table_lock();
+  void table_unlock();
+
   // スケジューリングの方針 (どのスレッドを次に走らせるか) はここが持つ。
   // カーネルは「渡す機構」しか持たない (D1)。
   bool schedule(uint32_t self);
@@ -173,6 +190,10 @@ private:
   uintptr_t memory_hand_over(uintptr_t handle, uintptr_t receiver,
                              object_error &error);
   uintptr_t memory_owner(uintptr_t handle, object_error &error);
+  // ★錠を**既に持っている**呼び出し元のための素の実装。錠は再入できないので、
+  //   API 側 (memory_owner) から中でもう一度取ると自分で自分を待つ。
+  //   実際にそれで固まった: release が錠を持ったまま owner を呼んでいた。
+  uintptr_t owner_of(uintptr_t handle, object_error &error) const;
 
   object_t m_objects[OBJECT_COUNT];
   shadow_t m_shadow[THREAD_COUNT];
@@ -185,7 +206,12 @@ private:
   // 貸したスタック (終わったスレッドから返してもらうために覚えておく)。
   uintptr_t m_thread_stack[THREAD_COUNT];
   // 次に見るスレッド (round-robin の回転子)。自分の直後だけを見ると飢餓が出る。
-  uint32_t m_rotor;
+  // ★rotor はコアごと。共有すると 2 コアが同じ順で舐めて同じ相手を取り合う
+  //   (claim の CAS が正しく弾くので壊れはしないが、片方が毎回競り負けて空回りする)。
+  uint32_t m_rotor[KERNEL::CORE_COUNT];
+  // 共有台帳の錠。0 = 空き。SIO のハードウェアスピンロックは E2 erratum で使えない
+  // ので LDREX/STREX (cas32) で組む。
+  volatile uint32_t m_table_lock;
   arena m_bookkeeping; // カーネルの簿記へ貸す (非特権から届かない場所)
   arena m_objects_arena; // オブジェクトが読み書きする (非特権から届く場所)
 };
