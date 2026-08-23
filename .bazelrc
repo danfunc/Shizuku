@@ -1,9 +1,11 @@
 # 既定ターゲット: RP2350 / pico2 (CMake kit と同じ構成)
 build --platforms=@pico-sdk//bazel/platform:rp2350
 build --@pico-sdk//bazel/config:PICO_BOARD=pico2_w
-build --@pico-sdk//bazel/config:PICO_STDIO_USB=True
-# 起動直後の診断がホスト接続前に流れて消えないよう、少しだけ接続を待つ
-build --@pico-sdk//bazel/config:PICO_STDIO_USB_CONNECT_WAIT_TIMEOUT_MS=2000
+# ★pico_stdio_usb は使わない。CDC 1 本前提で記述子も差し替えられないため、USB は
+#   自前で持つ (modules/pico_sdk_support/objects/usb_cdc.cpp、D42)。
+#   診断 = CDC0 / GDB = CDC1 に分けるのが目的。
+build --@pico-sdk//bazel/config:PICO_STDIO_USB=False
+build --@pico-sdk//bazel/config:PICO_TINYUSB_CONFIG=//modules/pico_sdk_support:tusb_config
 # CYW43 の分周比と PIO プログラムを clk_sys から導出して SDK 内部まで届かせる。
 # ★値は configs/cyw43_clock.bzl が決める (直書きしない理由はそこに書いてある)。
 build --@pico-sdk//bazel/config:PICO_CONFIG_EXTRA_HEADER=//configs:pico_extra_config

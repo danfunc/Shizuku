@@ -14,6 +14,7 @@
 //    ブレークポイントを置いて、continue / step できるところまで。
 //    それ以外の要求には空返事を返す (GDB は「未対応」と解釈する)。
 #include "pico/stdlib.h"
+#include "shizuku/objects/usb_cdc.hpp"
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/objects/gdb_stub.hpp"
@@ -32,7 +33,11 @@ char g_packet[PACKET_MAX];
 char g_reply[PACKET_MAX];
 uint32_t g_reply_length = 0;
 bool g_attached = false;
-bool g_quiet = false; // 診断を黙らせているか
+// ★stub 自身のスレッド。**絶対に自分を止めない**ための控え。
+//   do_continue が「止まったスレッド」へ乗り換える作りなので、これが無いと
+//   自分を対象にして自分を止め、GDB チャネルだけ死んで系は生きたまま、という
+//   一番分かりにくい壊れ方をする (実際に踏んだ)。
+uint32_t g_self_thread = 0xFFFFFFFFu;
 uint32_t g_target_thread = 0;
 // 置いてあるブレークポイント (FPB の比較器と 1 対 1)。
 uintptr_t g_breakpoints[8];
@@ -49,13 +54,16 @@ call_result api(object_api number, uintptr_t a1 = 0, uintptr_t a2 = 0,
 }
 
 // ---- 転送 (ここだけがハードウェアに触る) -----------------------------------
-int read_byte() { return ::getchar_timeout_us(0); }
-void write_byte(char value) { ::putchar_raw(value); }
+// ★★GDB は**自分専用の CDC (channel 1)** を使う。診断 (channel 0) と分けたので、
+//   人間向けの文字が握手に混ざりようが無い — D41 の不具合の根がここで消える。
+constexpr uint32_t GDB_CHANNEL = 1;
+int read_byte() { return usb_cdc_read(GDB_CHANNEL); }
+void write_byte(char value) { usb_cdc_write(GDB_CHANNEL, value); }
 // ★★書いたら**必ず押し出す**。pico の stdio は改行かバッファ満杯まで溜め込むが、
 //   GDB の返事に改行は無い。溜め込まれると返事が遅れて届き、GDB から見ると
 //   「1 つ前の問いへの答え」が来たように見える
 //   (実際に "Remote replied unexpectedly to 'vMustReplyEmpty'" になった)。
-void flush_out() { ::stdio_flush(); }
+void flush_out() { usb_cdc_flush(GDB_CHANNEL); }
 
 // ---- 16 進 -----------------------------------------------------------------
 char to_hex(uint32_t nibble) {
@@ -234,7 +242,12 @@ void do_continue() {
   const uint32_t since = kernel_instance.debug_event_count();
   kernel_instance.resume(g_target_thread);
   wait_for_stop(since);
-  g_target_thread = kernel_instance.debug_event().thread;
+  const uint32_t stopped = kernel_instance.debug_event().thread;
+  // ★自分が止まったのなら、乗り換えない (乗り換えると次に自分を止めて黙る)。
+  if (stopped != g_self_thread)
+    g_target_thread = stopped;
+  else
+    kernel_instance.resume(stopped);
   stop_reply();
 }
 
@@ -403,6 +416,7 @@ uintptr_t debuggee_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 uintptr_t stub_main(uintptr_t target, uintptr_t, uintptr_t, uintptr_t) {
   api(object_api::DECLARE_NAME, (uintptr_t) "gdbstub");
   g_target_thread = (uint32_t)target;
+  g_self_thread = kernel_instance.current_thread_id();
   ARCH::debug_enable(true);
   uint32_t idle_rounds = 0;
   while (true) {
@@ -410,44 +424,33 @@ uintptr_t stub_main(uintptr_t target, uintptr_t, uintptr_t, uintptr_t) {
     //   アタッチとみなす」細工を入れていたが、その 1 文字を食べたせいで応答が
     //   1 つずれ、GDB が vMustReplyEmpty への返事として qSupported の答えを
     //   受け取っていた (Remote replied unexpectedly と言われた)。覗かない。
+    // ★診断を黙らせる仕掛けは**消した**。CDC が分かれた今、混ざりようが無い
+    //   (D42)。以前は 1 バイト来た時点で黙らせていたが、それは 1 本を共有して
+    //   いたための応急処置だった。
     const int first = read_byte();
-    // ★★**1 バイトでも来たら即黙る**。正しいパケットを受け取ってから黙らせると、
-    //   その間に出た診断の文字が GDB の受信の先頭に混ざり、握手が壊れる
-    //   (実測: "Remote replied unexpectedly to 'vMustReplyEmpty'" になる。
-    //   RSP 自体は正しく、汚れていたのは通り道のほうだった)。
-    //   ★これは応急処置で、本筋は CDC をもう 1 本に分けること (D41)。
-    if (first >= 0 && !g_quiet) {
-      g_quiet = true;
-      BOARD::diag_mute(true);
-    }
     if (!receive_packet(first)) {
       // ★繋がっていたのに黙ったままなら、相手は居なくなったとみなして戻す。
       //   D を送らずに切る相手 (ケーブルを抜く等) がいるので、自分で復帰する。
-      if (g_quiet && ++idle_rounds > 20000) {
+      //   ★診断は止まっていないので、こうなったことは外から見える。
+      if (g_attached && ++idle_rounds > 20000) {
         g_attached = false;
-        g_quiet = false;
         idle_rounds = 0;
-        BOARD::diag_mute(false);
-        BOARD::diag_printf("[GDB] client went away, diagnostics are back\n");
+        kernel_instance.resume(g_target_thread);
+        BOARD::diag_printf("[GDB] client went away, the target is running again\n");
       }
       api(object_api::YIELD);
       continue;
     }
     idle_rounds = 0;
     if (!g_attached) {
-      // ★ここから CDC は GDB のもの — 人間向けの文字を混ぜると相手が壊れる。
-      //   ★黙らせるのは**正しいパケットを受け取ってから**。'$' を見た時点で
-      //     黙らせると、ゴミ 1 文字で診断が止まったまま戻らなくなる。
       g_attached = true;
-      BOARD::diag_mute(true);
+      BOARD::diag_printf("[GDB] a client attached on the GDB channel\n");
       // 繋いできた側は「止まっている」ことを期待している。
-      kernel_instance.suspend(g_target_thread);
+      if (g_target_thread != g_self_thread)
+        kernel_instance.suspend(g_target_thread);
     }
     handle_packet();
-    if (!g_attached && g_quiet) {
-      g_quiet = false;
-      BOARD::diag_mute(false);
-    }
+
   }
   return 0;
 }

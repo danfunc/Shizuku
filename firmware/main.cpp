@@ -6,6 +6,7 @@
 #include "shizuku/object_api.hpp"
 #include "shizuku/objects/flash_fs.hpp"
 #include "shizuku/objects/gdb_stub.hpp"
+#include "shizuku/objects/usb_cdc.hpp"
 #include "shizuku/objects/peripherals.hpp"
 #include "shizuku/apps/thermal.hpp"
 #include "shizuku/selftest.hpp"
@@ -61,7 +62,9 @@ void shizuku::app_entry() {
 }
 
 int main() {
-  stdio_init_all();
+  // ★USB は自前で持つ (CDC 2 本: 診断と GDB)。pico_stdio_usb は 1 本前提で、
+  //   記述子も差し替えられないため (D42)。
+  shizuku::objects::usb_cdc_init();
   sleep_ms(1000); // ホストが CDC を開く前の出力を落とさないための待ち
   shizuku::kernel_instance.init();
   // 系の組み立て: カーネルオブジェクトの表を用意し、そのハンドラをカーネルへ据える。

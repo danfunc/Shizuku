@@ -2,6 +2,16 @@ exports_files(["objects.list"])
 
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
+# ★TinyUSB の設定を差し替える (CDC を 2 本にする)。.bazelrc の
+#   PICO_TINYUSB_CONFIG がこれを指している。
+cc_library(
+    name = "tusb_config",
+    hdrs = ["tusb_config.h"],
+    includes = ["."],
+    visibility = ["//visibility:public"],
+)
+
+
 # モジュール提供ヘッダ (config.hpp が include するため、実装とは分けて公開する)
 cc_library(
     name = "headers",
@@ -27,6 +37,7 @@ cc_library(
         "memory_manager.cpp",
         "objects/flash_fs.cpp",
         "objects/gdb_stub.cpp",
+        "objects/usb_cdc.cpp",
         "objects/peripherals.cpp",
     ],
     # 例外ベクタから引かれるだけで、C++ 側から参照の無いシンボル (ISA の入口) が
@@ -48,7 +59,11 @@ cc_library(
         "@pico-sdk//src/rp2_common/pico_cyw43_arch:pico_cyw43_arch_none",
         "@pico-sdk//src/rp2_common/pico_multicore",
         "@pico-sdk//src/rp2_common/pico_stdio",
-        "@pico-sdk//src/rp2_common/pico_stdio_usb",
+        "@pico-sdk//src/rp2_common/pico_bootrom",
+        "@pico-sdk//src/rp2_common/pico_unique_id",
+        "@pico-sdk//src/rp2_common/pico_stdio_usb:reset_interface_headers",
+        "@pico-sdk//src/common/pico_usb_reset_interface_headers",
+        "@pico-sdk//bazel/config:PICO_TINYUSB_LIB",
         "@pico-sdk//src/rp2_common/pico_stdlib",
     ],
 )
