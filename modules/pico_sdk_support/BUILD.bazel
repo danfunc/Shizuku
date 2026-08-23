@@ -26,6 +26,7 @@ cc_library(
         "board.cpp",
         "memory_manager.cpp",
         "objects/flash_fs.cpp",
+        "objects/gdb_stub.cpp",
         "objects/peripherals.cpp",
     ],
     # 例外ベクタから引かれるだけで、C++ 側から参照の無いシンボル (ISA の入口) が

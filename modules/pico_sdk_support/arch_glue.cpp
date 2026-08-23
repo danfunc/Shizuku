@@ -19,6 +19,11 @@ extern "C" void shizuku_pendsv_dispatch(shizuku_armv8m_context *context) {
       reinterpret_cast<shizuku::KERNEL::CONTEXT *>(context));
 }
 
+extern "C" void shizuku_debug_dispatch(shizuku_armv8m_context *context) {
+  shizuku::kernel_instance.debug_dispatch(
+      (shizuku::KERNEL::CONTEXT *)context);
+}
+
 extern "C" void shizuku_fault_dispatch(shizuku_armv8m_context *context) {
   shizuku::kernel_instance.fault_dispatch(
       reinterpret_cast<shizuku::KERNEL::CONTEXT *>(context));

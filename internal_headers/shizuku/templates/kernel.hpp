@@ -144,6 +144,19 @@ public:
   //   他は走り続けさせる (I-9 / DESIGN §11.2.4)。止めても直らないのは
   //   「カーネル自身が落ちた」場合だけで、そこは区別する。
   void fault_dispatch(CONTEXT *context);
+  // ---- 自己ホスト型デバッグの受け口 ---------------------------------------
+  //  ★カーネルがやるのは**機構だけ**: 「何が起きたか」を記録し、そのスレッドを
+  //    止め、他へ実行権を渡す。何を報告するか・いつ再開するかは方針なので、
+  //    デバッガのオブジェクトが決める (D1)。カーネルは GDB を知らない。
+  void debug_dispatch(CONTEXT *context);
+  // そのスレッドだけ止める / 戻す。★TERMINATED と違って**文脈は生きたまま**
+  //   なので、レジスタを見て書き換えてから再開できる。
+  void suspend(uint32_t thread);
+  void resume(uint32_t thread);
+  // 止まっているスレッドの文脈。デバッガがレジスタを読み書きするための口。
+  CONTEXT *thread_context(uint32_t thread) {
+    return thread < m_thread_count ? &m_threads[thread].context : nullptr;
+  }
   // スレッドが落ちたときに実行権を渡す先。誰に渡すかは方針なので、composition の
   // 段階でカーネルオブジェクトが教えておく (カーネルは選ばない)。
   void set_recovery_thread(uint32_t thread);
@@ -233,8 +246,30 @@ public:
   };
   const fault_record &faults() const { return m_faults; }
 
+  // 直近のデバッグ事象。★フォールトと別に持つ — 「落ちた」と「止めた」は
+  //   別のことで、混ぜると数えられなくなる。
+  // ★止めようとしたが渡す先が無くて続けさせた、という印。reason に足して返す
+  //   (DFSR の実ビットとぶつからない上位を使う)。
+  static constexpr uint32_t DEBUG_NOT_STOPPED = 1u << 31;
+  struct debug_record {
+    uint32_t count;  // 何回止まったか
+    uint32_t thread; // 止めたスレッド
+    uintptr_t pc;    // 止まった場所
+    uint32_t reason; // DFSR (BKPT / 1 命令実行 / ウォッチポイント)
+  };
+  const debug_record &debug_event() const { return m_debug; }
+  // ★回数だけは**必ず読み直す**口を別に用意する。m_debug を書くのは例外ハンドラ
+  //   なので、コンパイラから見ると「誰も書いていない」= 素直に読むとレジスタに
+  //   載ったまま更新されない。実際にそれで「事象が起きているのに回数が増えて
+  //   いない」という嘘の失敗を出した (間に関数呼び出しがある経路だけ、たまたま
+  //   正しく見えていた)。
+  uint32_t debug_event_count() const {
+    return ARCH::load_acquire32((volatile uint32_t *)&m_debug.count);
+  }
+
 private:
   fault_record m_faults;
+  debug_record m_debug;
 };
 
 } // namespace templates

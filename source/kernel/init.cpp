@@ -19,6 +19,7 @@ template <> void KERNEL::init() {
   m_object_svc_handler = 0;
   m_recovery_thread = 0;
   m_faults = {};
+  m_debug = {};
   cpu_manager.init();
   if (auto result = memory_manager.init(); !result)
     BOARD::panic("memory manager init failed");

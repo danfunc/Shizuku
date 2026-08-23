@@ -148,6 +148,19 @@ shizuku_armv8m_return_stub:
     b     shizuku_return_stub_failed // 戻ってきた = 巻き戻しが弾かれた
 
 // ---------------------------------------------------------------------------
+// DebugMonitor の入口。フォールトとまったく同じ形にしてある —
+// 「止めて別のスレッドへ切り替えて復帰する」は既にある経路なので、増やさない。
+// ---------------------------------------------------------------------------
+.thumb_func
+.global shizuku_armv8m_debugmon_entry
+.align 2
+.type shizuku_armv8m_debugmon_entry, %function
+shizuku_armv8m_debugmon_entry:
+    CTX_SAVE
+    bl   shizuku_debug_dispatch
+    CTX_RESTORE
+
+// ---------------------------------------------------------------------------
 // ブート時にスレッドスタック (PSP) へ移り、entry を呼ぶ。
 //   r0 = スタック先頭 (高位), r1 = スタック下限, r2 = entry
 // SP を差し替える処理をコンパイラに任せると、切替後に SP 相対の局所変数へ触って

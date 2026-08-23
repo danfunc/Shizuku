@@ -1,32 +1,44 @@
 {
   // ===========================================================================
-  //  ステップ実行 (docs/03_porting_policy.md D39)
+  //  ステップ実行 (docs/03_porting_policy.md D39 / D40)
   // ===========================================================================
-  //  ★VS Code の「Run and Debug」パネルの緑の ▶ と F5、そして継続/ステップの
-  //    ツールバーが**そのままボタンになる**。タスク用の拡張を入れるより素直。
-  //
-  //  ★★この設定は**プローブが無いので未検証**。手元 (2026-08-21 時点) には
-  //    CMSIS-DAP なプローブが繋がっていないため、動かして確かめられていない。
-  //    OpenOCD (rp2350.cfg あり) と arm-none-eabi-gdb は揃っていることは確認済み。
-  //
-  //  【要るもの】
-  //    ・SWD のプローブ (Raspberry Pi Debug Probe か、debugprobe を焼いた別の Pico)
-  //    ・pico2_w の SWCLK / SWDIO / GND を繋ぐ
-  //  【この系ならではの注意】
-  //    ・**2 コア動いている**。片方だけ止めると、もう片方が
-  //      park_other_cores() (flash 書き込み) で応答を待って固まる。止めるなら
-  //      両方止める (rp2350.cfg は既定で両コアを見る)
-  //    ・止まっている間 USB CDC も止まるので、ホスト側のシリアルは切れる
-  //    ・カーネルオブジェクトのハンドラの中で止めると、共有台帳の錠を握ったまま
-  //      止まることがある。そこで再開しないと相手のコアが進めない
+  //  ★ボタンは VS Code 標準の「Run and Debug」パネル (緑の ▶ / F5 /
+  //    継続・ステップのツールバー)。第三者拡張は要らない。
   "version": "0.2.0",
   "configurations": [
     {
+      // ★★プローブが要らない構成。ファーム自身が DebugMonitor で止まり、
+      //   USB CDC 越しに GDB と喋る (modules/pico_sdk_support/objects/gdb_stub.cpp)。
+      //   halting debug と違って**止まるのは対象のスレッドだけ**で、他は走り続ける。
+      //   ★繋いだ瞬間から診断出力 ([SELFTEST]/[STRESS]) は止まる — 同じ CDC を
+      //     GDB が使うため。detach すると戻る。
+      //   ★ポート名は環境で変わる (usbmodem101 / usbmodem1101 …)。既定を直すか、
+      //     聞かれたら入れ直すこと。
+      "name": "Shizuku: 自己ホストデバッグ (プローブ不要)",
+      "type": "cppdbg",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "program": "${workspaceFolder}/bazel-bin/firmware/shizuku",
+      "MIMode": "gdb",
+      "miDebuggerPath": "${env:HOME}/.pico-sdk/toolchain/14_2_Rel1/bin/arm-none-eabi-gdb",
+      "miDebuggerServerAddress": "${input:serialPort}",
+      "preLaunchTask": "Shizuku: 焼く",
+      "externalConsole": false,
+      "stopAtEntry": false,
+      "setupCommands": [
+        // Bazel はサンドボックスで組むので、DWARF の comp_dir はここに無い。
+        // 相対名で引けるようにワークスペースを教える。
+        { "text": "directory ${workspaceFolder}" },
+        { "text": "set mem inaccessible-by-default off" },
+        { "text": "set remotetimeout 10" }
+      ]
+    },
+    {
+      // ★プローブがあるならこちら。**未検証** (手元にプローブが無い)。
       "name": "Shizuku: SWD でステップ実行 (プローブが要る)",
       "type": "cppdbg",
       "request": "launch",
       "cwd": "${workspaceFolder}",
-      // ★焼くのは uf2 だが、デバッガに食わせるのは**行番号を持っている ELF**。
       "program": "${workspaceFolder}/bazel-bin/firmware/shizuku",
       "MIMode": "gdb",
       "miDebuggerPath": "${env:HOME}/.pico-sdk/toolchain/14_2_Rel1/bin/arm-none-eabi-gdb",
@@ -37,8 +49,6 @@
       "preLaunchTask": "Shizuku: ビルド",
       "externalConsole": false,
       "setupCommands": [
-        // ★Bazel はサンドボックスの中でコンパイルするので、DWARF の comp_dir が
-        //   ここには無い場所を指す。相対名で引けるようにワークスペースを教える。
         { "text": "directory ${workspaceFolder}" },
         { "text": "set mem inaccessible-by-default off" }
       ],
@@ -47,6 +57,14 @@
         { "text": "load" }
       ],
       "stopAtEntry": true
+    }
+  ],
+  "inputs": [
+    {
+      "id": "serialPort",
+      "type": "promptString",
+      "description": "GDB stub が居るシリアルポート (ls /dev/cu.usbmodem* で確認)",
+      "default": "/dev/cu.usbmodem101"
     }
   ]
 }

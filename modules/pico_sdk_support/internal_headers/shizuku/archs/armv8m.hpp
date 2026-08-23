@@ -26,6 +26,7 @@ void shizuku_fault_dispatch(shizuku_armv8m_context *context);
 // 呼び先が普通に return したときの戻り口 (RETURN プリミティブを 1 段ぶん発行)。
 void shizuku_armv8m_return_stub();
 // スレッドスタック (PSP) へ移って entry を呼ぶ。戻らない。
+void shizuku_armv8m_debugmon_entry();
 [[noreturn]] void shizuku_armv8m_enter_thread_mode(uintptr_t stack_top,
                                                    uintptr_t stack_limit,
                                                    void (*entry)());
@@ -157,6 +158,79 @@ public:
     systick_hw->csr = 0x7; // ENABLE | TICKINT | プロセッサクロック
   }
   static void timer_cancel() { systick_hw->csr = 0; }
+
+  // ---- ★自己ホスト型デバッグ (DebugMonitor) --------------------------------
+  //  halting debug (SWD のプローブ) はコアを丸ごと止めるが、DebugMonitor は
+  //  **優先度が設定できる普通の例外**。だから「ブレークポイントでそのスレッドだけ
+  //  止め、他は走り続ける」ができる — I-9 とまっすぐ噛み合う。
+  //  ★プローブが繋がっている間は MON_EN が効かない (C_DEBUGEN が勝つ)。両方は
+  //    同時に使えないので、使う側がどちらかを選ぶ。
+  static constexpr uintptr_t DEMCR_ADDRESS = 0xE000EDFCu;
+  static constexpr uintptr_t DFSR_ADDRESS = 0xE000ED30u;
+  static constexpr uintptr_t FP_CTRL_ADDRESS = 0xE0002000u;
+  static constexpr uintptr_t FP_COMP_ADDRESS = 0xE0002008u;
+  static constexpr uint32_t DEMCR_TRCENA = 1u << 24;
+  static constexpr uint32_t DEMCR_MON_REQ = 1u << 19;
+  static constexpr uint32_t DEMCR_MON_STEP = 1u << 18;
+  static constexpr uint32_t DEMCR_MON_PEND = 1u << 17;
+  static constexpr uint32_t DEMCR_MON_EN = 1u << 16;
+  // DFSR: bit0 HALTED (1 命令実行の完了もこれ), bit1 BKPT, bit2 DWTTRAP
+  static constexpr uint32_t DFSR_HALTED = 1u << 0;
+  static constexpr uint32_t DFSR_BKPT = 1u << 1;
+  static constexpr uint32_t DFSR_DWTTRAP = 1u << 2;
+
+  static volatile uint32_t &at(uintptr_t address) {
+    return *(volatile uint32_t *)address;
+  }
+
+  static void debug_enable(bool on) {
+    uint32_t demcr = at(DEMCR_ADDRESS);
+    // TRCENA は DWT/FPB を動かすのに要る (デバッグ機能全体の元栓)。
+    demcr = on ? (demcr | DEMCR_TRCENA | DEMCR_MON_EN)
+               : (demcr & ~DEMCR_MON_EN);
+    at(DEMCR_ADDRESS) = demcr;
+    __asm__ volatile("dsb\n\tisb" ::: "memory");
+  }
+  // 有効になったか。★**プローブが繋がっていると MON_EN は立たない**ので、
+  //   「立てた」ではなく「立ったか」を読んで確かめる。
+  static bool debug_enabled() {
+    return (at(DEMCR_ADDRESS) & DEMCR_MON_EN) != 0;
+  }
+  // 次の 1 命令だけ実行して、また DebugMon へ戻ってくるようにする。
+  static void debug_step(bool on) {
+    uint32_t demcr = at(DEMCR_ADDRESS);
+    at(DEMCR_ADDRESS) = on ? (demcr | DEMCR_MON_STEP) : (demcr & ~DEMCR_MON_STEP);
+    // ★★書いたら **dsb + isb** で効かせる。入れないと DEMCR への書き込みが後ろへ
+    //   ずれ、「次の命令」ではなく数命令あとで止まる。実測で踏んだ: 直後に置いた
+    //   nop では止まらず、その先で止まっていた (「事象は起きているのに狙った場所
+    //   ではない」という一番読み違えやすい形で出る)。
+    __asm__ volatile("dsb\n\tisb" ::: "memory");
+  }
+  // なぜ止まったか (DFSR)。★読んだら**書き戻して消す** — 消さないと次の判定に
+  //   古い理由が混ざる (フォールトの CFSR で同じ罠を踏んでいる)。
+  static uint32_t debug_reason_take() {
+    const uint32_t reason = at(DFSR_ADDRESS);
+    at(DFSR_ADDRESS) = reason; // 1 を書いたビットが消える
+    return reason;
+  }
+  // ハードウェアブレークポイントの数。★実装依存なので**実行時に読む** (データ
+  //   シートの数字を信じない)。FP_CTRL の NUM_CODE は 2 か所に分かれている。
+  static uint32_t breakpoint_count() {
+    const uint32_t control = at(FP_CTRL_ADDRESS);
+    return (((control >> 12) & 0x7u) << 4) | ((control >> 4) & 0xFu);
+  }
+  static void breakpoint_enable(bool on) {
+    // bit1 (KEY) を一緒に書かないと ENABLE の変更が無視される。
+    at(FP_CTRL_ADDRESS) = (on ? 0x3u : 0x2u);
+  }
+  static void breakpoint_set(uint32_t index, uintptr_t address) {
+    // FPBv2: [31:1] が比較するアドレス、bit0 が有効。
+    at(FP_COMP_ADDRESS + 4u * index) = ((uint32_t)address & ~1u) | 1u;
+    __asm__ volatile("dsb\n\tisb" ::: "memory");
+  }
+  static void breakpoint_clear(uint32_t index) {
+    at(FP_COMP_ADDRESS + 4u * index) = 0;
+  }
   // 今の刻みで**まだ残っている**サイクル数。wrapped は「刻みを撃ち切った」印
   // (COUNTFLAG)。★svc は SysTick より優先度が高いので、発火が保留されたまま
   //   ここへ来ることがある。そのときカウンタは既に折り返して数え直しているので、

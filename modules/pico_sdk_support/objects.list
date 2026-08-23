@@ -6,3 +6,5 @@ spi
 led
 flashfs
 temperature
+gdb_stub
+debuggee

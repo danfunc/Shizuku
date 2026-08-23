@@ -13,6 +13,10 @@
 // arch 側)。ここだけの別名にして、上位のテンプレート引数とは混ぜない。
 using ARCH_TYPE = shizuku::archs::armv8m;
 
+// ★GDB が同じ CDC を使っている間は診断を黙らせる (board.cpp の diag_printf)。
+//   CDC をストリーム化すれば、この旗ごと要らなくなる。
+static bool g_diag_quiet = false;
+
 // リンカが置く「静的データの終端 = ヒープの先頭」。名前空間の中で宣言すると
 // 名前が飾られて別物になるので、必ずファイル先頭で C リンケージとして宣言する。
 extern "C" char __end__[];
@@ -56,6 +60,11 @@ void rp2350_pico2::init(uint32_t core) {
     //   置かれており、止められている間 flash を 1 バイトも読まない。
     ::multicore_lockout_victim_init();
   }
+  // ★DebugMonitor (例外番号 12) は pico-sdk の exception_number に無いので、
+  //   RAM ベクタへ直に据える。ベクタは両コア共有なので登録は core0 の 1 回だけ。
+  if (core == 0) {
+    ((void (**)())scb_hw->vtor)[12] = shizuku_armv8m_debugmon_entry;
+  }
   // 優先度は banked なので各コアで設定する。SVC 最優先 = プリミティブの原子性、
   // PendSV 最低 = 全 IRQ が捌けてからのスレッド切替 (DESIGN §14.5.1)。
   // ★この順序が 1 コア内の相互排除を無償で与える (DESIGN §14.5.1)。
@@ -74,6 +83,10 @@ void rp2350_pico2::init(uint32_t core) {
   irq_set_priority(USBCTRL_IRQ, 0x20);
   // 落ちたときに自分で回せるよう、USB の割り込みハンドラを控えておく。
   g_usb_irq_poll = (void (*)())irq_get_exclusive_handler(USBCTRL_IRQ);
+  // ★DebugMon はフォールトより**下**に置く。デバッグ中に落ちたら、デバッグより
+  //   先に落ちたことを報告できないと原因が分からなくなる。
+  //   優先度はシステムハンドラ優先度レジスタ (SHPR) の 12 番目。
+  ((volatile uint8_t *)(uintptr_t)0xE000ED18u)[12 - 4] = 0xA0;
   exception_set_priority(MEMMANAGE_EXCEPTION, 0x80);
   exception_set_priority(BUSFAULT_EXCEPTION, 0x80);
   exception_set_priority(USAGEFAULT_EXCEPTION, 0x80);
@@ -114,6 +127,10 @@ uint32_t rp2350_pico2::cycles_per_us() {
 }
 
 void rp2350_pico2::diag_printf(const char *format, ...) {
+  // ★GDB が同じ CDC を使っている間は黙る。人間向けの文字を混ぜると相手の
+  //   プロトコルが壊れる (CDC をストリーム化すれば、この旗は消える)。
+  if (g_diag_quiet)
+    return;
   va_list args;
   va_start(args, format);
   ::vprintf(format, args);
@@ -130,6 +147,8 @@ void rp2350_pico2::panic(const char *message) {
 //   ★pico-sdk の multicore_launch_core1 は core1 に自前のスタックを与えて C 関数を
 //     呼ばせる。そのスタックは**起動の足場**にすぎず、スレッドとしてのスタックは
 //     オブジェクトランドから借りたものへ移る (D18)。
+void rp2350_pico2::diag_mute(bool quiet) { g_diag_quiet = quiet; }
+
 void rp2350_pico2::launch_core(void (*entry)()) {
   ::multicore_launch_core1(entry);
 }

@@ -33,6 +33,9 @@ public:
   //   オブジェクトが任意の番地を読み書きできてしまい、region を張った意味が消える。
   //   だからチャネルはここ (特権側) が握り、オブジェクトには「繋いでくれ」という
   //   要求しか許さない。
+  // ★診断出力を黙らせる。GDB が繋がっている間は同じ CDC を GDB が使うので、
+  //   人間向けの文字を混ぜると相手のプロトコルが壊れる。**譲るための口**。
+  static void diag_mute(bool quiet);
   static int dma_claim();
   static void dma_copy(int channel, const void *from, void *to, uint32_t bytes);
   static bool dma_busy(int channel);

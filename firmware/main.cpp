@@ -5,6 +5,7 @@
 #include "shizuku/kernel_object.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/objects/flash_fs.hpp"
+#include "shizuku/objects/gdb_stub.hpp"
 #include "shizuku/objects/peripherals.hpp"
 #include "shizuku/apps/thermal.hpp"
 #include "shizuku/selftest.hpp"
@@ -40,10 +41,14 @@ void shizuku::app_entry() {
   //   つまりここで書けること自体が「止められている」ことの証拠になる。
   shizuku::objects::flash_fs_probe();
   shizuku::selftest::flash_stream_ladder();
+  shizuku::selftest::debug_ladder();
 
   // 温度の履歴アプリ。★負荷試験より前に起こして、負荷の下で周期がどれだけ
   //   揺らぐかを見る (静かな系で測っても揺らぎの話にならない)。
   shizuku::apps::start_thermal();
+
+  // ★GDB stub。繋がれるまでは何もしない (繋がれた瞬間に診断出力を GDB へ譲る)。
+  shizuku::objects::start_gdb_stub();
 
   // 負荷試験を起動する。以後、点滅と報告は専用スレッドが行う。
   shizuku::selftest::stress_launch();

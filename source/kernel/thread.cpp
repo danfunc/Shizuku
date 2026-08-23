@@ -23,6 +23,9 @@ template <> void KERNEL::set_thread_storage(void *, uintptr_t);
 template <> void KERNEL::release(uint32_t);
 template <> KERNEL::spawn_result KERNEL::reserve_thread();
 template <> void KERNEL::fault_dispatch(KERNEL::CONTEXT *);
+template <> void KERNEL::debug_dispatch(KERNEL::CONTEXT *);
+template <> void KERNEL::suspend(uint32_t);
+template <> void KERNEL::resume(uint32_t);
 
 // ---- 貸してもらった記憶をスレッド表として据える ----------------------------
 // ★所有はオブジェクトランド、保護はここで検査する。カーネルの簿記が非特権から
@@ -306,6 +309,69 @@ template <> void KERNEL::set_recovery_thread(uint32_t thread) {
 //   走り続けさせる (I-9 / DESIGN §11.2.4「違反しても系は止まらない」)。
 //   ここを「全部止める」にすると、1 つのオブジェクトの誤りが全系を道連れにする —
 //   それは資源管理で「超過した者にだけ当たる」と決めたことと矛盾する。
+// そのスレッドだけ止める。★TERMINATED と違って文脈は生きたままなので、
+//   レジスタを見て書き換えてから再開できる。走っているスレッドを止めた場合、
+//   切り替えるのは呼び出し側の仕事 (ここは状態を変えるだけ)。
+template <> void KERNEL::suspend(uint32_t thread) {
+  if (thread >= m_thread_count)
+    return;
+  ARCH::store_release32(&m_threads[thread].thread.state,
+                        (uint32_t)THREAD::state_t::SUSPENDED);
+}
+
+// 止めたスレッドを走れる状態へ戻す。★SUSPENDED のものだけ — 終わったスレッドを
+//   生き返らせない。
+template <> void KERNEL::resume(uint32_t thread) {
+  if (thread >= m_thread_count)
+    return;
+  ARCH::cas32(&m_threads[thread].thread.state,
+              (uint32_t)THREAD::state_t::SUSPENDED,
+              (uint32_t)THREAD::state_t::READY);
+}
+
+// ---- 自己ホスト型デバッグの受け口 ------------------------------------------
+// ★フォールトとまったく同じ形にしてある。違うのは「終わらせる」か「止める」かだけ
+//   で、切り替えの経路は共有する (経路を増やさない)。
+template <> void KERNEL::debug_dispatch(KERNEL::CONTEXT *context) {
+  const uint32_t core = BOARD::core_num();
+  const uint32_t thread = m_current[core];
+  m_debug.count++;
+  m_debug.thread = thread;
+  m_debug.pc = ARCH::frame_pc(*context->sp);
+  m_debug.reason = ARCH::debug_reason_take();
+
+  // ★1 命令実行の指示は使い切りにする。消さないと、再開した先で延々と止まり続ける。
+  ARCH::debug_step(false);
+
+  // ★カーネル自身の中で止まったら、そこから先へ進めない (止めるスレッドが無い)。
+  //   デバッガはスレッドモードのコードだけを相手にする。
+  if (!ARCH::faulted_in_thread_mode(*context)) {
+    BOARD::diag_printf("[DEBUG] event inside the kernel: pc=%08lx dfsr=%08lx\n",
+                       (unsigned long)m_debug.pc, (unsigned long)m_debug.reason);
+    return; // 何もせず戻る (止めたら系ごと動かなくなる)
+  }
+
+  suspend(thread);
+
+  // 借り手として走っていたなら貸し手へ返す。そうでなければ復帰先へ渡す。
+  // ★フォールトと同じ判断 — 「このコアで次に誰を走らせるか」は 1 か所で決める。
+  if (m_grants[core].depth != 0) {
+    grant_unwind(grant_end::EXPIRED);
+    return;
+  }
+  kernel_error error = kernel_error::OK;
+  if (m_recovery_thread < m_thread_count && claim(m_recovery_thread, error)) {
+    m_current[core] = m_recovery_thread;
+    return;
+  }
+  // ★渡す先が無いなら**止めるのをやめる**。フォールトと違ってデバッグ事象は
+  //   「続けられる」ので、ここで panic するのは過剰。かといって止めたまま戻ると
+  //   同じ場所へ復帰して延々と止まり続ける (生きたまま何も進まない)。
+  //   記録は残っているので、止められなかったことは後から分かる。
+  resume(thread);
+  m_debug.reason |= DEBUG_NOT_STOPPED;
+}
+
 template <> void KERNEL::fault_dispatch(KERNEL::CONTEXT *context) {
   const uint32_t core = BOARD::core_num();
   const uint32_t thread = m_current[core];

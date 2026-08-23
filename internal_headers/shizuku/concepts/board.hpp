@@ -38,6 +38,7 @@ concept board_requires = requires(uint32_t core, const char *text) {
   { BOARD::park_other_cores() };
   { BOARD::resume_other_cores() };
   // DMA (ストリームの接続に使う)。★チャネルは特権側が握る — MPU を素通りするため。
+  { BOARD::diag_mute(true) };
   { BOARD::dma_claim() } -> std::same_as<int>;
   { BOARD::dma_busy(0) } -> std::same_as<bool>;
   { BOARD::time_us() } -> std::same_as<uint64_t>;
