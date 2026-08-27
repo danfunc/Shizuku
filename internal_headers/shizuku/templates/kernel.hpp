@@ -42,6 +42,7 @@ public:
   using FRAME = typename ARCH::exception_frame_t;
   using THREAD = thread<CONTEXT>;
   static constexpr uintptr_t CORE_COUNT = CPU_MANAGER::CORE_COUNT;
+  static constexpr uint32_t KERNEL_OBJECT_ID = 0;
 
   // ★スレッドの記憶はカーネルの持ち物ではない。**オブジェクトランドが用意して貸す**
   //   (DESIGN §4.1 ルール 1「オブジェクトが資源を持つ」)。カーネルは渡された記憶を
@@ -81,6 +82,7 @@ public:
     uintptr_t prev;       // 一つ外側のヘッダのアドレス (0 = 最外)
     uint32_t total_bytes; // 退避域の総バイト数 (8B 境界に丸め済み)
     uint32_t frame_bytes; // 例外フレーム実サイズ
+    uint32_t caller_object; // 呼び出し元オブジェクトID
     CONTEXT saved; // 呼び出し元の文脈まるごと (sp を含む = 元フレームの位置)
   };
 
@@ -124,6 +126,11 @@ public:
     uint32_t affinity;
     uintptr_t stack_base;
     uintptr_t stack_bytes;
+    uint32_t object_id = 0; // 所属オブジェクトID
+    // ★call_request と同じ窓 (軸 B)。この対象オブジェクトの**自前のスレッド**
+    //   としての初回起動にも、CALL のときと同じ窓を開ける (Q8)。
+    uintptr_t region_base = 0;
+    uintptr_t region_limit = 0;
   };
   spawn_result spawn(const spawn_request &request);
   // 走らせずに枠だけ取る。2 本目以降のコアが「今の実行」を採用するために使う
@@ -153,6 +160,18 @@ public:
   //   なので、レジスタを見て書き換えてから再開できる。
   void suspend(uint32_t thread);
   void resume(uint32_t thread);
+  // ★★1 命令だけ実行させたい相手を**予約する**。ここで直接 MON_STEP を立てては
+  //   いけない — 立てた瞬間に「次の 1 命令」が刻まれるのは**呼び出し側 (デバッガの
+  //   スレッド) の次の命令**であって、対象が次に走ったときの命令ではない
+  //   (実測で踏んだ: デバッガ自身が single-step で止まり、GDB チャネルごと
+  //   死んだ)。実際に MON_STEP を立てるのは、対象の文脈へ復帰する
+  //   CTX_RESTORE の直前 (= consume_pending_step) だけ。
+  void arm_step(uint32_t thread);
+  // 復帰しようとしている文脈がちょうど予約した相手なら、ここで初めて
+  // MON_STEP を立てる。ISA 層の例外復帰 (SVC/PendSV/DebugMon/Fault の
+  // どれでも) から毎回呼ばれるので、対象でなければ何もしない。
+  void consume_pending_step();
+  static constexpr uint32_t NO_STEP_TARGET = 0xFFFFFFFFu;
   // 止まっているスレッドの文脈。デバッガがレジスタを読み書きするための口。
   CONTEXT *thread_context(uint32_t thread) {
     return thread < m_thread_count ? &m_threads[thread].context : nullptr;
@@ -160,6 +179,11 @@ public:
   // スレッドが落ちたときに実行権を渡す先。誰に渡すかは方針なので、composition の
   // 段階でカーネルオブジェクトが教えておく (カーネルは選ばない)。
   void set_recovery_thread(uint32_t thread);
+
+  void set_thread_debug_protected(uint32_t thread, bool is_protected) {
+    if (thread < m_thread_count)
+      m_threads[thread].thread.is_debug_protected = is_protected;
+  }
 
   uint32_t current_thread_id() const { return m_current[BOARD::core_num()]; }
   THREAD &current_thread() { return m_threads[current_thread_id()].thread; }
@@ -172,6 +196,7 @@ public:
   uint32_t thread_affinity(uint32_t thread) const {
     return m_threads[thread].thread.affinity;
   }
+  void set_thread_object(uint32_t thread, uint32_t obj) { m_threads[thread].thread.current_object = obj; }
   typename THREAD::state_t thread_state(uint32_t thread) const {
     return (typename THREAD::state_t)m_threads[thread].thread.state;
   }
@@ -224,6 +249,10 @@ private:
   thread_record *m_threads;
   uint32_t m_thread_count;
   uint32_t m_current[CORE_COUNT];
+  // ★予約は 1 件だけ (デバッガは 1 セッションしか繋がらない)。CORE_COUNT では
+  //   なくコア非依存で持つ — どのコアが対象を復帰させるかは分からない
+  //   (対象スレッドはどのコアでも走れるのが既定)。
+  uint32_t m_step_target;
   grant_stack m_grants[CORE_COUNT];
   // 今タイマへ装填した刻みの大きさ [クロック]。残りから引くために覚えておく。
   uint32_t m_armed[CORE_COUNT];

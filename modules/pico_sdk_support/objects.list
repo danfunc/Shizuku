@@ -3,8 +3,10 @@
 # 1 行 1 名。'#' から行末はコメント。
 gpio
 spi
+i2c
 led
 flashfs
 temperature
 gdb_stub
+gdb_agent
 debuggee

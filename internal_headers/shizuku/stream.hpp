@@ -28,7 +28,25 @@ namespace stream {
 
 // 溢れたときの振る舞い。★どちらが正しいかは用途で決まるので、機構は選ばない。
 constexpr uint32_t LOSSLESS = 1u << 0; // 溢れたら押し戻す (取りこぼさない)
-constexpr uint32_t MP_PROD = 1u << 1;  // producer が複数 (CAS で直列化する)
+// ★★ここに MP_PROD (「producer が複数」) という旗が**あった**が、消した
+//   (2026-08-24, D46)。理由は 2 つあり、どちらも致命的だった:
+//   (a) **定義されているだけで push() が一度も見ていなかった**。旗を立てても
+//       何も起きず、「対応しているつもり」で複数から push させると黙って
+//       レコードが消える (無音の失敗そのもの)
+//   (b) そもそも**モデルに無い**。ストリームは object 対 object の路で、
+//       席 (producer/consumer) はオブジェクト単位に stream_bind が座らせる。
+//       「producer が複数」は 1 本の路に複数のオブジェクトが繋がることになり、
+//       前提と正面から矛盾する
+//   → **複数から流したいなら、路をその数だけ作り、集約するなら**
+//     **ハブオブジェクトを立てる**のが正しい形:
+//         producer A ──stream──┐
+//         producer B ──stream──┼─→ [hub] ──stream──→ consumer
+//         producer C ──stream──┘
+//     こうすればどのリンクも object 対 object のまま保たれ、しかも
+//     「どう混ぜるか・どれを優先するか・溢れたらどれを捨てるか」という**方針が
+//     ハブという 1 つのオブジェクトの中に居る** (方針をカーネルにもこの
+//     ライブラリにも置かない = D1)。D37 が「詰め替えが要るなら中継オブジェクトを
+//     書くべき」と言っているのと同じ話の、合流版。
 
 // 制御プレーンの実体。カーネルオブジェクトはこのポインタだけを持つ。
 // ★データ領域 (base) と分離して置く。将来 MPU でデータ側だけを保護できるように
@@ -37,7 +55,7 @@ struct descriptor {
   void *base;         // データ領域の先頭 = REC buffer[capacity]
   uint32_t rec_size;  // 1 レコードのバイト数
   uint32_t capacity;  // レコード数
-  uint32_t flags;     // LOSSLESS / MP_PROD
+  uint32_t flags;     // LOSSLESS
   volatile uint32_t wr; // 公開済みレコード数 (producer が進める)
   volatile uint32_t rd; // 消費済みレコード数 (consumer が進める)
   uint32_t producer;  // 席を取っているオブジェクト (NO_OWNER = 空き)
@@ -69,6 +87,19 @@ public:
   // 1 つ流す。LOSSLESS で満杯なら false (押し戻す)。そうでなければ最も古いものを
   // 上書きして必ず true。★producer は決して待たない — 待つと、締切のある側が
   //   遅い側に引きずられる (それを避けるためにストリームがある)。
+  //
+  // ★★★**この路へ push してよいのは 1 つのオブジェクトだけ** (柱 3)。
+  //   ストリームは object 対 object の路で、席は stream_bind がオブジェクト
+  //   単位で座らせる。**複数から流したいなら路をその数だけ作り、集約するなら
+  //   ハブオブジェクトを立てること** (上の LOSSLESS の脇の図を参照)。
+  //   ここは「気をつける」で守るしかない場所になっている: push/pop は
+  //   わざと svc を通らないライブラリなので (柱 1)、descriptor のポインタさえ
+  //   持っていれば bind を通らずに呼べてしまい、カーネルオブジェクト側の
+  //   席の強制 (SEAT_TAKEN) をすり抜けられる。
+  //   ★破るとどうなるか (2026-08-24 に消費側で実際に起きた): 下の
+  //   「wr を読む → slot へ書く → wr+1 を書き戻す」の途中で別の producer に
+  //   割り込まれると、両者が同じ場所へ書いて wr が 1 しか進まない。
+  //   **エラーも出ずにレコードが消える**。
   SHIZUKU_STREAM_INLINE bool push(const REC &record) {
     const uint32_t capacity = m_desc->capacity;
     const uint32_t wr = m_desc->wr;

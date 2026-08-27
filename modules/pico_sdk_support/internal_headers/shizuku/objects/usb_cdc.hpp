@@ -23,7 +23,17 @@ void usb_cdc_init();
 int usb_cdc_read(uint32_t channel);
 void usb_cdc_write(uint32_t channel, char value);
 void usb_cdc_flush(uint32_t channel);
+// あと何バイト積めるか (0 なら、そのまま書くと**捨てられる**)。
+uint32_t usb_cdc_write_available(uint32_t channel);
 bool usb_cdc_connected(uint32_t channel);
+uint32_t usb_cdc_read_available(uint32_t channel);
+
+// ★panic 用 (board.cpp)。USB (診断出力・picotool のリセット要求) を保つのに
+//   要る IRQ (USBCTRL / tud_task を回す user IRQ / それを起こすタイマ IRQ)
+//   だけを残して、他の全 IRQ (GPIO・DMA・ペリフェラルすべて) を止める。
+//   ここに閉じ込めるのは、どの IRQ が要るかを知っているのが usb_cdc.cpp
+//   自身だからで、呼ぶ側 (board.cpp) はその内訳を知らなくてよい。
+void usb_cdc_isolate_for_panic();
 
 } // namespace objects
 } // namespace shizuku

@@ -48,7 +48,8 @@ void debug_ladder();
 
 // 負荷試験: ランダムな長さの仕事をするスレッドを何本か走らせ、周期スレッドが
 // 締切をどれだけ外すか (揺らぎ) を測り続ける。目視ではなく数字で見る。
-void stress_launch();
+// 戻り = blink (LED を叩く周期スレッド) のスレッド番号。
+uint32_t stress_launch();
 
 } // namespace selftest
 } // namespace shizuku

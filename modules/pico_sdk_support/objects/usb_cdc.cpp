@@ -5,6 +5,7 @@
 //  (Raspberry Pi (Trading) Ltd. / Damien P. George、MIT)。CDC を 2 本に増やし、
 //  リセットインターフェースはそのまま残してある。
 #include "hardware/irq.h"
+#include "hardware/timer.h"
 #include "pico/bootrom.h"
 #include "pico/stdio/driver.h"
 #include "pico/time.h"
@@ -12,6 +13,7 @@
 #include "pico/usb_reset_interface.h"
 #include "device/usbd_pvt.h"
 #include "tusb.h"
+#include "shizuku/objects/usb_cdc.hpp"
 
 // ★★ここが効いているかを**ビルド時に**確かめる。tusb_config.h が届いていないと
 //   CDC が 1 本のまま黙って組まれ、記述子だけ 2 本を名乗る = 列挙に失敗する
@@ -95,8 +97,11 @@ const char *g_strings[] = {
     [STR_PRODUCT] = "Shizuku",
     [STR_SERIAL] = g_serial,
     // ★名前を分けておく。ホスト側でどちらが GDB 用かを目で選べるようにするため。
+    //   GDB 側は "Shizuku" を含めない — SWD は使っていない (D40: DebugMonitor +
+    //   GDB の Remote Serial Protocol を CDC 越しに喋るだけ) ので、"RSP" の方が
+    //   "GDB Server" より実態に即して specific。
     [STR_CDC_DIAG] = "Shizuku diagnostics",
-    [STR_CDC_GDB] = "Shizuku GDB",
+    [STR_CDC_GDB] = "GDB RSP",
     [STR_RESET] = "Reset",
 };
 uint16_t g_string_buffer[32];
@@ -155,6 +160,26 @@ void usb_cdc_init() {
   stdio_set_driver_enabled(&g_diag_driver, true);
 }
 
+// ★panic からしか呼ばない (board.cpp)。USB を生かすのに要る 3 本の IRQ だけ
+//   残して、他を全部止める:
+//     - USBCTRL_IRQ    ハードウェアが実際のイベントを起こす所
+//     - g_task_irq      それを受けて tud_task() を回す低優先度 IRQ
+//     - タイマ IRQ      g_task_irq を 1ms ごとに起こすアラーム
+//   ★GPIO・DMA・ペリフェラルの IRQ は、壊れたカーネルの上でハンドラが
+//     勝手に共有状態を触るのを防ぐために止める — SysTick を止めるだけでは
+//     スレッド切り替えは止まっても、これらは止まらない。
+void usb_cdc_isolate_for_panic() {
+  const uint hw_alarm_num =
+      alarm_pool_hardware_alarm_num(alarm_pool_get_default());
+  const uint timer_irq = TIMER_ALARM_IRQ_NUM(
+      (timer_hw_t *)alarm_pool_get_default_timer(), hw_alarm_num);
+  for (uint irq = 0; irq < NUM_IRQS; ++irq) {
+    if (irq == USBCTRL_IRQ || irq == g_task_irq || irq == timer_irq)
+      continue;
+    irq_set_enabled(irq, false);
+  }
+}
+
 int usb_cdc_read(uint32_t channel) {
   if (!tud_cdc_n_available(channel))
     return -1;
@@ -164,6 +189,15 @@ void usb_cdc_write(uint32_t channel, char value) {
   tud_cdc_n_write_char(channel, value);
 }
 void usb_cdc_flush(uint32_t channel) { tud_cdc_n_write_flush(channel); }
+// ★あと何バイト積めるか。**満杯のまま書くと tud_cdc_n_write_char は黙って
+//   捨てる** — 診断ならそれでよいが (D42「溢れたら捨てる」)、GDB の返事で
+//   落とすとプロトコルが壊れる。呼ぶ側が空くのを待てるように口を出す。
+uint32_t usb_cdc_write_available(uint32_t channel) {
+  return (uint32_t)tud_cdc_n_write_available(channel);
+}
+uint32_t usb_cdc_read_available(uint32_t channel) {
+  return (uint32_t)tud_cdc_n_available(channel);
+}
 bool usb_cdc_connected(uint32_t channel) {
   return tud_cdc_n_connected(channel);
 }

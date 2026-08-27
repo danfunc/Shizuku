@@ -55,6 +55,12 @@ struct call_request {
   uintptr_t entry_pc;  // 呼び先の入口
   uint32_t protection; // PROTECTION_* のビット和
   uintptr_t args[4];   // 呼び先が受け取る引数 (a0..a3)
+  uint32_t callee_object = 0; // 呼び先のオブジェクトID
+  // ★軸 B (DESIGN §11.3)。呼び先が特権命令なしに読める追加の窓
+  //   (region0/1 の外)。0/0 = 窓なし。**呼び出し元ではなく呼び先の性質**として
+  //   決まる値をここへ載せる (docs/03_porting_policy.md Q8)。
+  uintptr_t region_base = 0;
+  uintptr_t region_limit = 0;
 };
 // ★戻り口はカーネルが自分の戻り口 1 本を載せる (発行側は指定しない)。その戻り口は
 //   常に RETURN(段数=1, 値, 0, 申告) を撃つが、**同じ svc が誰から出たかで意味が

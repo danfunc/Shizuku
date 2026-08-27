@@ -1,6 +1,20 @@
 exports_files(["objects.list"])
 
 load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@pico-sdk//bazel:pico_btstack_make_gatt_header.bzl", "pico_btstack_make_gatt_header")
+
+cc_library(
+    name = "btstack_config",
+    hdrs = ["config/btstack_config.h"],
+    includes = ["config"],
+    visibility = ["//visibility:public"],
+)
+
+pico_btstack_make_gatt_header(
+    name = "ble_uart_gatt_header",
+    src = "objects/ble_uart.gatt",
+)
+
 
 # ★TinyUSB の設定を差し替える (CDC を 2 本にする)。.bazelrc の
 #   PICO_TINYUSB_CONFIG がこれを指している。
@@ -54,9 +68,16 @@ cc_library(
         "@pico-sdk//src/rp2_common/hardware_exception",
         "@pico-sdk//src/rp2_common/hardware_flash",
         "@pico-sdk//src/rp2_common/hardware_gpio",
+        "@pico-sdk//src/rp2_common/hardware_i2c",
         "@pico-sdk//src/rp2_common/hardware_spi",
         "@pico-sdk//src/rp2_common/hardware_sync",
-        "@pico-sdk//src/rp2_common/pico_cyw43_arch:pico_cyw43_arch_none",
+        # ★poll モード。`pico_cyw43_arch_none` は pico-sdk の BUILD.bazel では
+        #   単に `pico_cyw43_arch_threadsafe_background` への alias (「lwIP
+        #   無し」の意味でしかない、poll とは無関係)。flight_robocon 側で
+        #   att_server_notify() が async_context のロック所有者チェックに
+        #   PANIC する不具合の原因だったため、こちらも `pico_cyw43_arch_poll`
+        #   に揃える (flight_robocon/BUILD.bazel のコメント参照、2026-08-24)。
+        "@pico-sdk//src/rp2_common/pico_cyw43_arch:pico_cyw43_arch_poll",
         "@pico-sdk//src/rp2_common/pico_multicore",
         "@pico-sdk//src/rp2_common/pico_stdio",
         "@pico-sdk//src/rp2_common/pico_bootrom",
@@ -66,4 +87,27 @@ cc_library(
         "@pico-sdk//bazel/config:PICO_TINYUSB_LIB",
         "@pico-sdk//src/rp2_common/pico_stdlib",
     ],
+)
+
+cc_library(
+    name = "ble_uart",
+    srcs = ["objects/ble_uart.cpp"],
+    hdrs = [
+        "internal_headers/shizuku/objects/ble_uart.hpp",
+        "internal_headers/shizuku/objects/gdb_stub.hpp",
+    ],
+    includes = ["internal_headers"],
+    deps = [
+        ":headers",
+        ":btstack_config",
+        ":ble_uart_gatt_header",
+        "//:internal_headers",
+        "//:kernel",
+        "//configs:config",
+        "@pico-sdk//src/rp2_common/pico_btstack",
+        "@pico-sdk//src/rp2_common/pico_btstack:pico_btstack_flash_bank",
+        "@pico-sdk//src/rp2_common/pico_cyw43_arch:pico_cyw43_arch_poll",
+        "@pico-sdk//src/rp2_common/pico_stdlib",
+    ],
+    visibility = ["//visibility:public"],
 )

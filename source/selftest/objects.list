@@ -17,4 +17,5 @@ stream_consumer
 unpriv_writer
 unpriv_reader
 unpriv_sink
+flash_trespasser
 debug_target

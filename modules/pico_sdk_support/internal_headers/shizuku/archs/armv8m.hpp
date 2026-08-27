@@ -70,6 +70,11 @@ public:
     uint32_t fp[16] = {};                // offset 40 (S16-S31 退避域)
     uint32_t psplim = 0;                 // offset 104 (0 = 制限なし)
     uint32_t control = CONTROL_PRIV_PSP; // offset 108
+    // ★軸 B (Q8)。control と同じ扱い: ここは値を持つだけで、実際に MPU へ
+    //   書くのは CTX_RESTORE 直前の shizuku_restore_region_window (offset は
+    //   asm から触らないので .equ は要らない)。0/0 = 窓なし。
+    uint32_t region_base = 0;  // offset 112
+    uint32_t region_limit = 0; // offset 116
   };
   // メソッド ABI (引数 4 本 + r12)。
   using method_t = uintptr_t (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t,
@@ -230,6 +235,11 @@ public:
   }
   static void breakpoint_clear(uint32_t index) {
     at(FP_COMP_ADDRESS + 4u * index) = 0;
+    // ★breakpoint_set と同じ理由で要る。無いと「解除した」つもりの後も
+    //   古い比較器の値がしばらく効いたままになり得る (実測で踏んだ:
+    //   detach で resume したはずの相手が、次に繋いだときに同じ
+    //   ブレークポイントの pc で止まったまま止まっていた)。
+    __asm__ volatile("dsb\n\tisb" ::: "memory");
   }
   // 今の刻みで**まだ残っている**サイクル数。wrapped は「刻みを撃ち切った」印
   // (COUNTFLAG)。★svc は SysTick より優先度が高いので、発火が保留されたまま
@@ -318,6 +328,17 @@ public:
   static void set_priv(context_t &context, bool privileged) {
     context.control = privileged ? CONTROL_PRIV_PSP : CONTROL_UNPRIV_PSP;
   }
+  // ★set_priv と同じ形 (Q8 / DESIGN §11.3)。ここでは値を持たせるだけで、
+  //   実際に MPU region へ書くのは復帰の直前 (shizuku_restore_region_window)。
+  //   limit==0 は「窓なし」。
+  static void set_region_window(context_t &context, uintptr_t base,
+                                uintptr_t limit) {
+    context.region_base = (uint32_t)base;
+    context.region_limit = (uint32_t)limit;
+  }
+  // GRANT_REGION が使う MPU region。0/1 は固定 (board.cpp)、2
+  // 以降は空いている。
+  static constexpr uint32_t GRANT_REGION_INDEX = 2;
   static void stack_limit_set(context_t &context, uintptr_t limit) {
     context.psplim = (uint32_t)limit;
   }
@@ -381,6 +402,10 @@ static_assert(offsetof(armv8m::context_t, psplim) == 104,
               "context_t layout mismatch: psplim offset (asm CTX_PSPLIM)");
 static_assert(offsetof(armv8m::context_t, control) == 108,
               "context_t layout mismatch: control offset (asm CTX_CONTROL)");
+static_assert(offsetof(armv8m::context_t, region_base) == 112,
+              "context_t layout mismatch: region_base offset");
+static_assert(offsetof(armv8m::context_t, region_limit) == 116,
+              "context_t layout mismatch: region_limit offset");
 // 戻り口 (armv8m_ctx.S) が即値で埋め込んでいる ABI 定数との一致。
 static_assert((uintptr_t)shizuku::primitive::RETURN == 2,
               "armv8m_ctx.S の return stub が撃つ番号と一致させること");

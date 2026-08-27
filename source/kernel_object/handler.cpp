@@ -32,6 +32,14 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t, uintptr_t, uintptr_t,
                                        object_error &);
 template <> uint32_t KERNEL_OBJECT::object_protection(uintptr_t) const;
 template <> uint32_t KERNEL_OBJECT::object_affinity(uintptr_t) const;
+template <> uint32_t KERNEL_OBJECT::object_region_base(uintptr_t) const;
+template <> uint32_t KERNEL_OBJECT::object_region_limit(uintptr_t) const;
+template <>
+uintptr_t KERNEL_OBJECT::grant_region(uintptr_t, uintptr_t, uintptr_t,
+                                      object_error &);
+template <>
+uintptr_t KERNEL_OBJECT::set_object_affinity(uintptr_t, uintptr_t,
+                                             object_error &);
 template <>
 uintptr_t KERNEL_OBJECT::export_method(uintptr_t, uintptr_t, object_error &);
 template <>
@@ -108,6 +116,8 @@ template <> void KERNEL_OBJECT::init() {
   for (uintptr_t id = 0; id < OBJECT_COUNT; ++id) {
     m_objects[id].created = false;
     m_objects[id].flags = 0;
+    m_objects[id].region_base = 0;
+    m_objects[id].region_limit = 0;
     m_object_name[id] = nullptr;
     for (uintptr_t method = 0; method < METHOD_COUNT; ++method)
       m_objects[id].methods[method] = nullptr;
@@ -145,7 +155,9 @@ template <> void KERNEL_OBJECT::init() {
   if (!heap)
     KERNEL::BOARD::panic("no room for the object arena");
   arena_init(m_objects_arena, (uintptr_t)heap.value(), OBJECT_ARENA_BYTES);
-  // ブートスレッドが名乗るオブジェクトだけは最初から在るものとして扱う。
+  // KERNEL_OBJECT (0) とブートアプリ ROOT_OBJECT (1) は最初から在るものとして扱う。
+  m_objects[KERNEL_OBJECT_ID].created = true;
+  m_object_name[KERNEL_OBJECT_ID] = "kernel_object";
   m_objects[ROOT_OBJECT].created = true;
   m_object_name[ROOT_OBJECT] = "root";
   for (uintptr_t index = 0; index < STREAM_COUNT; ++index)
@@ -239,7 +251,7 @@ template <> void KERNEL_OBJECT::reply(object_error error, uintptr_t value) {
 template <>
 uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
                                        uintptr_t flags, object_error &error) {
-  if (id >= OBJECT_COUNT || id == ROOT_OBJECT) {
+  if (id >= OBJECT_COUNT || id == KERNEL_OBJECT_ID || id == ROOT_OBJECT) {
     error = object_error::BAD_OBJECT;
     return 0;
   }
@@ -290,6 +302,52 @@ template <> uint32_t KERNEL_OBJECT::object_affinity(uintptr_t id) const {
                     OBJECT_AFFINITY_SHIFT);
 }
 
+// ---- 軸 B (Q8 / DESIGN §11.3) — オブジェクトへ動的に開く読み専用の窓 --------
+// ★生成時の宣言を差し替える。**次の SPAWN から**効く (走っているスレッドの
+//   アフィニティは変えない — 走っている文脈を別コアへ移す手段は無い)。
+template <>
+uintptr_t KERNEL_OBJECT::set_object_affinity(uintptr_t id, uintptr_t cores,
+                                             object_error &error) {
+  if (id >= OBJECT_COUNT || !m_objects[id].created) {
+    error = object_error::BAD_OBJECT;
+    return 0;
+  }
+  table_guard guard;
+  m_objects[id].flags = (m_objects[id].flags & ~(uint32_t)OBJECT_AFFINITY_MASK) |
+                        (uint32_t)((cores << OBJECT_AFFINITY_SHIFT) &
+                                   OBJECT_AFFINITY_MASK);
+  return 1;
+}
+
+template <> uint32_t KERNEL_OBJECT::object_region_base(uintptr_t id) const {
+  return m_objects[id].region_base;
+}
+template <> uint32_t KERNEL_OBJECT::object_region_limit(uintptr_t id) const {
+  return m_objects[id].region_limit;
+}
+
+// ★誰が誰に何を見せるかを決める権限そのものが特権行為。呼び出し元
+//   (現在オブジェクト) が非特権なら、対象がどこであろうと拒否する
+//   (対象を特権にする話ではない — 「開示できる側」の話)。
+template <>
+uintptr_t KERNEL_OBJECT::grant_region(uintptr_t target, uintptr_t base,
+                                      uintptr_t limit, object_error &error) {
+  const uint32_t thread = kernel_instance.current_thread_id();
+  const uintptr_t granter = current_object(thread);
+  if (object_protection(granter) != PROTECTION_PRIVILEGED) {
+    error = object_error::NOT_PRIVILEGED;
+    return 0;
+  }
+  if (target >= OBJECT_COUNT || !m_objects[target].created) {
+    error = object_error::BAD_OBJECT;
+    return 0;
+  }
+  table_guard guard;
+  m_objects[target].region_base = (uint32_t)base;
+  m_objects[target].region_limit = (uint32_t)limit;
+  return 1;
+}
+
 template <>
 uintptr_t KERNEL_OBJECT::export_method(uintptr_t method, uintptr_t entry,
                                        object_error &error) {
@@ -332,7 +390,10 @@ uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
 
   call_request request{};
   request.entry_pc = (uintptr_t)entry;
+  request.callee_object = (uint32_t)id; // ★呼び先オブジェクトID
   request.protection = object_protection(id);
+  request.region_base = object_region_base(id);
+  request.region_limit = object_region_limit(id);
   request.args[0] = argument;
 
   // 台帳へ先に積む (カーネルが失敗したら戻す)。
@@ -416,8 +477,11 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
   request.argument = argument;
   request.protection = object_protection(id);
   request.affinity = object_affinity(id);
+  request.region_base = object_region_base(id);
+  request.region_limit = object_region_limit(id);
   request.stack_base = stack;
   request.stack_bytes = THREAD_STACK_BYTES;
+  request.object_id = (uint32_t)id; // ★所属オブジェクトIDをカーネルに渡す
   const auto spawned = kernel_instance.spawn(request);
   if (spawned.error != kernel_error::OK) {
     table_lock();
@@ -512,7 +576,26 @@ uintptr_t KERNEL_OBJECT::sleep_us(uintptr_t microseconds, object_error &error) {
   const uint32_t self = kernel_instance.current_thread_id();
   const uint64_t deadline = KERNEL::BOARD::time_us() + (uint64_t)microseconds;
   m_wake_at[self] = deadline;
-  while ((int64_t)(deadline - KERNEL::BOARD::time_us()) > 0) {
+  // ★★★**締切だけでは抜けない。止められている間は抜けない** (D57)。
+  //   `suspend()` が保証するのは「**次に選ばれない**」ことだけで、
+  //   **既に CPU を持っている相手には効かない**。ここは
+  //   `schedule()` が候補を見つけられなければ CPU を手放さずに回り続ける
+  //   ループなので、止められていても締切が来れば素通りして、そのまま
+  //   ユーザコードへ戻ってしまう。
+  //   ★実測 (2026-08-26、XNO 13 スレッド): `monitor target` で止めた
+  //     bno055 の周回カウンタが **88/8秒 → 89/8秒** と**まったく減速
+  //     しなかった** (フル速度)。同じファームの blink は止まっていた —
+  //     差は「止めた瞬間に CPU を手放したかどうか」だけだった。
+  //     Shizuku の試験ファームは常時 READY な負荷スレッドが 3 本居るので
+  //     必ず手放しており、そちらでは再現しなかった。
+  //   ★ここを直すのは方針側 (kobj) の仕事。「寝るとはどういうことか」を
+  //     決めているのはここで、カーネルは状態を持つだけ。**あらゆる例外復帰**
+  //     に検査を足す (= 系で一番熱い経路に触る) より、譲る場所で見る方が安い。
+  //   ★止められている間もユーザコードは **1 命令も進まない**。回り続ける
+  //     ぶんは無駄だが、`schedule()` は毎周呼ぶので他が走れるなら譲る。
+  while ((int64_t)(deadline - KERNEL::BOARD::time_us()) > 0 ||
+         kernel_instance.thread_state(self) ==
+             KERNEL::THREAD::state_t::SUSPENDED) {
     // 借り手として走っているなら、貸し手へ返すのが先 (又貸しはしない)。
     if (kernel_instance.grant_active()) {
       ARCH::syscall((uintptr_t)primitive::SWITCH, 0);
@@ -936,6 +1019,12 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
     break;
   case object_api::STREAM_CONNECT:
     value = stream_connect(a1, a2, error);
+    break;
+  case object_api::GRANT_REGION:
+    value = grant_region(a1, a2, a3, error);
+    break;
+  case object_api::SET_OBJECT_AFFINITY:
+    value = set_object_affinity(a1, a2, error);
     break;
   case object_api::SET_BUDGET:
     if (a1 < THREAD_COUNT)

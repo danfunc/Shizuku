@@ -35,6 +35,8 @@ template <typename CONTEXT> struct thread {
   CONTEXT *context = nullptr;
   call_stack_t call_stack;
   uint32_t affinity = 0b1; // bit0 = core0 (どのコアで走ってよいか)
+  uint32_t current_object = 0;
+  bool is_debug_protected = false; // GDB stub/agent bypass
   // ★sleep の起床時刻やスケジューリングの優先度はここに無い。それは方針なので
   //   カーネルオブジェクトが自分の表で持つ (D1)。
 

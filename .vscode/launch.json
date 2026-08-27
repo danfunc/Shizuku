@@ -10,10 +10,22 @@
       // ★★プローブが要らない構成。ファーム自身が DebugMonitor で止まり、
       //   USB CDC 越しに GDB と喋る (modules/pico_sdk_support/objects/gdb_stub.cpp)。
       //   halting debug と違って**止まるのは対象のスレッドだけ**で、他は走り続ける。
-      //   ★繋いだ瞬間から診断出力 ([SELFTEST]/[STRESS]) は止まる — 同じ CDC を
-      //     GDB が使うため。detach すると戻る。
-      //   ★ポート名は環境で変わる (usbmodem101 / usbmodem1101 …)。既定を直すか、
-      //     聞かれたら入れ直すこと。
+      //   ★診断出力は**止まらない**。CDC を 2 本に分けたので (D42)、GDB は
+      //     専用の channel を使う。診断はそのまま流れ続ける。
+      //   ★★**ポートは聞かない**。指しているのは実物ではなく固定名の
+      //     シンボリックリンクで、これを張るのは「Shizuku: 焼く」
+      //     (tools/flash_and_wait.sh)。理由は 2 つ:
+      //     - 番号は**焼くたびに変わり得る** (usbmodem101 / usbmodem1101 を
+      //       実際に行き来した)。直書きすると必ず腐る
+      //     - ★聞く形 (${input:}) だと **VS Code は preLaunchTask より先に
+      //       解決する**ので、「焼く前に聞かれて、焼いた後には別物になって
+      //       いる」という一番困る形になる (実際にそうなっていた)
+      //   ★★★以前 `could not open device: No such file or directory` で
+      //     落ちていた件も同じスクリプトで面倒を見ている (2026-08-24 実測:
+      //     焼いた直後デバイスノードは**約 2.8 秒まるごと消える**。
+      //     picotool の終了 ≠ USB の再列挙完了)。加えて、**止めたのに
+      //     生き残った gdb** がポートを掴んで次を邪魔する件も始末する。
+      //     詳細は tools/flash_and_wait.sh のコメント。
       "name": "Shizuku: 自己ホストデバッグ (プローブ不要)",
       "type": "cppdbg",
       "request": "launch",
@@ -21,7 +33,7 @@
       "program": "${workspaceFolder}/bazel-bin/firmware/shizuku",
       "MIMode": "gdb",
       "miDebuggerPath": "${env:HOME}/.pico-sdk/toolchain/14_2_Rel1/bin/arm-none-eabi-gdb",
-      "miDebuggerServerAddress": "${input:serialPort}",
+      "miDebuggerServerAddress": "/tmp/shizuku-gdb-port",
       "preLaunchTask": "Shizuku: 焼く",
       "externalConsole": false,
       "stopAtEntry": false,
@@ -30,7 +42,22 @@
         // 相対名で引けるようにワークスペースを教える。
         { "text": "directory ${workspaceFolder}" },
         { "text": "set mem inaccessible-by-default off" },
-        { "text": "set remotetimeout 10" }
+        { "text": "set remotetimeout 10" },
+        // ★★non-stop にする (D53)。これが無いと GDB は all-stop =
+        //   「止まったら全部止まっている」前提で動き、**止まっている 1 本しか
+        //   見えない**。non-stop なら全スレッドが並び、走っているものは
+        //   `(running)` と出て、止まっているものへ切り替えて中を見られる。
+        //   ★このカーネルには止めたら系が終わるスレッドが在る (BLE 等) ので、
+        //     そもそも all-stop は選べない。接続**前**に設定すること。
+        //   ★★★以前ここで GDB が
+        //       remote.c: internal-error: mark_async_event_handler:
+        //       Assertion `this->is_async_p ()' failed
+        //     で落ちていたが、**原因は GDB ではなく stub 側だった** —
+        //     握手が済む前に `%Stop` 通知を送っており、GDB が非同期の準備を
+        //     終える前に受け取って落ちていた。最初の `?` に答えるまで通知を
+        //     出さないようにして解決 (gdb_stub.cpp の g_notify_allowed)。
+        { "text": "set mi-async on" },
+        { "text": "set non-stop on" }
       ]
     },
     {
@@ -57,14 +84,6 @@
         { "text": "load" }
       ],
       "stopAtEntry": true
-    }
-  ],
-  "inputs": [
-    {
-      "id": "serialPort",
-      "type": "promptString",
-      "description": "GDB stub が居るシリアルポート (ls /dev/cu.usbmodem* で確認)",
-      "default": "/dev/cu.usbmodem101"
     }
   ]
 }

@@ -1,0 +1,63 @@
+//
+// ble_uart.gatt - Nordic UART Service (NUS)
+//
+// pico_btstack_make_gatt_header() がこのファイルから ble_uart.h を生成する。
+// 生成されるハンドルマクロ:
+//   ATT_CHARACTERISTIC_6E400002_..._01_VALUE_HANDLE              (RX value)
+//   ATT_CHARACTERISTIC_6E400003_..._01_VALUE_HANDLE              (TX value)
+//   ATT_CHARACTERISTIC_6E400003_..._01_CLIENT_CONFIGURATION_HANDLE (TX CCC)
+//
+
+// 標準サービス
+PRIMARY_SERVICE, GAP_SERVICE
+CHARACTERISTIC, GAP_DEVICE_NAME, READ, "Shizuku UART"
+
+PRIMARY_SERVICE, GATT_SERVICE
+CHARACTERISTIC, GATT_DATABASE_HASH, READ,
+// ★Service Changed。**開発中は GATT DB が変わり続ける**のに、ホスト (macOS) は
+//   bonded 端末の DB をキャッシュして再探索しない — characteristic を足しても
+//   相手には見えないままになる (実際 GDB 用の 2 本が見えず、ここで詰まった)。
+//   これがある DB は「変わった」を indicate で伝えられるので、キャッシュを
+//   持つ相手も張り直してくれる。
+CHARACTERISTIC, GATT_SERVICE_CHANGED, INDICATE,
+
+// Nordic UART Service
+PRIMARY_SERVICE, 6E400001-B5A3-F393-E0A9-E50E24DCCA9E
+
+// TX: Peripheral -> Central (Notify)
+CHARACTERISTIC, 6E400003-B5A3-F393-E0A9-E50E24DCCA9E, NOTIFY | DYNAMIC
+
+// RX: Central -> Peripheral (Write / Write Without Response)
+CHARACTERISTIC, 6E400002-B5A3-F393-E0A9-E50E24DCCA9E, WRITE | WRITE_WITHOUT_RESPONSE | DYNAMIC
+
+// ---------------------------------------------------------------------------
+// GDB リンク (RSP)。★NUS と**必ず分ける** — RSP は `$...#xx` の枠付きバイト列で、
+// テレメトリの CSV 行が同じチャネルに挟まると握手ごと壊れる。USB を診断 (ch0) と
+// GDB (ch1) に分けたのと同じ理由・同じ形 (Shizuku D42)。
+// UUID は NUS と揃えた並びで、2 ブロック目だけ 401x にしてある。
+PRIMARY_SERVICE, 6E401001-B5A3-F393-E0A9-E50E24DCCA9E
+
+// GDB TX: Peripheral -> Central (Notify)  = stub の返事
+CHARACTERISTIC, 6E401003-B5A3-F393-E0A9-E50E24DCCA9E, NOTIFY | DYNAMIC
+
+// GDB RX: Central -> Peripheral (Write)   = GDB が撃つ RSP
+CHARACTERISTIC, 6E401002-B5A3-F393-E0A9-E50E24DCCA9E, WRITE | WRITE_WITHOUT_RESPONSE | DYNAMIC
+
+// ---------------------------------------------------------------------------
+// OTA (ファームウェア転送)。★NUS とも GDB とも分ける — 500KB 級のバイト列が
+// テレメトリや RSP と同じチャネルに乗ると、どちらも成立しない。
+// 受信専用なので write のみ (進捗・結果は NUS の notify 側へ行を出す)。
+PRIMARY_SERVICE, 6E402001-B5A3-F393-E0A9-E50E24DCCA9E
+
+// OTA RX: Central -> Peripheral (Write Without Response)
+CHARACTERISTIC, 6E402002-B5A3-F393-E0A9-E50E24DCCA9E, WRITE | WRITE_WITHOUT_RESPONSE | DYNAMIC
+
+// ---------------------------------------------------------------------------
+// 拡張チャネル #2 (Evaluator / Secondary Debug Stream)
+PRIMARY_SERVICE, 6E403001-B5A3-F393-E0A9-E50E24DCCA9E
+
+// CH2 TX: Peripheral -> Central (Notify)
+CHARACTERISTIC, 6E403003-B5A3-F393-E0A9-E50E24DCCA9E, NOTIFY | DYNAMIC
+
+// CH2 RX: Central -> Peripheral (Write / Write Without Response)
+CHARACTERISTIC, 6E403002-B5A3-F393-E0A9-E50E24DCCA9E, WRITE | WRITE_WITHOUT_RESPONSE | DYNAMIC

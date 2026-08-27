@@ -11,9 +11,21 @@
   "tasks": [
     {
       "label": "Shizuku: 焼く",
-      "detail": "bazelisk run //firmware:flash — ビルドしてから書き込む",
+      "detail": "bazelisk run //firmware:flash — ビルドして書き込み、USB が戻るまで待つ",
       "type": "shell",
-      "command": "bazelisk run //firmware:flash",
+      // ★★焼いたあと**シリアルが戻るまで待つ**のが必須 (2026-08-24 実測)。
+      //   picotool が終了した時点では USB はまだ再列挙されておらず、
+      //   デバイスノードは **約 2.8 秒** 消えたままになる
+      //   (実測: t=+6.0s に消え、t=+8.8s に戻った)。ここで待たないと、
+      //   このタスクを preLaunchTask にしている F5 (launch.json) が
+      //   「まだ存在しないポート」を開きに行き、
+      //     Unable to start debugging. ... could not open device:
+      //     No such file or directory
+      //   で落ちる。**焼けていないのではなく、戻る前に掴みに行っただけ**。
+      //   ★消えるのを待ってから戻るのを待つ (2 段構え)。消えるのを待たずに
+      //     「今ある」で判定すると、**再列挙前の古いノードを見て即通過**して
+      //     しまい、結局同じところで落ちる。
+      "command": "tools/flash_and_wait.sh",
       "options": { "cwd": "${workspaceFolder}" },
       "problemMatcher": ["$gcc"],
       "group": { "kind": "build", "isDefault": true },

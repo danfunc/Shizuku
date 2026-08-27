@@ -45,7 +45,8 @@ public:
   //   **その換算はここの意味ではない** — クロックを上げれば同じ数字がより短い
   //   時間になる。それでよい: 縛りたいのは仕事量のほう。
   static constexpr uint32_t DEFAULT_BUDGET_CYCLES = 300000;
-  static constexpr uintptr_t ROOT_OBJECT = 0; // ブートスレッドが名乗るオブジェクト
+  static constexpr uintptr_t KERNEL_OBJECT_ID = 0; // システムコールハンドラ
+  static constexpr uintptr_t ROOT_OBJECT = 1;      // ブートスレッドが名乗るオブジェクト
   static constexpr uintptr_t NO_OBJECT = OBJECT_COUNT;
 
   // 表を初期化する (ブート時・スレッドモード。まだ svc は飛んでこない)。
@@ -152,6 +153,10 @@ private:
 
     uint32_t flags; // OBJECT_* の宣言 (生成時に決まり、以後変わらない)
     method_t methods[METHOD_COUNT];
+    // ★flags と違い、こちらは生成後に変わる (GRANT_REGION で書き換わる)。
+    //   軸 B (Q8)。0/0 = 窓なし。
+    uint32_t region_base;
+    uint32_t region_limit;
   };
   // 名前の置き場。**コピーではなくポインタ**を持つ (kobj は文字列を触らない)。
   const char *m_object_name[OBJECT_COUNT_T];
@@ -214,6 +219,19 @@ private:
   uint32_t object_protection(uintptr_t id) const;
   // そのオブジェクトのスレッドを走らせてよいコア (0 = どこでもよい)。
   uint32_t object_affinity(uintptr_t id) const;
+  // ★軸 B (Q8)。呼び出し元ではなく**対象オブジェクトの性質**として引く —
+  //   object_protection/object_affinity と同じ形。
+  uint32_t object_region_base(uintptr_t id) const;
+  uint32_t object_region_limit(uintptr_t id) const;
+  // target へ [base, limit) の読み専用窓を開示する。呼び出し元 (現在オブジェクト)
+  // が特権でなければ拒否する — 「誰が誰に何を見せるか」を決める権限そのものが
+  // 特権行為 (Q8)。base==limit==0 は「閉じる」。
+  uintptr_t grant_region(uintptr_t target, uintptr_t base, uintptr_t limit,
+                        object_error &error);
+  // 生成時に宣言したアフィニティを差し替える。★次の SPAWN から効く
+  //   (走っているスレッドは動かさない)。D48 の「コアごとに 1 本ずつ」用。
+  uintptr_t set_object_affinity(uintptr_t id, uintptr_t cores,
+                                object_error &error);
   uintptr_t export_method(uintptr_t method, uintptr_t entry,
                           object_error &error);
   uintptr_t call_method(uintptr_t id, uintptr_t method, uintptr_t argument,

@@ -50,6 +50,7 @@ bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   header->prev = thread.call_stack.top;
   header->total_bytes = total;
   header->frame_bytes = frame_bytes;
+  header->caller_object = thread.current_object; // ★呼び出し元オブジェクトを退避
   header->saved = *context; // sp を含めて丸ごと (= 元フレームの位置も記録される)
 
   // ★元の例外フレームは動かさない (I-3)。下へ複製するのは書き換え用の作業コピー。
@@ -80,6 +81,7 @@ bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   // 元の例外フレームは退避域の中に元の位置のまま生きているので、文脈を丸ごと
   // 戻すだけで復帰先が正しく決まる (書き戻しも再配置も不要)。
   const uintptr_t previous = header->prev;
+  thread.current_object = header->caller_object; // ★呼び出し元オブジェクトを復元
   *context = header->saved;
   *frame = context->sp;
   thread.call_stack.top = previous;
@@ -95,12 +97,14 @@ kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
     return kernel_error::BAD_REQUEST;
   if (!call_frame_push(thread, context, frame))
     return kernel_error::NO_STACK;
+  thread.current_object = request.callee_object; // ★呼び先オブジェクトIDへ遷移
   // 戻り口は常にカーネルの 1 本。撃つ svc は同じでも、そこから出たときの段数の
   // パリティで「プリミティブとしての巻き戻し」か「メソッドが戻った知らせ」かが
   // 決まる (発行側が戻り口を選ぶ必要は無い)。
   ARCH::set_entry(**frame, request.entry_pc, ARCH::return_stub());
   ARCH::set_args(**frame, request.args);
   ARCH::set_priv(*context, (request.protection & PROTECTION_UNPRIVILEGED) == 0);
+  ARCH::set_region_window(*context, request.region_base, request.region_limit);
   return kernel_error::OK;
 }
 
@@ -108,14 +112,15 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
   THREAD &thread = current_thread();
   FRAME *frame = context->sp;
 
-  if ((thread.call_stack.depth & 1u) == 0) {
-    // 偶数段 = オブジェクトが走っている。その svc はオブジェクトランドのハンドラへの
+  if (thread.current_object != 0) { // 一般オブジェクト (id >= 1)
+    // 一般オブジェクトが走っている。その svc は KERNEL_OBJECT ハンドラへの
     // **メソッド呼び出し**として届けるだけ。カーネルは番号を解釈しない (I-1) し、
     // 誰が担当かも知らない。
     if (m_object_svc_handler == 0)
       BOARD::panic("no object-land svc handler registered");
     call_request request{};
     request.entry_pc = m_object_svc_handler;
+    request.callee_object = KERNEL_OBJECT_ID;
     request.protection = PROTECTION_PRIVILEGED;
     for (unsigned index = 0; index < 4; ++index)
       request.args[index] = ARCH::arg(*frame, index); // 元の引数をそのまま渡す
@@ -236,7 +241,7 @@ template <> void KERNEL::pendsv_dispatch(KERNEL::CONTEXT *context) {
   //     禁じた手。同じ条件は**フレームの段数のパリティ**で言える — 積むのは
   //     トランポリンと CALL だけなので必ず交互になり、**奇数段 = ハンドラ走行中**
   //     (I-1)。カーネルは「誰か」を知らないまま「今は誰の番か」だけを読む。
-  if ((current_depth() & 1u) != 0u) {
+  if (current_thread().current_object == 0) { // 0 = KERNEL_OBJECT
     grants.frames[grants.depth - 1].remaining = GRANT_RETRY_CYCLES;
     arm_timer();
     return;

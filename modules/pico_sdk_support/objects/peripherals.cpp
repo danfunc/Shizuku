@@ -9,6 +9,7 @@
 //    (名乗って他人のメソッドを生やすことはできない)。
 #include "hardware/adc.h"
 #include "hardware/gpio.h"
+#include "hardware/i2c.h"
 #include "hardware/spi.h"
 #if defined(CYW43_WL_GPIO_LED_PIN)
 #include "pico/cyw43_arch.h" // pico2_w: LED は無線チップ側の GPIO
@@ -116,7 +117,12 @@ uintptr_t led_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   // ★自分のハードウェアは自分で立ち上げる。ここが特権を要る場所:
   //   cyw43_arch_init は PIO/DMA/IRQ を掴んでチップへファームを送り込む。
 #if defined(CYW43_WL_GPIO_LED_PIN)
-  if (::cyw43_arch_init() != 0)
+  // ★診断: BT を有効にしたビルドでここから戻ってこない事例を追っている
+  //   (2026-08-24)。「入った」「返り値」を必ず外に出す。
+  KERNEL::BOARD::diag_printf("[PERIPH] led: cyw43_arch_init() 開始\n");
+  const int arch_rc = ::cyw43_arch_init();
+  KERNEL::BOARD::diag_printf("[PERIPH] led: cyw43_arch_init() -> %d\n", arch_rc);
+  if (arch_rc != 0)
     return LED_ARCH_INIT_FAILED; // 立ち上げ失敗をそのまま合成側へ返す
 #elif defined(PICO_DEFAULT_LED_PIN)
   ::gpio_init(PICO_DEFAULT_LED_PIN);
@@ -197,6 +203,121 @@ uintptr_t spi_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   return failures;
 }
 
+// ---- I2C ------------------------------------------------------------------
+// ★実測知見 (旧実装 flight_robocon_telemetory_sender の i2c_bus): 26 バイトの
+//   バースト読み (BNO055 motion block / BME280 calib) で 2ms タイムアウトは
+//   足りず、100kHz 運用では 10ms 要った。既定値をここでは持たず、呼び出し側
+//   (i2c_config::timeout_us) に委ねる — 用途によって必要な値が変わるため。
+constexpr uint32_t I2C_DEFAULT_TIMEOUT_US = 1000;
+uint32_t g_i2c_timeout_us[2] = {I2C_DEFAULT_TIMEOUT_US, I2C_DEFAULT_TIMEOUT_US};
+
+i2c_inst_t *i2c_instance_of(uint32_t instance) {
+  return instance == 0 ? i2c0 : i2c1;
+}
+
+// ★I2C は 1 本のバスに複数のデバイスがぶら下がる (BNO055/BME280 が同じ
+//   I2C0 を共有する構成が実測で発覚)。CALL_METHOD は呼び出し元スレッドの
+//   コンテキストでそのまま実行されるので、2 つのオブジェクトが自分の
+//   スレッドから同時に CONFIGURE/WRITE_READ 等を叩くと、片方の transaction
+//   (write→repeated start→read) の途中でもう片方が i2c_init や別の
+//   transaction を割り込ませ、両方とも化ける (実測: BNO055 単体では動いて
+//   いたのに BME280 を足した途端どちらも chip id 不一致で初期化失敗した)。
+//   バス単位の CAS ロックで直列化する (待ちは稀なので yield backoff で十分)。
+volatile uint32_t g_i2c_owner[2] = {0, 0}; // 0 = 空き。所有者は caller_thread+1
+constexpr uint32_t I2C_LOCK_BACKOFF_US = 100;
+
+struct i2c_guard {
+  uint32_t instance;
+  explicit i2c_guard(uint32_t inst) : instance(inst) {
+    uint32_t expected = 0;
+    while (!__atomic_compare_exchange_n(&g_i2c_owner[instance], &expected, 1u,
+                                        /*weak=*/true, __ATOMIC_ACQUIRE,
+                                        __ATOMIC_RELAXED)) {
+      expected = 0;
+      api(object_api::YIELD);
+    }
+  }
+  ~i2c_guard() {
+    __atomic_store_n(&g_i2c_owner[instance], 0u, __ATOMIC_RELEASE);
+  }
+  i2c_guard(const i2c_guard &) = delete;
+  i2c_guard &operator=(const i2c_guard &) = delete;
+};
+
+uintptr_t i2c_configure(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+  const i2c_config *config = (const i2c_config *)argument;
+  if (config == nullptr || config->instance > 1)
+    return 0;
+  i2c_guard lock(config->instance);
+  // ★ここが特権を要る場所: i2c_init は RESETS を解除しクロックを設定する。
+  const uint32_t actual =
+      ::i2c_init(i2c_instance_of(config->instance), config->baudrate);
+  ::gpio_set_function(config->sda_pin, GPIO_FUNC_I2C);
+  ::gpio_set_function(config->scl_pin, GPIO_FUNC_I2C);
+  ::gpio_pull_up(config->sda_pin);
+  ::gpio_pull_up(config->scl_pin);
+  g_i2c_timeout_us[config->instance] =
+      config->timeout_us != 0 ? config->timeout_us : I2C_DEFAULT_TIMEOUT_US;
+  return actual; // 実際に設定されたボーレート
+}
+
+uintptr_t i2c_write_method(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+  const i2c_transfer *t = (const i2c_transfer *)argument;
+  if (t == nullptr || t->instance > 1 || t->tx == nullptr || t->tx_len == 0)
+    return 0;
+  i2c_guard lock(t->instance);
+  const int written = ::i2c_write_timeout_us(
+      i2c_instance_of(t->instance), (uint8_t)t->address, t->tx, t->tx_len,
+      false, g_i2c_timeout_us[t->instance]);
+  return written > 0 ? (uintptr_t)written : 0;
+}
+
+uintptr_t i2c_read_method(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+  const i2c_transfer *t = (const i2c_transfer *)argument;
+  if (t == nullptr || t->instance > 1 || t->rx == nullptr || t->rx_len == 0)
+    return 0;
+  i2c_guard lock(t->instance);
+  const int read = ::i2c_read_timeout_us(
+      i2c_instance_of(t->instance), (uint8_t)t->address, t->rx, t->rx_len,
+      false, g_i2c_timeout_us[t->instance]);
+  return read > 0 ? (uintptr_t)read : 0;
+}
+
+// レジスタ読みの定型: tx (通常はレジスタアドレス 1 byte) を no-stop で書き、
+// 続けて rx を読む (repeated start)。BNO055/BME280 等のレジスタ越しセンサは
+// ほぼ全てこの形。
+uintptr_t i2c_write_read_method(uintptr_t argument, uintptr_t, uintptr_t,
+                                uintptr_t) {
+  const i2c_transfer *t = (const i2c_transfer *)argument;
+  if (t == nullptr || t->instance > 1 || t->tx == nullptr || t->tx_len == 0 ||
+      t->rx == nullptr || t->rx_len == 0)
+    return 0;
+  i2c_guard lock(t->instance);
+  i2c_inst_t *bus = i2c_instance_of(t->instance);
+  const uint32_t timeout = g_i2c_timeout_us[t->instance];
+  const int written = ::i2c_write_timeout_us(bus, (uint8_t)t->address, t->tx,
+                                             t->tx_len, true /*no stop*/,
+                                             timeout);
+  if (written != (int)t->tx_len)
+    return 0;
+  const int read = ::i2c_read_timeout_us(bus, (uint8_t)t->address, t->rx,
+                                         t->rx_len, false, timeout);
+  return read > 0 ? (uintptr_t)read : 0;
+}
+
+uintptr_t i2c_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  uintptr_t failures = declare_name("i2c");
+  failures += export_method((uintptr_t)i2c_method::CONFIGURE,
+                            (uintptr_t)&i2c_configure);
+  failures +=
+      export_method((uintptr_t)i2c_method::WRITE, (uintptr_t)&i2c_write_method);
+  failures +=
+      export_method((uintptr_t)i2c_method::READ, (uintptr_t)&i2c_read_method);
+  failures += export_method((uintptr_t)i2c_method::WRITE_READ,
+                            (uintptr_t)&i2c_write_read_method);
+  return failures;
+}
+
 } // namespace
 
 uint32_t register_peripherals() {
@@ -206,6 +327,7 @@ uint32_t register_peripherals() {
     uintptr_t (*main)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
   } const entries[] = {{"gpio", GPIO_OBJECT, gpio_main},
                        {"spi", SPI_OBJECT, spi_main},
+                       {"i2c", I2C_OBJECT, i2c_main},
                        {"led", LED_OBJECT, led_main},
                        {"temperature", TEMPERATURE_OBJECT, temperature_main}};
 

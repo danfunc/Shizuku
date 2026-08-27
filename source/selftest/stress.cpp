@@ -171,7 +171,7 @@ uintptr_t blink(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 
 } // namespace
 
-void stress_launch() {
+uint32_t stress_launch() {
   // ★blink は LED = CYW43 を叩く。CYW43 は**初期化したコアからしか触れない**ので
   //   core0 に固定する。実測でここを外すと、blink が core1 へ移った瞬間に
   //   pico-sdk の assert が発火してそのスレッドが止まった (系は継続した)。
@@ -204,6 +204,7 @@ void stress_launch() {
 
   BOARD::diag_printf("[STRESS] blink thread=%lu, 3 load threads running\n",
                      (unsigned long)blink_thread);
+  return (uint32_t)blink_thread;
 }
 
 } // namespace selftest

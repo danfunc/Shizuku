@@ -56,6 +56,12 @@
 // 切替えたかもしれない)、context_t から復元して例外復帰する。
 // ---------------------------------------------------------------------------
 .macro CTX_RESTORE
+    // ★GDB stub の 1 命令実行はここで立てる。「次の 1 命令」はこの直後に
+    //   復帰する文脈のものと確定しているので、対象を取り違えない
+    //   (立てる場所を間違えると「呼び出し側自身が刻まれる」— 実測で踏んだ)。
+    bl   shizuku_arm_pending_step
+    // ★Q8 (DESIGN §11.3)。同じ理由で「次に復帰する文脈が確定した今」書く。
+    bl   shizuku_restore_region_window
     bl   shizuku_current_context  // r0 = 復帰対象 context (別スレッドかもしれない)
 
     // 整数 callee-saved と PSP を復元

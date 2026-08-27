@@ -26,6 +26,8 @@ template <> void KERNEL::fault_dispatch(KERNEL::CONTEXT *);
 template <> void KERNEL::debug_dispatch(KERNEL::CONTEXT *);
 template <> void KERNEL::suspend(uint32_t);
 template <> void KERNEL::resume(uint32_t);
+template <> void KERNEL::arm_step(uint32_t);
+template <> void KERNEL::consume_pending_step();
 
 // ---- 貸してもらった記憶をスレッド表として据える ----------------------------
 // ★所有はオブジェクトランド、保護はここで検査する。カーネルの簿記が非特権から
@@ -69,6 +71,7 @@ KERNEL::spawn_result KERNEL::spawn(const KERNEL::spawn_request &request) {
   thread.context = &m_threads[index].context;
   *thread.context = CONTEXT{};
   thread.call_stack = {};
+  thread.current_object = request.object_id; // ★READYを公開する前に確実に設定
   // ★既定は**全コア**。core0 固定を既定にすると「渡す機構が効いている」ことを
   //   確かめられない (決めた通りに動いただけになる)。固定したい相手は明示する。
   thread.affinity = request.affinity == 0
@@ -78,6 +81,8 @@ KERNEL::spawn_result KERNEL::spawn(const KERNEL::spawn_request &request) {
                         (request.stack_base + 7) & ~(uintptr_t)7);
   ARCH::set_priv(*thread.context,
                  (request.protection & PROTECTION_UNPRIVILEGED) == 0);
+  ARCH::set_region_window(*thread.context, request.region_base,
+                          request.region_limit);
   // 最初の 1 回は「例外から復帰してきた」ように見せかける必要があるので、
   // 例外フレームを自分で組み立てる。戻り口は普通の呼び出しと同じ 1 本
   // (スレッドの入口が return したときは戻り先が無いので、受け取ったカーネル
@@ -161,8 +166,13 @@ template <> kernel_error KERNEL::do_switch(uint32_t target) {
   m_current[core] = target;
   // 渡した側は READY へ。release 以降、他コアが拾ってよい (自分の文脈の退避は
   // 例外入口が済ませている)。
-  ARCH::store_release32(&m_threads[current].thread.state,
-                        (uint32_t)THREAD::state_t::READY);
+  // ★★**RUNNING だったときだけ**戻す (D54)。無条件に READY を書くと、
+  //   デバッガが直前に立てた SUSPENDED を**上書きして復活させる** —
+  //   「止めたのに走り続ける」の経路の 1 つがこれだった。CAS にするのは、
+  //   状態を変えてよいのが「今 RUNNING である」場合に限るから。
+  ARCH::cas32(&m_threads[current].thread.state,
+              (uint32_t)THREAD::state_t::RUNNING,
+              (uint32_t)THREAD::state_t::READY);
   return kernel_error::OK;
 }
 
@@ -214,7 +224,12 @@ template <> void KERNEL::grant_unwind(grant_end reason) {
   // 貸し手が待っていた syscall の戻り値を書く (a0 は貸した時点で OK 済み)。
   ARCH::set_result(*m_threads[lender].thread.context->sp, (uintptr_t)kernel_error::OK,
                    (uintptr_t)reason);
-  m_threads[lender].thread.set_state(THREAD::state_t::RUNNING);
+  // ★★貸し手が**止められている**なら RUNNING へ戻さない (D54)。戻すと
+  //   デバッガの停止が無かったことになる (「止めたのに走り続ける」の経路の
+  //   1 つがこれだった)。状態を残しておけば、次に schedule() が候補を選ぶとき
+  //   READY でないので拾われない。
+  if (!m_threads[lender].thread.is_state(THREAD::state_t::SUSPENDED))
+    m_threads[lender].thread.set_state(THREAD::state_t::RUNNING);
   m_current[core] = lender;
   // 借り手を返す。走り終えていたらそのまま (終了させたスレッドを生き返らせない)。
   if (m_threads[borrower].thread.is_state(THREAD::state_t::RUNNING))
@@ -335,6 +350,12 @@ template <> void KERNEL::resume(uint32_t thread) {
 template <> void KERNEL::debug_dispatch(KERNEL::CONTEXT *context) {
   const uint32_t core = BOARD::core_num();
   const uint32_t thread = m_current[core];
+  if (thread < m_thread_count && m_threads[thread].thread.is_debug_protected) {
+    // デバッガ自身がブレークポイントを踏んだ場合は無視して継続
+    // (そうしないとデッドロックや無限ループになる)
+    return;
+  }
+
   m_debug.count++;
   m_debug.thread = thread;
   m_debug.pc = ARCH::frame_pc(*context->sp);
@@ -370,6 +391,24 @@ template <> void KERNEL::debug_dispatch(KERNEL::CONTEXT *context) {
   //   記録は残っているので、止められなかったことは後から分かる。
   resume(thread);
   m_debug.reason |= DEBUG_NOT_STOPPED;
+}
+
+// ★★1 命令だけ実行させたい対象を予約する。ここでは MON_STEP を立てない
+//   (理由はヘッダのコメント通り)。単に「次にこの文脈へ復帰するときに立てて」
+//   と書き置くだけ。
+template <> void KERNEL::arm_step(uint32_t thread) {
+  ARCH::store_release32(&m_step_target, thread);
+}
+
+// ISA 層の CTX_RESTORE から**あらゆる復帰経路**で毎回呼ばれる。復帰しようと
+// している文脈がちょうど予約した相手のときだけ、ここで初めて MON_STEP を
+// 立てる — こうすると「次の 1 命令」が確実に対象自身の命令になる。
+// ★CAS で消費する: 2 コアが同時に別の文脈を復帰させても、この予約を
+//   誤って 2 回消費したり、無関係な文脈へ誤爆したりしない。
+template <> void KERNEL::consume_pending_step() {
+  const uint32_t thread = m_current[BOARD::core_num()];
+  if (ARCH::cas32(&m_step_target, thread, NO_STEP_TARGET))
+    ARCH::debug_step(true);
 }
 
 template <> void KERNEL::fault_dispatch(KERNEL::CONTEXT *context) {

@@ -10,4 +10,21 @@
 // 診断で「どの速度で喋っているか」を出すために持たせる。
 #define SHIZUKU_CYW43_SCK_KHZ @SCK@
 
+// ★panic() の既定 (pico_platform_panic/panic.c) はメッセージを出したら
+//   bkpt #0 で止まるだけ — レジスタもどこで壊れたかも残らない。
+//   PICO_PANIC_FUNCTION を差し替えて、board.cpp の shizuku_panic_dump に
+//   飛ばす (呼び出し元の LR / SP / どのコア・スレッドかを診断へ残してから
+//   自前で割り込みを止めて完全に停止する)。
+#define PICO_PANIC_FUNCTION shizuku_panic_dump
+
+// ★btstack の bonding (ペアリング鍵) 永続化を pico-sdk 標準の
+//   pico_flash_bank_instance() (PICO_FLASH_BANK_STORAGE_OFFSET 等、
+//   全翻訳単位に効くここ経由でしか設定できない) で試したところ、実機で
+//   `assertion "false" failed` (i2c 登録直後・LED より前、flash-bank の
+//   コードがまだ呼ばれていないはずの地点) を踏んだため撤回した
+//   (2026-08-24)。3 回目の試行では flight_robocon_telemetory_sender の
+//   ble_uart.cpp が `hal_flash_bank_t` を自前実装し、ここを一切使わない
+//   形にした。詳細は ble_uart.cpp 冒頭コメント、
+//   ~/.claude/plans/ancient-cuddling-adleman.md の Phase C.6/C.7 参照。
+
 #endif // SHIZUKU_PICO_CONFIG_EXTRA_HEADERS_H

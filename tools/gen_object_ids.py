@@ -32,7 +32,7 @@ def main():
 
     seen = {}
     lines = []
-    index = 1  # 0 はブートスレッドが名乗る root で予約
+    index = 2  # 0 は KERNEL_OBJECT, 1 はブートスレッド (ROOT_OBJECT) で予約
     for path in sorted(args.lists):
         for name in read_names(path):
             if name in seen:

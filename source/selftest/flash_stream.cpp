@@ -2,13 +2,17 @@
 //  非特権オブジェクトが flash をストリーム越しに読み書きできるか (DESIGN §11.2 / §13)
 // ===========================================================================
 //  ★これが「制御はメソッド、データはストリーム」に分けた理由そのもの:
-//    - **読み**は extent (XIP アドレス + 長さ) が流れる。XIP は region0 が
-//      読み出しを全員に許しているので、非特権のまま**直接読める**。写さない
+//    - **読み**は extent (XIP アドレス + 長さ) が流れる。写さない
 //    - **書き**は非特権ではフラッシュを焼けない。だからバイトをストリームへ流し、
 //      特権側の書き手が汲んで焼く。流し込む側は 33ms を一度も待たない
 //  ★確かめるのは「動いた」ではなく「**非特権のまま**動いた」。対象自身に
 //    CONTROL を読ませて申告させる (§11.2.0 の教訓: 特権のまま走った計測を
 //    「非特権で動いた」と読み違えた事故がある)。
+//  ★★2026-08-24 (Q8): region0 は**ファーム本体の範囲だけ**になった。flash_fs の
+//    データは region0 の外なので、開いた本人が GRANT_REGION で自分の extent を
+//    明示的に開示しないと、直接ポインタで読んでも落ちる (docs/03_porting_policy.md
+//    Q8)。「開いたその extent だけ読める」ことを、正当な読みと拒否のテストの
+//    両方で確かめる。
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/object_ids.hpp"
@@ -26,6 +30,7 @@ using BOARD = KERNEL::BOARD;
 constexpr uintptr_t OBJECT_WRITER = object_id::unpriv_writer;
 constexpr uintptr_t OBJECT_READER = object_id::unpriv_reader;
 constexpr uintptr_t OBJECT_SINK = object_id::unpriv_sink;
+constexpr uintptr_t OBJECT_TRESPASSER = object_id::flash_trespasser;
 constexpr uint32_t PAYLOAD_BYTES = 300; // ページ 1 枚を跨がせる
 
 struct api_result {
@@ -90,6 +95,15 @@ uintptr_t unprivileged_sink(uintptr_t descriptor, uintptr_t, uintptr_t,
   return sum;
 }
 
+// ★拒否のテスト (Q8)。GRANT_REGION された extent の**外**を直接ポインタで
+//   読もうとしたら落ちること。触る先は「自分の extent のすぐ 1 バイト先」—
+//   flash_fs のデータ領域の中ではあるが、この対象には開示していない場所。
+//   (docs/selftest/unprivileged.cpp と同じ形: 別スレッドで走らせ、系は続ける)。
+uintptr_t flash_trespasser(uintptr_t address, uintptr_t, uintptr_t, uintptr_t) {
+  const volatile uint8_t *forbidden = (const volatile uint8_t *)address;
+  return *forbidden; // ここで落ちるのが正しい
+}
+
 void check(const char *name, bool ok, unsigned long got, unsigned long want) {
   if (ok) {
     ++passed;
@@ -112,6 +126,8 @@ void flash_stream_ladder() {
       OBJECT_UNPRIVILEGED);
   api(object_api::CREATE_OBJECT, OBJECT_SINK, (uintptr_t)&unprivileged_sink,
       OBJECT_UNPRIVILEGED);
+  api(object_api::CREATE_OBJECT, OBJECT_TRESPASSER,
+      (uintptr_t)&flash_trespasser, OBJECT_UNPRIVILEGED);
 
   // ---- 書き: 非特権がバイトを流し、特権側が焼く ----------------------------
   flash_open opening{"unpriv.bin", 4096, 0, 0, 0, 0};
@@ -148,6 +164,15 @@ void flash_stream_ladder() {
         (unsigned long)PAYLOAD_BYTES);
   if (opened_read.value == 0)
     return;
+  // ★Q8: region0 の外なので、読む本人 (OBJECT_READER) へ明示的に開示する。
+  //   開示するのはこちら (特権で走っている選テストコード自身) — 「誰が誰に
+  //   何を見せるか」を決めるのは特権行為 (call_method の呼び出し元ではなく、
+  //   対象オブジェクトの性質として効く)。
+  const api_result granted =
+      api(object_api::GRANT_REGION, OBJECT_READER, reading.address,
+          reading.address + reading.records);
+  check("flash stream: granted the reader its own extent", granted.value == 1,
+        (unsigned long)granted.value, 1);
   const api_result read_desc = api(object_api::STREAM_OPEN, reading.stream);
   const api_result got =
       api(object_api::CALL_METHOD, OBJECT_READER, 0, read_desc.value);
@@ -214,6 +239,66 @@ void flash_stream_ladder() {
     // ★★本命。CPU が 1 バイトも写さずに、flash の中身が受け手の環まで届いた。
     check("connect: the bytes are the ones in flash", sum == want,
           (unsigned long)sum, (unsigned long)want);
+  }
+
+  // ---- 拒否: 開示された extent の外を読もうとしたら落ちる (Q8) --------------
+  {
+    // ★同じファイルを、境界を確かめるために narrow に開き直す。開示するのは
+    //   ちょうどこの extent だけ — grant の外なので、region の外 = 特権のみに
+    //   落ちるはず。
+    // ★★狙う先は extent の**ちょうど 1 バイト先ではない**。PMSAv8 は 32B 粒度
+    //   なので、1 バイト外はハードウェアの丸め次第でたまたま同じブロックに
+    //   収まり、落ちないことがある (実測で踏んだ — 境界ちょうどは粒度の限界で
+    //   判定できない)。粒度の余地を確実に超える先 (1 ページ = 4096B 先、まだ
+    //   flash_fs のデータ領域の中だが自分には開示されていない場所) を狙う。
+    flash_open bounded{"unpriv.bin", 0, 1, 0, 0, 0};
+    api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
+        (uintptr_t)flash_fs_method::OPEN_READ, (uintptr_t)&bounded);
+    const uintptr_t extent_end = bounded.address + bounded.records;
+    const uintptr_t trespass_address = extent_end + 4096;
+    api(object_api::GRANT_REGION, OBJECT_TRESPASSER, bounded.address,
+        extent_end);
+
+    const auto faults_before = kernel_instance.faults().count;
+    // ★**別スレッドで**走らせる (unprivileged.cpp と同じ理由: 落ちるのは
+    //   スレッド単位なので、呼び出しで試すと自分ごと止まってテストの続きが
+    //   走れない)。
+    const auto spawned = ARCH::syscall((uintptr_t)object_api::SPAWN,
+                                       OBJECT_TRESPASSER, 0, trespass_address);
+    for (uint32_t guard = 0;
+         guard < 200 && kernel_instance.faults().count == faults_before;
+         ++guard)
+      ARCH::syscall((uintptr_t)object_api::YIELD);
+
+    const auto &record = kernel_instance.faults();
+    check("deny: reading past the granted extent faults",
+          record.count == faults_before + 1, (unsigned long)record.count,
+          (unsigned long)(faults_before + 1));
+    check("deny: the offending thread was stopped",
+          record.thread == spawned.value, (unsigned long)record.thread,
+          (unsigned long)spawned.value);
+    BOARD::diag_printf(
+        "[SELFTEST] deny: flash extent [%08lx,%08lx) trespass at %08lx "
+        "stopped thread %lu cfsr=%08lx\n",
+        (unsigned long)bounded.address, (unsigned long)extent_end,
+        (unsigned long)trespass_address, (unsigned long)record.thread,
+        (unsigned long)record.status);
+
+    // ---- 対照: 同じ extent の**中**なら読める (境界そのものを確かめる) ------
+    const auto in_bounds_faults = kernel_instance.faults().count;
+    const auto in_bounds = ARCH::syscall((uintptr_t)object_api::SPAWN,
+                                         OBJECT_TRESPASSER, 0,
+                                         extent_end - 1);
+    for (uint32_t guard = 0; guard < 200; ++guard) {
+      ARCH::syscall((uintptr_t)object_api::YIELD);
+      if (kernel_instance.thread_state((uint32_t)in_bounds.value) ==
+          KERNEL::THREAD::state_t::TERMINATED)
+        break;
+    }
+    check("deny: the last byte inside the extent does not fault",
+          kernel_instance.faults().count == in_bounds_faults,
+          (unsigned long)kernel_instance.faults().count,
+          (unsigned long)in_bounds_faults);
   }
 
   BOARD::diag_printf("[SELFTEST] flash stream ladder done\n");

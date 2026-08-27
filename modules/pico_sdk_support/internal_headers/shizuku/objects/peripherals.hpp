@@ -23,6 +23,7 @@ namespace objects {
 // shizuku/objects/flash_fs.hpp に集約してある** — 散らすと衝突に気づけない。
 constexpr uintptr_t GPIO_OBJECT = object_id::gpio;
 constexpr uintptr_t SPI_OBJECT = object_id::spi;
+constexpr uintptr_t I2C_OBJECT = object_id::i2c;
 // ボード上の LED。**どのピンに繋がっているか (あるいは GPIO ですらないか) を
 // 隠す**のがこのオブジェクトの仕事: pico2 は GPIO 25、pico2_w は CYW43 チップの
 // WL_GPIO0 で、後者は GPIO を叩いても光らない。呼ぶ側はどちらか知らなくてよい。
@@ -41,6 +42,15 @@ enum struct spi_method : uintptr_t {
   MAIN = 0,
   CONFIGURE = 1, // a0 = spi_config*
   TRANSFER = 2,  // a0 = spi_transfer* (戻り値 = 転送したバイト数)
+};
+enum struct i2c_method : uintptr_t {
+  MAIN = 0,
+  CONFIGURE = 1,  // a0 = i2c_config*
+  WRITE = 2,      // a0 = i2c_transfer* (rx は無視。戻り値 = 書けたバイト数、失敗時 0)
+  READ = 3,       // a0 = i2c_transfer* (tx は無視。戻り値 = 読めたバイト数、失敗時 0)
+  // レジスタ読みの定型 (tx = レジスタアドレス列を no-stop で書き、続けて rx を
+  // 読む)。BNO055 等の burst read はこれを使う。
+  WRITE_READ = 4, // a0 = i2c_transfer* (tx/tx_len と rx/rx_len の両方を使う)
 };
 
 enum struct led_method : uintptr_t {
@@ -76,6 +86,26 @@ struct spi_transfer {
   const uint8_t *tx; // nullptr なら 0 を送る
   uint8_t *rx;       // nullptr なら読み捨てる
   uint32_t length;
+};
+
+struct i2c_config {
+  uint32_t instance;   // 0 = i2c0, 1 = i2c1
+  uint32_t baudrate;   // [Hz]
+  uint32_t sda_pin;
+  uint32_t scl_pin;
+  // ★I2C はバス busy/NACK で本当に固まることがある実測知見 (BNO055/BME280 の
+  //   26 バイトバースト読みで 2ms は足りず 10ms 要った)。呼び出し側が用途に
+  //   応じて指定すること。0 なら 1000us を既定値として使う。
+  uint32_t timeout_us;
+};
+
+struct i2c_transfer {
+  uint32_t instance;
+  uint32_t address;    // 7bit スレーブアドレス
+  const uint8_t *tx;
+  uint32_t tx_len;
+  uint8_t *rx;
+  uint32_t rx_len;
 };
 
 // 合成側 (ブート後のスレッドモード) から呼ぶ。オブジェクトを生成し、各自の main を

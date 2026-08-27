@@ -16,6 +16,7 @@ template <> void KERNEL::init() {
     m_current[core] = 0;
     m_armed[core] = 0;
   }
+  m_step_target = NO_STEP_TARGET;
   m_object_svc_handler = 0;
   m_recovery_thread = 0;
   m_faults = {};
@@ -38,6 +39,7 @@ template <> void KERNEL::bootstrap(void (*entry)(), uintptr_t stack_base,
   THREAD &thread = m_threads[0].thread;
   thread.context = &m_threads[0].context;
   thread.call_stack = {};
+  thread.current_object = 1; // ROOT_OBJECT (1)
   thread.set_state(THREAD::state_t::RUNNING);
   ARCH::stack_limit_set(*thread.context, limit);
   ARCH::set_priv(*thread.context, true);
@@ -65,6 +67,7 @@ void KERNEL::bootstrap_secondary(uint32_t thread, void (*entry)(),
   THREAD &adopted = m_threads[thread].thread;
   adopted.context = &m_threads[thread].context;
   adopted.call_stack = {};
+  adopted.current_object = 1; // ROOT_OBJECT (1)
   // ★このコアでしか走らせない。他コアが拾うと、今この CPU が走らせている文脈を
   //   別コアが同時に走らせることになる (claim の CAS は「READY を取る」ための
   //   ものであって、既に走っているものは守れない)。

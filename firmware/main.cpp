@@ -48,11 +48,15 @@ void shizuku::app_entry() {
   //   揺らぐかを見る (静かな系で測っても揺らぎの話にならない)。
   shizuku::apps::start_thermal();
 
-  // ★GDB stub。繋がれるまでは何もしない (繋がれた瞬間に診断出力を GDB へ譲る)。
-  shizuku::objects::start_gdb_stub();
-
   // 負荷試験を起動する。以後、点滅と報告は専用スレッドが行う。
-  shizuku::selftest::stress_launch();
+  const uint32_t blink_thread = shizuku::selftest::stress_launch();
+
+  // ★GDB stub。繋がれるまでは何もしない (繋がれた瞬間に診断出力を GDB へ譲る)。
+  // ★★2026-08-24 デモ用: 合成の debuggee ではなく実在の blink (LED を叩く
+  //   スレッド) を対象にする。attach するだけで LED が目に見えて止まり、
+  //   detach で再開する — DebugMonitor が「そのスレッドだけ」止めることの
+  //   一番分かりやすい確認 (docs/03_porting_policy.md D43)。
+  shizuku::objects::start_gdb_stub(blink_thread);
 
   // ★スレッド 0 は以後アイドル役に徹する。誰かが走れるなら渡し、誰も居なければ
   //   空回りするだけ。**ここで自分が仕事をしてはいけない** — アイドルが仕事を
