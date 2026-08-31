@@ -141,6 +141,16 @@ public:
   // スレッドを終了させる (走り終えた / 隔離する)。今のコアが走らせているスレッドを
   // 終了させた場合は、次に誰かへ切り替わるまでこのコアは何もしない。
   void terminate(uint32_t thread);
+  // ★**READY からのみ**終了させる (取れたら true)。「他人を終わらせて記憶を
+  //   返してよいか」を一手で決めるための口 (D55)。READY はこの系では
+  //   「文脈の退避が済み、どのコアも走らせていない」を意味するので、
+  //   これが CAS で取れた瞬間だけが足場を返してよい瞬間になる。
+  //   ★RUNNING / WAIT_GRANT からは取らない: 前者は他コアが今その足場で
+  //     走っており、後者は貸し手として巻き取りを待っている。
+  //   ★SUSPENDED からも取らない。あれは**デバッガの持ち物**なので、
+  //     こちらが横から終わらせるとデバッガが止めた相手が消える。
+  //     デバッガが再開して READY へ戻したところで、こちらの番が来る。
+  bool terminate_if_idle(uint32_t thread);
 
   // ---- ISA 層 (例外入口) から呼ばれる ----
   CONTEXT *current_context();
@@ -180,6 +190,9 @@ public:
   // 段階でカーネルオブジェクトが教えておく (カーネルは選ばない)。
   void set_recovery_thread(uint32_t thread);
 
+  bool thread_debug_protected(uint32_t thread) const {
+    return thread < m_thread_count && m_threads[thread].thread.is_debug_protected;
+  }
   void set_thread_debug_protected(uint32_t thread, bool is_protected) {
     if (thread < m_thread_count)
       m_threads[thread].thread.is_debug_protected = is_protected;
@@ -196,7 +209,14 @@ public:
   uint32_t thread_affinity(uint32_t thread) const {
     return m_threads[thread].thread.affinity;
   }
-  void set_thread_object(uint32_t thread, uint32_t obj) { m_threads[thread].thread.current_object = obj; }
+  void set_thread_object(uint32_t thread, uint32_t obj) {
+    m_threads[thread].thread.current_object = obj;
+  }
+  // その枠が今何代目か。★スレッド番号を控える側は、これも一緒に控えて
+  //   使う直前に突き合わせること (番号だけでは使い回しに気づけない)。
+  uint32_t thread_generation(uint32_t thread) const {
+    return thread < m_thread_count ? m_threads[thread].thread.generation : 0;
+  }
   typename THREAD::state_t thread_state(uint32_t thread) const {
     return (typename THREAD::state_t)m_threads[thread].thread.state;
   }

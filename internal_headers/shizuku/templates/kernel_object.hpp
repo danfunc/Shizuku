@@ -184,6 +184,10 @@ private:
   volatile uint32_t m_pump_lock;
 
   // per-thread の「今どのオブジェクトとして走っているか」の台帳。
+  //  ★★スレッド自身のスタック上の呼び出しフレームから導出してはいけない。
+  //    フレームは非特権オブジェクトが読み書きできる場所に住んでいるので、
+  //    そこから identity を読むと**自分の呼び出し元を書き換えて他人を騙れる**。
+  //    台帳をこちら側 (非特権から届かない場所) に持つのが偽装できない根拠。
   struct shadow_t {
     uint16_t object[MAX_DEPTH]; // 呼び出しごとの呼び先
     uint16_t caller[MAX_DEPTH]; // その呼び出しの発行元 (identity)
@@ -212,9 +216,9 @@ private:
                          object_error &error);
   uintptr_t yield_to(uintptr_t target, object_error &error);
   uintptr_t sleep_us(uintptr_t microseconds, object_error &error);
-  uintptr_t run_for(uintptr_t thread, uintptr_t cycles,
-                    object_error &error);
+  uintptr_t run_for(uintptr_t thread, uintptr_t cycles, object_error &error);
   void exit_thread();
+  uintptr_t kill_thread(uintptr_t thread, object_error &error);
   // そのオブジェクトを走らせるときの保護指定 (PROTECTION_*)。
   uint32_t object_protection(uintptr_t id) const;
   // そのオブジェクトのスレッドを走らせてよいコア (0 = どこでもよい)。
@@ -259,6 +263,12 @@ private:
   shadow_t m_shadow[THREAD_COUNT];
   // スレッドごとの「どのオブジェクトのために作ったか」。方針側の台帳なのでここ。
   uint16_t m_thread_object[THREAD_COUNT];
+  // 停止要求が出ているスレッド。★要求と回収を分けるための旗 (D55)。
+  //   KILL_THREAD は suspend を撃ってここに印を付けるだけで、記憶を返すのは
+  //   schedule() が「どのコアでも走っていない」ことを確かめたあと。
+  //   ★錠の外からも読む (schedule の走査) ので volatile。見落としても
+  //     次の周回で拾えるだけなので、原子性までは要らない。
+  volatile uint8_t m_kill_pending[THREAD_COUNT];
   // ★起床時刻と時限は**方針**なのでカーネルではなくここが持つ (D1)。
   //   カーネルは「渡す機構」しか持たず、誰をいつ走らせるかは知らない。
   uint64_t m_wake_at[THREAD_COUNT];

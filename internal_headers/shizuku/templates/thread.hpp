@@ -36,6 +36,11 @@ template <typename CONTEXT> struct thread {
   call_stack_t call_stack;
   uint32_t affinity = 0b1; // bit0 = core0 (どのコアで走ってよいか)
   uint32_t current_object = 0;
+  // ★枠が使い回されたことを外から見分けるための番号。release のたびに 1 進む。
+  //   スレッド番号だけを控えていると、控えた相手が終わって同じ番号に別の
+  //   スレッドが入ったとき、**控えた側は気づけない** (デバッガが止めたつもりの
+  //   相手が既に別人、という形で効く)。番号 + 世代なら食い違いが検出できる。
+  uint32_t generation = 0;
   bool is_debug_protected = false; // GDB stub/agent bypass
   // ★sleep の起床時刻やスケジューリングの優先度はここに無い。それは方針なので
   //   カーネルオブジェクトが自分の表で持つ (D1)。

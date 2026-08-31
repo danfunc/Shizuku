@@ -54,6 +54,8 @@ template <> uintptr_t KERNEL_OBJECT::sleep_us(uintptr_t, object_error &);
 template <>
 uintptr_t KERNEL_OBJECT::run_for(uintptr_t, uintptr_t, object_error &);
 template <> void KERNEL_OBJECT::exit_thread();
+template <>
+uintptr_t KERNEL_OBJECT::kill_thread(uintptr_t thread, object_error &error);
 template <> bool KERNEL_OBJECT::schedule(uint32_t);
 template <> void KERNEL_OBJECT::table_lock();
 template <> void KERNEL_OBJECT::table_unlock();
@@ -124,6 +126,7 @@ template <> void KERNEL_OBJECT::init() {
   }
   for (uintptr_t thread = 0; thread < THREAD_COUNT; ++thread) {
     m_shadow[thread].depth = 0;
+    m_kill_pending[thread] = 0;
     m_thread_object[thread] = (uint16_t)ROOT_OBJECT;
     m_wake_at[thread] = 0;
     // 既定は量つき。自分から返さないスレッドがいても系が凍らないようにする
@@ -255,12 +258,23 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
     error = object_error::BAD_OBJECT;
     return 0;
   }
+  // ★既にある番号に**上書きで**生成する要求 (動的ロードの入れ替え) は、
+  //   その番号を持っている誰かを黙って乗っ取る行為なので、特権オブジェクト
+  //   だけに許す。名前を付けずにビットだけ立てると、衝突の検出 (下) を
+  //   素通りする抜け道が無名のまま残る。
+  const bool replace = (flags & OBJECT_REPLACE) != 0;
+  if (replace &&
+      object_protection(current_object(kernel_instance.current_thread_id())) !=
+          PROTECTION_PRIVILEGED) {
+    error = object_error::NOT_PRIVILEGED;
+    return 0;
+  }
   const char *taken_by = nullptr;
   {
     table_guard guard;
-    if (!m_objects[id].created) {
+    if (!m_objects[id].created || replace) {
       m_objects[id].created = true;
-      m_objects[id].flags = (uint32_t)flags;
+      m_objects[id].flags = (uint32_t)(flags & ~OBJECT_REPLACE);
       // 最初のメソッドは生成側が与える (オブジェクト自身はまだ走っていないので
       // 自分では登録できない)。以後は EXPORT_METHOD で自分が増やす。
       m_objects[id].methods[0] = (method_t)entry;
@@ -516,9 +530,54 @@ template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
   //   (専用スレッドにすると、それ自体が予算を食う口になる)。
   pump_connections();
   for (uint32_t step = 1; step <= THREAD_COUNT; ++step) {
-  const uint32_t candidate = (m_rotor[core] + step) % THREAD_COUNT;
+    const uint32_t candidate = (m_rotor[core] + step) % THREAD_COUNT;
     if (candidate == self)
       continue;
+    // ★止めてくれと言われた相手は、**どのコアでも二度と選ばない**。見るのは
+    //   自分たちの旗だけで、共有の状態語には触らない — ここが要点で、
+    //   **SUSPENDED を使うとデバッガと喧嘩する** (D55):
+    //     ・こちらが SUSPENDED を書く → GDB の `c` が resume() で
+    //       CAS(SUSPENDED→READY) して**こちらの停止を解除する**
+    //     ・こちらが SUSPENDED から回収する → **GDB が止めている相手を消す**
+    //       (デバッガは g_target_thread を握ったままなので、枠が再利用された
+    //        あと無関係のスレッドのレジスタを読み書きしに行く)
+    //   状態語は 1 つしか無く持ち主も書いていないので、2 人が別々の意図で
+    //   書いた瞬間に区別が付かなくなる。だから**共有しない**。
+    // 回収は READY からの CAS でだけ行う。READY はこの系では「文脈の退避が
+    //   済み、どのコアも走らせていない」と同義なので、取れた瞬間だけが足場を
+    //   返してよい瞬間 (判定と確定を 1 命令に畳んで、見てから書くまでの隙を消す)。
+    // ★デバッガが止めている間、kill は**完了しない**。再開して READY へ
+    //   戻った時点で完了する。待たせるほうが、横から消すより安全。
+    if (m_kill_pending[candidate]) {
+      // ★既に TERMINATED の相手も拾う。止めるつもりでいる間に、相手が自分で
+      //   走り終えたり (exit_thread) 保護違反で落ちたり (fault_dispatch) する
+      //   ことがある。CAS は READY からしか取れないので、この枝が無いと
+      //   「旗は立っているが二度と READY にならない」相手の記憶が永久に
+      //   返らなくなる (旗を見て continue するので、下の回収にも届かない)。
+      const bool mine =
+          kernel_instance.terminate_if_idle(candidate) ||
+          kernel_instance.thread_state(candidate) == state_t::TERMINATED;
+      if (mine) {
+        table_lock();
+        if (m_kill_pending[candidate]) { // 別のコアが先に片付けていた
+          if (m_thread_stack[candidate] != 0) {
+            arena_release(m_objects_arena, m_thread_stack[candidate]);
+            m_thread_stack[candidate] = 0;
+          }
+          m_shadow[candidate].depth = 0;
+          m_thread_object[candidate] = (uint16_t)ROOT_OBJECT;
+          m_wake_at[candidate] = 0;
+          m_budget[candidate] = DEFAULT_BUDGET_CYCLES;
+          // ★★旗を消してから枠を返す。順を逆にすると、返した枠を他コアの
+          //   spawn が (こちらの錠とは無関係に) CAS で取り、生まれたばかりの
+          //   スレッドが**前の住人宛の停止要求を相続する**。
+          m_kill_pending[candidate] = 0;
+          kernel_instance.release(candidate);
+        }
+        table_unlock();
+      }
+      continue; // 取れても取れなくても走らせない
+    }
     // ★終わったスレッドの記憶をここで回収する。貸したのはこちらなので、返させるのも
     //   こちらの仕事 (DESIGN §4.1 ルール 3「自身が保有する資源を自由に開放できる」)。
     //   走り終えた本人には自分のスタックを返せない (その上で走っているため)。
@@ -651,6 +710,10 @@ uintptr_t KERNEL_OBJECT::run_for(uintptr_t thread, uintptr_t cycles,
 template <> void KERNEL_OBJECT::exit_thread() {
   const uint32_t self = kernel_instance.current_thread_id();
   m_shadow[self].depth = 0;
+  // ★★自分のスタックも自分の枠も、ここでは返さない。**今その上で走っている**
+  //   ので、返した瞬間に他コアの割り当てや spawn がその領域と枠を掴める
+  //   (返してから SWITCH を撃つまでの窓で、自分は解放済みの足場を使い続ける)。
+  //   回収するのは schedule() — 走っていない相手だけを見て返す (D55)。
   kernel_instance.terminate(self);
   if (kernel_instance.grant_active()) {
     ARCH::syscall((uintptr_t)primitive::SWITCH, 0); // 貸し手へ返す
@@ -662,6 +725,59 @@ template <> void KERNEL_OBJECT::exit_thread() {
                                (unsigned long)self);
     reply(object_error::OK, 0);
   }
+}
+
+// ---- 他人を止める (D55) ----------------------------------------------------
+// ★ここでやるのは**自分たちの旗を 1 つ立てること**だけ。カーネルの状態語には
+//   触らない。
+//   GDB stub の停止 (kernel_instance.suspend) が確実に効くのは、賢いからでは
+//   なく**弱いから**である — 状態語を 1 つ書くだけで何も回収しないので、
+//   「止まった」の意味が「スケジューラが二度と選ばない」で足り、即座である
+//   必要が無い。だが**その状態語を借りてはいけない**: SUSPENDED には持ち主が
+//   書いていないので、デバッガとこちらが別々の意図で同じ語を書いた瞬間に
+//   区別が付かなくなり、GDB の resume がこちらの停止を解除し、こちらの回収が
+//   GDB の止めた相手を消す (どちらの向きも事故)。
+//   なので停止の意思はこちら側の台帳 (m_kill_pending) に持ち、
+//   ・選ばないこと    → schedule() が旗を見て飛ばす (状態語に触らない)
+//   ・記憶を返すこと  → READY からの CAS が取れたときだけ (terminate_if_idle)
+//   に分ける。
+template <>
+uintptr_t KERNEL_OBJECT::kill_thread(uintptr_t thread, object_error &error) {
+  using state_t = KERNEL::THREAD::state_t;
+  const uint32_t self = kernel_instance.current_thread_id();
+  // 「誰が誰を止めてよいか」は方針。止める権利は特権オブジェクトだけが持つ
+  //  (GRANT_REGION と同じ理由 — 権限そのものを配る行為は特権行為)。
+  if (object_protection(current_object(self)) != PROTECTION_PRIVILEGED) {
+    error = object_error::NOT_PRIVILEGED;
+    return 0;
+  }
+  // ★各コアの「最初の 1 本」は止めない。core0 はスレッド 0、core1 は
+  //   start_secondary_core が採った枠 (g_secondary_thread)。これらは
+  //   **実行権の渡し先**であってアプリではないので、止めるとそのコアに
+  //   走らせる相手が居なくなる。しかもアイドルは時限 0 で回るので
+  //   READY にも降りてくる = 回収条件を満たしてしまう (黙って死ぬ)。
+  if (thread == 0 || thread >= THREAD_COUNT ||
+      thread == g_secondary_thread) {
+    error = object_error::BAD_OBJECT;
+    return 0;
+  }
+  if (thread == self) {
+    exit_thread(); // 自分を止めるのは「走り終える」のと同じ経路
+    return 1;
+  }
+  // ★デバッガ自身のスレッド (stub / agent) は止めない。止めると、止めたことを
+  //   報告する経路ごと消える。デバッガが「自分は止めない」ために付けている印を
+  //   そのまま使う。
+  if (kernel_instance.thread_debug_protected((uint32_t)thread)) {
+    error = object_error::NOT_PRIVILEGED;
+    return 0;
+  }
+  const state_t state = kernel_instance.thread_state((uint32_t)thread);
+  if (state == state_t::UNINITIALIZED || state == state_t::TERMINATED)
+    return 1; // もう居ない (冪等)
+  table_guard guard;
+  m_kill_pending[thread] = 1;
+  return 1;
 }
 
 // ---- 共有台帳の錠 ----------------------------------------------------------
@@ -679,8 +795,6 @@ template <> void KERNEL_OBJECT::table_lock() {
 template <> void KERNEL_OBJECT::table_unlock() {
   ARCH::store_release32(&m_table_lock, 0u);
 }
-
-
 
 // ---- 名乗り ----------------------------------------------------------------
 // ★誰として登録するかは**発行元から導出する** (EXPORT_METHOD と同じ作法)。
@@ -1025,6 +1139,9 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
     break;
   case object_api::SET_OBJECT_AFFINITY:
     value = set_object_affinity(a1, a2, error);
+    break;
+  case object_api::KILL_THREAD:
+    value = kill_thread(a1, error);
     break;
   case object_api::SET_BUDGET:
     if (a1 < THREAD_COUNT)

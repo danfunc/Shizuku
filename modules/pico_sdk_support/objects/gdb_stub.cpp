@@ -993,17 +993,22 @@ void handle_monitor(const char *hex) {
       static uint32_t s_dyn_obj = 24;
       obj_id = s_dyn_obj++;
       if (s_dyn_obj >= 32) s_dyn_obj = 24;
-      const auto c_res = api(object_api::CREATE_OBJECT, obj_id, entry_or_id, 0);
-      if (c_res.error != 0 && c_res.error != (uintptr_t)object_error::ALREADY_EXISTS) {
+      // ★OBJECT_REPLACE で、再利用時も methods[0] を新しい entry へ差し替える
+      //   (特権オブジェクトだけが立てられる。gdb_stub は特権)。
+      const auto c_res = api(object_api::CREATE_OBJECT, obj_id, entry_or_id,
+                             OBJECT_REPLACE | 0x100u);
+      if (c_res.error != 0) {
         snprintf(line, sizeof(line), "create_object failed (%lu)\n", (unsigned long)c_res.error);
         reply_hex_text(line);
         return;
       }
+      asm volatile("dsb\nisb" ::: "memory");
     }
     const auto s_res = api(object_api::SPAWN, obj_id, a1, 0);
     if (s_res.error != 0) {
       snprintf(line, sizeof(line), "spawn failed (error %lu)\n", (unsigned long)s_res.error);
     } else {
+      g_target_thread = (uint32_t)s_res.value;
       snprintf(line, sizeof(line), "spawned thread %lu (object %lu)\n", (unsigned long)s_res.value, (unsigned long)obj_id);
     }
     reply_hex_text(line);

@@ -38,6 +38,7 @@ cc_library(
         "@pico-sdk//src/rp2_common/hardware_adc",
         "@pico-sdk//src/rp2_common/hardware_dma",
         "@pico-sdk//src/rp2_common/hardware_exception",
+        "@pico-sdk//src/rp2_common/hardware_flash",
         "@pico-sdk//src/rp2_common/pico_stdlib",
     ],
 )
@@ -108,6 +109,30 @@ cc_library(
         "@pico-sdk//src/rp2_common/pico_btstack:pico_btstack_flash_bank",
         "@pico-sdk//src/rp2_common/pico_cyw43_arch:pico_cyw43_arch_poll",
         "@pico-sdk//src/rp2_common/pico_stdlib",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "ota",
+    srcs = ["objects/ota.cpp"],
+    hdrs = [
+        "internal_headers/shizuku/objects/inflate.hpp",
+        "internal_headers/shizuku/objects/ota.hpp",
+    ],
+    includes = ["internal_headers"],
+    deps = [
+        ":ble_uart",
+        ":headers",
+        "//:internal_headers",
+        "//:kernel",
+        "//configs:config",
+        "@pico-sdk//src/common/boot_picoboot_headers",
+        "@pico-sdk//src/rp2_common/hardware_flash",
+        "@pico-sdk//src/rp2_common/hardware_sync",
+        "@pico-sdk//src/rp2_common/hardware_uart",
+        "@pico-sdk//src/rp2_common/pico_bootrom",
+        "@pico-sdk//src/rp2_common/pico_flash",
     ],
     visibility = ["//visibility:public"],
 )

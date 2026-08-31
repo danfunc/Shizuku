@@ -114,6 +114,13 @@ struct i2c_transfer {
 //   なり、原因の切り分けが一気に難しくなる (D12)。
 uint32_t register_peripherals();
 
+// Pico 2 W など CYW43 経由の LED において、Core 0
+// のポーリングループから安全に状態を同期する
+void led_sync_hw();
+
+// どのコア・スレッドからでも安全に呼べる LED トグル関数 (Pico 2 / Pico 2 W 両対応)
+void led_toggle();
+
 } // namespace objects
 } // namespace shizuku
 #endif // SHIZUKU_OBJECTS_PERIPHERALS_HPP

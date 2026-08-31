@@ -21,6 +21,7 @@ template <> bool KERNEL::claim(uint32_t, kernel_error &);
 template <> void KERNEL::set_recovery_thread(uint32_t);
 template <> void KERNEL::set_thread_storage(void *, uintptr_t);
 template <> void KERNEL::release(uint32_t);
+template <> bool KERNEL::terminate_if_idle(uint32_t);
 template <> KERNEL::spawn_result KERNEL::reserve_thread();
 template <> void KERNEL::fault_dispatch(KERNEL::CONTEXT *);
 template <> void KERNEL::debug_dispatch(KERNEL::CONTEXT *);
@@ -118,6 +119,23 @@ template <> void KERNEL::terminate(uint32_t thread) {
                         (uint32_t)THREAD::state_t::TERMINATED);
 }
 
+// ★READY からのみ終了させる。**「他人を終わらせてよい唯一の瞬間」を CAS で
+//   取る**ための口 (D55)。状態を見てから書く形にすると、見た直後に他コアが
+//   claim して走り出せる (見る/書くの間が空く) ので、判定と確定を 1 命令に
+//   畳んでいる。
+// ★READY を選ぶ理由: do_switch は**文脈の退避が済んでから** READY を書き、
+//   m_current は既に別の相手へ移っている。つまりこの系で READY は
+//   「どのコアもこの足場を使っていない」と同義。RUNNING (他コアが走行中)、
+//   WAIT_GRANT (貸し手として巻き取り待ち)、SUSPENDED (デバッガが止めている)
+//   のどれからも取らない。
+template <> bool KERNEL::terminate_if_idle(uint32_t thread) {
+  if (thread >= m_thread_count || thread == 0)
+    return false;
+  return ARCH::cas32(&m_threads[thread].thread.state,
+                     (uint32_t)THREAD::state_t::READY,
+                     (uint32_t)THREAD::state_t::TERMINATED);
+}
+
 // 枠を返す。記憶そのものを返すのは貸し主 (オブジェクトランド) の仕事で、
 // ここは「もう誰も使っていない」ことにするだけ。
 template <> void KERNEL::release(uint32_t thread) {
@@ -126,6 +144,9 @@ template <> void KERNEL::release(uint32_t thread) {
   if (m_threads[thread].thread.state !=
       (uint32_t)THREAD::state_t::TERMINATED)
     return;
+  // ★状態を空きへ戻す**前に**世代を進める。逆順にすると、空きを見た他コアが
+  //   枠を取ってから世代が動くことになり、新しい住人の世代が一瞬古いままになる。
+  m_threads[thread].thread.generation++;
   ARCH::store_release32(&m_threads[thread].thread.state,
                         (uint32_t)THREAD::state_t::UNINITIALIZED);
 }

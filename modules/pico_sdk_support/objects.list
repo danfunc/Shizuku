@@ -10,3 +10,4 @@ temperature
 gdb_stub
 gdb_agent
 debuggee
+ota

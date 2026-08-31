@@ -20,7 +20,7 @@ genrule(
     outs = ["generated_object_ids/shizuku/object_ids.hpp"],
     cmd = "python3 $(location //tools:gen_object_ids.py)" +
           " --template $(location //tools:object_ids.hpp.in)" +
-          " --out $@ --limit 32" +
+          " --out $@ --limit 48" +
           " $(location source/apps/objects.list)" +
           " $(location source/selftest/objects.list)" +
           " $(location //modules/pico_sdk_support:objects.list)",

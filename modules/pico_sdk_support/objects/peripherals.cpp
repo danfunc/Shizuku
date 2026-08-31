@@ -91,10 +91,21 @@ uintptr_t gpio_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 //   閉じ込める。呼ぶ側 (合成側やドライバ) はピン番号も配線も知らなくてよい。
 //     pico2   : GPIO 25 (PICO_DEFAULT_LED_PIN)
 //     pico2_w : CYW43 チップの WL_GPIO0 — **GPIO を叩いても光らない**
-uint32_t g_led_state = 0;
+static volatile uint32_t g_led_state = 0;
+static volatile uint32_t g_hw_led_state = 0xFFFFFFFFu;
 // main が返す失敗コード (0 = 成功)。合成側がそのまま印字できるよう意味を持たせる。
 constexpr uintptr_t LED_ARCH_INIT_FAILED = 1000;
 constexpr uintptr_t LED_ABSENT = 1001;
+
+#if defined(CYW43_WL_GPIO_LED_PIN)
+void led_sync_hw() {
+  const uint32_t target = g_led_state;
+  if (g_hw_led_state != target) {
+    g_hw_led_state = target;
+    ::cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, target != 0);
+  }
+}
+#endif
 
 uintptr_t led_write(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
   const led_request *request = (const led_request *)argument;
@@ -102,11 +113,27 @@ uintptr_t led_write(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
     return 0;
   g_led_state = request->value != 0 ? 1u : 0u;
 #if defined(CYW43_WL_GPIO_LED_PIN)
-  ::cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, g_led_state != 0);
+  // Core 0 から呼ばれた場合は即時反映。Core 1 から呼ばれた場合は
+  // ble_uart (Core 0) のポーリングループ (cyw43_arch_poll) が安全に反映する。
+  if (BOARD::core_num() == 0) {
+    led_sync_hw();
+  }
 #elif defined(PICO_DEFAULT_LED_PIN)
   ::gpio_put(PICO_DEFAULT_LED_PIN, g_led_state != 0);
 #endif
   return g_led_state;
+}
+
+void led_toggle() {
+  const uint32_t next = g_led_state ^ 1u;
+  g_led_state = next;
+#if defined(CYW43_WL_GPIO_LED_PIN)
+  if (BOARD::core_num() == 0) {
+    led_sync_hw();
+  }
+#elif defined(PICO_DEFAULT_LED_PIN)
+  ::gpio_put(PICO_DEFAULT_LED_PIN, next != 0);
+#endif
 }
 
 uintptr_t led_read(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {

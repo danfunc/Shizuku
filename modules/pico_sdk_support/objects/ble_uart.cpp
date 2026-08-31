@@ -51,16 +51,18 @@
 extern "C" {
 #include "ble/att_db.h"
 #include "ble/att_server.h"
+#include "ble/le_device_db.h" // ボンド件数の確認 / 鍵の削除 (施錠と解錠)
 #include "btstack.h"
 #include "gap.h"
 #include "hci.h"
 #include "pico/stdlib.h" // getchar_timeout_us (USB CDC 経由の NC confirm 入力)
 }
 #include "ble_uart.h" // pico_btstack_make_gatt_header() が生成
-#include "shizuku/objects/ble_uart.hpp"
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_api.hpp"
+#include "shizuku/objects/ble_uart.hpp"
 #include "shizuku/objects/gdb_stub.hpp" // GDB リンクをストリームで運ぶ
+#include "shizuku/objects/peripherals.hpp"
 #include "shizuku/stream.hpp"
 #include <cstdint>
 #include <cstdio>
@@ -69,11 +71,24 @@ extern "C" {
 
 namespace shizuku {
 namespace objects {
+
+#if defined(CYW43_WL_GPIO_LED_PIN)
+// peripherals オブジェクトがリンクされていないバイナリでもリンクを通すための
+// weak 定義
+__attribute__((weak)) void led_sync_hw() {}
+__attribute__((weak)) void led_toggle() {}
+#else
+__attribute__((weak)) void led_toggle() {}
+#endif
+
 namespace ble_uart {
 
 static uintptr_t s_object_id = 7;
 
 namespace {
+
+using ARCH = shizuku::KERNEL::ARCH;
+using BOARD = shizuku::KERNEL::BOARD;
 
 // ★ペアリング方式は CDC(診断チャネル)の専用コマンドで実行時に切り替える
 //   (ビルドを分けない)。既定は **NC 必須 (安全側、事故防止)**。
@@ -83,7 +98,92 @@ namespace {
 //   読まれる値を変えるだけなので)。
 static bool g_auto_pair = false;
 
+// ===========================================================================
+//  ペアリング施錠 (2026-08-31)
+// ===========================================================================
+//  ★狙い: 「一度ボンドしたら、以後の新規ペアリングは拒む」。
+//    なぜ必要か — btstack_config.h の `MAX_NR_LE_DEVICE_DB_ENTRIES` は **1**。
+//    つまり新しいペアリングが成立すると、**こちらの鍵が押し出されて消える**。
+//    攻撃者が勝手にペアリングを通せば、機体を奪われるだけでなく、正規の
+//    母艦が締め出されて OTA (唯一の遠隔書き込み手段) も失われる。
+//
+//  ★どこで拒むか: `sm_set_accepted_stk_generation_methods(0)`。
+//    btstack は Pairing Request を受けた直後 (sm.c の `sm_stk_generation_init`)
+//    でこの集合を検査し、空なら `SM_REASON_AUTHENTHICATION_REQUIREMENTS` で
+//    即座に落とす。**公開鍵交換 (ECDH) より前**なので、拒否そのものが安く、
+//    ペアリング要求を投げ続けられても計算資源を食われない (DoS 側にも効く)。
+//    ★★**再暗号化 (reencryption) はこの経路を通らない** — 保存済み LTK を
+//      使う手続きで Pairing Request が飛ばないため。だから施錠しても
+//      「既にボンドしている母艦の再接続」は素通しで、OTA 経路は壊れない。
+//
+//  ★捨てた案:
+//    - `sm_bonding_decline()` を SM_EVENT_PAIRING_STARTED で呼ぶ:
+//      **効かない**。sm.c の decline は `SM_PH1_W4_USER_RESPONSE` 等の
+//      「ユーザ応答待ち」状態でしか作用せず、PAIRING_STARTED の時点では
+//      default: break で無視される (SDK 2.2.0 の sm.c:5367 を読んで確認)。
+//      ただしユーザ応答イベント (NC / Just Works) での decline は効くので、
+//      **二重の網**として下の SM ハンドラにも入れてある。
+//    - `sm_set_authentication_requirements` をいじる: 要求の中身を変えるだけで
+//      「拒む」意思にならない。相手が条件を満たせば通ってしまう。
+//
+//  ★締め出し対策 (ここを間違えると機体が文鎮になる):
+//    母艦側でボンドを消した (macOS の「このデバイスを削除」等) 場合、
+//    向こうは新規ペアリングを試みる → 施錠中なので拒否 → **BLE から一切
+//    入れなくなる**。逃げ道は有線の XIAO (UART0) からの
+//    `nc allow` (一回だけ許可) と `nc forget!` (鍵を全部消す)。
+//    有線経路を持たない解錠手段は用意しない — 用意すると施錠の意味が消える。
+// ★「施錠 ON/OFF の旗」は**置かない**。施錠は
+//     鍵が 1 本でもある && 一回券が生きていない
+//   という状態そのもので表す。旗にすると「OFF のまま戻し忘れて飛ばす」形が
+//   作れてしまい、しかもそれが**無言で**成立する。状態で表せば、解錠は
+//   必ず「期限付きの一回券」の形しか取れない。
+static uint64_t g_pair_allow_until_us = 0;  // 一回券の期限 (0 = 券なし)
+static uint32_t g_pair_strikes = 0;         // 失敗ペアリングの連続回数
+static uint64_t g_pair_block_until_us = 0;  // クールダウン (広告停止) の期限
+static uint32_t g_bonded_count = 0;         // le_device_db_count() の写し
+static uint32_t g_nc_generation = 0;        // NC 要求の通し番号
+static uint32_t g_nc_passkey = 0;
+// 外 (シェル) からの依頼。★旗だけ立てて btstack を触るのは poll ループ
+//   ([[no-btstack-from-caller-thread]])。
+static volatile uint8_t g_pair_answer_requested = 0; // 0=無 1=承認 2=拒否
+static volatile bool g_forget_bonds_requested = false;
+static volatile bool g_pair_mode_dirty = false;      // 施錠状態を再適用したい
+
+// 一回券の有効時間。★短すぎると人が間に合わず、長すぎると「解錠したまま
+//   忘れて飛ばす」が起きる。人が板の横に居て操作している前提で 3 分。
+static constexpr uint64_t PAIRING_ALLOW_WINDOW_US = 180000000ull;
+// 失敗が続いたら広告を止める閾値と時間 (後述の DoS 対策)。
+static constexpr uint32_t PAIR_STRIKE_LIMIT = 3;
+static constexpr uint64_t PAIR_BLOCK_US = 60000000ull;
+// 認可されないまま繋ぎっぱなしのリンクを畳むまでの時間。
+// ★BLE の接続は 1 本しか持てないので、**繋いで黙っているだけ**で正規の母艦を
+//   締め出せてしまう。これが実際にいちばん安い DoS。NC の承認待ち中は
+//   人間の操作時間なので、この計測を止める (下の unauth_deadline_active 参照)。
+//   ★90 秒は「実測で決めていない」値。実機で正規の初回ペアリングに何秒
+//     かかるかを測ってから詰めること (下げると占拠に強く、誤爆に弱くなる)。
+static constexpr uint64_t UNAUTH_LINK_TIMEOUT_US = 90000000ull;
+
+// 施錠が効いているか。★ボンドが 0 件のときは施錠しない — 初回ペアリングまで
+//   塞いでしまうと、工場出荷状態の板に誰も入れなくなる (卵と鶏)。
+static bool pairing_locked_now(uint64_t now_us) {
+  if (g_bonded_count == 0)
+    return false;
+  if (g_pair_allow_until_us != 0 && now_us < g_pair_allow_until_us)
+    return false; // 一回券が生きている
+  return true;
+}
+
 static void apply_security_mode() {
+  // ★施錠は「受け入れる STK 生成方式」の集合で表す。空集合 = どの方式でも
+  //   ペアリングを受けない。ここを毎回上書きするので、解錠したら必ず戻る。
+  if (pairing_locked_now(BOARD::time_us())) {
+    sm_set_accepted_stk_generation_methods(0);
+  } else {
+    sm_set_accepted_stk_generation_methods(
+        SM_STK_GENERATION_METHOD_JUST_WORKS |
+        SM_STK_GENERATION_METHOD_NUMERIC_COMPARISON |
+        SM_STK_GENERATION_METHOD_PASSKEY | SM_STK_GENERATION_METHOD_OOB);
+  }
   if (g_auto_pair) {
     // Just Works: MITM を要求しないので NC (Numeric Comparison) 自体が
     // 発生せず、OS 側の確認ダイアログも Pico 側の y/n 入力も無しで
@@ -101,9 +201,6 @@ static void apply_security_mode() {
                                        SM_AUTHREQ_BONDING);
   }
 }
-
-using ARCH = shizuku::KERNEL::ARCH;
-using BOARD = shizuku::KERNEL::BOARD;
 
 struct call_result {
   uintptr_t error;
@@ -123,6 +220,8 @@ uintptr_t export_method(method m, uintptr_t entry) {
 // ---- セキュリティ / 接続状態 (旧実装 §「セキュリティ設定」「接続/通知状態」) ----
 static hci_con_handle_t nc_pending_handle = HCI_CON_HANDLE_INVALID;
 static hci_con_handle_t con_handle = HCI_CON_HANDLE_INVALID;
+// リンクが張られた時刻。認可されないまま居座る相手を畳むのに使う。
+static uint64_t conn_started_us = 0;
 static bool tx_notify_enabled = false;
 static bool can_send_requested = false;
 static uint16_t conn_interval = 0;
@@ -170,7 +269,6 @@ shizuku::stream::handle<frame_t> g_ch2_tx_in;
 bool ch2_notify_enabled = false;
 bool g_ch2_held_valid = false;
 frame_t g_ch2_held{};
-
 
 // 「デバッガが繋がっている」= notify が有効 **かつ** リンクが認可済み。
 // ★認可を必ず条件に入れる — GDB は任意のメモリ読み書きとレジスタ操作そのもの
@@ -351,6 +449,11 @@ static int att_write_callback(hci_con_handle_t connection_handle,
       BOARD::diag_printf("[BLE_UART] ota write dropped (unauthorized, %u byte)\n",
                          buffer_size);
       return 0;
+    }
+    static uint32_t s_ota_pkt_count = 0;
+    if (++s_ota_pkt_count >= 10) {
+      s_ota_pkt_count = 0;
+      led_toggle();
     }
     uint32_t offset = 0;
     while (offset < buffer_size) {
@@ -573,6 +676,13 @@ done:
   }
 }
 
+// 広告を出してよい時間か。★止めるのは DoS クールダウン中だけ。
+//   「ボンド済みなら広告を完全に止める」案は採らなかった (下の poll ループの
+//   コメント参照)。
+static bool advertising_allowed(uint64_t now_us) {
+  return g_pair_block_until_us == 0 || now_us >= g_pair_block_until_us;
+}
+
 // ---- HCI / ATT イベント (旧実装から診断・ウォッチドッグ・PHY 系を落とした版) ----
 static void packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
                            uint16_t) {
@@ -604,7 +714,8 @@ static void packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
         BOARD::diag_printf(
             "[BLE_UART] connection failed (status=0x%02x), re-advertising\n",
             st);
-        gap_advertisements_enable(1);
+        if (advertising_allowed(BOARD::time_us()))
+          gap_advertisements_enable(1);
         break;
       }
       hci_con_handle_t h =
@@ -612,6 +723,7 @@ static void packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
       if (h == con_handle)
         break; // 二重配送ガード
       con_handle = h;
+      conn_started_us = BOARD::time_us();
       conn_interval =
           hci_subevent_le_connection_complete_get_conn_interval(packet);
       tx_notify_enabled = false;
@@ -648,7 +760,8 @@ static void packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
     update_gdb_connected();
     ci_nego_stage = 0;
     nc_pending_handle = HCI_CON_HANDLE_INVALID;
-    gap_advertisements_enable(1);
+    if (advertising_allowed(BOARD::time_us()))
+      gap_advertisements_enable(1);
     break;
   case ATT_EVENT_CAN_SEND_NOW:
     can_send_requested = false;
@@ -667,40 +780,99 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
   if (packet_type != HCI_EVENT_PACKET)
     return;
   switch (hci_event_packet_get_type(packet)) {
-  case SM_EVENT_NUMERIC_COMPARISON_REQUEST:
+  case SM_EVENT_NUMERIC_COMPARISON_REQUEST: {
+    const hci_con_handle_t h =
+        sm_event_numeric_comparison_request_get_handle(packet);
+    // ★施錠中はここまで来ないはず (Pairing Request の時点で
+    //   sm_set_accepted_stk_generation_methods(0) が弾く) が、**二重の網**として
+    //   ここでも拒む。理由: 拒否の一次防壁がグローバル変数 1 個に乗っているので、
+    //   将来 apply_security_mode() の呼び忘れが 1 箇所でも入ると穴になる。
+    //   ここは「今まさに人に承認を求めようとしている」地点なので、施錠の意思が
+    //   最後に効く場所として自然。
+    if (pairing_locked_now(BOARD::time_us())) {
+      sm_bonding_decline(h);
+      ++g_pair_strikes;
+      BOARD::diag_printf(
+          "[BLE_UART] pairing DECLINED (locked, bonds=%lu, strike %lu)\n",
+          (unsigned long)g_bonded_count, (unsigned long)g_pair_strikes);
+      break;
+    }
     // ★事故防止のため必須: 番号を CDC へ出し、オペレータの y/n 確認を
     //   ble_uart_poll 側で待つ (自動 confirm にしない = MITM 防御が成立する)。
-    nc_pending_handle = sm_event_numeric_comparison_request_get_handle(packet);
+    // ★★承認の口は CDC だけではない。飛行前に USB は繋がないので、
+    //   有線の XIAO (UART0) からも同じ答えを入れられるように、番号と
+    //   「待っている」ことを pairing_state として外へ出す (GET_PAIRING_STATE)。
+    //   ここで UART へ直接書かないのは、UART0 の持ち主が shizuku_shell 側で、
+    //   二人で書くと行が混ざるため (読み手も一人に保つのと同じ理由)。
+    nc_pending_handle = h;
+    g_nc_passkey =
+        (uint32_t)sm_event_numeric_comparison_request_get_passkey(packet);
+    ++g_nc_generation;
     BOARD::diag_printf("[BLE_UART] === NUMERIC COMPARISON ===\n");
-    BOARD::diag_printf(
-        "[BLE_UART] device number : %06lu\n",
-        (unsigned long)sm_event_numeric_comparison_request_get_passkey(packet));
-    BOARD::diag_printf(
-        "[BLE_UART] スマホ側の表示と一致していれば 'y'、違えば 'n' を入力\n");
+    BOARD::diag_printf("[BLE_UART] device number : %06lu\n",
+                       (unsigned long)g_nc_passkey);
+    BOARD::diag_printf("[BLE_UART] 一致していれば CDC で 'y' / XIAO で 'nc y'、"
+                       "違えば 'n' / 'nc n'\n");
     break;
+  }
+  case SM_EVENT_JUST_WORKS_REQUEST: {
+    // ★Just Works は MITM 防御が無い。btstack は応答しなければ黙って先へ進む
+    //   仕様 (sm.c: sm_user_response が IDLE のままなら自動継続) なので、
+    //   **拒みたいならここで明示的に decline しなければならない**。
+    const hci_con_handle_t h = sm_event_just_works_request_get_handle(packet);
+    if (pairing_locked_now(BOARD::time_us())) {
+      sm_bonding_decline(h);
+      ++g_pair_strikes;
+      BOARD::diag_printf("[BLE_UART] just-works DECLINED (locked, strike %lu)\n",
+                         (unsigned long)g_pair_strikes);
+    } else if (!g_auto_pair) {
+      // ★NC 必須モードなのに Just Works に落ちた = 相手が MITM 防御を要求して
+      //   いない (格下げ)。要求した保護が得られていない以上、通してはいけない。
+      sm_bonding_decline(h);
+      ++g_pair_strikes;
+      BOARD::diag_printf(
+          "[BLE_UART] just-works DECLINED (SECURE モードでの格下げ拒否)\n");
+    }
+    // AUTO モードでは**何もしない** = btstack がそのまま自動継続する。
+    // ここで sm_just_works_confirm() を呼んでも等価だが、実機で通っている
+    // 経路を触らない (テスト用モードのために本番経路を動かす価値が無い)。
+    break;
+  }
   case SM_EVENT_PASSKEY_DISPLAY_NUMBER:
     BOARD::diag_printf(
         "[BLE_UART] passkey (enter on phone) = %06lu\n",
         (unsigned long)sm_event_passkey_display_number_get_passkey(packet));
     break;
   case SM_EVENT_PAIRING_COMPLETE:
+    nc_pending_handle = HCI_CON_HANDLE_INVALID;
     if (sm_event_pairing_complete_get_status(packet) == ERROR_CODE_SUCCESS) {
       cmd_authorized = true;
       update_gdb_connected();
-      BOARD::diag_printf("[BLE_UART] pairing complete -> authorized\n");
+      // ★一回券は**使ったら失効**させる。時間切れを待つと「解錠したまま
+      //   飛ばす」窓が残り、施錠の意味が薄れる。
+      g_pair_allow_until_us = 0;
+      g_pair_strikes = 0;
+      g_pair_mode_dirty = true; // 新しいボンドを数え直して施錠を掛け直す
+      BOARD::diag_printf("[BLE_UART] pairing complete -> authorized (再施錠)\n");
       print_conn_interval("paired");
       request_fast_ci();
     } else {
       cmd_authorized = false;
       update_gdb_connected();
-      BOARD::diag_printf("[BLE_UART] pairing failed (status 0x%02x)\n",
-                         sm_event_pairing_complete_get_status(packet));
+      ++g_pair_strikes;
+      BOARD::diag_printf("[BLE_UART] pairing failed (status 0x%02x, strike %lu)\n",
+                         sm_event_pairing_complete_get_status(packet),
+                         (unsigned long)g_pair_strikes);
     }
     break;
   case SM_EVENT_REENCRYPTION_COMPLETE:
     if (sm_event_reencryption_complete_get_status(packet) == ERROR_CODE_SUCCESS) {
       cmd_authorized = true;
       update_gdb_connected();
+      // ★正規の相手が戻ってきた = それまでの失敗は攻撃かノイズかに関わらず
+      //   「今は正常」なので数え直す。ここで消さないと、たまたま失敗が
+      //   積もっていただけで正規運用中に広告が止まる。
+      g_pair_strikes = 0;
       BOARD::diag_printf("[BLE_UART] reencryption complete -> authorized\n");
       print_conn_interval("paired");
       request_fast_ci();
@@ -761,6 +933,61 @@ uintptr_t method_get_rx_stream(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   return g_rx_stream_id;
 }
 
+// ---- ペアリング施錠の外向き口 (呼ぶのは shizuku_shell = 別スレッド) ---------
+// ★どれも **btstack を一切触らない**。触るのは poll ループの担当
+//   ([[no-btstack-from-caller-thread]]: 呼び出し元スレッドから btstack に
+//   入ると CYW43 の SPI バスごと固まる)。ここでは旗を立てるだけ。
+uintptr_t method_get_pairing_state(uintptr_t out, uintptr_t, uintptr_t,
+                                   uintptr_t) {
+  if (out == 0)
+    return 0;
+  auto *s = (shizuku::objects::ble_uart::pairing_state *)out;
+  const uint64_t now = BOARD::time_us();
+  *s = {};
+  s->nc_generation = g_nc_generation;
+  s->nc_passkey = g_nc_passkey;
+  s->strikes = g_pair_strikes;
+  s->nc_pending = nc_pending_handle != HCI_CON_HANDLE_INVALID ? 1 : 0;
+  s->locked = pairing_locked_now(now) ? 1 : 0;
+  // ★件数は写しを返す。le_device_db_count() を直に呼ぶと btstack の内部を
+  //   別スレッドから読むことになる (今の実装は単なる static int だが、
+  //   「btstack を触ってよいのは poll ループだけ」の線を実装詳細で崩さない)。
+  s->bonded = (uint8_t)g_bonded_count;
+  s->connected = con_handle != HCI_CON_HANDLE_INVALID ? 1 : 0;
+  s->authorized = cmd_authorized ? 1 : 0;
+  if (g_pair_allow_until_us != 0 && now < g_pair_allow_until_us)
+    s->allow_seconds_left = (uint32_t)((g_pair_allow_until_us - now) / 1000000u);
+  if (g_pair_block_until_us != 0 && now < g_pair_block_until_us)
+    s->block_seconds_left = (uint32_t)((g_pair_block_until_us - now) / 1000000u);
+  return 1;
+}
+
+uintptr_t method_pairing_answer(uintptr_t confirm, uintptr_t, uintptr_t,
+                                uintptr_t) {
+  if (nc_pending_handle == HCI_CON_HANDLE_INVALID)
+    return 0; // 訊かれていないのに答えない (取り違えを防ぐ)
+  g_pair_answer_requested = confirm != 0 ? 1 : 2;
+  return 1;
+}
+
+uintptr_t method_set_pairing_lock(uintptr_t lock, uintptr_t, uintptr_t,
+                                  uintptr_t) {
+  if (lock != 0) {
+    g_pair_allow_until_us = 0; // 出した一回券を取り消す = 即施錠
+  } else {
+    // ★「解錠モード」にはしない。一回券 (時間で失効・ペアリング成立でも失効)
+    //   にすることで、「戻し忘れたまま飛ばす」を構造的に潰す。
+    g_pair_allow_until_us = BOARD::time_us() + PAIRING_ALLOW_WINDOW_US;
+  }
+  g_pair_mode_dirty = true;
+  return 1;
+}
+
+uintptr_t method_forget_bonds(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  g_forget_bonds_requested = true;
+  return 1;
+}
+
 // ---- BT スタック起動 (旧実装の bt_stack_bringup から診断/Stage1/2 を落とした版) --
 static void bt_stack_bringup() {
   // ★cyw43_arch_init() はここで呼ばない。pico2_w では LED オブジェクト
@@ -789,6 +1016,14 @@ static void bt_stack_bringup() {
   //   `picotool erase --all` でしか復旧できない状態になる。
   sm_init();
 
+  // ★施錠の判断材料 (保存済みボンドの件数) をここで一度読む。
+  //   TLV の走査は SDK の `btstack_cyw43_init()` が
+  //   `le_device_db_tlv_configure()` の中で済ませており (le_device_db_tlv.c の
+  //   `le_device_db_tlv_scan`)、`sm_init()` 側の `le_device_db_init()` は
+  //   TLV 実装では no-op。つまりこの時点で件数は正しい。
+  //   ★ここで読まないと、poll スレッドが最初の 1 秒を回すまで**解錠状態**の
+  //     まま HCI が上がってしまい、その窓で新規ペアリングが通る。
+  g_bonded_count = (uint32_t)le_device_db_count();
   // 既定 (g_auto_pair=false) = NC 必須。'A'/'S' コマンドで実行時に切替可能
   // (apply_security_mode 参照)。
   apply_security_mode();
@@ -928,9 +1163,14 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       shizuku::kernel_instance.current_thread_id());
 
   uint64_t next_adv_ensure_us = 0;
+  uint64_t next_bond_check_us = 0;
+  uint64_t forget_deadline_us = 0;
   last_conn_activity_us = BOARD::time_us();
   while (true) {
     cyw43_arch_poll();
+#if defined(CYW43_WL_GPIO_LED_PIN)
+    led_sync_hw();
+#endif
 
     // ★頼まれていたら切る。ここでやるのは、btstack を突いてよいのが
     //   このループだけだから (ble_uart.hpp の REQUEST_DISCONNECT 参照)。
@@ -954,6 +1194,10 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
         } else if (c == 'n' || c == 'N') {
           BOARD::diag_printf("[BLE_UART] numeric comparison declined\n");
           sm_bonding_decline(nc_pending_handle);
+          // ★拒否は「その相手は自分ではなかった」の表明。UART 経由の拒否
+          //   (上の (a)) と同じく失敗として数える — 数え方が経路で違うと、
+          //   DoS 判定が「どちらの口から拒んだか」に依存してしまう。
+          ++g_pair_strikes;
           nc_pending_handle = HCI_CON_HANDLE_INVALID;
         }
       } else if (c == 'A') {
@@ -972,6 +1216,147 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
         apply_security_mode();
         BOARD::diag_printf(
             "[BLE_UART] pairing mode -> SECURE (NC required). 次の接続から有効\n");
+      }
+    }
+
+    // ---- ペアリング施錠まわりの世話 ------------------------------------
+    // ★btstack (sm_*/gap_*/le_device_db_*) を叩いてよいのはこのループだけ。
+    //   外 (シェル) から来るのは旗だけで、実際の操作はここで代行する
+    //   ([[no-btstack-from-caller-thread]])。
+    {
+      const uint64_t now = BOARD::time_us();
+
+      // (a) 外部からの NC 承認/拒否。CDC の 'y'/'n' と**同じ答え**を、
+      //     有線の XIAO (UART0 → shizuku_shell → CALL_METHOD) からも入れられる
+      //     ようにするための口。飛行前に USB を繋ぐ運用が無いので、承認経路が
+      //     CDC しか無いと NC が実質使えなかった。
+      if (g_pair_answer_requested != 0) {
+        const uint8_t answer = g_pair_answer_requested;
+        g_pair_answer_requested = 0;
+        if (nc_pending_handle != HCI_CON_HANDLE_INVALID) {
+          if (answer == 1) {
+            BOARD::diag_printf("[BLE_UART] numeric comparison confirmed (wire)\n");
+            sm_numeric_comparison_confirm(nc_pending_handle);
+          } else {
+            BOARD::diag_printf("[BLE_UART] numeric comparison declined (wire)\n");
+            sm_bonding_decline(nc_pending_handle);
+            ++g_pair_strikes;
+          }
+          nc_pending_handle = HCI_CON_HANDLE_INVALID;
+        }
+      }
+
+      // (b) 鍵を全部消す (施錠から締め出されたときの唯一の逃げ道)。
+      //     ★★消す前にリンクを落とす。鍵の削除は TLV 経由で flash を書き、
+      //       その中の `flash_safe_execute` が**全コアの割り込みを止める**。
+      //       BLE が流れている最中にやると CYW43 の共有バスの index がずれて
+      //       板ごと無応答になる ([[long-irq-off-wedges-cyw43]]、OTA で実測)。
+      //     ★切れるのを待つが、待ち続けはしない — 相手が切断に応じない場合に
+      //       「逃げ道が使えない」ほうが困る。3 秒で見切って消す。
+      if (g_forget_bonds_requested) {
+        if (con_handle != HCI_CON_HANDLE_INVALID) {
+          if (forget_deadline_us == 0) {
+            forget_deadline_us = now + 3000000ull;
+            BOARD::diag_printf("[BLE_UART] forget bonds: dropping the link first\n");
+            gap_disconnect(con_handle);
+          }
+          if (now < forget_deadline_us) {
+            api(shizuku::object_api::SLEEP_US, 1000);
+            continue; // まだ切れていない。次周でもう一度見る
+          }
+          BOARD::diag_printf("[BLE_UART] forget bonds: link did not drop, 続行\n");
+        }
+        g_forget_bonds_requested = false;
+        forget_deadline_us = 0;
+        uint32_t removed = 0;
+        for (int i = 0; i < le_device_db_max_count(); ++i) {
+          int type = (int)BD_ADDR_TYPE_UNKNOWN;
+          bd_addr_t addr;
+          le_device_db_info(i, &type, addr, nullptr);
+          if (type == (int)BD_ADDR_TYPE_UNKNOWN)
+            continue; // 空き枠
+          gap_delete_bonding((bd_addr_type_t)type, addr);
+          ++removed;
+        }
+        g_pair_allow_until_us = 0;
+        g_pair_strikes = 0;
+        g_pair_block_until_us = 0;
+        g_pair_mode_dirty = true;
+        BOARD::diag_printf(
+            "[BLE_UART] forgot %lu bond(s) — 次の接続は新規ペアリングになる\n",
+            (unsigned long)removed);
+      }
+
+      // (c) ボンド件数の追跡と施錠の再適用。
+      //     ★毎周ではなく 1 秒ごと。件数は人の操作でしか動かないのに、
+      //       le_device_db_count() を 1kHz で呼ぶ意味が無い。
+      if (g_pair_mode_dirty || now >= next_bond_check_us) {
+        g_pair_mode_dirty = false;
+        next_bond_check_us = now + 1000000ull;
+        if (g_pair_allow_until_us != 0 && now >= g_pair_allow_until_us) {
+          g_pair_allow_until_us = 0;
+          BOARD::diag_printf("[BLE_UART] pairing allow window expired -> locked\n");
+        }
+        const uint32_t counted = (uint32_t)le_device_db_count();
+        const bool was_locked = pairing_locked_now(now);
+        g_bonded_count = counted;
+        apply_security_mode();
+        if (was_locked != pairing_locked_now(now))
+          BOARD::diag_printf("[BLE_UART] pairing %s (bonds=%lu)\n",
+                             pairing_locked_now(now) ? "LOCKED" : "UNLOCKED",
+                             (unsigned long)counted);
+      }
+
+      // (d) ペアリング DoS への保険 — 失敗が続いたら**一定時間広告を止める**。
+      //   ★捨てた案と理由:
+      //     - 「ボンド済みなら広告を常時止める」: 攻撃者は繋げなくなるが、
+      //       **こちらも繋げなくなる**。BLE OTA が唯一の遠隔書き込み手段
+      //       なので、見えない板は文鎮化と同義。却下。
+      //     - directed advertising: 相手の identity address が要る。macOS は
+      //       resolvable private address を使うので、解決リスト無しでは
+      //       当たらない。かつ high-duty directed は 1.28 秒でしか出ず、
+      //       復旧用の新しいホストからは永久に見えなくなる。却下。
+      //     - whitelist (filter policy 0x03): 筋は良いが、RPA を弾かないため
+      //       コントローラ側の resolving list 設定が要り、外すと**自分が
+      //       締め出される**種類の設定。実機で確かめられない今は入れない。
+      //   ★残したのは「速度を落とす」だけの手。完全には防げない (広告が
+      //     見えれば誰でも接続は試せる) ことは受け入れて、1 分間の沈黙で
+      //     連打の採算を壊す。自動で明けるので締め出しにはならない。
+      if (g_pair_strikes >= PAIR_STRIKE_LIMIT && advertising_allowed(now)) {
+        g_pair_strikes = 0;
+        g_pair_block_until_us = now + PAIR_BLOCK_US;
+        gap_advertisements_enable(0);
+        if (con_handle != HCI_CON_HANDLE_INVALID)
+          gap_disconnect(con_handle);
+        BOARD::diag_printf(
+            "[BLE_UART] too many failed pairings — advertising off for %lus\n",
+            (unsigned long)(PAIR_BLOCK_US / 1000000ull));
+      }
+      if (g_pair_block_until_us != 0 && now >= g_pair_block_until_us) {
+        g_pair_block_until_us = 0;
+        next_adv_ensure_us = 0; // ③ に即座に張り直させる
+        BOARD::diag_printf("[BLE_UART] pairing cooldown over — advertising again\n");
+      }
+
+      // (e) 認可されないまま居座るリンクを畳む。
+      //   ★BLE の接続は **1 本しか持てない**ので、繋いで黙っているだけで
+      //     正規の母艦を締め出せる。これがいちばん安い DoS で、しかも
+      //     ①の生存ウォッチドッグ (20 秒無通信) では畳めない —— 攻撃者が
+      //     何か送っていれば「活きたリンク」に見えるため。
+      //   ★NC の承認待ち中は数えない。そこは人間の操作時間なので、機械の
+      //     しびれを切らす時間で測ってはいけない。
+      //   ★長さの決め方: 誤爆 (正規の遅いペアリングを切る) の代償は
+      //     「strike が溜まって離陸前に 60 秒黙る」で、見逃し (占拠が
+      //     45 秒でなく 90 秒続く) の代償はほぼ無い。**非対称なので長めに倒す**。
+      if (con_handle != HCI_CON_HANDLE_INVALID && !cmd_authorized &&
+          nc_pending_handle == HCI_CON_HANDLE_INVALID &&
+          now - conn_started_us > UNAUTH_LINK_TIMEOUT_US) {
+        BOARD::diag_printf(
+            "[BLE_UART] link unauthorized for %lus — dropping\n",
+            (unsigned long)(UNAUTH_LINK_TIMEOUT_US / 1000000ull));
+        gap_disconnect(con_handle);
+        ++g_pair_strikes;
+        conn_started_us = now; // 切断イベントが来るまで連打しない
       }
     }
 
@@ -1023,8 +1408,12 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 
     // ③ 広告の保険: 未接続なのに広告が止まっている事態 (切断イベントの
     //    取りこぼしや enable 失敗) を 1 秒ごとに埋める。enable は冪等。
+    //    ★クールダウン中だけは埋めない。ここを無条件にしておくと、上の (d) で
+    //      止めた広告を 1 秒後にこの保険が復活させてしまう (対策が自分で
+    //      自分を打ち消す形になる)。
     if (con_handle == HCI_CON_HANDLE_INVALID &&
-        BOARD::time_us() >= next_adv_ensure_us) {
+        BOARD::time_us() >= next_adv_ensure_us &&
+        advertising_allowed(BOARD::time_us())) {
       gap_advertisements_enable(1);
       next_adv_ensure_us = BOARD::time_us() + 1000000ull;
     }
@@ -1067,6 +1456,14 @@ uintptr_t ble_uart_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
                             (uintptr_t)&method_get_ch2_rx_stream);
   failures += export_method(method::SET_CH2_TX_STREAM,
                             (uintptr_t)&method_set_ch2_tx_stream);
+  failures += export_method(method::GET_PAIRING_STATE,
+                            (uintptr_t)&method_get_pairing_state);
+  failures += export_method(method::PAIRING_ANSWER,
+                            (uintptr_t)&method_pairing_answer);
+  failures += export_method(method::SET_PAIRING_LOCK,
+                            (uintptr_t)&method_set_pairing_lock);
+  failures +=
+      export_method(method::FORGET_BONDS, (uintptr_t)&method_forget_bonds);
   failures += export_method(method::POLL, (uintptr_t)&poll_loop);
 
   const auto rx_created =

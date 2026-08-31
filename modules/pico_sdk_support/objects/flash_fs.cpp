@@ -8,6 +8,7 @@
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/objects/flash_fs.hpp"
+#include "shizuku/objects/flash_map.hpp"
 
 // ★リンカが置いたファーム末尾。名前空間の中に書くと C++ のマングリングが効いて
 //   別物になるので、必ずファイルスコープの extern "C" で受ける (同じ罠を
@@ -47,11 +48,14 @@ uintptr_t export_method(uintptr_t method, uintptr_t entry) {
 }
 
 // ---- 媒体の割り付け --------------------------------------------------------
-//  flash の**末尾**を切り出して使う。ファームは先頭から伸びるので、末尾を取る限り
-//  「大きくなったファームに踏まれる」ことが無い。踏みそうなときは mount で気づく。
-constexpr uint32_t REGION_BYTES = 1024 * 1024;
-constexpr uint32_t REGION_OFFSET = PICO_FLASH_SIZE_BYTES - REGION_BYTES;
-constexpr uintptr_t REGION_ADDRESS = XIP_BASE + REGION_OFFSET;
+//  ★**自分では決めない**。場所は flash_map.hpp が一箇所で決め、重なりを
+//    static_assert が確かめる。以前はここで「末尾 1MB を取る」と自分で決めて
+//    いて、その末尾 1MB が btstack の bonding バンク (SDK の持ち物) を物理的に
+//    含んでいた — 両方を有効にするとペアリング鍵が壊れる関係だったが、
+//    場所を各自が決めている限り、誰もそれに気づけなかった。
+constexpr uint32_t REGION_BYTES = flash_map::FS_BYTES;
+constexpr uint32_t REGION_OFFSET = flash_map::FS_OFFSET;
+constexpr uintptr_t REGION_ADDRESS = flash_map::FS_ADDRESS;
 
 constexpr uint32_t DIRECTORY_MAGIC = 0x5A4B4653; // 'ZKFS'
 constexpr uint32_t DIRECTORY_VERSION = 2;
