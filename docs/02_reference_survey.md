@@ -94,8 +94,8 @@ DESIGN §12 が正規リスト。要点:
 ## 5. ビルド (参照側を動かしたい場合)
 
 ```
-export PICO_SDK_PATH=/Users/ishigakiyua/.pico-sdk/sdk/2.2.0
-export PICO_TOOLCHAIN_PATH=/Users/ishigakiyua/.pico-sdk/toolchain/14_2_Rel1
+export PICO_SDK_PATH=$HOME/.pico-sdk/sdk/2.2.0
+export PICO_TOOLCHAIN_PATH=$HOME/.pico-sdk/toolchain/14_2_Rel1
 export PATH=$PICO_TOOLCHAIN_PATH/bin:$PATH
 cd latest_ver_from_flight_robocon/flight_robocon_telemetory_sender
 cmake -S . -B build && cmake --build build -j8   # → build/main.uf2

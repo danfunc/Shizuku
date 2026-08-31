@@ -14,7 +14,7 @@ bazel_dep(name = "pico-sdk", version = "2.2.0")
 local_path_override(
     module_name = "pico-sdk",
     # VS Code Pico 拡張が展開する SDK。マシンが変わったらここを更新する。
-    path = "/Users/ishigakiyua/.pico-sdk/sdk/2.2.0",
+    path = "../../.pico-sdk/sdk/2.2.0",
 )
 
 # pico-sdk のツールチェーンは dev_dependency 登録なので、利用側が明示的に登録する。
