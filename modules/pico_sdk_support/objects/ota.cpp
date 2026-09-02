@@ -269,8 +269,16 @@ void reset_transfer() {
 bool ensure_erased(uint32_t needed_bytes) {
   if (needed_bytes > STAGING_BYTES)
     return false;
+  // ★★64KB ブロックを 1 回の flash_safe_execute でまとめて消していたら
+  //   1 回あたり約 108ms 止まっていた (2026-09-02 実測、以前のメモに
+  //   「対策済み」と書かれていた値は単位が us と誤記されていた可能性が高い —
+  //   同じ 108ms/block の値と一致する)。flush_sector() が書き込みを 256B
+  //   ページへ分割して直したのと同じ理由で、こちらも消去の最小単位
+  //   (FLASH_SECTOR_SIZE = 4KB、これより小さくは消せない) へ割り、
+  //   合間で必ず YIELD する。窓を縮めるだけでなく実際に譲ることが要点
+  //   (flush_sector() と同じ)。
   while (g_erased < needed_bytes) {
-    uint32_t block_bytes = FLASH_BLOCK_SIZE;
+    uint32_t block_bytes = FLASH_SECTOR_SIZE;
     if (g_erased + block_bytes > STAGING_BYTES)
       block_bytes = STAGING_BYTES - g_erased;
     erase_op op{STAGING_OFFSET + g_erased, block_bytes};
@@ -278,8 +286,11 @@ bool ensure_erased(uint32_t needed_bytes) {
               (unsigned long)(STAGING_OFFSET + g_erased),
               (unsigned long)block_bytes, (unsigned long)g_received);
     const uint64_t t0 = BOARD::time_us();
-    flash_quiet quiet;
-    const auto res = ::flash_safe_execute(erase_range, &op, UINT32_MAX);
+    int res;
+    {
+      flash_quiet quiet;
+      res = ::flash_safe_execute(erase_range, &op, UINT32_MAX);
+    }
     const uint64_t elapsed = BOARD::time_us() - t0;
     OTA_TRACE("[OTA] erase<  rc=%d took=%lu us\n", (int)res,
               (unsigned long)elapsed);
@@ -290,6 +301,8 @@ bool ensure_erased(uint32_t needed_bytes) {
       return false;
     }
     g_erased += block_bytes;
+    // ★flush_sector() のページループと同じ規律: ロックの外で必ず譲る。
+    api(object_api::YIELD);
   }
   return true;
 }
