@@ -629,12 +629,14 @@ uint32_t report_missing() {
     if (!bm_get(g_ok_bm, i))
       ++missing;
 
-  snprintf(line, sizeof(line),
-           "NEED n=%lu (of %lu, ok=%lu bad=%lu round=%lu)\n",
+  // ★短く保つこと (上の FIFO の話は見出し行にも同じく効く。45 文字の 1 行
+  //   ですら 115200 で 3.9ms かかり、相手の 2.8ms を超える)。
+  snprintf(line, sizeof(line), "NEED n=%lu of=%lu ok=%lu bad=%lu r=%lu\n",
            (unsigned long)missing, (unsigned long)g_nchunks,
            (unsigned long)g_chunks_ok, (unsigned long)g_chunks_bad,
            (unsigned long)g_queries);
   say(line);
+  api(object_api::SLEEP_US, 30000);
 
   if (missing == 0) {
     const uint32_t got = staged_crc(g_total);
@@ -678,32 +680,53 @@ uint32_t report_missing() {
     return 0;
   }
 
-  // 一覧。★1 行に詰め込みすぎない — say() は frame_t の 244B で切り捨てる
-  //   ので、溢れると**黙って seq が消える** (送り手は「もう要らない」と
-  //   誤解して欠けたまま commit へ進む)。余裕をもって折り返す。
+  // 一覧は**範囲**で書く ("40-59,98-108")。ビット化けは連続したチャンクを
+  // まとめて落とすので、範囲にすると劇的に短くなる。
+  // ★★短くするのは見た目のためではない。**XIAO の UART RX は FIFO 32B の
+  //   ポーリングで、115200 では 2.8ms で溢れる** (Pico 側が DMA 化して解決した
+  //   のと同じ問題が、XIAO 側には残っている)。長い行を続けて流すと途中が
+  //   落ちて一覧が欠け、送り手は足りない seq を知らないまま再送するので
+  //   **永久に収束しない**。2026-09-02 実機で踏んだ: n=70 と言いながら
+  //   11 個しか届かず、再送しても ok が increase しなかった。
+  // ★1 行ごとに実際に**寝る**こと。YIELD は他に走るものが無ければすぐ戻る
+  //   ので、相手が汲む時間を作れない。
+  constexpr uint32_t LINE_GAP_US = 30000;
   uint32_t at = 0;
   while (at < g_nchunks) {
     int n = snprintf(line, sizeof(line), "NEEDSEQ");
     bool any = false;
-    while (at < g_nchunks && n > 0 && n < (int)sizeof(line) - 16) {
-      if (bm_get(g_ok_bm, at)) {
+    // 1 行あたりの範囲数を絞る (相手の FIFO に合わせて短く保つ)。
+    for (uint32_t ranges = 0; ranges < 8 && at < g_nchunks; ++ranges) {
+      while (at < g_nchunks && bm_get(g_ok_bm, at))
         ++at;
-        continue;
-      }
-      const int add = snprintf(line + n, sizeof(line) - (size_t)n, "%s%lu",
-                               any ? "," : " ", (unsigned long)at);
-      if (add <= 0)
+      if (at >= g_nchunks)
         break;
+      const uint32_t start = at;
+      while (at < g_nchunks && !bm_get(g_ok_bm, at))
+        ++at;
+      const uint32_t last = at - 1;
+      int add;
+      if (last == start)
+        add = snprintf(line + n, sizeof(line) - (size_t)n, "%s%lu",
+                       any ? "," : " ", (unsigned long)start);
+      else
+        add = snprintf(line + n, sizeof(line) - (size_t)n, "%s%lu-%lu",
+                       any ? "," : " ", (unsigned long)start,
+                       (unsigned long)last);
+      if (add <= 0 || n + add >= (int)sizeof(line) - 2) {
+        at = start; // この行には入らない。次の行へ回す
+        break;
+      }
       n += add;
       any = true;
-      ++at;
     }
     if (!any)
       break;
     snprintf(line + n, sizeof(line) - (size_t)n, "\n");
     say(line);
-    api(object_api::YIELD); // 出口 (BLE notify / UART) を詰まらせない
+    api(object_api::SLEEP_US, LINE_GAP_US);
   }
+  api(object_api::SLEEP_US, LINE_GAP_US);
   say("NEEDEND\n");
   return missing;
 }
