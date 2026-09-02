@@ -1193,7 +1193,13 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       reset_transfer();
     }
 
-    if (g_writes != g_last_write_report) {
+    // ★チャンク再送 (XNOR) ではこの定期診断行を出さない。中継の終わりで
+    //   シェルの UBRIDGE_LOST / UBRIDGE_DONE / ACK と UART0 上で衝突し、
+    //   **ACK が化けて XIAO が 2 秒のアイドル待ちに落ちる** (2026-09-02 実機)。
+    //   欲しい情報 (受理数・破損数・ラウンド数) は report_missing() の
+    //   NEED 行がより正確に出すので、失うものが無い。XNOZ 経路は従来どおり
+    //   — あちらは inflate failed を追うときの数少ない足跡なので残す。
+    if (!g_chunked && g_writes != g_last_write_report) {
       static uint64_t next_note = 0;
       const uint64_t now = BOARD::time_us();
       if (now >= next_note) {
