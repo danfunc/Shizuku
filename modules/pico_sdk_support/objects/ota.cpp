@@ -646,6 +646,10 @@ uintptr_t method_get_stream(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   return g_out_id;
 }
 
+uintptr_t method_get_state(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  return (uintptr_t)g_state;
+}
+
 uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   while (true) {
     api(object_api::YIELD);
@@ -709,6 +713,7 @@ uintptr_t ota_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   failures += export_method(method::SET_INPUT_STREAM,
                             (uintptr_t)&method_set_input_stream);
   failures += export_method(method::GET_STREAM, (uintptr_t)&method_get_stream);
+  failures += export_method(method::GET_STATE, (uintptr_t)&method_get_state);
   failures += export_method(method::POLL, (uintptr_t)&poll_loop);
 
   g_out.init();

@@ -25,6 +25,13 @@ enum struct method : uintptr_t {
   // 戻り値 = 進捗・結果を出す行ストリームの番号 (logger が購読する)。
   GET_STREAM = 2,
   POLL = 3,
+  // 戻り値 = 現在の内部状態 (state 列挙値、IDLE=0)。★中継の入れ替え元
+  //   (UART ブリッジ等) が「入力ストリームを引き渡してよいか」を判断する
+  //   材料。ストリームの available()==0 は「積んだ分は pop された」しか
+  //   意味せず、pop の中で走る feed()/finish_upload() (flash 書き込み・
+  //   CRC・完了行の送出) が終わったことまでは保証しない。IDLE に戻るのを
+  //   待って初めて「もう ota は何も出さない」と言える。
+  GET_STATE = 4,
 };
 
 using frame_t = shizuku::objects::ble_uart::frame_t;
