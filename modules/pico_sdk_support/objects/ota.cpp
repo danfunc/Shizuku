@@ -618,7 +618,14 @@ uint32_t staged_crc(uint32_t total) {
 uint32_t report_missing() {
   char line[200];
   if (!g_chunked || g_nchunks == 0) {
-    say("NEED n=0 (チャンク転送が走っていない)\n");
+    // ★★"NEED n=0" を使わないこと。あれは「全チャンク揃った」を意味する
+    //   ので、**転送が走っていないという失敗**を成功として読ませてしまう。
+    //   実際に踏んだ (2026-09-02): 転送が FAILED で畳まれた後の問い合わせに
+    //   この行を返し、母艦が「全チャンク受領」と報告して commit へ進んだ。
+    //   ★機械が読む行に日本語を混ぜないこと。XIAO の行組み立ては
+    //     32..=126 しか通さないので、**日本語は途中で黙って消える**。
+    //     消えた結果 "NEED n=0 ()" になり、n=0 として解釈された。
+    say("NEEDIDLE no transfer in progress\n");
     say("NEEDEND\n");
     return 0;
   }
