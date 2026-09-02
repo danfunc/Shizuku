@@ -32,6 +32,11 @@ enum struct method : uintptr_t {
   //   CRC・完了行の送出) が終わったことまでは保証しない。IDLE に戻るのを
   //   待って初めて「もう ota は何も出さない」と言える。
   GET_STATE = 4,
+  // 戻り値 = 直近の転送が成功で終わったか (1=成功, 0=失敗)。★GET_STATE と
+  //   違い reset_transfer() で消えない。DONE/FAILED から IDLE へ落ちる
+  //   その一瞬しか GET_STATE では見えないので、判定を残す側 (ota 自身の
+  //   スレッド) が確定させて持つ。ACK/NAK で相手へ伝える材料。
+  GET_LAST_OK = 5,
 };
 
 using frame_t = shizuku::objects::ble_uart::frame_t;

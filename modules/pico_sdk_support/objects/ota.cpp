@@ -177,6 +177,9 @@ enum struct state : uint32_t { IDLE, HEADER, DATA, ZLEN, ZDATA, DONE, FAILED };
 constexpr uint32_t ZCHUNK_MAX = FLASH_SECTOR_SIZE + 256;
 
 state g_state = state::IDLE;
+// ★reset_transfer() では触らない。DONE/FAILED から IDLE へ落ちる一瞬にしか
+//   確定しない判定を、次の転送が始まるまで持ち越すための場所 (method::GET_LAST_OK)。
+bool g_last_ok = false;
 uint8_t g_header[12];
 // ★★「今フラッシュを触っている」を外へ見せる印。
 //   消去・書き込みの間は IRQ を止め XIP も止まる。そこへ**他の口が喋る**と、
@@ -650,6 +653,10 @@ uintptr_t method_get_state(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   return (uintptr_t)g_state;
 }
 
+uintptr_t method_get_last_ok(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  return (uintptr_t)g_last_ok;
+}
+
 uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   while (true) {
     api(object_api::YIELD);
@@ -702,6 +709,10 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       }
     }
     if (g_state == state::FAILED || g_state == state::DONE) {
+      // ★DONE/FAILED から IDLE へ落ちるのはここだけ (ota 自身のスレッド)
+      //   なので、確定判定として競合なく残せる。GET_STATE は reset_transfer()
+      //   の後は 0 (IDLE) に戻ってしまい、外から見えるのは一瞬だけ。
+      g_last_ok = (g_state == state::DONE);
       reset_transfer();
     }
   }
@@ -714,6 +725,8 @@ uintptr_t ota_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
                             (uintptr_t)&method_set_input_stream);
   failures += export_method(method::GET_STREAM, (uintptr_t)&method_get_stream);
   failures += export_method(method::GET_STATE, (uintptr_t)&method_get_state);
+  failures +=
+      export_method(method::GET_LAST_OK, (uintptr_t)&method_get_last_ok);
   failures += export_method(method::POLL, (uintptr_t)&poll_loop);
 
   g_out.init();
