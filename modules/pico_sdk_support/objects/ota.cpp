@@ -172,9 +172,107 @@ void __no_inline_not_in_flash_func(commit_blast)(void *param) {
     __asm volatile("wfi");
 }
 
-enum struct state : uint32_t { IDLE, HEADER, DATA, ZLEN, ZDATA, DONE, FAILED };
+// ★新しい値は**末尾へ足すこと**。GET_STATE は列挙値をそのまま数値で外
+//   (シェル) へ渡しており、途中に挿すと DONE/FAILED の番号がずれる。
+//   Pico とシェルは同じ像に入っているので即死はしないが、片方だけ古いログや
+//   ドキュメントを見ている人間が必ず騙される。
+enum struct state : uint32_t {
+  IDLE,
+  HEADER,
+  DATA,
+  ZLEN,
+  ZDATA,
+  DONE,
+  FAILED,
+  // 以下 XNOR (チャンク単位の再送) 専用。
+  CSEEK, // チャンクヘッダの magic を探している。**ラウンドの合間もここ**
+  CHDR,  // 16B のチャンクヘッダを集めている
+  CDATA, // チャンクのペイロードを集めている
+};
 
 constexpr uint32_t ZCHUNK_MAX = FLASH_SECTOR_SIZE + 256;
+
+// ===========================================================================
+//  XNOR — チャンク単位の再送 (HTTP の range 再取得と同じ発想)
+// ===========================================================================
+//  送り手は最後まで**一括で送り切り**、受け手 (ここ) は化けたチャンクを
+//  記録するだけで転送を殺さない。送り終わったら送り手が「足りない seq」を
+//  問い合わせ、その分だけ再送する。窓幅・順序・タイムアウト再送といった
+//  パイプライン方式の状態機械が要らないのが利点。
+//
+//  ★★従来の XNOZ (`[u16 len][deflate]` の裸の連続) では**この方式が成立
+//    しない**。len の 1 ビットが化けると以降のフレーム境界が全部ずれるので、
+//    「化けた seq だけ再送」が実際には「最初の 1 個が化けたら以降全部」へ
+//    退化する。だからチャンクごとに**自己同期できるヘッダ**を付ける:
+//
+//      [u32 'XNCK'][u16 seq][u16 len][u32 crc32(payload)][u16 rsv][u16 crc16(先頭14B)]
+//
+//    受け手は len を信用する前に crc16 でヘッダを検め、壊れていれば
+//    1 バイトずつずらして magic を探し直す (CSEEK)。上乗せは 16B/4096B
+//    = 0.39% (300KB で約 0.04 秒)。
+//
+//  ★seq == QUERY_SEQ (0xFFFF) かつ len == 0 のヘッダは「今どれが足りないか
+//    教えろ」という問い合わせ。**チャンクと同じ枠に載せてある**ので、
+//    CSEEK の探索も crc16 の保護もそのまま効き、BLE でも UART でも同じ
+//    入口を通る (別経路・別パーサを作らずに済む)。
+//
+//  ★チャンク 1 個 = セクタ 1 個 (ZCHUNK == FLASH_SECTOR_SIZE == flash の
+//    消去最小単位) が綺麗に一致するので、再送は「そのセクタを消して書き
+//    直す」だけで済む。ここが噛み合っているのは設計の幸運なので、
+//    ZCHUNK を変えるときは必ずこの前提を見直すこと。
+//
+//  ★★XNOZ の経路には**一切手を入れていない**。回復経路を残すため —
+//    新形式にバグがあっても、古い送り手 (XNOZ) でこの板へ焼き直せる。
+
+constexpr uint8_t CHUNK_MAGIC[4] = {'X', 'N', 'C', 'K'};
+constexpr uint32_t CHUNK_HDR_BYTES = 16;
+constexpr uint32_t QUERY_SEQ = 0xFFFFu;
+// ★「今の転送を捨てて待ち受けに戻れ」。失敗して諦めた campaign のあと、
+//   ota は CSEEK のまま最大 2 分居座る (ラウンドの合間を守るための長い
+//   タイムアウト)。その間に次の転送を始めると、**XNOR ファイルヘッダが
+//   チャンクデータとして食われて**先へ進まない。送り手が campaign の頭で
+//   これを撃てるようにしておく。
+constexpr uint32_t RESET_SEQ = 0xFFFEu;
+// ステージング領域に入るチャンクの上限 (Pico 2 W = 4MB flash なら 509)。
+constexpr uint32_t MAX_CHUNKS = STAGING_BYTES / FLASH_SECTOR_SIZE;
+constexpr uint32_t BM_WORDS = (MAX_CHUNKS + 31) / 32;
+
+bool g_chunked = false;
+uint32_t g_nchunks = 0;
+uint32_t g_ok_bm[BM_WORDS]; // 検証を通って flash へ書けた seq
+uint8_t g_chdr[CHUNK_HDR_BYTES];
+uint32_t g_chdr_got = 0;
+uint8_t g_cwin[4]; // CSEEK 用の magic 探索窓
+uint32_t g_cwin_filled = 0;
+uint32_t g_cseq = 0;
+uint32_t g_clen = 0;
+uint32_t g_ccrc = 0;
+uint32_t g_cgot = 0;
+uint32_t g_chunks_ok = 0;  // 診断用: 受理した数 (再送ぶんの重複は数えない)
+uint32_t g_chunks_bad = 0; // 診断用: ヘッダ破損 + ペイロード破損の累計
+uint32_t g_queries = 0;    // 診断用: 問い合わせを受けた回数 = ラウンド数
+
+bool bm_get(const uint32_t *bm, uint32_t i) {
+  return ((bm[i >> 5] >> (i & 31)) & 1u) != 0;
+}
+void bm_set(uint32_t *bm, uint32_t i) { bm[i >> 5] |= 1u << (i & 31); }
+
+// CRC-16/CCITT-FALSE。★16 バイトのヘッダにしか掛けないので、表を持たず
+//   ビットで回して十分 (テーブル 512B を積むほうがもったいない)。
+uint16_t crc16_ccitt(const uint8_t *p, uint32_t n) {
+  uint16_t crc = 0xFFFFu;
+  for (uint32_t i = 0; i < n; ++i) {
+    crc ^= (uint16_t)((uint16_t)p[i] << 8);
+    for (uint32_t b = 0; b < 8; ++b)
+      crc = (crc & 0x8000u) ? (uint16_t)((uint16_t)(crc << 1) ^ 0x1021u)
+                            : (uint16_t)(crc << 1);
+  }
+  return crc;
+}
+
+uint16_t read_le16(const uint8_t *p) {
+  return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
 
 state g_state = state::IDLE;
 // ★reset_transfer() では触らない。DONE/FAILED から IDLE へ落ちる一瞬にしか
@@ -232,6 +330,18 @@ tiny_inflate::state g_inflate_state;
 uint64_t g_last_byte_us = 0;
 constexpr uint64_t IDLE_TIMEOUT_US =
     15000000ull; // 15秒 (CoreBluetooth 輻輳時の救済)
+// ★チャンク再送 (XNOR) のラウンドの合間は 15 秒では短すぎる。OTW では中継を
+//   いったん畳んで baud を 115200 へ戻し、母艦が NEED を読んでチャンクを
+//   詰め直し、もう一度 ubridge を張り直す (2 回連続ブリッジの実用対処だけで
+//   3 秒待つ)。ここで転送を捨てると**受領ビットマップごと消えて全再送**に
+//   なり、再送機構そのものの意味が無くなる。
+constexpr uint64_t CHUNKED_IDLE_TIMEOUT_US = 120000000ull; // 2分
+
+// ★「ota が今 feed() の中にいる」。中継が baud を戻してよいかの判断に使う。
+//   ストリームの available()==0 は「積んだ分は pop された」しか意味せず、
+//   pop の中で走る flash 書き込みや完了行の送出までは保証しない
+//   (GET_STATE を足したときと同じ話、method::GET_QUIESCENT を参照)。
+volatile bool g_feeding = false;
 
 uint32_t read_le32(const uint8_t *p) {
   return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
@@ -258,6 +368,14 @@ void reset_transfer() {
   g_zgot = 0;
   g_zlen_got = 0;
   g_inflate_us = 0;
+  // ★ビットマップは XNOR ヘッダの受領時に消す。ここで消さないのは、
+  //   reset_transfer() が「ラウンドの合間」には走らないことを前提に
+  //   していないため — 走ってしまったら g_chunked が false になるので、
+  //   次のラウンドは NEED n=0 (転送が走っていない) と正直に答える。
+  g_chunked = false;
+  g_nchunks = 0;
+  g_cwin_filled = 0;
+  g_chdr_got = 0;
 }
 
 // ★計測用の足跡。**kprintf は USB CDC へ出るので BLE には一切載らない** ——
@@ -367,6 +485,65 @@ bool flush_sector() {
   return true;
 }
 
+// ---- XNOR: 1 チャンク = 1 セクタを消して書く ------------------------------
+// ★★再送では**必ず消してから**書く。一度書いた flash は消さずに書き直せない。
+//   毎回消すので「初回か再送か」を覚えておく必要がなく、状態が 1 つ減る。
+//   代償は初回も必ず消去が入ることだが、ensure_erased() も結局全域を消して
+//   いたので**総消去量は変わらない** (2026-09-02 実測の erase 4284ms /109 blk
+//   と同じ仕事量)。
+// ★消去は 4KB 単位、書き込みは 256B ページ単位に割り、合間で必ず YIELD する。
+//   窓を縮めるだけでは足りず、実際に譲って CYW43 を回さないと取り残しは
+//   解消しない ([[long-irq-off-wedges-cyw43]]、flush_sector() と同じ規律)。
+// ★g_sector を作業バッファとして借りる。XNOZ 経路と同時には動かない
+//   (magic が排他) が、**借り物であることは意識しておくこと**。
+bool write_sector(uint32_t seq, const uint8_t *data, uint32_t len) {
+  const uint32_t at = seq * FLASH_SECTOR_SIZE;
+  if (len > FLASH_SECTOR_SIZE || at + FLASH_SECTOR_SIZE > STAGING_BYTES)
+    return false;
+
+  {
+    erase_op op{STAGING_OFFSET + at, FLASH_SECTOR_SIZE};
+    const uint64_t t0 = BOARD::time_us();
+    int res;
+    {
+      flash_quiet quiet;
+      res = ::flash_safe_execute(erase_range, &op, UINT32_MAX);
+    }
+    g_erase_us += BOARD::time_us() - t0;
+    ++g_erase_count;
+    if (res != PICO_OK) {
+      say("erase failed\n");
+      return false;
+    }
+    api(object_api::YIELD);
+  }
+
+  memcpy(g_sector, data, len);
+  const uint32_t write_bytes =
+      (len + FLASH_PAGE_SIZE - 1) & ~(FLASH_PAGE_SIZE - 1);
+  if (write_bytes > len)
+    memset(g_sector + len, 0xFF, write_bytes - len);
+
+  const uint64_t t0 = BOARD::time_us();
+  int res = PICO_OK;
+  for (uint32_t off = 0; off < write_bytes; off += FLASH_PAGE_SIZE) {
+    program_op op{STAGING_OFFSET + at + off, g_sector + off, FLASH_PAGE_SIZE};
+    {
+      flash_quiet quiet;
+      res = ::flash_safe_execute(program_range, &op, UINT32_MAX);
+    }
+    if (res != PICO_OK)
+      break;
+    api(object_api::YIELD); // ★ここで譲らないとページに割った意味が無い
+  }
+  g_program_us += BOARD::time_us() - t0;
+  if (res != PICO_OK) {
+    say("program failed\n");
+    return false;
+  }
+  return true;
+}
+
 void finish_upload() {
   if (!flush_sector()) {
     say("failed: flush\n");
@@ -425,6 +602,110 @@ uint32_t staged_crc(uint32_t total) {
     api(object_api::YIELD);
   }
   return crc ^ 0xFFFFFFFFu;
+}
+
+// ---- XNOR: 足りないチャンクを報告する (= ラウンドの区切り) ----------------
+// ★★ここが「送り手が次に何をすべきか」を決める唯一の出口。出力の形:
+//     NEED n=<足りない数> (of <総数>, ok=.. bad=.. round=..)
+//     NEEDSEQ 3,17,42            ← n>0 のとき、必要なだけ複数行
+//     NEEDEND
+//   n==0 のときは NEEDSEQ を出さずに、そのまま**flash の読み返し CRC**まで
+//   走らせて done: / crc MISMATCH: を出す。
+// ★★判定に到着順のストリーミング CRC を使わない。順不同の再送と両立しない
+//   のが直接の理由だが、**flash の実体を検べるほうが本質的に強い** —
+//   「RAM を通ったバイト列は正しかった」ではなく「焼けているものが正しい」を
+//   言えるので、commit 前の readback (begin_commit) と同じ土俵に乗る。
+uint32_t report_missing() {
+  char line[200];
+  if (!g_chunked || g_nchunks == 0) {
+    say("NEED n=0 (チャンク転送が走っていない)\n");
+    say("NEEDEND\n");
+    return 0;
+  }
+  ++g_queries;
+
+  uint32_t missing = 0;
+  for (uint32_t i = 0; i < g_nchunks; ++i)
+    if (!bm_get(g_ok_bm, i))
+      ++missing;
+
+  snprintf(line, sizeof(line),
+           "NEED n=%lu (of %lu, ok=%lu bad=%lu round=%lu)\n",
+           (unsigned long)missing, (unsigned long)g_nchunks,
+           (unsigned long)g_chunks_ok, (unsigned long)g_chunks_bad,
+           (unsigned long)g_queries);
+  say(line);
+
+  if (missing == 0) {
+    const uint32_t got = staged_crc(g_total);
+    const uint64_t total_us = BOARD::time_us() - g_start_us;
+    const uint32_t total_ms = (uint32_t)(total_us / 1000ull);
+    const uint32_t erase_ms = (uint32_t)(g_erase_us / 1000ull);
+    const uint32_t prog_ms = (uint32_t)(g_program_us / 1000ull);
+    const uint32_t infl_ms = (uint32_t)(g_inflate_us / 1000ull);
+    const int32_t link_ms = (int32_t)total_ms - (int32_t)erase_ms -
+                            (int32_t)prog_ms - (int32_t)infl_ms;
+    if (got != g_expect_crc) {
+      snprintf(line, sizeof(line),
+               "crc MISMATCH: got=%08lx want=%08lx (%lu bytes, total %lums)\n",
+               (unsigned long)got, (unsigned long)g_expect_crc,
+               (unsigned long)g_total, (unsigned long)total_ms);
+      say(line);
+      // ★全チャンクが個別の crc32 を通ったのにここで外れる = 化けではなく
+      //   flash へ書けていない (program の取りこぼし等)。再送しても直らない
+      //   ので、素直に失敗として畳む。
+      say("NEEDEND\n");
+      g_state = state::FAILED;
+      return 0;
+    }
+    snprintf(line, sizeof(line),
+             "done: %lu bytes crc=%08lx OK (staged at 0x%lx)\n",
+             (unsigned long)g_total, (unsigned long)got,
+             (unsigned long)STAGING_OFFSET);
+    say(line);
+    snprintf(line, sizeof(line),
+             "time: %lums = erase %lu (%lu blk) + program %lu + inflate %lu + "
+             "link %ld\n",
+             (unsigned long)total_ms, (unsigned long)erase_ms,
+             (unsigned long)g_erase_count, (unsigned long)prog_ms,
+             (unsigned long)infl_ms, (long)link_ms);
+    say(line);
+    // ★終端は成否によらず必ず出す。母艦は「NEEDEND が見えたか」だけで
+    //   「返事が全部届いた」を判定する — 経路ごとに終端が違うと、一覧が
+    //   途中で切れたのか正常に終わったのかを区別できない。
+    say("NEEDEND\n");
+    g_state = state::DONE;
+    return 0;
+  }
+
+  // 一覧。★1 行に詰め込みすぎない — say() は frame_t の 244B で切り捨てる
+  //   ので、溢れると**黙って seq が消える** (送り手は「もう要らない」と
+  //   誤解して欠けたまま commit へ進む)。余裕をもって折り返す。
+  uint32_t at = 0;
+  while (at < g_nchunks) {
+    int n = snprintf(line, sizeof(line), "NEEDSEQ");
+    bool any = false;
+    while (at < g_nchunks && n > 0 && n < (int)sizeof(line) - 16) {
+      if (bm_get(g_ok_bm, at)) {
+        ++at;
+        continue;
+      }
+      const int add = snprintf(line + n, sizeof(line) - (size_t)n, "%s%lu",
+                               any ? "," : " ", (unsigned long)at);
+      if (add <= 0)
+        break;
+      n += add;
+      any = true;
+      ++at;
+    }
+    if (!any)
+      break;
+    snprintf(line + n, sizeof(line) - (size_t)n, "\n");
+    say(line);
+    api(object_api::YIELD); // 出口 (BLE notify / UART) を詰まらせない
+  }
+  say("NEEDEND\n");
+  return missing;
 }
 
 void reject_commit(const char *why) {
@@ -531,6 +812,41 @@ void consume_header_12(const uint8_t *hdr) {
     begin_commit();
     return;
   }
+  // ★待ち受け (IDLE) の最中にチャンク枠が来た。制御フレーム (問い合わせ /
+  //   リセット) を**転送が走っていないときにも撃てる**ようにするための受け口。
+  //   12B だけ先に食ってしまっているので、そのまま 16B ヘッダの途中として
+  //   引き継ぐ (残り 4B は続けて流れてくる)。これが無いと、送り手は
+  //   「相手が IDLE か CSEEK か」を知らないと制御フレームを撃てなくなる。
+  if (hdr[0] == 'X' && hdr[1] == 'N' && hdr[2] == 'C' && hdr[3] == 'K') {
+    memcpy(g_chdr, hdr, 12);
+    g_chdr_got = 12;
+    g_cwin_filled = 0;
+    g_state = state::CHDR;
+    return;
+  }
+  if (hdr[0] == 'X' && hdr[1] == 'N' && hdr[2] == 'O' && hdr[3] == 'R') {
+    g_compressed = true;
+    g_chunked = true;
+    g_nchunks = (g_total + FLASH_SECTOR_SIZE - 1) / FLASH_SECTOR_SIZE;
+    if (g_total == 0 || g_nchunks > MAX_CHUNKS) {
+      say("size out of range\n");
+      g_state = state::FAILED;
+      return;
+    }
+    memset(g_ok_bm, 0, sizeof(g_ok_bm));
+    g_chunks_ok = 0;
+    g_chunks_bad = 0;
+    g_queries = 0;
+    g_cwin_filled = 0;
+    g_chdr_got = 0;
+    g_state = state::CSEEK;
+    // ★ここで全域を消さない。消去はチャンクを書く直前へ移した
+    //   (write_sector)。先に全部消すと、実際には送られてこない末尾まで
+    //   消すことになるうえ、再送のたびに「消し済みで未書き込み」のセクタを
+    //   覚える羽目になる。毎回消せばその記憶が要らない。
+    say("ready (chunked)\n");
+    return;
+  }
   if (hdr[0] == 'X' && hdr[1] == 'N' && hdr[2] == 'O' && hdr[3] == 'Z') {
     g_compressed = true;
     g_state = state::ZLEN;
@@ -618,6 +934,141 @@ void process_compressed_stream(const uint8_t *p, uint32_t len) {
   }
 }
 
+// ---- XNOR: チャンク列を読む -----------------------------------------------
+void accept_chunk() {
+  // 期待する展開後の長さ。最後のチャンクだけ端数になる。
+  const uint32_t at = g_cseq * FLASH_SECTOR_SIZE;
+  const uint32_t want_raw =
+      (g_total - at) < FLASH_SECTOR_SIZE ? (g_total - at) : FLASH_SECTOR_SIZE;
+
+  const uint64_t t0 = BOARD::time_us();
+  const int32_t raw_bytes =
+      tiny_inflate::run(g_inflate_state, g_zbuf, g_clen, g_raw, sizeof(g_raw));
+  g_inflate_us += BOARD::time_us() - t0;
+
+  if (raw_bytes <= 0 || (uint32_t)raw_bytes != want_raw) {
+    // ★crc32 を通ったのに展開できない / 長さが合わない = ビット化けではなく
+    //   送り手と受け手の作りが食い違っている。再送しても直らないが、
+    //   **ここでも転送は殺さない** — 欠損として記録して NEED に出し、送り手の
+    //   上限回数で諦めさせる。転送を殺すと「何が起きたか」を問い合わせる口
+    //   ごと消えてしまい、原因が分からないまま終わるため。
+    ++g_chunks_bad;
+    return;
+  }
+  if (!write_sector(g_cseq, g_raw, (uint32_t)raw_bytes)) {
+    g_state = state::FAILED; // flash が焼けないのは本物の失敗
+    return;
+  }
+  if (!bm_get(g_ok_bm, g_cseq)) {
+    bm_set(g_ok_bm, g_cseq);
+    ++g_chunks_ok;
+  }
+}
+
+void process_chunked_stream(const uint8_t *p, uint32_t len) {
+  while (len > 0 && g_state != state::FAILED && g_state != state::DONE) {
+    if (g_state == state::CSEEK) {
+      // magic を 1 バイトずつずらして探す。★ヘッダが化けたら len を信用でき
+      //   ないので、次のチャンクの頭は「探す」以外に見つけようがない。
+      g_cwin[0] = g_cwin[1];
+      g_cwin[1] = g_cwin[2];
+      g_cwin[2] = g_cwin[3];
+      g_cwin[3] = *p++;
+      --len;
+      // ★★窓が満ちた**その回に**照合すること。「満ちるまで continue」に
+      //   すると 4 バイト目を入れた回を飛ばしてしまい、その窓は次のバイトで
+      //   先頭が押し出されて二度と一致しない。結果、**チャンクを 1 個おきに
+      //   取り逃がす** (無傷の入力でも毎ラウンド半分しか受理されず、ラウンド
+      //   ごとに欠損が半減していくだけで収束しない)。ホスト側に受信部を
+      //   写して無傷入力を流す試験で捕まえた。
+      if (g_cwin_filled < 4)
+        ++g_cwin_filled;
+      if (g_cwin_filled < 4)
+        continue;
+      if (g_cwin[0] != CHUNK_MAGIC[0] || g_cwin[1] != CHUNK_MAGIC[1] ||
+          g_cwin[2] != CHUNK_MAGIC[2] || g_cwin[3] != CHUNK_MAGIC[3])
+        continue;
+      memcpy(g_chdr, CHUNK_MAGIC, 4);
+      g_chdr_got = 4;
+      g_state = state::CHDR;
+      continue;
+    }
+
+    if (g_state == state::CHDR) {
+      while (len > 0 && g_chdr_got < CHUNK_HDR_BYTES) {
+        g_chdr[g_chdr_got++] = *p++;
+        --len;
+      }
+      if (g_chdr_got < CHUNK_HDR_BYTES)
+        return;
+      g_cseq = read_le16(g_chdr + 4);
+      g_clen = read_le16(g_chdr + 6);
+      g_ccrc = read_le32(g_chdr + 8);
+      const bool hdr_ok =
+          crc16_ccitt(g_chdr, CHUNK_HDR_BYTES - 2) == read_le16(g_chdr + 14);
+
+      g_cwin_filled = 0;
+      g_chdr_got = 0;
+
+      // 問い合わせ (seq=QUERY_SEQ, len=0)。★チャンクと同じ枠に載せてあるので、
+      //   CSEEK の探索も crc16 の保護もそのまま効く。
+      if (hdr_ok && g_cseq == QUERY_SEQ && g_clen == 0) {
+        report_missing();
+        if (g_state != state::FAILED && g_state != state::DONE)
+          g_state = state::CSEEK;
+        continue;
+      }
+      if (hdr_ok && g_cseq == RESET_SEQ && g_clen == 0) {
+        say("reset\n");
+        reset_transfer(); // g_state は IDLE へ戻る
+        // ★★このフレームの**残りは捨てる**。feed() の header 段はもう
+        //   通り過ぎているので、ここから先を続けて読ませる道が無い。
+        //   したがって送り手は **RESET を書き込み単位の最後に置くこと**
+        //   (BLE なら 16B を単独で write する)。UART の中継のように
+        //   バイト列が連続する経路では、代わりに**中継の外**からシェルの
+        //   OTARESET を使うこと (そちらはそもそもこの経路を通らない)。
+        return;
+      }
+      if (!hdr_ok || g_cseq >= g_nchunks || g_clen == 0 ||
+          g_clen > sizeof(g_zbuf)) {
+        // ヘッダが壊れている、またはデータ中に偶然並んだ 'XNCK'。
+        // ★探索をやり直すだけ。**16 バイト食ってしまった分、本物のヘッダを
+        //   飛び越える可能性がある**が、その場合はそのチャンクが NEED に出て
+        //   次のラウンドで拾える。取りこぼしても壊れないほうを選ぶ。
+        ++g_chunks_bad;
+        g_state = state::CSEEK;
+        continue;
+      }
+      g_cgot = 0;
+      g_state = state::CDATA;
+      continue;
+    }
+
+    if (g_state == state::CDATA) {
+      const uint32_t need = g_clen - g_cgot;
+      const uint32_t take = len < need ? len : need;
+      memcpy(g_zbuf + g_cgot, p, take);
+      g_cgot += take;
+      p += take;
+      len -= take;
+      if (g_cgot < g_clen)
+        return;
+      const uint32_t crc =
+          crc32_update(0xFFFFFFFFu, g_zbuf, g_clen) ^ 0xFFFFFFFFu;
+      if (crc != g_ccrc)
+        ++g_chunks_bad; // 化けた。記録だけして先へ進む (NEED で拾う)
+      else
+        accept_chunk();
+      g_cwin_filled = 0;
+      g_chdr_got = 0;
+      if (g_state != state::FAILED && g_state != state::DONE)
+        g_state = state::CSEEK;
+      continue;
+    }
+    break;
+  }
+}
+
 void feed(const uint8_t *data, uint32_t len) {
   g_last_byte_us = BOARD::time_us();
   if (g_state == state::IDLE) {
@@ -642,6 +1093,9 @@ void feed(const uint8_t *data, uint32_t len) {
     process_uncompressed_bytes(data, take);
   } else if (g_state == state::ZLEN || g_state == state::ZDATA) {
     process_compressed_stream(data, len);
+  } else if (g_state == state::CSEEK || g_state == state::CHDR ||
+             g_state == state::CDATA) {
+    process_chunked_stream(data, len);
   }
 }
 
@@ -667,7 +1121,35 @@ uintptr_t method_get_state(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 }
 
 uintptr_t method_get_last_ok(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  // ★チャンク再送のラウンドの合間は「像が完成したか」がまだ決まっていない。
+  //   ACK/NAK は XIAO にとって「Pico はもう喋らない」を告げる同期バイトで
+  //   あって合否ではない (合否は NEED/done の行を母艦が読む) ので、ここでは
+  //   「ハード故障を起こしていない」を返す。素直に g_last_ok を返すと、
+  //   正常な多ラウンド転送でも毎ラウンド NAK になり、XIAO の状態 LED が
+  //   赤く光って**転送が失敗しているように見える**。
+  if (g_chunked && g_state == state::CSEEK)
+    return 1;
   return (uintptr_t)g_last_ok;
+}
+
+uintptr_t method_get_missing(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  return (uintptr_t)report_missing();
+}
+
+uintptr_t method_reset(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  say("reset\n");
+  reset_transfer();
+  return 0;
+}
+
+// ★「ota は何も抱えていない」= メッセージの途中でもなく、feed() の最中でも
+//   ない。GET_STATE==IDLE を使わないのは、チャンク再送のラウンドの合間の
+//   ota が IDLE ではなく CSEEK (次のチャンクを待っている) で待機しているため。
+//   IDLE を待つと永久に来ず、中継が baud を戻せない。
+uintptr_t method_get_quiescent(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  if (g_feeding)
+    return 0;
+  return (g_state == state::IDLE || g_state == state::CSEEK) ? 1 : 0;
 }
 
 uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
@@ -678,6 +1160,7 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 
     frame_t f{};
     uint32_t lost = 0;
+    g_feeding = true;
     while (g_in.pop(&f, &lost)) {
       if (lost != 0) {
         say("input overrun — 転送をやり直すこと\n");
@@ -696,9 +1179,12 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
           say(line);
       }
     }
+    g_feeding = false;
+    const uint64_t idle_limit =
+        g_chunked ? CHUNKED_IDLE_TIMEOUT_US : IDLE_TIMEOUT_US;
     if (g_state != state::IDLE && g_state != state::DONE &&
         g_state != state::FAILED &&
-        BOARD::time_us() - g_last_byte_us > IDLE_TIMEOUT_US) {
+        BOARD::time_us() - g_last_byte_us > idle_limit) {
       char line[96];
       if (snprintf(line, sizeof(line),
                    "timed out at %lu / %lu bytes — 捨てて待ち受けに戻る\n",
@@ -740,6 +1226,11 @@ uintptr_t ota_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   failures += export_method(method::GET_STATE, (uintptr_t)&method_get_state);
   failures +=
       export_method(method::GET_LAST_OK, (uintptr_t)&method_get_last_ok);
+  failures +=
+      export_method(method::GET_MISSING, (uintptr_t)&method_get_missing);
+  failures +=
+      export_method(method::GET_QUIESCENT, (uintptr_t)&method_get_quiescent);
+  failures += export_method(method::RESET, (uintptr_t)&method_reset);
   failures += export_method(method::POLL, (uintptr_t)&poll_loop);
 
   g_out.init();
