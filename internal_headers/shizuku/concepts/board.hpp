@@ -15,7 +15,9 @@ namespace concepts {
 // - core_num()     : 自コア番号 (0 起点)
 // - launch_core()  : もう一方のコアを起こす
 // - park/resume_other_cores() : 他コアを一時停止 / 再開 (XIP が止まる操作のため)
-// - dma_claim/copy/busy : ストリームの接続に使う DMA (特権側が握る)
+// - dma_claim/copy/busy/release : ストリームの接続に使う DMA (特権側が握る)
+//   ★release が要る。掴んだきり返せないと**チャネルが漏れる**うえ、接続を
+//     畳めない = 詰まった接続を外す手段が無くなる (再起動しか無くなる)。
 // - time_us()      : 単調増加のマイクロ秒時刻 (全コア共通基準)
 // - cycles_per_us(): タイマの刻みを µs から換算するための実クロック。
 //                    ★クロックを知っているのは board だけ (PORT §2.3)。上位は
@@ -41,6 +43,7 @@ concept board_requires = requires(uint32_t core, const char *text) {
   { BOARD::diag_mute(true) };
   { BOARD::dma_claim() } -> std::same_as<int>;
   { BOARD::dma_busy(0) } -> std::same_as<bool>;
+  { BOARD::dma_release(0) } -> std::same_as<void>;
   { BOARD::time_us() } -> std::same_as<uint64_t>;
   { BOARD::cycles_per_us() } -> std::same_as<uint32_t>;
   { BOARD::unprivileged_floor() } -> std::same_as<uintptr_t>;

@@ -167,6 +167,12 @@ private:
   // 接続 (DMA ポンプ)。★1 本につき DMA チャネルを 1 つ握る。チャネルは
   //   オブジェクトへは渡さない — DMA は MPU を素通りするため。
   static constexpr uintptr_t CONNECTION_COUNT = 4;
+  // 接続の状態。★2 値ではなく 3 値にしてある — 「畳んでほしい」と「畳んだ」を
+  //   分けないと、DMA が転送中の環の席を返してしまう (別の持ち主が bind できて
+  //   しまう)。印を立てるのは呼び出し側、実際に畳むのはポンプ。
+  static constexpr uint32_t CONNECTION_FREE = 0;
+  static constexpr uint32_t CONNECTION_ACTIVE = 1;
+  static constexpr uint32_t CONNECTION_CLOSING = 2;
   struct connection {
     volatile uint32_t active;
     uint32_t src;
@@ -209,6 +215,7 @@ private:
   //   流れたものは「途中のオブジェクトが pop して push する」段を通らずに dst へ届く。
   //   中継オブジェクトが要らなくなるのが眼目で、そのために DMA を使う。
   uintptr_t stream_connect(uintptr_t src, uintptr_t dst, object_error &error);
+  uintptr_t stream_disconnect(uintptr_t slot, object_error &error);
   // 接続を進める。★schedule() から呼ばれる。接続が 0 本なら数語読んで即戻る。
   void pump_connections();
   uintptr_t object_name(uintptr_t id, object_error &error);

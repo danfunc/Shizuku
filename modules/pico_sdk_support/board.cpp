@@ -377,6 +377,14 @@ void rp2350_pico2::dma_copy(int channel, const void *from, void *to,
 
 int rp2350_pico2::dma_claim() { return ::dma_claim_unused_channel(false); }
 
+// ★掴んだチャネルを返す。接続を畳めるようにするために要る (無いとチャネルが
+//   漏れ、詰まった接続を外す手段も無くなる)。呼ぶ側が「もう転送中でない」
+//   ことを保証してから呼ぶこと。
+void rp2350_pico2::dma_release(int channel) {
+  if (channel >= 0)
+    ::dma_channel_unclaim((uint)channel);
+}
+
 bool rp2350_pico2::dma_busy(int channel) {
   return ::dma_channel_is_busy(channel);
 }

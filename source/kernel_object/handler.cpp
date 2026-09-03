@@ -79,6 +79,8 @@ template <>
 uintptr_t KERNEL_OBJECT::stream_bind(uintptr_t, uintptr_t, object_error &);
 template <>
 uintptr_t KERNEL_OBJECT::stream_connect(uintptr_t, uintptr_t, object_error &);
+template <>
+uintptr_t KERNEL_OBJECT::stream_disconnect(uintptr_t, object_error &);
 template <> void KERNEL_OBJECT::pump_connections();
 template <> KERNEL_OBJECT::lent_stack KERNEL_OBJECT::lend_boot_stack();
 template <> bool KERNEL_OBJECT::start_secondary_core();
@@ -932,9 +934,33 @@ uintptr_t KERNEL_OBJECT::stream_connect(uintptr_t src, uintptr_t dst,
   link.channel = channel;
   link.inflight = 0;
   link.moved = 0;
-  ARCH::store_release32(&link.active, 1u);
+  ARCH::store_release32(&link.active, CONNECTION_ACTIVE);
   ++m_connection_count;
   return slot;
+}
+
+// 接続を畳む。★**ここでは待たない。** 転送中なら「畳む」印を立てて戻り、
+//   ポンプが在庫を運び終えてから席と DMA を返す。カーネルの中で DMA の完了を
+//   待つと、その待ちがカーネルに入り込む (誰も進められない時間ができる)。
+// ★席を返すのは実際に畳んだ瞬間だけ。印を立てた時点で返すと、まだ DMA が
+//   触っている環へ別の持ち主が bind できてしまう。
+template <>
+uintptr_t KERNEL_OBJECT::stream_disconnect(uintptr_t slot, object_error &error) {
+  table_guard guard;
+  if (slot >= CONNECTION_COUNT) {
+    error = object_error::BAD_STREAM;
+    return 0;
+  }
+  connection &link = m_connections[slot];
+  const uint32_t state = ARCH::load_acquire32(&link.active);
+  if (state == CONNECTION_FREE) {
+    error = object_error::BAD_STREAM;
+    return 0;
+  }
+  // 既に closing なら黙って成功にする (二度呼ばれても壊れない)。
+  if (state == CONNECTION_ACTIVE)
+    ARCH::store_release32(&link.active, CONNECTION_CLOSING);
+  return 0;
 }
 
 // 接続を 1 歩進める。★schedule() から呼ばれるので、接続が 0 本なら数語読んで即戻る。
@@ -946,7 +972,8 @@ template <> void KERNEL_OBJECT::pump_connections() {
     return;
   for (uintptr_t index = 0; index < CONNECTION_COUNT; ++index) {
     connection &link = m_connections[index];
-    if (ARCH::load_acquire32(&link.active) == 0)
+    const uint32_t state = ARCH::load_acquire32(&link.active);
+    if (state == CONNECTION_FREE)
       continue;
     stream::descriptor *from = m_streams[link.src];
     stream::descriptor *to = m_streams[link.dst];
@@ -959,6 +986,20 @@ template <> void KERNEL_OBJECT::pump_connections() {
       ARCH::store_release32(&to->wr, link.dst_wr + link.inflight);
       link.moved += link.inflight;
       link.inflight = 0;
+    }
+    // ★畳むのは**在庫を運び終えてから**。ここに来た時点で inflight == 0 が
+    //   保証されている (上で待っている) ので、DMA はもうこの環を触っていない。
+    //   残りを運ばずに捨てるのは、畳めと言われた以上そのほうが正しい
+    //   (運び切るまで畳めないと、詰まった接続が永久に外せなくなる)。
+    if (state == CONNECTION_CLOSING) {
+      KERNEL::BOARD::dma_release((int)link.channel);
+      from->consumer = stream::NO_OWNER;
+      to->producer = stream::NO_OWNER;
+      link.channel = -1;
+      ARCH::store_release32(&link.active, CONNECTION_FREE);
+      if (m_connection_count != 0)
+        --m_connection_count;
+      continue;
     }
     const uint32_t src_rd = from->rd;
     const uint32_t src_wr = ARCH::load_acquire32(&from->wr);
@@ -1133,6 +1174,9 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
     break;
   case object_api::STREAM_CONNECT:
     value = stream_connect(a1, a2, error);
+    break;
+  case object_api::STREAM_DISCONNECT:
+    value = stream_disconnect(a1, error);
     break;
   case object_api::GRANT_REGION:
     value = grant_region(a1, a2, a3, error);

@@ -39,6 +39,7 @@ public:
   static int dma_claim();
   static void dma_copy(int channel, const void *from, void *to, uint32_t bytes);
   static bool dma_busy(int channel);
+  static void dma_release(int channel);
   static uint32_t core_num() { return (uint32_t)::get_core_num(); }
   static uint64_t time_us() { return ::time_us_64(); }
   // ★クロックを知っているのは board (PORT §2.3)。上位は µs でしか話さない。
