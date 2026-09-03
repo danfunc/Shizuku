@@ -57,8 +57,20 @@ stream::storage<frame_t, 8> g_out;
 uintptr_t g_out_id = 0;
 
 // 入口: ble_uart の OTA characteristic から来る生バイト
-uintptr_t g_in_id = ble_uart::NO_STREAM;
-stream::handle<frame_t> g_in;
+// ★★入力は**複数を常設で持つ**。以前は 1 本しか持たず、shell が
+//   SET_INPUT_STREAM で BLE と UART を**差し替えて**いた。それが 2026-09-02 の
+//   主症状の元だった:
+//     * 汲んでいる最中に差し替えて consumer 席を壊した (109 チャンク中 40 個
+//       しか受理されない転送になった)
+//     * shell が差し替えと復帰の間で固まると、ota は誤ったストリームを向いたまま
+//     * **BLE OTA が生きていたのは「shell がちゃんと戻してくれたから」**にすぎず、
+//       独立しているつもりで shell に隠れて依存していた
+//   常設にすれば切り替えが無くなり、shell が死んでも各経路は生き残る。
+//   ★ストリームは object-to-object の SPSC なので、多対一は「1 本ずつ持って
+//     受け側が両方を汲む」が正しい形 (1 本に 2 人の producer を座らせない)。
+constexpr uint32_t INPUT_COUNT = 2;
+uintptr_t g_in_id[INPUT_COUNT] = {ble_uart::NO_STREAM, ble_uart::NO_STREAM};
+stream::handle<frame_t> g_in[INPUT_COUNT];
 
 uintptr_t g_ota_obj_id = 0;
 uintptr_t g_status_sink_obj_id = 0;
@@ -1129,17 +1141,38 @@ void feed(const uint8_t *data, uint32_t len) {
   }
 }
 
+// ★★**差し替えではなく登録**。同じ枠へ二度目を入れるのは配線の誤りなので
+//   受け付けない — 差し替えができると、また「汲んでいる最中に引き抜く」が
+//   できてしまう。機構として塞ぐ。
+// ★枠は引数ではなく**メソッド番号**で分ける。CALL_METHOD は引数を 1 つしか
+//   運ばないので、2 つ目を渡したつもりで黙って捨てられる (実際に踏んだ)。
+uintptr_t wire_input(uintptr_t stream_id, uint32_t slot) {
+  if (slot >= INPUT_COUNT)
+    return 1;
+  if (g_in_id[slot] != ble_uart::NO_STREAM) {
+    BOARD::diag_printf("[OTA] input slot %lu is already wired (%lu)\n",
+                       (unsigned long)slot, (unsigned long)g_in_id[slot]);
+    return 1;
+  }
+  g_in_id[slot] = stream_id;
+  const auto opened = api(object_api::STREAM_OPEN, stream_id);
+  if (opened.error == 0 && opened.value != 0) {
+    g_in[slot] = stream::handle<frame_t>((stream::descriptor *)opened.value);
+    api(object_api::STREAM_BIND, stream_id, (uintptr_t)stream::role::CONSUMER);
+  }
+  BOARD::diag_printf("[OTA] input slot %lu <- stream %lu\n",
+                     (unsigned long)slot, (unsigned long)stream_id);
+  return 0;
+}
+
 uintptr_t method_set_input_stream(uintptr_t stream_id, uintptr_t, uintptr_t,
                                   uintptr_t) {
-  g_in_id = stream_id;
-  const auto opened = api(object_api::STREAM_OPEN, g_in_id);
-  if (opened.error == 0 && opened.value != 0) {
-    g_in = stream::handle<frame_t>((stream::descriptor *)opened.value);
-    api(object_api::STREAM_BIND, g_in_id, (uintptr_t)stream::role::CONSUMER);
-  }
-  BOARD::diag_printf("[OTA] in stream attached (%lu)\n",
-                     (unsigned long)g_in_id);
-  return 0;
+  return wire_input(stream_id, 0); // BLE
+}
+
+uintptr_t method_set_input_stream_uart(uintptr_t stream_id, uintptr_t,
+                                       uintptr_t, uintptr_t) {
+  return wire_input(stream_id, 1); // UART (中継)
 }
 
 uintptr_t method_get_stream(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
@@ -1185,13 +1218,19 @@ uintptr_t method_get_quiescent(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   while (true) {
     api(object_api::YIELD);
-    if (!g_in.valid())
-      continue;
 
     frame_t f{};
     uint32_t lost = 0;
     g_feeding = true;
-    while (g_in.pop(&f, &lost)) {
+    // ★★入力を**全部**汲む。どれか 1 本だけを見ると、その経路が黙っている間
+    //   もう一方が届かない。転送そのものは 1 本ずつしか来ない前提だが、
+    //   それを保証するのは運用であって機構ではないので、両方汲んでおく
+    //   (受領ビットマップは共通なので、BLE で始めて UART で終わらせることも
+    //   原理的には成り立つ)。
+    for (uint32_t slot = 0; slot < INPUT_COUNT; ++slot) {
+    if (!g_in[slot].valid())
+      continue;
+    while (g_in[slot].pop(&f, &lost)) {
       if (lost != 0) {
         say("input overrun — 転送をやり直すこと\n");
         reset_transfer();
@@ -1208,6 +1247,7 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
                      (unsigned long)g_received, (unsigned long)g_total) > 0)
           say(line);
       }
+    }
     }
     g_feeding = false;
     const uint64_t idle_limit =
@@ -1258,6 +1298,8 @@ uintptr_t ota_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   uintptr_t failures = api(object_api::DECLARE_NAME, (uintptr_t)"ota").error;
   failures += export_method(method::SET_INPUT_STREAM,
                             (uintptr_t)&method_set_input_stream);
+  failures += export_method(method::SET_INPUT_STREAM_UART,
+                            (uintptr_t)&method_set_input_stream_uart);
   failures += export_method(method::GET_STREAM, (uintptr_t)&method_get_stream);
   failures += export_method(method::GET_STATE, (uintptr_t)&method_get_state);
   failures +=
