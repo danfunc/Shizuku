@@ -163,8 +163,17 @@ template <> void KERNEL_OBJECT::init() {
   // KERNEL_OBJECT (0) とブートアプリ ROOT_OBJECT (1) は最初から在るものとして扱う。
   m_objects[KERNEL_OBJECT_ID].created = true;
   m_object_name[KERNEL_OBJECT_ID] = "kernel_object";
+  // ★svc ハンドラを務めるのはこのオブジェクト = 種別は HANDLER。カーネルが
+  //   「0 番だから」で決めるのではなく、**こちらが役として宣言する**。
+  //   差し替えや多重化をするときも、変わるのはこの宣言だけで済む。
+  m_objects[KERNEL_OBJECT_ID].kind = object_kind::HANDLER;
+  m_objects[KERNEL_OBJECT_ID].parent_handler_object = (uint32_t)KERNEL_OBJECT_ID;
+  m_objects[KERNEL_OBJECT_ID].parent_handler_entry = handler_entry();
   m_objects[ROOT_OBJECT].created = true;
   m_object_name[ROOT_OBJECT] = "root";
+  m_objects[ROOT_OBJECT].kind = object_kind::PLAIN;
+  m_objects[ROOT_OBJECT].parent_handler_object = (uint32_t)KERNEL_OBJECT_ID;
+  m_objects[ROOT_OBJECT].parent_handler_entry = handler_entry();
   for (uintptr_t index = 0; index < STREAM_COUNT; ++index)
     m_streams[index] = nullptr;
   for (uintptr_t index = 0; index < CONNECTION_COUNT; ++index)
@@ -260,14 +269,24 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
     error = object_error::BAD_OBJECT;
     return 0;
   }
+  const uint32_t creator =
+      (uint32_t)current_object(kernel_instance.current_thread_id());
+  const bool is_privileged =
+      (object_protection(creator) == PROTECTION_PRIVILEGED);
+
+  // ★専用 handling object の宣言は特権オブジェクト (ROOT 等) だけが行える (指摘 1)。
+  const bool is_handler = (flags & OBJECT_HANDLER) != 0;
+  if (is_handler && !is_privileged) {
+    error = object_error::NOT_PRIVILEGED;
+    return 0;
+  }
+
   // ★既にある番号に**上書きで**生成する要求 (動的ロードの入れ替え) は、
   //   その番号を持っている誰かを黙って乗っ取る行為なので、特権オブジェクト
   //   だけに許す。名前を付けずにビットだけ立てると、衝突の検出 (下) を
   //   素通りする抜け道が無名のまま残る。
   const bool replace = (flags & OBJECT_REPLACE) != 0;
-  if (replace &&
-      object_protection(current_object(kernel_instance.current_thread_id())) !=
-          PROTECTION_PRIVILEGED) {
+  if (replace && !is_privileged) {
     error = object_error::NOT_PRIVILEGED;
     return 0;
   }
@@ -276,10 +295,33 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
     table_guard guard;
     if (!m_objects[id].created || replace) {
       m_objects[id].created = true;
-      m_objects[id].flags = (uint32_t)(flags & ~OBJECT_REPLACE);
+      m_objects[id].flags =
+          (uint32_t)(flags & ~(OBJECT_REPLACE | OBJECT_HANDLER));
       // 最初のメソッドは生成側が与える (オブジェクト自身はまだ走っていないので
       // 自分では登録できない)。以後は EXPORT_METHOD で自分が増やす。
       m_objects[id].methods[0] = (method_t)entry;
+
+      if (is_handler) {
+        // ★特権オブジェクトによって専用ハンドラ (HANDLER) として宣言された
+        m_objects[id].kind = object_kind::HANDLER;
+        // 専用ハンドラ自身の親ハンドラは root kernel object
+        m_objects[id].parent_handler_object = (uint32_t)KERNEL_OBJECT_ID;
+        m_objects[id].parent_handler_entry = handler_entry();
+      } else {
+        m_objects[id].kind = object_kind::PLAIN;
+        // ★親ハンドラの自動導出 (指摘 1, 5, 7):
+        // 作成者が専用ハンドラなら、その専用ハンドラが親になる。
+        // 作成者が Root 等なら、root kernel object が親になる。
+        if (creator != KERNEL_OBJECT_ID && creator != ROOT_OBJECT &&
+            m_objects[creator].kind == object_kind::HANDLER) {
+          m_objects[id].parent_handler_object = creator;
+          m_objects[id].parent_handler_entry =
+              (uintptr_t)m_objects[creator].methods[0];
+        } else {
+          m_objects[id].parent_handler_object = (uint32_t)KERNEL_OBJECT_ID;
+          m_objects[id].parent_handler_entry = handler_entry();
+        }
+      }
       return id;
     }
     taken_by = m_object_name[id];
@@ -406,7 +448,10 @@ uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
 
   call_request request{};
   request.entry_pc = (uintptr_t)entry;
-  request.callee_object = (uint32_t)id; // ★呼び先オブジェクトID
+  request.callee_object = (uint32_t)id;                    // ★呼び先オブジェクトID
+  request.callee_kind = (uint32_t)object_kind_of(id);      // ★呼び先の種別
+  request.parent_handler_object = m_objects[id].parent_handler_object;
+  request.parent_handler_entry = m_objects[id].parent_handler_entry;
   request.protection = object_protection(id);
   request.region_base = object_region_base(id);
   request.region_limit = object_region_limit(id);
@@ -434,11 +479,24 @@ template <>
 void KERNEL_OBJECT::exit_method(uintptr_t levels, uintptr_t value,
                                 uintptr_t error) {
   const uint32_t thread = kernel_instance.current_thread_id();
-  const uint32_t depth = claimed_depth(); // 台帳から申告する値 (落とす前に取る)
+  const uint32_t caller = kernel_instance.current_caller_object();
   shadow_t &shadow = m_shadow[thread];
-  // 呼び出し 1 段につきフレームは 2 枚 (この戻りを運んだ枠 + 戻ろうとしている
-  // 呼び先の枠)。**枚数を知っているのは枠を積んだこちら側**なので、オブジェクトは
-  // 「何段畳むか」だけを言い、変換はここで行う (D5)。段数は必ず申告する (§9.3)。
+
+  // ★専用ハンドラ (HANDLER) が child の処理を終えて通常 return してきた場合 (指摘 6)
+  if (caller != 0 && caller < OBJECT_COUNT &&
+      m_objects[caller].kind == object_kind::HANDLER &&
+      (shadow.depth == 0 || shadow.object[shadow.depth - 1] != caller)) {
+    const uint32_t cur_depth = kernel_instance.current_depth();
+    const uintptr_t count = 2; // kobj (Frame 2) と dedicated handler (Frame 1) の 2 枚
+    if (cur_depth >= count) {
+      const auto result = ARCH::syscall((uintptr_t)primitive::RETURN, count,
+                                        value, error, cur_depth);
+      reply(object_error::UNWIND_REJECTED, (uintptr_t)result.error);
+      return;
+    }
+  }
+
+  const uint32_t depth = claimed_depth(); // 台帳から申告する値 (落とす前に取る)
   const uintptr_t pops = levels == 0 ? 1 : levels;
   const uintptr_t count = 2 * pops;
   // ★戻り先が無い = スレッドの入口が return した。呼び出しを畳むのではなく
@@ -498,6 +556,9 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
   request.stack_base = stack;
   request.stack_bytes = THREAD_STACK_BYTES;
   request.object_id = (uint32_t)id; // ★所属オブジェクトIDをカーネルに渡す
+  request.kind = (uint32_t)object_kind_of(id); // ★種別も同じく渡す
+  request.parent_handler_object = m_objects[id].parent_handler_object;
+  request.parent_handler_entry = m_objects[id].parent_handler_entry;
   const auto spawned = kernel_instance.spawn(request);
   if (spawned.error != kernel_error::OK) {
     table_lock();

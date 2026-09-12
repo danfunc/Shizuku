@@ -73,6 +73,9 @@ KERNEL::spawn_result KERNEL::spawn(const KERNEL::spawn_request &request) {
   *thread.context = CONTEXT{};
   thread.call_stack = {};
   thread.current_object = request.object_id; // ★READYを公開する前に確実に設定
+  thread.current_kind = request.kind;        // ★種別も同じく公開前に確定させる
+  thread.current_handler_object = request.parent_handler_object;
+  thread.current_handler_entry = request.parent_handler_entry;
   // ★既定は**全コア**。core0 固定を既定にすると「渡す機構が効いている」ことを
   //   確かめられない (決めた通りに動いただけになる)。固定したい相手は明示する。
   thread.affinity = request.affinity == 0

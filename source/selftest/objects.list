@@ -19,3 +19,10 @@ unpriv_reader
 unpriv_sink
 flash_trespasser
 debug_target
+cost_leaf
+cost_nest
+binding_parent_a
+binding_parent_b
+binding_child_a
+binding_child_b
+binding_unpriv

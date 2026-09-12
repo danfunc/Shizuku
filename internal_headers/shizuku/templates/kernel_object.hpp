@@ -1,6 +1,7 @@
 #ifndef SHIZUKU_TEMPLATES_KERNEL_OBJECT_HPP
 #define SHIZUKU_TEMPLATES_KERNEL_OBJECT_HPP
 #include <cstdint>
+#include "shizuku/kernel_abi.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/stream.hpp"
 
@@ -144,6 +145,11 @@ public:
     const shadow_t &shadow = m_shadow[thread];
     return shadow.depth == 0 ? NO_OBJECT : shadow.caller[shadow.depth - 1];
   }
+  uint32_t object_parent_handler(uint32_t object_id) const {
+    if (object_id >= OBJECT_COUNT_T || !m_objects[object_id].created)
+      return NO_OBJECT;
+    return m_objects[object_id].parent_handler_object;
+  }
 
 private:
   struct object_t {
@@ -152,6 +158,15 @@ private:
     //   methods) で毎回触るので、経路に関係ない名前を混ぜてキャッシュ行を汚さない。
 
     uint32_t flags; // OBJECT_* の宣言 (生成時に決まり、以後変わらない)
+    // ★**種別**。flags のビットではなく独立したフィールドとして持つ — 「役」は
+    //   属性の一つではなく、そのオブジェクトが何であるかそのものだから
+    //   (2026-09-05 に第 2 世代の形へ戻した。object_api.hpp の経緯を参照)。
+    //   HANDLER を名乗れるのは svc ハンドラを務めるオブジェクトだけで、これが
+    //   「プリミティブを撃てるのは誰か」を決める。
+    object_kind kind;
+    // ★親 handling object の情報 (解決済み binding: Codex 指摘 5)
+    uint32_t parent_handler_object;
+    uintptr_t parent_handler_entry;
     method_t methods[METHOD_COUNT];
     // ★flags と違い、こちらは生成後に変わる (GRANT_REGION で書き換わる)。
     //   軸 B (Q8)。0/0 = 窓なし。
@@ -234,6 +249,11 @@ private:
   //   object_protection/object_affinity と同じ形。
   uint32_t object_region_base(uintptr_t id) const;
   uint32_t object_region_limit(uintptr_t id) const;
+  // そのオブジェクトの**種別**。カーネルは台帳を持たないので、CALL / SPAWN の
+  // たびにここから引いて申告する (どの ID が何の役かを知っているのはこちらだけ)。
+  object_kind object_kind_of(uintptr_t id) const {
+    return id < OBJECT_COUNT ? m_objects[id].kind : object_kind::PLAIN;
+  }
   // target へ [base, limit) の読み専用窓を開示する。呼び出し元 (現在オブジェクト)
   // が特権でなければ拒否する — 「誰が誰に何を見せるか」を決める権限そのものが
   // 特権行為 (Q8)。base==limit==0 は「閉じる」。

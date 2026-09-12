@@ -18,6 +18,7 @@ template <> void KERNEL::init() {
   }
   m_step_target = NO_STEP_TARGET;
   m_object_svc_handler = 0;
+  m_object_svc_handler_object = 0;
   m_recovery_thread = 0;
   m_faults = {};
   m_debug = {};
@@ -40,6 +41,12 @@ template <> void KERNEL::bootstrap(void (*entry)(), uintptr_t stack_base,
   thread.context = &m_threads[0].context;
   thread.call_stack = {};
   thread.current_object = 1; // ROOT_OBJECT (1)
+  // ★ブートスレッドは一般オブジェクトとして走り出す。svc はトランポリンを通って
+  //   ハンドラへ届く (ここを HANDLER にすると、ブート直後の svc がハンドラを
+  //   経由せずプリミティブとして解釈されてしまう)。
+  thread.current_kind = (uint32_t)object_kind::PLAIN;
+  thread.current_handler_object = m_object_svc_handler_object;
+  thread.current_handler_entry = m_object_svc_handler;
   thread.set_state(THREAD::state_t::RUNNING);
   ARCH::stack_limit_set(*thread.context, limit);
   ARCH::set_priv(*thread.context, true);
@@ -68,6 +75,9 @@ void KERNEL::bootstrap_secondary(uint32_t thread, void (*entry)(),
   adopted.context = &m_threads[thread].context;
   adopted.call_stack = {};
   adopted.current_object = 1; // ROOT_OBJECT (1)
+  adopted.current_kind = (uint32_t)object_kind::PLAIN; // 同上
+  adopted.current_handler_object = m_object_svc_handler_object;
+  adopted.current_handler_entry = m_object_svc_handler;
   // ★このコアでしか走らせない。他コアが拾うと、今この CPU が走らせている文脈を
   //   別コアが同時に走らせることになる (claim の CAS は「READY を取る」ための
   //   ものであって、既に走っているものは守れない)。

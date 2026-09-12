@@ -21,12 +21,15 @@ namespace templates {
 //    (2) **オブジェクトランドの svc ハンドラ** = カーネルオブジェクトが持ち、
 //        **スレッドモードで**走る方針側。番号を解釈し、担当へ配る
 //
-//  ★経路は**呼び出しフレームの段数のパリティ**だけで決まる (I-1):
-//      偶数段 → オブジェクトが走っている → (2) をメソッドとして呼ぶ
-//      奇数段 → ハンドラが走っている     → プリミティブを実行
-//    積むのはトランポリンと CALL の 2 つだけで必ず交互になるので、パリティが
-//    そのまま実行主体を表す。旗も cookie も要らない。段数を書けるのはカーネル
-//    だけなので偽装もできない (オブジェクトが誰かは kobj の台帳の話。PORT §3.1)。
+//  ★経路は**今走っているオブジェクトの種別** (object_kind) だけで決まる (I-1):
+//      PLAIN   → オブジェクトが走っている → (2) をメソッドとして呼ぶ
+//      HANDLER → ハンドラが走っている     → プリミティブを実行
+//    ★段数のパリティでも ID でもない (2026-09-05)。パリティは「ハンドラ =
+//      カーネルオブジェクト」を仮定するのでマルチ ABI で崩れ、ID の決め打ちは
+//      kobj の差し替え・多重化を禁じる。種別は独立した値として持つ。
+//    種別を書けるのはカーネルだけ (遷移のたびにフレームへ退避して読み戻す) なので
+//    偽装はできない。どのオブジェクトがどの種別かという台帳は持たない — 呼び出しの
+//    たびに kobj が call_request で申告する (PORT §3.1)。
 //
 //  ★カーネルオブジェクト以外は RETURN を撃てない。そのため、ハンドラを起こすときに
 //    **今のネスト数を渡し** (ARCH::set_handler_info)、オブジェクトは exit API に
@@ -42,7 +45,8 @@ public:
   using FRAME = typename ARCH::exception_frame_t;
   using THREAD = thread<CONTEXT>;
   static constexpr uintptr_t CORE_COUNT = CPU_MANAGER::CORE_COUNT;
-  static constexpr uint32_t KERNEL_OBJECT_ID = 0;
+  // ★「カーネルオブジェクトの ID」はここに無い。ハンドラが何番を名乗るかは
+  //   set_object_handler で教えてもらう値であって、カーネルが決める定数ではない。
 
   // ★スレッドの記憶はカーネルの持ち物ではない。**オブジェクトランドが用意して貸す**
   //   (DESIGN §4.1 ルール 1「オブジェクトが資源を持つ」)。カーネルは渡された記憶を
@@ -83,6 +87,9 @@ public:
     uint32_t total_bytes; // 退避域の総バイト数 (8B 境界に丸め済み)
     uint32_t frame_bytes; // 例外フレーム実サイズ
     uint32_t caller_object; // 呼び出し元オブジェクトID
+    uint32_t caller_kind;   // 呼び出し元の種別 (object_kind)
+    uint32_t caller_handler_object; // 呼び出し元の親ハンドラID
+    uintptr_t caller_handler_entry; // 呼び出し元の親ハンドラエントリ
     CONTEXT saved; // 呼び出し元の文脈まるごと (sp を含む = 元フレームの位置)
   };
 
@@ -93,7 +100,10 @@ public:
   void init();
   // オブジェクトランドの svc ハンドラを据える。系の組み立て (composition) の一部で
   // 実行時 API ではないため、ブート前に 1 回だけ呼ぶ。
-  void set_object_handler(uintptr_t entry_pc);
+  // ★入口だけでなく「そのハンドラが何番のオブジェクトとして走るか」も一緒に
+  //   受け取る。カーネルが 0 番と決め打つと、kobj を差し替えられなくなる。
+  void set_object_handler(uintptr_t entry_pc, uint32_t object_id);
+
   // 今の実行をスレッド 0 として採用し、entry へ移る (スレッドスタックへ
   // 切り替えるので戻らない)。★最初の 1 本のスタックも貸してもらう — ここだけ
   //   カーネルが自分で malloc すると「スレッドの記憶は誰のものか」が二枚舌になる。
@@ -127,10 +137,16 @@ public:
     uintptr_t stack_base;
     uintptr_t stack_bytes;
     uint32_t object_id = 0; // 所属オブジェクトID
+    // ★そのスレッドが走り出すときの種別。CALL と同じく kobj が自分の台帳から
+    //   申告する (既定は PLAIN)。
+    uint32_t kind = (uint32_t)object_kind::PLAIN;
     // ★call_request と同じ窓 (軸 B)。この対象オブジェクトの**自前のスレッド**
     //   としての初回起動にも、CALL のときと同じ窓を開ける (Q8)。
     uintptr_t region_base = 0;
     uintptr_t region_limit = 0;
+    // ★親 handling object の情報 (解決済み binding)
+    uint32_t parent_handler_object = 0;
+    uintptr_t parent_handler_entry = 0;
   };
   spawn_result spawn(const spawn_request &request);
   // 走らせずに枠だけ取る。2 本目以降のコアが「今の実行」を採用するために使う
@@ -204,13 +220,21 @@ public:
     return m_threads[current_thread_id()].thread;
   }
   uint32_t current_depth() const { return current_thread().call_stack.depth; }
+  uint32_t current_caller_object() const {
+    const auto top = current_thread().call_stack.top;
+    if (top == 0)
+      return 0;
+    return ((const call_frame_header *)top)->caller_object;
+  }
   // スケジューリング方針 (kobj 側) が候補を探すための読み出し。
   // そのスレッドを走らせてよいコアの集合 (方針側が候補を絞るために読む)。
   uint32_t thread_affinity(uint32_t thread) const {
     return m_threads[thread].thread.affinity;
   }
-  void set_thread_object(uint32_t thread, uint32_t obj) {
+  void set_thread_object(uint32_t thread, uint32_t obj,
+                         object_kind kind = object_kind::PLAIN) {
     m_threads[thread].thread.current_object = obj;
+    m_threads[thread].thread.current_kind = (uint32_t)kind;
   }
   // その枠が今何代目か。★スレッド番号を控える側は、これも一緒に控えて
   //   使う直前に突き合わせること (番号だけでは使い回しに気づけない)。
@@ -283,6 +307,8 @@ private:
   static constexpr uint32_t GRANT_RETRY_CYCLES = 8192; // ≒55µs @150MHz
   // オブジェクトランドの svc ハンドラの入口。表ではなく 1 個だけ。
   uintptr_t m_object_svc_handler;
+  // そのハンドラが名乗るオブジェクト ID (据えるときに教えてもらう)。
+  uint32_t m_object_svc_handler_object;
   uint32_t m_recovery_thread;
 
 public:

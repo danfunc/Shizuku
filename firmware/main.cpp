@@ -26,6 +26,7 @@ void shizuku::app_entry() {
   // 書くと XIP ごと止まるので、扱いはペリフェラルと同じく特権側。
   shizuku::objects::register_flash_fs();
   shizuku::selftest::call_ladder();
+  shizuku::selftest::handler_binding_probe();
   shizuku::selftest::thread_ladder();
   shizuku::selftest::memory_ladder();
   shizuku::selftest::unprivileged_probe();
@@ -75,7 +76,8 @@ int main() {
   // これ以降、オブジェクトが撃った svc はすべてそのハンドラへ届く。
   shizuku::kernel_object_instance.init();
   shizuku::kernel_instance.set_object_handler(
-      shizuku::KERNEL_OBJECT::handler_entry());
+      shizuku::KERNEL_OBJECT::handler_entry(),
+      (uint32_t)shizuku::KERNEL_OBJECT::KERNEL_OBJECT_ID);
   // 今の実行をスレッド 0 として採用し、スレッドスタックへ移って app_entry へ。
   // ★最初の 1 本のスタックもオブジェクトランドから借りる (他のスレッドと同じ扱い)。
   const auto boot = shizuku::kernel_object_instance.lend_boot_stack();

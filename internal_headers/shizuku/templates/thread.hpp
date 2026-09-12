@@ -1,13 +1,16 @@
 #ifndef SHIZUKU_TEMPLATE_THREAD_HPP
 #define SHIZUKU_TEMPLATE_THREAD_HPP
 #include <cstdint>
+#include "shizuku/kernel_abi.hpp"
 namespace shizuku {
 namespace templates {
 
 // スレッド = カーネルが知る唯一の実行単位 (DESIGN §5)。
-// ★カーネルはオブジェクトを知らない (D1)。「どのオブジェクトとして走っているか」は
-//   ここに無い — それはカーネルオブジェクトの台帳の話で、カーネルは呼び出しフレームの
-//   積み下ろししか知らない。
+// ★カーネルはオブジェクトの**台帳**を知らない (D1)。ここにあるのは「今どのオブジェクト
+//   として、どの種別で走っているか」という文脈だけで、誰が何を export しているか・
+//   誰が誰の親かといった話は全部カーネルオブジェクトの側にある。
+//   ★2026-09-05: identity を文脈として持つこと自体は設計判断であって D1 違反ではない、
+//     と方針を緩めた。緩めていないのは「役を ID で代用しない」という一点。
 template <typename CONTEXT> struct thread {
   enum struct state_t : uint32_t {
     UNINITIALIZED = 0,
@@ -36,6 +39,14 @@ template <typename CONTEXT> struct thread {
   call_stack_t call_stack;
   uint32_t affinity = 0b1; // bit0 = core0 (どのコアで走ってよいか)
   uint32_t current_object = 0;
+  // ★今走っているオブジェクトの**種別**。ID とは独立に持つ (ID は名前であって
+  //   役ではない)。svc の経路も、取り上げを見送るかどうかも、これだけで決まる。
+  //   遷移させるのはカーネルだけ: CALL で呼び先の申告を載せ、戻るときに
+  //   呼び出しフレームのヘッダから読み戻す。
+  uint32_t current_kind = (uint32_t)object_kind::PLAIN;
+  // ★今走っているオブジェクトの親 handling object の情報 (解決済み binding)
+  uint32_t current_handler_object = 0;
+  uintptr_t current_handler_entry = 0;
   // ★枠が使い回されたことを外から見分けるための番号。release のたびに 1 進む。
   //   スレッド番号だけを控えていると、控えた相手が終わって同じ番号に別の
   //   スレッドが入ったとき、**控えた側は気づけない** (デバッガが止めたつもりの

@@ -88,6 +88,7 @@ cc_library(
         "source/selftest/call_ladder.cpp",
         "source/selftest/debug_ladder.cpp",
         "source/selftest/flash_stream.cpp",
+        "source/selftest/handler_binding.cpp",
         "source/selftest/memory_ladder.cpp",
         "source/selftest/multicore.cpp",
         "source/selftest/stream_ladder.cpp",

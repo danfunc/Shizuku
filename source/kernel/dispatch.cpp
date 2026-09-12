@@ -5,14 +5,31 @@
 //  持つ**オブジェクトランドの svc ハンドラ** (スレッドモードで走る方針側) とは
 //  別概念で、ここでは後者を「登録された entry」としてしか扱わない。
 //
-//  ★経路は呼び出しフレームの段数のパリティだけで決まる (I-1):
-//      偶数段 → オブジェクトが走っている → 登録済みハンドラをメソッドとして呼ぶ
-//      奇数段 → ハンドラが走っている     → プリミティブを実行
-//    積むのはトランポリン (オブジェクト→ハンドラ) と CALL (ハンドラ→オブジェクト)
-//    の 2 つだけで必ず交互になるので、パリティがそのまま実行主体になる。
-//    identity も信頼ビットも旗も持たない。
+//  ★経路は**今走っているオブジェクトの種別** (object_kind) だけで決まる (I-1):
+//      PLAIN   → オブジェクトが走っている → 登録済みハンドラをメソッドとして呼ぶ
+//      HANDLER → ハンドラが走っている     → プリミティブを実行
+//    種別は thread.current_kind にあり、遷移させるのはカーネルだけ:
+//    CALL では呼び先の申告 (call_request::callee_kind) を載せ、トランポリンでは
+//    HANDLER を載せ、戻るときは呼び出しフレームのヘッダから読み戻す。
+//    オブジェクト側からは書けないので偽装できない。
 //
-//  ★カーネルオブジェクト以外は RETURN を撃てないので、ハンドラを起こすときに
+//  ★★2026-09-05: ここは長らく「ID 0 = カーネルオブジェクト」の決め打ちで動いて
+//    いた (第 2 世代にあった種別フィールドが削除された退行)。種別を独立した値と
+//    して復活させ、判定を種別に戻したのがこの版。採らなかった案を残しておく:
+//    (1) **段数のパリティ**: 「ハンドラ = カーネルオブジェクト」を仮定しており、
+//        **一般オブジェクトがハンドラを務める構成 (マルチ ABI) で崩れる**。
+//        マルチ ABI はこの系の主張そのものなので採れない。冒頭にあった I-1 の
+//        「パリティで決まる」という記述はその意味で誤りだった。
+//        ※ 実測ではパリティでも自己テストは通った (96 passed / 3 failed で既定と
+//          一致、費用も誤差内) が、**ハンドラが 1 つしか居ないから通っただけ**で
+//          正しさの証明にはならない。
+//    (2) **カーネル内に属性表を置いて ID で引く** (参照実装の形): D1 を緩めた今は
+//        禁じ手ではないが、カーネルがオブジェクト空間の大きさを知る必要が出る。
+//        種別は呼び出しのたびに kobj が申告すれば足りるので、表は持たない。
+//    ★ID で代用しないことが要点。ID は名前であって役ではなく、決め打つと kobj を
+//      差し替えることも多重化することもできない。
+//
+//  ★HANDLER 種別以外は RETURN を撃てないので、ハンドラを起こすときに
 //    今のネスト数を渡す。オブジェクトは exit API に何段戻すかを載せて撃ち、
 //    ハンドラがその段数で巻き戻す (D5)。
 #include "shizuku/kernel.hpp"
@@ -25,9 +42,12 @@ template <> KERNEL::CONTEXT *KERNEL::current_context() {
   return m_threads[m_current[BOARD::core_num()]].thread.context;
 }
 
-template <> void KERNEL::set_object_handler(uintptr_t entry_pc) {
+template <> void KERNEL::set_object_handler(uintptr_t entry_pc,
+                                            uint32_t object_id) {
   m_object_svc_handler = entry_pc;
+  m_object_svc_handler_object = object_id;
 }
+
 
 template <>
 bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
@@ -42,8 +62,21 @@ bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
 
   // スタック下限の手前で止める。ここで false を返せば呼び出し側がエラーを返すので、
   // スタック不足が無音ロックアップにならない (I-9)。
+  // ★★余白は**この構造体の大きさから算術で出す** (2026-09-05)。ARCH::CALL_HEADROOM
+  //   という固定値だけを見ていた頃は、ヘッダに 1 語足すと余白がその分だけ痩せ、
+  //   「NO_STACK を返すはずが PSPLIM の UsageFault で無言ロックアップ」に化けた。
+  //   ★実測: 種別フィールドを足した最初の試み (2026-09-05) が実機で起動しなく
+  //     なった原因はこれ。**中身に関係なくヘッダを 1 語太らせるだけで同じように
+  //     死ぬ**ことを詰め物で確認した (call_ladder のスタック掘り切りで固まり、
+  //     フォールト報告すら出ない = 一番情報の少ない壊れ方)。
+  //   呼び先が最低 1 回はカーネルを呼び返せること = ハンドラへのトランポリンを
+  //   もう 1 枚積めること、なので**その 1 枚ぶんは構造から計算して足す**。
+  //   ARCH::CALL_HEADROOM に残るのは「ハンドラ連鎖の C フレーム」の見積もりだけで、
+  //   カーネルの幾何が変わってもそちらは動かなくてよい。
+  const uintptr_t reserve =
+      (uintptr_t)sizeof(call_frame_header) + frame_bytes + ARCH::CALL_HEADROOM;
   const uintptr_t limit = ARCH::stack_limit(*context);
-  if (limit != 0 && callee_frame < limit + ARCH::CALL_HEADROOM)
+  if (limit != 0 && callee_frame < limit + reserve)
     return false;
 
   call_frame_header *header = (call_frame_header *)snapshot;
@@ -51,6 +84,9 @@ bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   header->total_bytes = total;
   header->frame_bytes = frame_bytes;
   header->caller_object = thread.current_object; // ★呼び出し元オブジェクトを退避
+  header->caller_kind = thread.current_kind;     // ★その種別も一緒に退避
+  header->caller_handler_object = thread.current_handler_object; // ★親ハンドラ情報も退避
+  header->caller_handler_entry = thread.current_handler_entry;
   header->saved = *context; // sp を含めて丸ごと (= 元フレームの位置も記録される)
 
   // ★元の例外フレームは動かさない (I-3)。下へ複製するのは書き換え用の作業コピー。
@@ -82,6 +118,9 @@ bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   // 戻すだけで復帰先が正しく決まる (書き戻しも再配置も不要)。
   const uintptr_t previous = header->prev;
   thread.current_object = header->caller_object; // ★呼び出し元オブジェクトを復元
+  thread.current_kind = header->caller_kind;     // ★種別も一緒に復元
+  thread.current_handler_object = header->caller_handler_object; // ★親ハンドラも復元
+  thread.current_handler_entry = header->caller_handler_entry;
   *context = header->saved;
   *frame = context->sp;
   thread.call_stack.top = previous;
@@ -95,12 +134,21 @@ kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                              const call_request &request) {
   if (request.entry_pc == 0)
     return kernel_error::BAD_REQUEST;
+  // ★偽装防止 (指摘4): 一般 call_request から KERNEL_OBJECT 種別や
+  //   m_object_svc_handler_object を名乗ることは拒否する。
+  if (request.callee_kind == (uint32_t)object_kind::KERNEL_OBJECT ||
+      request.callee_object == m_object_svc_handler_object) {
+    return kernel_error::BAD_REQUEST;
+  }
   if (!call_frame_push(thread, context, frame))
     return kernel_error::NO_STACK;
   thread.current_object = request.callee_object; // ★呼び先オブジェクトIDへ遷移
-  // 戻り口は常にカーネルの 1 本。撃つ svc は同じでも、そこから出たときの段数の
-  // パリティで「プリミティブとしての巻き戻し」か「メソッドが戻った知らせ」かが
-  // 決まる (発行側が戻り口を選ぶ必要は無い)。
+  thread.current_kind = request.callee_kind;     // ★種別もここで切り替わる
+  thread.current_handler_object = request.parent_handler_object;
+  thread.current_handler_entry = request.parent_handler_entry;
+  // 戻り口は常にカーネルの 1 本。撃つ svc は同じでも、そこから出たときの**種別**で
+  // 「プリミティブとしての巻き戻し」か「メソッドが戻った知らせ」かが決まる
+  // (発行側が戻り口を選ぶ必要は無い)。
   ARCH::set_entry(**frame, request.entry_pc, ARCH::return_stub());
   ARCH::set_args(**frame, request.args);
   ARCH::set_priv(*context, (request.protection & PROTECTION_UNPRIVILEGED) == 0);
@@ -112,108 +160,101 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
   THREAD &thread = current_thread();
   FRAME *frame = context->sp;
 
-  if (thread.current_object != 0) { // 一般オブジェクト (id >= 1)
-    // 一般オブジェクトが走っている。その svc は KERNEL_OBJECT ハンドラへの
-    // **メソッド呼び出し**として届けるだけ。カーネルは番号を解釈しない (I-1) し、
-    // 誰が担当かも知らない。
-    if (m_object_svc_handler == 0)
-      BOARD::panic("no object-land svc handler registered");
-    call_request request{};
-    request.entry_pc = m_object_svc_handler;
-    request.callee_object = KERNEL_OBJECT_ID;
-    request.protection = PROTECTION_PRIVILEGED;
-    for (unsigned index = 0; index < 4; ++index)
-      request.args[index] = ARCH::arg(*frame, index); // 元の引数をそのまま渡す
-    // ★ハンドラへ渡す情報はレジスタに散らさない。番号は引数スロット (a0) に
-    //   そのまま乗っており、ネストの深さはカーネルが積んだフレームの段数そのもの。
-    //   どちらも呼び出しフレーム側にあるので、ネストしても混ざらないし、呼び先の
-    //   C 関数が callee-saved を潰しても壊れない (参照実装はここをレジスタで
-    //   持ち回り、ABI シムの push 順を間違えて何度も溶かしている)。
-    const kernel_error error = do_call(thread, context, &frame, request);
-    if (error != kernel_error::OK) {
-      // ★ハンドラへ届けられなかった。答えるのはカーネルだが、受け取るのは
-      //   オブジェクト — 番号空間が違うので印を付ける (混ぜると受け取った側が
-      //   自分の語彙で読んで黙って別の意味になる)。
-      ARCH::set_result(*frame, KERNEL_ERROR_MARK | (uintptr_t)error, 0);
+  // ★「kernel object 本人であるか」の厳格判定 (指摘3, 指摘4)。
+  //   単なる HANDLER ではなく、登録済み kernel object (種別 KERNEL_OBJECT かつ
+  //   ID が m_object_svc_handler_object) だけが kernel primitive を直接解釈できる。
+  if (thread.current_kind == (uint32_t)object_kind::KERNEL_OBJECT &&
+      thread.current_object == m_object_svc_handler_object) {
+    const uintptr_t number = ARCH::arg(*frame, 0);
+    switch ((primitive)number) {
+    case primitive::CALL: {
+      const call_request *pointer = (const call_request *)ARCH::arg(*frame, 1);
+      if (pointer == nullptr) {
+        ARCH::set_result(*frame, (uintptr_t)kernel_error::BAD_REQUEST, 0);
+        break;
+      }
+      const call_request request = *pointer;
+      const kernel_error error = do_call(thread, context, &frame, request);
+      if (error != kernel_error::OK)
+        ARCH::set_result(*frame, (uintptr_t)error, 0);
+      break;
+    }
+    case primitive::RETURN: {
+      const uintptr_t count = ARCH::arg(*frame, 1);
+      const uintptr_t value = ARCH::arg(*frame, 2);
+      const uintptr_t error = ARCH::arg(*frame, 3);
+      const uintptr_t claim = ARCH::arg(*frame, 4);
+      const uint32_t depth = thread.call_stack.depth;
+      if (depth == 0) {
+        ARCH::set_result(*frame, (uintptr_t)kernel_error::BAD_COUNT, 0);
+        break;
+      }
+      if (claim != 0 && claim != depth) {
+        ARCH::set_result(*frame, (uintptr_t)kernel_error::DEPTH_MISMATCH, depth);
+        break;
+      }
+      if (count == 0 || count > depth) {
+        ARCH::set_result(*frame, (uintptr_t)kernel_error::BAD_COUNT, depth);
+        break;
+      }
+      for (uintptr_t index = 0; index < count; ++index)
+        call_frame_pop(thread, context, &frame);
+      ARCH::set_result(*frame, error, value);
+      break;
+    }
+    case primitive::SWITCH: {
+      const kernel_error error = do_switch((uint32_t)ARCH::arg(*frame, 1));
+      ARCH::set_result(*frame, (uintptr_t)error, 0);
+      break;
+    }
+    case primitive::GRANT: {
+      const uint32_t target = (uint32_t)ARCH::arg(*frame, 1);
+      const uint32_t cycles = (uint32_t)ARCH::arg(*frame, 2);
+      ARCH::set_result(*frame, (uintptr_t)kernel_error::OK,
+                       (uintptr_t)grant_end::YIELDED);
+      const kernel_error error = do_grant(target, cycles);
+      if (error != kernel_error::OK)
+        ARCH::set_result(*frame, (uintptr_t)error, 0);
+      break;
+    }
+    default:
+      BOARD::panic("unknown kernel primitive");
+      break;
     }
     return;
   }
 
-  const uintptr_t number = ARCH::arg(*frame, 0);
-  // ここから先は奇数段 = ハンドラだけ。プリミティブを撃てるのがカーネルオブジェクトの
-  // ハンドラに限られること (I-2) は、この分岐自体が保証している。
-  switch ((primitive)number) {
-  case primitive::CALL: {
-    const call_request *pointer = (const call_request *)ARCH::arg(*frame, 1);
-    if (pointer == nullptr) {
-      ARCH::set_result(*frame, (uintptr_t)kernel_error::BAD_REQUEST, 0);
-      break;
-    }
-    // フレームを書き換える前に内容を控える。
-    const call_request request = *pointer;
-    // 呼び先は 1 段深くなる = 偶数段 = オブジェクトとして走る。ハンドラから
-    // 呼ばれただけの普通のメソッドがプリミティブを撃てるようにはならない (I-8)。
-    const kernel_error error = do_call(thread, context, &frame, request);
-    // 成功時はこの syscall から戻らない (呼び先が戻ったときに、復元された
-    // 呼び出し元フレームへ戻り値が載る)。失敗時だけその場でエラー復帰する。
-    if (error != kernel_error::OK)
-      ARCH::set_result(*frame, (uintptr_t)error, 0);
-    break;
+  // ここへ来るのは非 kernel object (一般 child や専用 handling object など)。
+  // 親ハンドラが未登録なら黙って root へ fallback せず、診断可能な panic とする (指摘2)。
+  if (thread.current_handler_entry == 0) {
+    BOARD::panic("unregistered parent handler for object syscall");
   }
-  case primitive::RETURN: {
-    const uintptr_t count = ARCH::arg(*frame, 1);
-    const uintptr_t value = ARCH::arg(*frame, 2);
-    const uintptr_t error = ARCH::arg(*frame, 3);
-    const uintptr_t claim = ARCH::arg(*frame, 4);
-    const uint32_t depth = thread.call_stack.depth;
-    // ★段数の検算 (§9.3)。落とす枚数は発行側の自由だが、発行側が想定している
-    //   呼び出し文脈と実際がズレていたら 1 枚も落としてはいけない — ズレたまま
-    //   落とすと無関係な祖先が偽の戻り値で再開する (無音ロックアップの正体)。
-    if (depth == 0) {
-      ARCH::set_result(*frame, (uintptr_t)kernel_error::BAD_COUNT, 0);
-      break;
-    }
-    if (claim != 0 && claim != depth) {
-      // 実際の深さを返して発行側が自己診断できるようにする (両側チェック)。
-      ARCH::set_result(*frame, (uintptr_t)kernel_error::DEPTH_MISMATCH, depth);
-      break;
-    }
-    if (count == 0 || count > depth) {
-      ARCH::set_result(*frame, (uintptr_t)kernel_error::BAD_COUNT, depth);
-      break;
-    }
-    for (uintptr_t index = 0; index < count; ++index)
-      call_frame_pop(thread, context, &frame);
-    ARCH::set_result(*frame, error, value);
-    break;
+
+  // 親ハンドラへの直接ディスパッチ (O(1)、テーブル検索ゼロ、同期例外中の再帰なし)。
+  const uintptr_t target_entry = thread.current_handler_entry;
+  const uint32_t target_object = thread.current_handler_object;
+  const bool to_root = (target_object == m_object_svc_handler_object);
+
+  if (!call_frame_push(thread, context, &frame)) {
+    ARCH::set_result(*frame, KERNEL_ERROR_MARK | (uintptr_t)kernel_error::NO_STACK, 0);
+    return;
   }
-  case primitive::SWITCH: {
-    const kernel_error error = do_switch((uint32_t)ARCH::arg(*frame, 1));
-    // 切り替わった場合、この結果を見るのは**次にこのスレッドが再開したとき**。
-    ARCH::set_result(*frame, (uintptr_t)error, 0);
-    break;
-  }
-  case primitive::GRANT: {
-    const uint32_t target = (uint32_t)ARCH::arg(*frame, 1);
-    // ★単位はクロック。µs ではない (kernel.hpp の grant_frame を参照)。
-    const uint32_t cycles = (uint32_t)ARCH::arg(*frame, 2);
-    // 貸し手の戻り値は先に OK を置いておく (借り手が返してきたとき a1 に理由が入る)。
-    ARCH::set_result(*frame, (uintptr_t)kernel_error::OK,
-                     (uintptr_t)grant_end::YIELDED);
-    const kernel_error error = do_grant(target, cycles);
-    if (error != kernel_error::OK)
-      ARCH::set_result(*frame, (uintptr_t)error, 0);
-    break;
-  }
-  default:
-    // ★ここへ来るのはカーネルオブジェクトのハンドラだけ。存在しないプリミティブを
-    //   撃つのは**カーネル自身の不変条件の破れ**なので panic してよい (§14)。
-    //   エラーで返す相手が居ないので kernel_error にこの語彙は無い。ただし
-    //   **黙って捨てるのは禁止** — 無音の握り潰しは「効いていないのに動いて見える」
-    //   計測事故を生む (DESIGN §11.2.0 で実際に起きた)。
-    BOARD::panic("unknown kernel primitive");
-    break;
-  }
+
+  thread.current_object = target_object;
+  thread.current_kind = to_root ? (uint32_t)object_kind::KERNEL_OBJECT
+                                : (uint32_t)object_kind::HANDLER;
+  // 親ハンドラ自身の親ハンドラは root kernel object。root 自身の親は自身。
+  thread.current_handler_object = m_object_svc_handler_object;
+  thread.current_handler_entry = m_object_svc_handler;
+
+  uintptr_t args[4];
+  for (unsigned index = 0; index < 4; ++index)
+    args[index] = ARCH::arg(*frame, index);
+
+  ARCH::set_entry(*frame, target_entry, ARCH::return_stub());
+  ARCH::set_args(*frame, args);
+  ARCH::set_priv(*context, true);
+  ARCH::set_region_window(*context, 0, 0);
 }
 
 // 最低優先度の遅延例外 = 実行権の強制巻き取り。ここへ来た時点で全ての割り込みは
@@ -231,17 +272,10 @@ template <> void KERNEL::pendsv_dispatch(KERNEL::CONTEXT *context) {
     arm_timer();
     return;
   }
-  // ★借り手が**オブジェクトランドの svc ハンドラの中に居る**なら、取り上げを
-  //   見送る。ハンドラはオブジェクトランドの共有台帳 (オブジェクト表・arena・
-  //   rotor) を触っている最中かもしれず、そこで切り替えると別のスレッドが
-  //   半端な状態を見る。原子性はオブジェクトランドの方針だが、**切り替える機構は
-  //   こちらにしか無い**ので、こちらが待つ以外に守りようがない。
-  //   ★参照実装は「借り手のオブジェクトがカーネルオブジェクトか」を**オブジェクト表を
-  //     引いて**判定していた。それは D1 (カーネルはオブジェクトを知らない) で
-  //     禁じた手。同じ条件は**フレームの段数のパリティ**で言える — 積むのは
-  //     トランポリンと CALL だけなので必ず交互になり、**奇数段 = ハンドラ走行中**
-  //     (I-1)。カーネルは「誰か」を知らないまま「今は誰の番か」だけを読む。
-  if (current_thread().current_object == 0) { // 0 = KERNEL_OBJECT
+  // ★借り手がオブジェクトランドのハンドラまたはカーネルオブジェクトの中に居るなら、
+  //   共有台帳等の同期保護のため取り上げを見送る (指摘3: execution role)。
+  if (current_thread().current_kind == (uint32_t)object_kind::HANDLER ||
+      current_thread().current_kind == (uint32_t)object_kind::KERNEL_OBJECT) {
     grants.frames[grants.depth - 1].remaining = GRANT_RETRY_CYCLES;
     arm_timer();
     return;
