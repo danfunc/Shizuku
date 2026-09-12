@@ -123,11 +123,18 @@ enum struct object_api : uintptr_t {
   KILL_THREAD = 25,
   // a1 = STREAM_CONNECT が返した接続番号。★**同期では畳まない** — 転送中なら
   //   「畳む」印だけ立て、ポンプが在庫を運び終えてから席と DMA を返す。
-  //   カーネルの中で DMA の完了を待つと、待ちがカーネルに入る。
+  //   カーネルの中で DMA の完了を待つと、その待ちがカーネルに入り込む (誰も進められない時間ができる)。
   // ★★これが無いと (1) DMA チャネルが漏れ (2) 席が CONNECTED のまま固定され
   //   二度と bind し直せず (3) **詰まった接続を外せない**。層を積む設計では
   //   下の口が死んだときに張り替えられる必要がある。
   STREAM_DISCONNECT = 26,
+  // 専用ハンドラ (HANDLER) が配下の子オブジェクトのメソッド終了 (EXIT_METHOD) を
+  // Root Kernel Object へ転送する。
+  // a1 = 戻り値, a2 = エラーコード。
+  // 呼び出し元が HANDLER かつ shadow stack の top が子オブジェクトである場合のみ受理され、
+  // Root は shadow stack から子を pop し、Root + Handler + Child の 3 フレームを
+  // まとめて畳んで Child の呼び出し元 (Caller) へ復帰する。
+  FORWARD_CHILD_EXIT = 27,
 };
 
 // 生成時に宣言する、そのオブジェクトが必要とする走らせ方。
@@ -144,14 +151,11 @@ constexpr uintptr_t OBJECT_REPLACE = 1u << 31;
 //   したがって非特権で走れるオブジェクトは「状態をヒープに置き、標準ライブラリを
 //   直に呼ばない」ものに限られる (DESIGN §11.2.2)。当面は宣言した相手だけ。
 constexpr uintptr_t OBJECT_UNPRIVILEGED = 1u << 1;
-// ★専用 handling object (マルチ ABI ハンドラ) として走らせる。
-//   特権オブジェクト (ROOT_OBJECT 等) だけが組み立て・管理時に指定できる。
-//   非特権オブジェクトが指定した場合は PERMISSION_DENIED で拒否される。
-constexpr uintptr_t OBJECT_HANDLER = 1u << 2;
-// ★★オブジェクトの**種別**はここ (flags) には無い。**あってはいけない**。
+// ★★オブジェクトの**種別**はここ (flags) は無い。**あってはいけない**。
 //   種別は object_kind (kernel_abi.hpp) として kobj のオブジェクト構造体の
 //   独立したフィールドに持つ — 「役」は属性の一つではなく、そのオブジェクトが
 //   何であるかそのものだから。
+//   handler role の付与は Root Kernel Object の信頼済み composition のみが行える。
 //   経緯 (作者の証言, 2026-09-05): 第 2 世代ではオブジェクトの種別はオブジェクト
 //   構造体のフィールド (32bit の enum) として存在したが、AI エージェント
 //   (別セッションの Opus) が削除し、以後カーネルは「ID 0 = カーネルオブジェクト」

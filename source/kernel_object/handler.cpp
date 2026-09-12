@@ -274,9 +274,10 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
   const bool is_privileged =
       (object_protection(creator) == PROTECTION_PRIVILEGED);
 
-  // ★専用 handling object の宣言は特権オブジェクト (ROOT 等) だけが行える (指摘 1)。
-  const bool is_handler = (flags & OBJECT_HANDLER) != 0;
-  if (is_handler && !is_privileged) {
+  // ★専用 handling object の宣言は信頼済み composition 主体 (ROOT / KERNEL_OBJECT) だけが行える (重大指摘 1)。
+  //   単なる実行特権 bit (PROTECTION_PRIVILEGED) では絶対に許可しない。
+  const bool is_handler = (flags & INTERNAL_FLAG_HANDLER) != 0;
+  if (is_handler && creator != ROOT_OBJECT && creator != KERNEL_OBJECT_ID) {
     error = object_error::NOT_PRIVILEGED;
     return 0;
   }
@@ -296,7 +297,7 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
     if (!m_objects[id].created || replace) {
       m_objects[id].created = true;
       m_objects[id].flags =
-          (uint32_t)(flags & ~(OBJECT_REPLACE | OBJECT_HANDLER));
+          (uint32_t)(flags & ~(OBJECT_REPLACE | INTERNAL_FLAG_HANDLER));
       // 最初のメソッドは生成側が与える (オブジェクト自身はまだ走っていないので
       // 自分では登録できない)。以後は EXPORT_METHOD で自分が増やす。
       m_objects[id].methods[0] = (method_t)entry;
@@ -514,6 +515,54 @@ void KERNEL_OBJECT::exit_method(uintptr_t levels, uintptr_t value,
   //   エラーとして返す (系は落とさない = I-9)。
   shadow.depth += (uint32_t)pops;
   reply(object_error::UNWIND_REJECTED, (uintptr_t)result.error);
+}
+
+template <>
+void KERNEL_OBJECT::forward_child_exit(uintptr_t value, uintptr_t error) {
+  const uint32_t thread = kernel_instance.current_thread_id();
+  const uint32_t caller = kernel_instance.current_caller_object();
+  shadow_t &shadow = m_shadow[thread];
+
+  // 呼び出し元は専用ハンドラ (HANDLER) でなければならない (重大指摘 1, 2)
+  if (caller == 0 || caller >= OBJECT_COUNT ||
+      m_objects[caller].kind != object_kind::HANDLER) {
+    reply(object_error::NOT_PRIVILEGED, 0);
+    return;
+  }
+
+  // shadow stack の top に子オブジェクトが積まれていることを確認
+  if (shadow.depth == 0) {
+    reply(object_error::UNWIND_REJECTED, 0);
+    return;
+  }
+
+  const uint32_t child_id = shadow.object[shadow.depth - 1];
+  // さらに、その子オブジェクトの親ハンドラがこの caller であることを確認 (なりすまし転送防止)
+  if (child_id >= OBJECT_COUNT ||
+      m_objects[child_id].parent_handler_object != caller) {
+    reply(object_error::NOT_PRIVILEGED, 0);
+    return;
+  }
+
+  // 子オブジェクトの呼び出しを 1 段畳む (shadow stack から落とす)
+  shadow.depth--;
+
+  // 物理フレームの巻き戻し:
+  // Root (F4) + 専用ハンドラ (F3) + 子オブジェクト (F2) の計 3 フレームをまとめて畳み、
+  // 子オブジェクトの呼び出し元 (Caller = F1) の直後へ復帰させる。
+  const uint32_t cur_depth = kernel_instance.current_depth();
+  const uintptr_t count = 3;
+  if (cur_depth >= count) {
+    const auto result = ARCH::syscall((uintptr_t)primitive::RETURN, count,
+                                      value, error, cur_depth);
+    // 巻き戻し失敗時 (カーネル検算で弾かれた場合) のみ戻る
+    shadow.depth++;
+    reply(object_error::UNWIND_REJECTED, (uintptr_t)result.error);
+    return;
+  }
+
+  shadow.depth++;
+  reply(object_error::UNWIND_REJECTED, 0);
 }
 
 // ---- スレッドと実行権の方針 -------------------------------------------------
@@ -1184,6 +1233,10 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
     // カーネルの戻り口が撃った svc がここへ届く (a1 = 畳む段数, a2 = 戻り値,
     // a3 = エラー)。巻き戻しに成功すればここから戻らない。
     exit_method(a1, a2, a3);
+    return 0;
+  case object_api::FORWARD_CHILD_EXIT:
+    // 専用ハンドラ (HANDLER) からの子オブジェクト終了転送 (重大指摘 2)
+    forward_child_exit(a1, a2);
     return 0;
   case object_api::GET_CURRENT_OBJECT:
     value = current_object(kernel_instance.current_thread_id());

@@ -145,6 +145,11 @@ public:
     const shadow_t &shadow = m_shadow[thread];
     return shadow.depth == 0 ? NO_OBJECT : shadow.caller[shadow.depth - 1];
   }
+  // ★専用ハンドラ (HANDLER) 付与用の信頼済み内部フラグ (重大指摘 1)。
+  //   公開 flags (object_api.hpp) には置かず、ROOT_OBJECT / KERNEL_OBJECT 本人による
+  //   create_object 時のみ受理される。一般オブジェクトの指定は NOT_PRIVILEGED で拒否。
+  static constexpr uintptr_t INTERNAL_FLAG_HANDLER = 1u << 2;
+
   uint32_t object_parent_handler(uint32_t object_id) const {
     if (object_id >= OBJECT_COUNT_T || !m_objects[object_id].created)
       return NO_OBJECT;
@@ -268,6 +273,8 @@ private:
   uintptr_t call_method(uintptr_t id, uintptr_t method, uintptr_t argument,
                         object_error &error);
   void exit_method(uintptr_t levels, uintptr_t value, uintptr_t error);
+  // 専用ハンドラ (HANDLER) からの子オブジェクトのメソッド終了転送 (重大指摘 2)
+  void forward_child_exit(uintptr_t value, uintptr_t error);
   // 巻き戻さずにその場で答える (エラー返却)。
   void reply(object_error error, uintptr_t value);
   // 巻き戻しで申告する「今のネスト数」を**自分の台帳から**計算する (§9.3)。

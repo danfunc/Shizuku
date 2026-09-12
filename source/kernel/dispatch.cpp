@@ -244,6 +244,9 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
   thread.current_kind = to_root ? (uint32_t)object_kind::KERNEL_OBJECT
                                 : (uint32_t)object_kind::HANDLER;
   // 親ハンドラ自身の親ハンドラは root kernel object。root 自身の親は自身。
+  // ★制約 (2026-09-12): 専用ハンドラの親ハンドラは常に Root Kernel Object に設定されるため、
+  //   現在の実装における専用ハンドラ階層は「Child → Dedicated Handler → Root」の 1 段限定である。
+  //   無制限のハンドラ多段ネストはサポートしない (独立監査指摘)。
   thread.current_handler_object = m_object_svc_handler_object;
   thread.current_handler_entry = m_object_svc_handler;
 
