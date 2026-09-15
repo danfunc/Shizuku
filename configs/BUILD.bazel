@@ -49,7 +49,7 @@ expand_template(
         #   ble_uart/bno055/bme280 等を足すため 32 では埋まる (Shizuku 自身が
         #   30 使用 + 消費側 2〜3 個で即オーバー、実測: bme280 の CREATE_OBJECT
         #   が範囲外で失敗した)。余裕を持たせておく。
-        "${SHIZUKU_OBJECT_COUNT}": "48",
+        "${SHIZUKU_OBJECT_COUNT}": "64",
         "${SHIZUKU_METHOD_COUNT}": "16",
         "${SHIZUKU_CALL_DEPTH}": "32",
         "${SHIZUKU_MEMORY_MANAGER}": "shizuku::memory_managers::pico_sdk",
