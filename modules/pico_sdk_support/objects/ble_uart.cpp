@@ -1,9 +1,10 @@
 // ===========================================================================
 //  BLE UART (Nordic UART Service) — Shizuku オブジェクト版 (v1: 最小構成)
 // ===========================================================================
-//  移植元: flight_robocon_telemetory_sender/BLE_UART_DRIVER.cpp (旧 CMake ビルド)。
-//  v1 スコープ: advertise / pairing / notify・write / CI 強制 (15ms 固定)。
-//  ★ペアリング方式は CDC の実行時コマンドで切替 (既定 = NC 必須、事故防止)。
+//  移植元: flight_robocon_telemetory_sender/BLE_UART_DRIVER.cpp (旧 CMake
+//  ビルド)。 v1 スコープ: advertise / pairing / notify・write / CI 強制 (15ms
+//  固定)。 ★ペアリング方式は CDC の実行時コマンドで切替 (既定 = NC
+//  必須、事故防止)。
 //    'A'+Enter で自動ペアリング (Just Works) へ、'S'+Enter で NC 必須へ戻す
 //    (g_auto_pair / apply_security_mode 参照)。
 //
@@ -18,9 +19,10 @@
 //
 //  ★ペアリング(bonding)鍵の flash 永続化 — **このファイルは何もしない**。
 //    pico-sdk の `btstack_cyw43_init()` (= `cyw43_arch_init()` から呼ばれる) が
-//    `setup_tlv()` の中で flash bank の TLV を張り、`le_device_db_tlv_configure`
-//    まで済ませている (SDK の btstack_cyw43.c)。**BT 有効でこの経路を使う限り、
-//    bonding の永続化は最初から有効**だった。
+//    `setup_tlv()` の中で flash bank の TLV
+//    を張り、`le_device_db_tlv_configure` まで済ませている (SDK の
+//    btstack_cyw43.c)。**BT 有効でこの経路を使う限り、 bonding
+//    の永続化は最初から有効**だった。
 //
 //    ★ここへ辿り着くまでに 4 回自前実装を試して全部壊した (2026-08-24)。
 //      1. flash_fs へ自前ブリッジ → PANIC
@@ -38,10 +40,11 @@
 //      別々に管理 → バンクの整合が崩れる → 次回起動の
 //      `btstack_tlv_flash_bank_init_instance` が「消してやり直す」判断 →
 //      その erase が `flash_safe_execute` を呼ぶ → **cyw43_arch_init の中で
-//      core1 はまだ起きていない**ので `multicore_lockout_victim_is_initialized(1)`
-//      が false → `assert(false)` (pico_flash/flash.c:190) で停止。
-//      壊れた状態は flash に残るので、**電源再投入でもアプリの焼き直しでも
-//      直らない**。復旧は `picotool erase --all` のみ。
+//      core1 はまだ起きていない**ので
+//      `multicore_lockout_victim_is_initialized(1)` が false → `assert(false)`
+//      (pico_flash/flash.c:190) で停止。 壊れた状態は flash
+//      に残るので、**電源再投入でもアプリの焼き直しでも 直らない**。復旧は
+//      `picotool erase --all` のみ。
 //
 //  ★接続フリーズの根本原因 (旧実装の教訓) は printf の二重ブロッキングだった
 //    ("ble-freeze-is-blocking-printf")。Shizuku 側は usb_cdc.cpp が診断出力を
@@ -137,17 +140,17 @@ static bool g_auto_pair = false;
 //   という状態そのもので表す。旗にすると「OFF のまま戻し忘れて飛ばす」形が
 //   作れてしまい、しかもそれが**無言で**成立する。状態で表せば、解錠は
 //   必ず「期限付きの一回券」の形しか取れない。
-static uint64_t g_pair_allow_until_us = 0;  // 一回券の期限 (0 = 券なし)
-static uint32_t g_pair_strikes = 0;         // 失敗ペアリングの連続回数
-static uint64_t g_pair_block_until_us = 0;  // クールダウン (広告停止) の期限
-static uint32_t g_bonded_count = 0;         // le_device_db_count() の写し
-static uint32_t g_nc_generation = 0;        // NC 要求の通し番号
+static uint64_t g_pair_allow_until_us = 0; // 一回券の期限 (0 = 券なし)
+static uint32_t g_pair_strikes = 0;        // 失敗ペアリングの連続回数
+static uint64_t g_pair_block_until_us = 0; // クールダウン (広告停止) の期限
+static uint32_t g_bonded_count = 0;        // le_device_db_count() の写し
+static uint32_t g_nc_generation = 0;       // NC 要求の通し番号
 static uint32_t g_nc_passkey = 0;
 // 外 (シェル) からの依頼。★旗だけ立てて btstack を触るのは poll ループ
 //   ([[no-btstack-from-caller-thread]])。
 static volatile uint8_t g_pair_answer_requested = 0; // 0=無 1=承認 2=拒否
 static volatile bool g_forget_bonds_requested = false;
-static volatile bool g_pair_mode_dirty = false;      // 施錠状態を再適用したい
+static volatile bool g_pair_mode_dirty = false; // 施錠状態を再適用したい
 
 // 一回券の有効時間。★短すぎると人が間に合わず、長すぎると「解錠したまま
 //   忘れて飛ばす」が起きる。人が板の横に居て操作している前提で 3 分。
@@ -217,7 +220,8 @@ uintptr_t export_method(method m, uintptr_t entry) {
   return api(shizuku::object_api::EXPORT_METHOD, (uintptr_t)m, entry).error;
 }
 
-// ---- セキュリティ / 接続状態 (旧実装 §「セキュリティ設定」「接続/通知状態」) ----
+// ---- セキュリティ / 接続状態 (旧実装 §「セキュリティ設定」「接続/通知状態」)
+// ----
 static hci_con_handle_t nc_pending_handle = HCI_CON_HANDLE_INVALID;
 static hci_con_handle_t con_handle = HCI_CON_HANDLE_INVALID;
 // リンクが張られた時刻。認可されないまま居座る相手を畳むのに使う。
@@ -232,17 +236,20 @@ static bool cmd_authorized = false;
 shizuku::stream::storage<frame_t, 8> g_rx;
 uintptr_t g_rx_stream_id = 0;
 
-// ---- TX: ble_uart 自身の行 (内部専用、ストリーム登録しない) -------------------
+// ---- TX: ble_uart 自身の行 (内部専用、ストリーム登録しない)
+// -------------------
 shizuku::stream::storage<frame_t, 16> g_tx;
 
-// ---- TX: ハブ (flight_controller) から流れてくる本線 --------------------------
-// ★実体を持つのは向こう側。こちらは番号で引いて (STREAM_OPEN) consumer 席に
+// ---- TX: ハブ (flight_controller) から流れてくる本線
+// -------------------------- ★実体を持つのは向こう側。こちらは番号で引いて
+// (STREAM_OPEN) consumer 席に
 //   座るだけ。番号は合成側が起動前に SET_TX_STREAM で渡す。
 uintptr_t g_tx_in_id = NO_STREAM;
 shizuku::stream::handle<frame_t> g_tx_in;
 
-// ---- GDB リンク (RSP) --------------------------------------------------------
-// ★NUS とは別の characteristic で運ぶ (ble_uart.gatt 参照)。ここは**運ぶだけ** —
+// ---- GDB リンク (RSP)
+// -------------------------------------------------------- ★NUS とは別の
+// characteristic で運ぶ (ble_uart.gatt 参照)。ここは**運ぶだけ** —
 //   RSP の中身は一切見ない (解釈するのは Shizuku の gdb server)。
 using link_chunk = shizuku::objects::link_chunk;
 uintptr_t g_gdb_to_stub_id = NO_STREAM;   // ここから stub へ (host の書き込み)
@@ -250,11 +257,13 @@ uintptr_t g_gdb_from_stub_id = NO_STREAM; // stub からここへ (GDB への返
 shizuku::stream::handle<link_chunk> g_gdb_to_stub;
 shizuku::stream::handle<link_chunk> g_gdb_from_stub;
 bool gdb_notify_enabled = false;
-// notify のクレジット切れで出せなかった 1 個をここに留める (下の flush_gdb 参照)。
+// notify のクレジット切れで出せなかった 1 個をここに留める (下の flush_gdb
+// 参照)。
 link_chunk g_gdb_held{};
 bool g_gdb_held_valid = false;
 
-// ---- OTA 受信 ----------------------------------------------------------------
+// ---- OTA 受信
+// ----------------------------------------------------------------
 // ★ここも**運ぶだけ**。中身 (ヘッダ/CRC/イメージ) は ota オブジェクトが見る。
 // ★容量を大きめに取る: 転送中は BLE から連続で流れ込み、ota 側は flash 書き
 //   込み (1 セクタ消去に数十ms) で待たされるため、ここが詰まると取りこぼす。
@@ -282,9 +291,9 @@ static uint32_t tx_pending(); // 下で定義 (GDB CCC 有効時の補填で先�
 //     いなくても再接続で notify を張り直してくる**。OTA しかしていないのに
 //     `gdb notify enabled` が毎回出るのはこれ。
 //   これを「繋がった」と数えると、スタブは寝るのをやめて RSP を待つ空回りに
-//   入り (受信 → 失敗 → YIELD の繰り返し)、**core0 を BLE の poll と食い合う**。
-//   実測で OTA の転送が 29% で止まった。
-//   ★1 バイトでも RSP が来れば本物なので、それを条件にする。来る前は
+//   入り (受信 → 失敗 → YIELD の繰り返し)、**core0 を BLE の poll
+//   と食い合う**。 実測で OTA の転送が 29% で止まった。 ★1 バイトでも RSP
+//   が来れば本物なので、それを条件にする。来る前は
 //     スタブが寝ているが、バイトはストリームに溜まるので取りこぼさない
 //     (スタブは起きたときに読む)。
 static bool gdb_saw_traffic = false;
@@ -312,7 +321,9 @@ static void tx_push(const uint8_t *data, uint32_t len) {
   g_tx.hdl().push(f); // LOSSLESS ではない (v16, 満杯なら最古を上書き)
 }
 
-static void tx_push_line(const char *s) { tx_push((const uint8_t *)s, (uint32_t)strlen(s)); }
+static void tx_push_line(const char *s) {
+  tx_push((const uint8_t *)s, (uint32_t)strlen(s));
+}
 
 // ---- 広告データ (旧実装のまま) ----------------------------------------------
 static uint8_t adv_buffer[31];
@@ -346,7 +357,7 @@ static void process_rx(const uint8_t *data, uint16_t len) {
     return;
   frame_t f{};
   f.len = len > sizeof(frame_t::data) ? (uint16_t)sizeof(frame_t::data)
-                                       : (uint16_t)len;
+                                      : (uint16_t)len;
   memcpy(f.data, data, f.len);
   // ★LOSSLESS を付けていない (push は常に true) — 満杯なら黙って最古を上書き。
   //   producer (この関数) は決して待たない (stream.hpp の設計方針)。
@@ -354,9 +365,10 @@ static void process_rx(const uint8_t *data, uint16_t len) {
   BOARD::diag_printf("[BLE_UART] RX %u byte accepted (authorized)\n", len);
 }
 
-// ---- CI 強制 (旧実装のまま — 実測知見そのもの) -------------------------------
-// 12 units = 15.00ms。Apple/macOS はこれ未満を要求すると数秒で強制切断する
-// (macos-ble-min-conn-interval-15ms の実測知見)。
+// ---- CI 強制 (旧実装のまま — 実測知見そのもの)
+// ------------------------------- 12 units = 15.00ms。Apple/macOS
+// はこれ未満を要求すると数秒で強制切断する (macos-ble-min-conn-interval-15ms
+// の実測知見)。
 static constexpr uint16_t FORCED_CI = 12;
 // ---- 生存監視 (旧 BLE_UART_DRIVER から移植, 2026-08-24) --------------------
 // ★何を直しているか:
@@ -370,12 +382,12 @@ static constexpr uint16_t FORCED_CI = 12;
 // ★段を分ける理由: 掃除で戻るなら 2 秒止める必要は無いし、掃除で戻らない相手に
 //   掃除を繰り返しても永久に戻らない。「掃除 → 応答があるか見る → 無ければ
 //   電源」の順にすることで、**代償の大きい手を最後にだけ払う**。
-static uint32_t hci_event_count = 0;      // 何か HCI/SM イベントが来た印
+static uint32_t hci_event_count = 0; // 何か HCI/SM イベントが来た印
 static uint64_t last_conn_activity_us = 0;
-static bool wd_recovery_pending = false;  // 掃除したので応答を見張っている
+static bool wd_recovery_pending = false; // 掃除したので応答を見張っている
 static uint64_t wd_cleanup_us = 0;
 static uint32_t wd_evt_snapshot = 0;
-static bool restart_requested = false;    // 診断 CDC の 'R' から
+static bool restart_requested = false; // 診断 CDC の 'R' から
 
 // ★接続中の無音をどれだけ許すか。テレメトリが流れている限り CAN_SEND_NOW が
 //   絶えず来るので、生きたリンクがここまで黙ることはない。GDB でブレーク
@@ -384,7 +396,8 @@ static constexpr uint64_t CONN_IDLE_TIMEOUT_US = 20000000ull;
 // 掃除への応答をどれだけ待つか。ここを過ぎたらコントローラ無応答とみなす。
 static constexpr uint64_t WD_RECOVERY_TIMEOUT_US = 3000000ull;
 
-static uint8_t ci_nego_stage = 0; // 0=未要求 / 1=(12,12)要求済み / 2=フォールバック済み
+static uint8_t ci_nego_stage =
+    0; // 0=未要求 / 1=(12,12)要求済み / 2=フォールバック済み
 
 static void print_conn_interval(const char *tag) {
   uint32_t x100 = (uint32_t)conn_interval * 125u;
@@ -411,8 +424,8 @@ static void request_ci_fallback(const char *why) {
 }
 
 // ---- ATT read/write callback ------------------------------------------------
-static uint16_t att_read_callback(hci_con_handle_t, uint16_t, uint16_t, uint8_t *,
-                                  uint16_t) {
+static uint16_t att_read_callback(hci_con_handle_t, uint16_t, uint16_t,
+                                  uint8_t *, uint16_t) {
   return 0; // TX は notify 専用、RX も値読み出しは無し
 }
 
@@ -446,8 +459,9 @@ static int att_write_callback(hci_con_handle_t connection_handle,
       ATT_CHARACTERISTIC_6E402002_B5A3_F393_E0A9_E50E24DCCA9E_01_VALUE_HANDLE) {
     // ★fail-closed。認可されていないリンクからファームは受け取らない。
     if (!cmd_authorized) {
-      BOARD::diag_printf("[BLE_UART] ota write dropped (unauthorized, %u byte)\n",
-                         buffer_size);
+      BOARD::diag_printf(
+          "[BLE_UART] ota write dropped (unauthorized, %u byte)\n",
+          buffer_size);
       return 0;
     }
     static uint32_t s_ota_pkt_count = 0;
@@ -490,8 +504,9 @@ static int att_write_callback(hci_con_handle_t connection_handle,
     // ★fail-closed。認可前の RSP は捨てる (デバッガは繋がらないだけで、
     //   こちらの状態は一切変わらない)。
     if (!cmd_authorized) {
-      BOARD::diag_printf("[BLE_UART] gdb write dropped (unauthorized, %u byte)\n",
-                         buffer_size);
+      BOARD::diag_printf(
+          "[BLE_UART] gdb write dropped (unauthorized, %u byte)\n",
+          buffer_size);
       return 0;
     }
     if (!gdb_saw_traffic) {
@@ -548,9 +563,10 @@ static int att_write_callback(hci_con_handle_t connection_handle,
 }
 
 // ---- TX flush ---------------------------------------------------------------
-// v1: 1 CAN_SEND_NOW で送れるだけ送る (優先度の作り分けは無い — 単一ストリーム)。
-// 出口は 2 つ: ble_uart 自身の行 (g_tx) と、ハブから来る本線 (g_tx_in)。
-// ★自分の行を先に出す — 接続状態などの内部メッセージは本数が少なく、
+// v1: 1 CAN_SEND_NOW で送れるだけ送る (優先度の作り分けは無い —
+// 単一ストリーム)。 出口は 2 つ: ble_uart 自身の行 (g_tx) と、ハブから来る本線
+// (g_tx_in)。 ★自分の行を先に出す —
+// 接続状態などの内部メッセージは本数が少なく、
 //   テレメトリのバルクに埋もれると読めなくなるため (旧実装が PRIO_SYS を
 //   一番強くしていたのと同じ理由)。合流の方針をここに書けるのは、
 //   ble_uart が**この 2 本の合流点**だから (D46 のハブが方針を持つ、の小型版)。
@@ -683,12 +699,20 @@ static bool advertising_allowed(uint64_t now_us) {
   return g_pair_block_until_us == 0 || now_us >= g_pair_block_until_us;
 }
 
-// ---- HCI / ATT イベント (旧実装から診断・ウォッチドッグ・PHY 系を落とした版) ----
+// ---- HCI / ATT イベント (旧実装から診断・ウォッチドッグ・PHY 系を落とした版)
+// ----
 static void packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
                            uint16_t) {
   // ★「何か来た」印。ウォッチドッグはこの数字が動くかどうかだけを見る。
   ++hci_event_count;
+#ifdef GEMINI_MODIFY_20260905
+  if (!(packet_type == HCI_EVENT_PACKET &&
+        hci_event_packet_get_type(packet) == ATT_EVENT_CAN_SEND_NOW)) {
+    last_conn_activity_us = BOARD::time_us();
+  }
+#else
   last_conn_activity_us = BOARD::time_us();
+#endif
   if (packet_type != HCI_EVENT_PACKET)
     return;
   uint8_t event = hci_event_packet_get_type(packet);
@@ -731,8 +755,8 @@ static void packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
       cmd_authorized = false;
       update_gdb_connected();
       ci_nego_stage = 0;
-      BOARD::diag_printf("[BLE_UART] connected, handle=0x%04x (requesting pairing)\n",
-                         h);
+      BOARD::diag_printf(
+          "[BLE_UART] connected, handle=0x%04x (requesting pairing)\n", h);
       sm_request_pairing(con_handle);
       break;
     }
@@ -748,18 +772,22 @@ static void packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
     }
     break;
   case HCI_EVENT_DISCONNECTION_COMPLETE:
-    BOARD::diag_printf("[BLE_UART] disconnected (reason=0x%02x), re-advertising\n",
-                       hci_event_disconnection_complete_get_reason(packet));
+    BOARD::diag_printf(
+        "[BLE_UART] disconnected (reason=0x%02x), re-advertising\n",
+        hci_event_disconnection_complete_get_reason(packet));
     con_handle = HCI_CON_HANDLE_INVALID;
     tx_notify_enabled = false;
     can_send_requested = false;
     cmd_authorized = false;
     gdb_notify_enabled = false; // 切断で GDB も落ちる (次の接続で張り直す)
     gdb_saw_traffic = false;
-    g_gdb_held_valid = false;   // 前の接続の断片を次へ持ち越さない
+    g_gdb_held_valid = false; // 前の接続の断片を次へ持ち越さない
     update_gdb_connected();
     ci_nego_stage = 0;
     nc_pending_handle = HCI_CON_HANDLE_INVALID;
+#ifdef GEMINI_MODIFY_20260905
+    g_pair_strikes = 0;
+#endif
     if (advertising_allowed(BOARD::time_us()))
       gap_advertisements_enable(1);
     break;
@@ -784,9 +812,10 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
     const hci_con_handle_t h =
         sm_event_numeric_comparison_request_get_handle(packet);
     // ★施錠中はここまで来ないはず (Pairing Request の時点で
-    //   sm_set_accepted_stk_generation_methods(0) が弾く) が、**二重の網**として
-    //   ここでも拒む。理由: 拒否の一次防壁がグローバル変数 1 個に乗っているので、
-    //   将来 apply_security_mode() の呼び忘れが 1 箇所でも入ると穴になる。
+    //   sm_set_accepted_stk_generation_methods(0) が弾く)
+    //   が、**二重の網**として ここでも拒む。理由:
+    //   拒否の一次防壁がグローバル変数 1 個に乗っているので、 将来
+    //   apply_security_mode() の呼び忘れが 1 箇所でも入ると穴になる。
     //   ここは「今まさに人に承認を求めようとしている」地点なので、施錠の意思が
     //   最後に効く場所として自然。
     if (pairing_locked_now(BOARD::time_us())) {
@@ -823,8 +852,9 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
     if (pairing_locked_now(BOARD::time_us())) {
       sm_bonding_decline(h);
       ++g_pair_strikes;
-      BOARD::diag_printf("[BLE_UART] just-works DECLINED (locked, strike %lu)\n",
-                         (unsigned long)g_pair_strikes);
+      BOARD::diag_printf(
+          "[BLE_UART] just-works DECLINED (locked, strike %lu)\n",
+          (unsigned long)g_pair_strikes);
     } else if (!g_auto_pair) {
       // ★NC 必須モードなのに Just Works に落ちた = 相手が MITM 防御を要求して
       //   いない (格下げ)。要求した保護が得られていない以上、通してはいけない。
@@ -853,20 +883,26 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
       g_pair_allow_until_us = 0;
       g_pair_strikes = 0;
       g_pair_mode_dirty = true; // 新しいボンドを数え直して施錠を掛け直す
-      BOARD::diag_printf("[BLE_UART] pairing complete -> authorized (再施錠)\n");
+      BOARD::diag_printf(
+          "[BLE_UART] pairing complete -> authorized (再施錠)\n");
       print_conn_interval("paired");
       request_fast_ci();
     } else {
       cmd_authorized = false;
       update_gdb_connected();
       ++g_pair_strikes;
-      BOARD::diag_printf("[BLE_UART] pairing failed (status 0x%02x, strike %lu)\n",
-                         sm_event_pairing_complete_get_status(packet),
-                         (unsigned long)g_pair_strikes);
+      BOARD::diag_printf(
+          "[BLE_UART] pairing failed (status 0x%02x, strike %lu)\n",
+          sm_event_pairing_complete_get_status(packet),
+          (unsigned long)g_pair_strikes);
+#ifdef GEMINI_MODIFY_20260905
+      gap_disconnect(con_handle);
+#endif
     }
     break;
   case SM_EVENT_REENCRYPTION_COMPLETE:
-    if (sm_event_reencryption_complete_get_status(packet) == ERROR_CODE_SUCCESS) {
+    if (sm_event_reencryption_complete_get_status(packet) ==
+        ERROR_CODE_SUCCESS) {
       cmd_authorized = true;
       update_gdb_connected();
       // ★正規の相手が戻ってきた = それまでの失敗は攻撃かノイズかに関わらず
@@ -880,6 +916,9 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
       cmd_authorized = false;
       update_gdb_connected();
       BOARD::diag_printf("[BLE_UART] reencryption failed -> stays locked\n");
+#ifdef GEMINI_MODIFY_20260905
+      gap_disconnect(con_handle);
+#endif
     }
     break;
   default:
@@ -887,9 +926,10 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
   }
 }
 
-// ---- エクスポートするメソッド ------------------------------------------------
-// a0 = ハブ (flight_controller) の TX ストリーム番号。番号を控えるだけで、
-// consumer 席に座る (STREAM_BIND) のは poll スレッドの冒頭 — 席は**発行元の
+// ---- エクスポートするメソッド
+// ------------------------------------------------ a0 = ハブ
+// (flight_controller) の TX ストリーム番号。番号を控えるだけで、 consumer
+// 席に座る (STREAM_BIND) のは poll スレッドの冒頭 — 席は**発行元の
 // オブジェクト**から導出されるので、実際に pop する側のスレッドで座らないと
 // 意味がないため。
 uintptr_t method_set_tx_stream(uintptr_t argument, uintptr_t, uintptr_t,
@@ -917,7 +957,8 @@ uintptr_t method_get_ota_stream(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 // ★旗を立てるだけ。btstack を触るのは poll ループの担当 (ble_uart.hpp の
 //   REQUEST_DISCONNECT のコメント)。
 volatile bool g_drop_link_requested = false;
-uintptr_t method_request_disconnect(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+uintptr_t method_request_disconnect(uintptr_t, uintptr_t, uintptr_t,
+                                    uintptr_t) {
   g_drop_link_requested = true;
   return 0;
 }
@@ -956,9 +997,11 @@ uintptr_t method_get_pairing_state(uintptr_t out, uintptr_t, uintptr_t,
   s->connected = con_handle != HCI_CON_HANDLE_INVALID ? 1 : 0;
   s->authorized = cmd_authorized ? 1 : 0;
   if (g_pair_allow_until_us != 0 && now < g_pair_allow_until_us)
-    s->allow_seconds_left = (uint32_t)((g_pair_allow_until_us - now) / 1000000u);
+    s->allow_seconds_left =
+        (uint32_t)((g_pair_allow_until_us - now) / 1000000u);
   if (g_pair_block_until_us != 0 && now < g_pair_block_until_us)
-    s->block_seconds_left = (uint32_t)((g_pair_block_until_us - now) / 1000000u);
+    s->block_seconds_left =
+        (uint32_t)((g_pair_block_until_us - now) / 1000000u);
   return 1;
 }
 
@@ -988,7 +1031,8 @@ uintptr_t method_forget_bonds(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   return 1;
 }
 
-// ---- BT スタック起動 (旧実装の bt_stack_bringup から診断/Stage1/2 を落とした版) --
+// ---- BT スタック起動 (旧実装の bt_stack_bringup から診断/Stage1/2
+// を落とした版) --
 static void bt_stack_bringup() {
   // ★cyw43_arch_init() はここで呼ばない。pico2_w では LED オブジェクト
   //   (peripherals.cpp の led_main) が既に core0 から呼んでチップとファームを
@@ -1005,9 +1049,9 @@ static void bt_stack_bringup() {
   //   `setup_tlv()` で `btstack_tlv_flash_bank_init_instance` +
   //   `btstack_tlv_set_instance` + `le_device_db_tlv_configure` まで
   //   済ませている (SDK の btstack_cyw43.c:28-47)。
-  //   ★★ここで**同じことをもう一度やると板が起動しなくなる** (2026-08-24 実測)。
-  //   同じ物理バンクを 2 つの `btstack_tlv_flash_bank_t` が別々に管理する形に
-  //   なり、バンクの整合が崩れる → 次回以降の
+  //   ★★ここで**同じことをもう一度やると板が起動しなくなる** (2026-08-24
+  //   実測)。 同じ物理バンクを 2 つの `btstack_tlv_flash_bank_t`
+  //   が別々に管理する形に なり、バンクの整合が崩れる → 次回以降の
   //   `btstack_tlv_flash_bank_init_instance` が「消してやり直す」判断をする →
   //   その erase が `flash_safe_execute` を呼ぶ → **cyw43_arch_init の中なので
   //   core1 はまだ起きておらず** `multicore_lockout_victim_is_initialized(1)`
@@ -1052,7 +1096,8 @@ static void bt_stack_bringup() {
 // ★上位層を**明示的に** deinit する。btstack の init 群は再初期化ガード付きで、
 //   deinit しないと次の init が黙って no-op になる (= 作り直したつもりで
 //   古い状態のまま走る、という一番たちの悪い形)。
-// ★cyw43_arch_deinit() は内部で hci_power_control(OFF) + hci_close + run loop の
+// ★cyw43_arch_deinit() は内部で hci_power_control(OFF) + hci_close + run loop
+// の
 //   解体までやり、チップの電源も落とす。次の cyw43_arch_init でファームが
 //   再ロードされる = コアの完全リセット。
 static void bt_stack_teardown() {
@@ -1083,10 +1128,23 @@ static void bt_full_chip_restart() {
 
   bt_stack_teardown();
   busy_wait_us(100000); // 電源断を落ち着かせる。★sleep ではない (譲らない)
+#ifdef GEMINI_MODIFY_20260905
+  int retry = 3;
+  while (cyw43_arch_init() != 0) {
+    BOARD::diag_printf(
+        "[BLE_UART] cyw43_arch_init FAILED after reset, retrying...\n");
+    if (--retry == 0) {
+      BOARD::diag_printf("[BLE_UART] cyw43_arch_init FATAL error\n");
+      return;
+    }
+    busy_wait_us(100000);
+  }
+#else
   if (cyw43_arch_init() != 0) {
     BOARD::diag_printf("[BLE_UART] cyw43_arch_init FAILED after reset\n");
     return;
   }
+#endif
   bt_stack_bringup();
   last_conn_activity_us = BOARD::time_us();
   BOARD::diag_printf("[BLE_UART] chip reset done, waiting for HCI ready\n");
@@ -1119,7 +1177,8 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
           (uintptr_t)shizuku::stream::role::CONSUMER);
     } else {
       BOARD::diag_printf("[BLE_UART] TX stream %lu could not be opened (%lu)\n",
-                         (unsigned long)g_tx_in_id, (unsigned long)opened.error);
+                         (unsigned long)g_tx_in_id,
+                         (unsigned long)opened.error);
     }
   } else {
     BOARD::diag_printf("[BLE_UART] no TX stream wired — 自分の行だけ送る\n");
@@ -1130,9 +1189,9 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       (uintptr_t)shizuku::stream::role::PRODUCER);
 
   // ---- GDB リンクの席 ----
-  if (g_gdb_to_stub_id != NO_STREAM &&
-      g_gdb_from_stub_id != NO_STREAM) {
-    const auto to_stub = api(shizuku::object_api::STREAM_OPEN, g_gdb_to_stub_id);
+  if (g_gdb_to_stub_id != NO_STREAM && g_gdb_from_stub_id != NO_STREAM) {
+    const auto to_stub =
+        api(shizuku::object_api::STREAM_OPEN, g_gdb_to_stub_id);
     const auto from_stub =
         api(shizuku::object_api::STREAM_OPEN, g_gdb_from_stub_id);
     if (to_stub.error == 0 && to_stub.value != 0 && from_stub.error == 0 &&
@@ -1209,13 +1268,14 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       } else if (c == 'R') {
         // ★手で起こせるようにしておく。壊れてからしか通らない経路を
         //   壊れる前に一度通しておかないと、いざという時に動く保証が無い。
-        BOARD::diag_printf("[BLE_UART] chip reset requested from the console\n");
+        BOARD::diag_printf(
+            "[BLE_UART] chip reset requested from the console\n");
         restart_requested = true;
       } else if (c == 'S') {
         g_auto_pair = false;
         apply_security_mode();
-        BOARD::diag_printf(
-            "[BLE_UART] pairing mode -> SECURE (NC required). 次の接続から有効\n");
+        BOARD::diag_printf("[BLE_UART] pairing mode -> SECURE (NC required). "
+                           "次の接続から有効\n");
       }
     }
 
@@ -1235,10 +1295,12 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
         g_pair_answer_requested = 0;
         if (nc_pending_handle != HCI_CON_HANDLE_INVALID) {
           if (answer == 1) {
-            BOARD::diag_printf("[BLE_UART] numeric comparison confirmed (wire)\n");
+            BOARD::diag_printf(
+                "[BLE_UART] numeric comparison confirmed (wire)\n");
             sm_numeric_comparison_confirm(nc_pending_handle);
           } else {
-            BOARD::diag_printf("[BLE_UART] numeric comparison declined (wire)\n");
+            BOARD::diag_printf(
+                "[BLE_UART] numeric comparison declined (wire)\n");
             sm_bonding_decline(nc_pending_handle);
             ++g_pair_strikes;
           }
@@ -1257,14 +1319,16 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
         if (con_handle != HCI_CON_HANDLE_INVALID) {
           if (forget_deadline_us == 0) {
             forget_deadline_us = now + 3000000ull;
-            BOARD::diag_printf("[BLE_UART] forget bonds: dropping the link first\n");
+            BOARD::diag_printf(
+                "[BLE_UART] forget bonds: dropping the link first\n");
             gap_disconnect(con_handle);
           }
           if (now < forget_deadline_us) {
             api(shizuku::object_api::SLEEP_US, 1000);
             continue; // まだ切れていない。次周でもう一度見る
           }
-          BOARD::diag_printf("[BLE_UART] forget bonds: link did not drop, 続行\n");
+          BOARD::diag_printf(
+              "[BLE_UART] forget bonds: link did not drop, 続行\n");
         }
         g_forget_bonds_requested = false;
         forget_deadline_us = 0;
@@ -1295,7 +1359,8 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
         next_bond_check_us = now + 1000000ull;
         if (g_pair_allow_until_us != 0 && now >= g_pair_allow_until_us) {
           g_pair_allow_until_us = 0;
-          BOARD::diag_printf("[BLE_UART] pairing allow window expired -> locked\n");
+          BOARD::diag_printf(
+              "[BLE_UART] pairing allow window expired -> locked\n");
         }
         const uint32_t counted = (uint32_t)le_device_db_count();
         const bool was_locked = pairing_locked_now(now);
@@ -1335,7 +1400,8 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       if (g_pair_block_until_us != 0 && now >= g_pair_block_until_us) {
         g_pair_block_until_us = 0;
         next_adv_ensure_us = 0; // ③ に即座に張り直させる
-        BOARD::diag_printf("[BLE_UART] pairing cooldown over — advertising again\n");
+        BOARD::diag_printf(
+            "[BLE_UART] pairing cooldown over — advertising again\n");
       }
 
       // (e) 認可されないまま居座るリンクを畳む。
@@ -1347,7 +1413,8 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       //     しびれを切らす時間で測ってはいけない。
       //   ★長さの決め方: 誤爆 (正規の遅いペアリングを切る) の代償は
       //     「strike が溜まって離陸前に 60 秒黙る」で、見逃し (占拠が
-      //     45 秒でなく 90 秒続く) の代償はほぼ無い。**非対称なので長めに倒す**。
+      //     45 秒でなく 90 秒続く)
+      //     の代償はほぼ無い。**非対称なので長めに倒す**。
       if (con_handle != HCI_CON_HANDLE_INVALID && !cmd_authorized &&
           nc_pending_handle == HCI_CON_HANDLE_INVALID &&
           now - conn_started_us > UNAUTH_LINK_TIMEOUT_US) {
@@ -1373,10 +1440,17 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
     //      しない** = ホストからは永久に見つからない。
     if (con_handle != HCI_CON_HANDLE_INVALID &&
         BOARD::time_us() - last_conn_activity_us > CONN_IDLE_TIMEOUT_US) {
-      BOARD::diag_printf("[BLE_UART] link idle %llums — force cleanup\n",
-                         (unsigned long long)((BOARD::time_us() -
-                                               last_conn_activity_us) / 1000));
+      BOARD::diag_printf(
+          "[BLE_UART] link idle %llums — force cleanup\n",
+          (unsigned long long)((BOARD::time_us() - last_conn_activity_us) /
+                               1000));
       gap_disconnect(con_handle); // 生きていれば正規に切れる。死んでいれば無害
+#ifdef GEMINI_MODIFY_20260905
+      // Wait for HCI_EVENT_DISCONNECTION_COMPLETE. If it never comes, the chip
+      // will be reset.
+      wd_recovery_pending = true;
+      wd_cleanup_us = BOARD::time_us();
+#else
       con_handle = HCI_CON_HANDLE_INVALID;
       tx_notify_enabled = false;
       can_send_requested = false;
@@ -1392,15 +1466,22 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       wd_cleanup_us = BOARD::time_us();
       wd_evt_snapshot = hci_event_count;
       last_conn_activity_us = BOARD::time_us();
+#endif
     }
 
     // ② エスカレーション: 掃除に応答が無ければコントローラごと無応答。
     if (wd_recovery_pending) {
+#ifdef GEMINI_MODIFY_20260905
+      if (con_handle == HCI_CON_HANDLE_INVALID) {
+        wd_recovery_pending = false;
+#else
       if (hci_event_count != wd_evt_snapshot) {
         wd_recovery_pending = false; // 応答あり = 掃除で足りた
+#endif
       } else if (BOARD::time_us() - wd_cleanup_us > WD_RECOVERY_TIMEOUT_US) {
         wd_recovery_pending = false;
-        BOARD::diag_printf("[BLE_UART] controller unresponsive — resetting CYW43\n");
+        BOARD::diag_printf(
+            "[BLE_UART] controller unresponsive — resetting CYW43\n");
         bt_full_chip_restart();
         continue;
       }
@@ -1442,24 +1523,26 @@ uintptr_t ble_uart_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   g_rx.init();
   g_tx.init();
 
-  uintptr_t failures = api(shizuku::object_api::DECLARE_NAME, (uintptr_t) "ble_uart")
-                           .error;
-  failures += export_method(method::GET_RX_STREAM, (uintptr_t)&method_get_rx_stream);
-  failures += export_method(method::SET_TX_STREAM, (uintptr_t)&method_set_tx_stream);
+  uintptr_t failures =
+      api(shizuku::object_api::DECLARE_NAME, (uintptr_t)"ble_uart").error;
+  failures +=
+      export_method(method::GET_RX_STREAM, (uintptr_t)&method_get_rx_stream);
+  failures +=
+      export_method(method::SET_TX_STREAM, (uintptr_t)&method_set_tx_stream);
   failures += export_method(method::SET_GDB_STREAMS,
                             (uintptr_t)&method_set_gdb_streams);
   failures += export_method(method::REQUEST_DISCONNECT,
                             (uintptr_t)&method_request_disconnect);
-  failures += export_method(method::GET_OTA_STREAM,
-                            (uintptr_t)&method_get_ota_stream);
+  failures +=
+      export_method(method::GET_OTA_STREAM, (uintptr_t)&method_get_ota_stream);
   failures += export_method(method::GET_CH2_RX_STREAM,
                             (uintptr_t)&method_get_ch2_rx_stream);
   failures += export_method(method::SET_CH2_TX_STREAM,
                             (uintptr_t)&method_set_ch2_tx_stream);
   failures += export_method(method::GET_PAIRING_STATE,
                             (uintptr_t)&method_get_pairing_state);
-  failures += export_method(method::PAIRING_ANSWER,
-                            (uintptr_t)&method_pairing_answer);
+  failures +=
+      export_method(method::PAIRING_ANSWER, (uintptr_t)&method_pairing_answer);
   failures += export_method(method::SET_PAIRING_LOCK,
                             (uintptr_t)&method_set_pairing_lock);
   failures +=
@@ -1497,15 +1580,15 @@ uint32_t register_ble_uart(uintptr_t object_id) {
   //   core1 へ乗る余地を残してしまう。LED (peripherals.cpp) が core0 から
   //   cyw43_arch_init() した以上、cyw43 に触れるスレッドは明示的に core0 へ
   //   ピン留めしないと安全ではない。
-  const auto created = api(shizuku::object_api::CREATE_OBJECT, OBJECT,
-                           (uintptr_t)&ble_uart_main,
-                           shizuku::OBJECT_PRIVILEGED | shizuku::OBJECT_ON_CORE(0));
+  const auto created =
+      api(shizuku::object_api::CREATE_OBJECT, OBJECT, (uintptr_t)&ble_uart_main,
+          shizuku::OBJECT_PRIVILEGED | shizuku::OBJECT_ON_CORE(0));
   const auto started = api(shizuku::object_api::CALL_METHOD, OBJECT, 0, 0);
   if (created.error != 0 || started.error != 0 || started.value != 0) {
-    BOARD::diag_printf("[BLE_UART] FAILED: create=%lu call=%lu exports_failed=%lu\n",
-                       (unsigned long)created.error,
-                       (unsigned long)started.error,
-                       (unsigned long)started.value);
+    BOARD::diag_printf(
+        "[BLE_UART] FAILED: create=%lu call=%lu exports_failed=%lu\n",
+        (unsigned long)created.error, (unsigned long)started.error,
+        (unsigned long)started.value);
     return 1;
   }
   BOARD::diag_printf("[BLE_UART] registered (object %lu, rx stream %lu)\n",
@@ -1524,8 +1607,8 @@ uint32_t start_ble_uart(uintptr_t object_id) {
                        (unsigned long)spawned.error);
     return 1;
   }
-  // cyw43/btstack は preemption-safe ではない (旧実装の budget-0 の理由と同じ) の
-  // で、貸し出しは baton (0) にする。
+  // cyw43/btstack は preemption-safe ではない (旧実装の budget-0 の理由と同じ)
+  // の で、貸し出しは baton (0) にする。
   api(shizuku::object_api::SET_BUDGET, spawned.value, 0);
   BOARD::diag_printf("[BLE_UART] poll thread %lu started\n",
                      (unsigned long)spawned.value);
