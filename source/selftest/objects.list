@@ -14,6 +14,7 @@ load
 counter
 stream_producer
 stream_consumer
+# Flash-stream test IDs are present in both board configurations.
 unpriv_writer
 unpriv_reader
 unpriv_sink

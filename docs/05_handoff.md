@@ -1,7 +1,8 @@
 # 引き継ぎ書 (2026-08-24 時点)
 
 このファイルは「次に触る人が最初に読む 1 枚」。**設計の理由は書かない** —
-それは `03_porting_policy.md` の決定事項 (D1〜D55) にある。ここに書くのは
+それは `03_porting_policy.md` の決定事項 (現行の最終番号は D58) にある。D1 は
+2026-09-28 に廃止され、現行要件は D58 を参照する。ここに書くのは
 **今どこまで来ていて、何が動いていて、何が壊れていて、どこを踏むと痛いか**。
 
 ---
@@ -35,7 +36,7 @@ cat /dev/cu.usbmodem101           # 診断 (自己テストと [STRESS])
 
 | 層 | 中身 | 証拠 |
 |---|---|---|
-| カーネル | 呼び出しフレーム / パリティ経路 / 実行権の貸し借り (クロック基準) / フォールト隔離 | call ladder 24, thread ladder 41 |
+| カーネル | 呼び出しフレーム / 種別で決まる経路 / 実行権の貸し借り (クロック基準) / フォールト隔離 | call ladder 24, thread ladder 41 |
 | 保護 | MPU、非特権オブジェクト、拒否のテスト、`GRANT_REGION` (Q8: flash extent の動的開示) | 対象自身が CONTROL を申告 (=15)、開示外は落ちる・開示内は読める |
 | 多コア | 2 コアで普通のスレッドが走る | `cores seen 0x3` |
 | 記憶 | 階級別空きリストで O(1) | 穴 24 個でも費用が変わらない |
@@ -225,7 +226,7 @@ source/selftest/              梯子。**ここが仕様書**
 modules/pico_sdk_support/     board / arch / ペリフェラル / flash FS / USB / GDB stub
 configs/                      型注入 (config.hpp) と CYW43 クロックの導出
 tools/gen_object_ids.py       オブジェクト番号を振る (各 objects.list を読む)
-docs/03_porting_policy.md     決定 D1〜D55 と未決 Q1〜Q7 ← **設計の理由はここ**
+docs/03_porting_policy.md     決定 D1 (廃止)〜D58 と未決 Q1〜Q7 ← **設計の理由はここ**
 ```
 
 **自己テストが仕様書**。何かを変えたら、まず対応する ladder が落ちるかを見る。

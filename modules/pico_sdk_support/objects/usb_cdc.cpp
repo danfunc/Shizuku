@@ -91,7 +91,13 @@ const uint8_t g_config_descriptor[CONFIG_TOTAL_LEN] = {
     SHIZUKU_RESET_DESCRIPTOR(ITF_RESET, STR_RESET)};
 
 char g_serial[PICO_UNIQUE_BOARD_ID_SIZE_BYTES * 2 + 1];
-const char *g_strings[] = {
+#if defined(SHIZUKU_RP2040)
+// The table is immutable; keep its pointer array in flash on the smaller SRAM target.
+using usb_string_entry = const char *const;
+#else
+using usb_string_entry = const char *;
+#endif
+usb_string_entry g_strings[] = {
     [STR_LANGUAGE] = "",
     [STR_MANUFACTURER] = "Shizuku",
     [STR_PRODUCT] = "Shizuku",

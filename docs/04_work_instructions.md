@@ -1,11 +1,15 @@
 # 04. 指示書 — フェーズ別の実装手順
 
-前提: [03_porting_policy.md](03_porting_policy.md) の決定 D1-D17 に従う。
+前提: 現行の設計判断は [03_porting_policy.md](03_porting_policy.md) の D58 を含む有効な決定に従う。
+この文書の Phase 0〜5.5 は当時の作業指示・実施記録であり、D1 廃止前の記述を含む。
+D1 に依存する未実施手順は現行指示として扱わず、D58 の再登録・ホットスワップ要件に
+合わせて更新する。
 各フェーズは「受け入れ条件」を満たしてから次へ進む。**梯子を飛ばさない**こと
 (参照実装が 6 段ネストを一気に試して長時間溶かした反省 = DESIGN §16 / PORT §7)。
 
 実装順序の背骨は 2 本:
-- 機構: PORT §6 (arch 抽象 → オブジェクト概念の外出し → 2nd ISA → RISC-V → ボード)
+- 機構: PORT §6 (arch 抽象 → 当時のオブジェクト概念外出し案 → 2nd ISA → RISC-V → ボード)。
+  オブジェクト配置は現在 D58 に従う
 - アクセス制御: DESIGN §17 (identity → 親子 → md → arena)。**順序厳守・飛ばすと無意味**
 
 ---
@@ -155,15 +159,15 @@ concept を満たさないダミー型で「どの要件が欠けたか」が 1 
 注意 (Phase 2 への引き継ぎ):
 - `abis/rp2040_abi.hpp` (svc ラッパ) は名前も ABI も暫定のまま。Q1 (レジスタ渡し統一)
   の決定と合わせて Phase 2 で書き直す
-- `templates/kernel.hpp` はまだ OBJECT パラメータと object_table を持つ (D1 未適用)。
+- `templates/kernel.hpp` はまだ OBJECT パラメータと object_table を持つ (当時の記録。D1 未適用は現在の課題ではない)。
   `templates/object.hpp` の特権 enum (D6) も未処理。どちらも Phase 2/3 の対象
 - main.cpp の PSP 移行 + svc ループは実験コードのまま。Phase 2 で thread0
   ブートストラップ (参照 shizu.hpp の set_current_context_as_kernel_init 相当) に置換する
 
-## Phase 2 — カーネルテンプレート (オブジェクト概念なし) + プリミティブ
+## Phase 2 — カーネルテンプレート (当時の計画: オブジェクト概念なし) + プリミティブ
 
-目的: DESIGN §7 の ABI を `templates::kernel<ARCH, BOARD, …>` として実装する。
-**カーネルからオブジェクト概念を外す (D1) のはここ。**
+目的 (当時): DESIGN §7 の ABI を `templates::kernel<ARCH, BOARD, …>` として実装する。
+**D1 に基づく以下の切り離し計画は 2026-09-28 に廃止された (03 D58)。**
 
 1. `templates::kernel` を再定義: thread_table (疎, D8) / per-core current_thread /
    grant_stacks / 登録ハンドラ (entry + 信頼フラグ)。`OBJECT_T` パラメータ削除
@@ -190,12 +194,12 @@ concept を満たさないダミー型で「どの要件が欠けたか」が 1 
 - スタック不足で NO_STACK が返る (PSPLIM 手前拒否)
 - 2 コアで SWITCH/GRANT のストレス (参照 smp_stress の縮小版) が ADVANCING
 
-### Phase 2 進捗記録 (2026-08-19 実装。**実機未確認**)
+### Phase 2 進捗記録 (2026-08-19 実装。**実機未確認**。D1 廃止前の実装記録)
 
 実装済み (CALL / RETURN / SET_HANDLER。SWITCH / GRANT は Phase 2b へ):
 - `kernel_abi.hpp`: プリミティブ 5 種と `call_request` / `kernel_error`。
   **カーネルの語彙に「未知の番号」「権限がない」は無い** (§3.6.1)
-- `templates/kernel.hpp` を D1 の形へ再定義: `kernel<CPU_MANAGER, MEMORY_MANAGER,
+- `templates/kernel.hpp` を当時の D1 案に再定義: `kernel<CPU_MANAGER, MEMORY_MANAGER,
   THREAD_COUNT>`。OBJECT パラメータと object_table を削除し、現在オブジェクトは
   不透明な cookie に。`templates/object.hpp` (特権 enum を含む旧型) は削除 (D6)
 - `templates/thread.hpp`: 状態機械 + 活性化状態 (cookie / caller_cookie / trusted) +
@@ -222,9 +226,12 @@ concept を満たさないダミー型で「どの要件が欠けたか」が 1 
 **★2026-08-20 の作り直し (ユーザー指摘 3 連発による)**:
 1. 「活性化 (activation)」の概念を廃止。参照実装の `in_handler` は「走り方に権限が
    付く」形で、ハンドラから呼ばれた先まで特権化する穴だった
-2. cookie / identity / 信頼ビットをカーネルから全廃。**経路は呼び出しフレームの
-   段数のパリティだけ**で決まる (偶数 = オブジェクト、奇数 = ハンドラ。積むのは
-   トランポリンと CALL の 2 つだけなので必ず交互になる)
+2. cookie / 信頼ビットをカーネルから全廃。経路は**今走っているオブジェクトの種別**
+   だけで決まる (PLAIN = オブジェクト、HANDLER = ハンドラ)。
+   ★当初はここを「呼び出しフレームの段数のパリティ」と書いていたが、それは
+   「ハンドラ = カーネルオブジェクト」を仮定していてマルチ ABI で崩れる。
+   実装も一時「ID 0 = カーネルオブジェクト」の決め打ちに退行していた。
+   2026-09-05 に種別 (`object_kind`) を独立した値として復活させて直した
 3. `call_request.return_pc` も廃止。戻り口はカーネルの 1 本で、同じ RETURN が
    誰から出たかで意味が変わる (プリミティブ / exit API)
 4. **カーネルオブジェクトを先に実装**し (`source/kernel_object/handler.cpp`)、
@@ -237,6 +244,9 @@ concept を満たさないダミー型で「どの要件が欠けたか」が 1 
 (SWITCH / GRANT / スレッド生成) → Phase 4 (親子関係と md)。
 
 ## Phase 3 — カーネルオブジェクト (kobj) + 委譲ファミリ
+
+以下は D1 時点の構成案を含む実装記録。現在の設計では D58 のホットスワップと
+保護付き/カーネル空間オブジェクトの要件が優先し、過去の分離制約を根拠にしない。
 
 目的: オブジェクトモデル・表・方針をすべて kobj 側に実装 (PORT §3)。
 

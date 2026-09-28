@@ -106,7 +106,8 @@ source/                            カーネル実装 (.cpp)。kernel.cpp / cpu_
    `memory_manager.init()` 失敗時に `panic("memory_manager_uninitialized")` (I-9 的には
    ブート時なので panic 可だが、メッセージと分類は整理)。object_table[0] 経由の
    カーネルオブジェクト生成コードは DESIGN の「カーネルはオブジェクトを知らない」(§7)
-   と矛盾するので、**このスケッチは廃棄対象** (03 参照)。
+   と矛盾すると当時判断され、**このスケッチは廃棄対象**として記録された (03 の旧 D1)。
+   D1 は 2026-09-28 に廃止。オブジェクトをカーネルから外すこと自体は現行要件ではない。
 8. **buildUtilities.cmake の空関数** `setting()` は `set()` を無引数で呼ぶだけの残骸。削除可。
 9. **configs/CMakeLists.txt の `set(config_need_headers)`**: ローカル変数を消して
    キャッシュ値を透過させる意図なら動くが紛らわしい。コメントを付けるか
