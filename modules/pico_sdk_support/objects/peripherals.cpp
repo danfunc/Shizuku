@@ -119,7 +119,11 @@ uintptr_t led_write(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
     led_sync_hw();
   }
 #elif defined(PICO_DEFAULT_LED_PIN)
-  ::gpio_put(PICO_DEFAULT_LED_PIN, g_led_state != 0);
+  bool pin_value = g_led_state != 0;
+#if defined(PICO_DEFAULT_LED_PIN_INVERTED) && PICO_DEFAULT_LED_PIN_INVERTED
+  pin_value = !pin_value;
+#endif
+  ::gpio_put(PICO_DEFAULT_LED_PIN, pin_value);
 #endif
   return g_led_state;
 }
@@ -132,7 +136,11 @@ void led_toggle() {
     led_sync_hw();
   }
 #elif defined(PICO_DEFAULT_LED_PIN)
-  ::gpio_put(PICO_DEFAULT_LED_PIN, next != 0);
+  bool pin_value = next != 0;
+#if defined(PICO_DEFAULT_LED_PIN_INVERTED) && PICO_DEFAULT_LED_PIN_INVERTED
+  pin_value = !pin_value;
+#endif
+  ::gpio_put(PICO_DEFAULT_LED_PIN, pin_value);
 #endif
 }
 
@@ -154,6 +162,11 @@ uintptr_t led_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 #elif defined(PICO_DEFAULT_LED_PIN)
   ::gpio_init(PICO_DEFAULT_LED_PIN);
   ::gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
+#if defined(PICO_DEFAULT_LED_PIN_INVERTED) && PICO_DEFAULT_LED_PIN_INVERTED
+  ::gpio_put(PICO_DEFAULT_LED_PIN, true); // Active-low LEDs are off when high.
+#else
+  ::gpio_put(PICO_DEFAULT_LED_PIN, false);
+#endif
 #else
   return LED_ABSENT; // ボードに LED が無い
 #endif
@@ -249,23 +262,19 @@ i2c_inst_t *i2c_instance_of(uint32_t instance) {
 //   (write→repeated start→read) の途中でもう片方が i2c_init や別の
 //   transaction を割り込ませ、両方とも化ける (実測: BNO055 単体では動いて
 //   いたのに BME280 を足した途端どちらも chip id 不一致で初期化失敗した)。
-//   バス単位の CAS ロックで直列化する (待ちは稀なので yield backoff で十分)。
+//   バス単位の ARCH CAS ロックで直列化する (待ちは稀なので yield backoff で十分)。
 volatile uint32_t g_i2c_owner[2] = {0, 0}; // 0 = 空き。所有者は caller_thread+1
 constexpr uint32_t I2C_LOCK_BACKOFF_US = 100;
 
 struct i2c_guard {
   uint32_t instance;
   explicit i2c_guard(uint32_t inst) : instance(inst) {
-    uint32_t expected = 0;
-    while (!__atomic_compare_exchange_n(&g_i2c_owner[instance], &expected, 1u,
-                                        /*weak=*/true, __ATOMIC_ACQUIRE,
-                                        __ATOMIC_RELAXED)) {
-      expected = 0;
+    while (!ARCH::cas32(&g_i2c_owner[instance], 0u, 1u)) {
       api(object_api::YIELD);
     }
   }
   ~i2c_guard() {
-    __atomic_store_n(&g_i2c_owner[instance], 0u, __ATOMIC_RELEASE);
+    ARCH::store_release32(&g_i2c_owner[instance], 0u);
   }
   i2c_guard(const i2c_guard &) = delete;
   i2c_guard &operator=(const i2c_guard &) = delete;
@@ -359,15 +368,30 @@ uint32_t register_peripherals() {
                        {"temperature", TEMPERATURE_OBJECT, temperature_main}};
 
   uint32_t failures = 0;
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  uint32_t entry_index = 0;
+#endif
   for (const entry_t &entry : entries) {
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+    const uint32_t stage = 61u + entry_index * 4u;
+    KERNEL::BOARD::boot_trace_stage(stage); // CREATE_OBJECT 直前
+#endif
     // ペリフェラルを直接叩くので特権を宣言する (上のドライバは非特権のままでよい)。
     const call_result created =
         api(object_api::CREATE_OBJECT, entry.object, (uintptr_t)entry.main,
             OBJECT_PRIVILEGED);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+    KERNEL::BOARD::boot_trace_stage(stage + 1u); // CREATE_OBJECT 復帰
+    KERNEL::BOARD::boot_trace_stage(stage + 2u); // CALL_METHOD 直前
+#endif
     // main を 1 回呼んで、自分のメソッドを自分で export させる。
     // main の戻り値は「export に失敗した数」なので、そこも見る。
     const call_result started =
         api(object_api::CALL_METHOD, entry.object, 0, 0);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+    KERNEL::BOARD::boot_trace_stage(stage + 3u); // CALL_METHOD 復帰
+    ++entry_index;
+#endif
     if (created.error != 0 || started.error != 0 || started.value != 0) {
       ++failures;
       KERNEL::BOARD::diag_printf(
@@ -388,6 +412,9 @@ uint32_t register_peripherals() {
 #endif
     }
   }
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  KERNEL::BOARD::boot_trace_stage(81); // 5 オブジェクトの登録完了
+#endif
   return failures;
 }
 

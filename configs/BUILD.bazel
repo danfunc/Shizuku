@@ -1,6 +1,8 @@
 # config.hpp の生成 (CMake の configure_file と同じ内容になるよう保つ)。
 # TODO(Phase1 以降): 置換値を bazel/config の build setting に外出しする。
 load("@bazel_skylib//rules:expand_template.bzl", "expand_template")
+load("@bazel_skylib//rules:common_settings.bzl", "int_flag", "string_flag")
+load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@rules_cc//cc:defs.bzl", "cc_library")
 load(
     "//configs:cyw43_clock.bzl",
@@ -8,6 +10,74 @@ load(
     "CYW43_SCK_ACTUAL_KHZ",
     "CYW43_SPI_PROGRAM",
     "SYS_CLOCK_KHZ",
+)
+
+string_flag(
+    name = "board",
+    build_setting_default = "rp2350_pico2_w",
+    values = [
+        "rp2040_pico",
+        "rp2040_pico_w",
+        "rp2040_xiao",
+        "rp2350_pico2",
+        "rp2350_pico2_w",
+    ],
+    visibility = ["//visibility:public"],
+)
+int_flag(
+    name = "flash_capacity_bytes",
+    build_setting_default = 0,
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "rp2040_pico",
+    constraint_values = ["@pico-sdk//bazel/constraint:rp2040"],
+    flag_values = {
+        ":board": "rp2040_pico",
+        "@pico-sdk//bazel/config:PICO_BOARD": "pico",
+    },
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "rp2040_xiao",
+    constraint_values = ["@pico-sdk//bazel/constraint:rp2040"],
+    flag_values = {
+        ":board": "rp2040_xiao",
+        "@pico-sdk//bazel/config:PICO_BOARD": "seeed_xiao_rp2040",
+    },
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "rp2040_pico_w",
+    constraint_values = ["@pico-sdk//bazel/constraint:rp2040"],
+    flag_values = {
+        ":board": "rp2040_pico_w",
+        "@pico-sdk//bazel/config:PICO_BOARD": "pico_w",
+    },
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "rp2350_pico2",
+    constraint_values = ["@pico-sdk//bazel/constraint:rp2350"],
+    flag_values = {
+        ":board": "rp2350_pico2",
+        "@pico-sdk//bazel/config:PICO_BOARD": "pico2",
+    },
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "rp2350_pico2_w",
+    constraint_values = ["@pico-sdk//bazel/constraint:rp2350"],
+    flag_values = {
+        ":board": "rp2350_pico2_w",
+        "@pico-sdk//bazel/config:PICO_BOARD": "pico2_w",
+    },
+    visibility = ["//visibility:public"],
+)
+selects.config_setting_group(
+    name = "rp2040",
+    match_any = [":rp2040_pico", ":rp2040_pico_w", ":rp2040_xiao"],
+    visibility = ["//visibility:public"],
 )
 
 # ★SDK 内部 (cyw43 ドライバ) にも届かせる必要があるので、コンパイルオプションでは
@@ -36,8 +106,13 @@ expand_template(
     out = "internal_headers/shizuku/config.hpp",
     substitutions = {
         "${INCLUDE_HEADERS_INSTRUCTION}": "\n".join([
+        "#if defined(SHIZUKU_RP2040)",
+            "#include <shizuku/archs/armv6m.hpp>",
+            "#include <shizuku/boards/rp2040_pico_w.hpp>",
+            "#else",
             "#include <shizuku/archs/armv8m.hpp>",
             "#include <shizuku/boards/rp2350_pico2.hpp>",
+            "#endif",
             "#include <shizuku/memory_managers/pico_sdk.hpp>",
             "#include <shizuku/app_entry.hpp>",
         ]),

@@ -34,6 +34,10 @@
 //    ハンドラがその段数で巻き戻す (D5)。
 #include "shizuku/kernel.hpp"
 
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+extern "C" void shizuku_boot_trace_phase(uint32_t);
+#endif
+
 namespace shizuku {
 
 // ISA 層の例外入口が退避先・復帰先として使う文脈。dispatch が現在スレッドを
@@ -140,6 +144,10 @@ kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
       request.callee_object == m_object_svc_handler_object) {
     return kernel_error::BAD_REQUEST;
   }
+#if defined(SHIZUKU_RP2040)
+  if (!ARCH::region_range_representable(request.region_base, request.region_limit))
+    return kernel_error::BAD_REQUEST;
+#endif
   if (!call_frame_push(thread, context, frame))
     return kernel_error::NO_STACK;
   thread.current_object = request.callee_object; // ★呼び先オブジェクトIDへ遷移
@@ -157,6 +165,9 @@ kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
 }
 
 template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(410);
+#endif
   THREAD &thread = current_thread();
   FRAME *frame = context->sp;
 
@@ -165,6 +176,9 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
   //   ID が m_object_svc_handler_object) だけが kernel primitive を直接解釈できる。
   if (thread.current_kind == (uint32_t)object_kind::KERNEL_OBJECT &&
       thread.current_object == m_object_svc_handler_object) {
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+    shizuku_boot_trace_phase(411);
+#endif
     const uintptr_t number = ARCH::arg(*frame, 0);
     switch ((primitive)number) {
     case primitive::CALL: {
@@ -235,10 +249,17 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
   const uint32_t target_object = thread.current_handler_object;
   const bool to_root = (target_object == m_object_svc_handler_object);
 
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(412);
+#endif
   if (!call_frame_push(thread, context, &frame)) {
     ARCH::set_result(*frame, KERNEL_ERROR_MARK | (uintptr_t)kernel_error::NO_STACK, 0);
     return;
   }
+
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(413);
+#endif
 
   thread.current_object = target_object;
   thread.current_kind = to_root ? (uint32_t)object_kind::KERNEL_OBJECT
@@ -258,6 +279,9 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
   ARCH::set_args(*frame, args);
   ARCH::set_priv(*context, true);
   ARCH::set_region_window(*context, 0, 0);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(414);
+#endif
 }
 
 // 最低優先度の遅延例外 = 実行権の強制巻き取り。ここへ来た時点で全ての割り込みは

@@ -2,6 +2,13 @@
 #define SHIZUKU_OBJECTS_FLASH_MAP_HPP
 #include "hardware/flash.h"
 #include <cstdint>
+#if defined(CYW43_WL_GPIO_LED_PIN)
+#include "pico/btstack_flash_bank.h"
+#ifdef pico_flash_bank_get_storage_offset_func
+#error "Flash map requires a compile-time BTstack bank offset"
+#endif
+#endif
+#include "shizuku/objects/flash_layout_config.hpp"
 
 // ===========================================================================
 //  flash の割り付け — **一箇所で決め、重なりを機械に確かめさせる**
@@ -24,35 +31,92 @@ namespace objects {
 namespace flash_map {
 
 // ---- SDK が持っている末尾 -------------------------------------------------
-// btstack の bonding バンク。★SDK の pico_btstack が
-//   PICO_FLASH_BANK_STORAGE_OFFSET
-//     = PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE - PICO_FLASH_BANK_TOTAL_SIZE
-//   (RP2350)、PICO_FLASH_BANK_TOTAL_SIZE = FLASH_SECTOR_SIZE * 2 で置いている。
-//   ★ここは**こちらが管理しない**。cyw43_arch_init() の中で SDK が張るので、
-//     自前で TLV を張り直すと二重管理になって板が起動不能になる (実測 4 回)。
-constexpr uint32_t BT_RESERVED_BYTES = FLASH_SECTOR_SIZE * 3;
-constexpr uint32_t BT_RESERVED_OFFSET = PICO_FLASH_SIZE_BYTES - BT_RESERVED_BYTES;
+// btstack の bonding バンク。offset と bank size はSDKヘッダから取得する。
+// RP2040では末尾2セクタ、RP2350 A2では末尾から3セクタ目に2セクタを置く
+// (末尾1セクタはRP2350-E10 workaround用)。SDK設定が変わってもここを追従させる。
+#if defined(CYW43_WL_GPIO_LED_PIN)
+constexpr uint32_t BT_RESERVED_OFFSET = PICO_FLASH_BANK_STORAGE_OFFSET;
+constexpr uint32_t BT_RESERVED_BYTES = PICO_FLASH_SIZE_BYTES - BT_RESERVED_OFFSET;
+static_assert(PICO_FLASH_BANK_TOTAL_SIZE % FLASH_SECTOR_SIZE == 0,
+              "BTstack flash bank must use whole sectors");
+static_assert(PICO_FLASH_BANK_STORAGE_OFFSET % FLASH_SECTOR_SIZE == 0,
+              "BTstack flash bank offset must be sector aligned");
+static_assert(PICO_FLASH_BANK_STORAGE_OFFSET <= PICO_FLASH_SIZE_BYTES &&
+                  PICO_FLASH_BANK_TOTAL_SIZE <=
+                      PICO_FLASH_SIZE_BYTES - PICO_FLASH_BANK_STORAGE_OFFSET,
+              "BTstack flash bank exceeds board flash size");
+static_assert(BT_RESERVED_BYTES >= PICO_FLASH_BANK_TOTAL_SIZE,
+              "BTstack reservation does not contain both flash banks");
+static_assert(BT_RESERVED_BYTES % FLASH_SECTOR_SIZE == 0,
+              "BTstack reserved tail must use whole sectors");
+#else
+// Non-W boards have no BTstack persistence bank to reserve.
+constexpr uint32_t BT_RESERVED_OFFSET = PICO_FLASH_SIZE_BYTES;
+constexpr uint32_t BT_RESERVED_BYTES = 0;
+#endif
+static_assert(PICO_FLASH_SIZE_BYTES % FLASH_SECTOR_SIZE == 0,
+              "board flash size must contain whole sectors");
+static_assert(SHIZUKU_FLASH_CAPACITY_BYTES >= 0,
+              "logical flash capacity must not be negative");
+static_assert(SHIZUKU_LOGICAL_FLASH_BYTES <= PICO_FLASH_SIZE_BYTES,
+              "logical flash capacity exceeds the physical board flash size");
+static_assert(SHIZUKU_LOGICAL_FLASH_BYTES % FLASH_SECTOR_SIZE == 0,
+              "logical flash capacity must be sector aligned");
+constexpr uint32_t LOGICAL_FLASH_LIMIT =
+    SHIZUKU_LOGICAL_FLASH_BYTES < BT_RESERVED_OFFSET
+        ? SHIZUKU_LOGICAL_FLASH_BYTES
+        : BT_RESERVED_OFFSET;
 
 // ---- 先頭: 走っているファームウェア ---------------------------------------
 constexpr uint32_t FIRMWARE_OFFSET = 0;
-constexpr uint32_t FIRMWARE_BYTES = 1024 * 1024;
+#if defined(SHIZUKU_RP2040)
+// RP2040 reserves fixed, equal firmware and OTA windows. Keep the firmware
+// ceiling in this one constant; the remaining pre-BT area belongs to flash FS.
+constexpr uint32_t RP2040_FIRMWARE_BYTES = SHIZUKU_FIRMWARE_BYTES;
+constexpr uint32_t RP2040_STAGING_BYTES = SHIZUKU_STAGING_BYTES;
+static_assert(RP2040_FIRMWARE_BYTES <= LOGICAL_FLASH_LIMIT,
+              "firmware reservation exceeds flash before BT storage");
+static_assert(RP2040_STAGING_BYTES <=
+                  LOGICAL_FLASH_LIMIT - RP2040_FIRMWARE_BYTES,
+              "firmware and OTA reservations exceed flash before BT storage");
+static_assert(LOGICAL_FLASH_LIMIT >=
+                  RP2040_FIRMWARE_BYTES + RP2040_STAGING_BYTES + FLASH_SECTOR_SIZE,
+              "logical flash capacity cannot contain firmware, OTA, and one FS sector");
+constexpr uint32_t FIRMWARE_BYTES = RP2040_FIRMWARE_BYTES;
+constexpr uint32_t FS_OFFSET = FIRMWARE_OFFSET + FIRMWARE_BYTES;
+constexpr uint32_t FS_BYTES =
+    LOGICAL_FLASH_LIMIT - RP2040_FIRMWARE_BYTES - RP2040_STAGING_BYTES -
+    FIRMWARE_OFFSET;
+constexpr uintptr_t FS_ADDRESS = XIP_BASE + FS_OFFSET;
+constexpr uint32_t STAGING_OFFSET = LOGICAL_FLASH_LIMIT - RP2040_STAGING_BYTES;
+#else
+constexpr uint32_t FIRMWARE_BYTES = SHIZUKU_FIRMWARE_BYTES;
 
 // ---- flash FS ------------------------------------------------------------
 constexpr uint32_t FS_OFFSET = FIRMWARE_OFFSET + FIRMWARE_BYTES;
-constexpr uint32_t FS_BYTES = 1024 * 1024;
+constexpr uint32_t FS_BYTES = SHIZUKU_FS_BYTES;
 constexpr uintptr_t FS_ADDRESS = XIP_BASE + FS_OFFSET;
 
 // ---- ota のステージング (bonding バンクの直下で終わる) --------------------
 constexpr uint32_t STAGING_OFFSET = FS_OFFSET + FS_BYTES;
-constexpr uint32_t STAGING_BYTES = BT_RESERVED_OFFSET - STAGING_OFFSET;
+#endif
+static_assert(LOGICAL_FLASH_LIMIT >= STAGING_OFFSET + FIRMWARE_BYTES,
+              "logical flash capacity cannot contain the firmware and OTA partitions");
+static_assert(STAGING_OFFSET <= LOGICAL_FLASH_LIMIT,
+              "ota staging offset exceeds btstack reserved region");
+constexpr uint32_t STAGING_BYTES = LOGICAL_FLASH_LIMIT - STAGING_OFFSET;
 
 // ---- 重なっていないことを機械に確かめさせる -------------------------------
 static_assert(FIRMWARE_OFFSET + FIRMWARE_BYTES <= FS_OFFSET,
               "ファームウェアが flash FS に食い込んでいる");
+static_assert(FIRMWARE_OFFSET + FIRMWARE_BYTES <= BT_RESERVED_OFFSET,
+              "firmware reservation overlaps BTstack or exceeds board flash");
 static_assert(FS_OFFSET + FS_BYTES <= STAGING_OFFSET,
               "flash FS が ota のステージングに食い込んでいる");
-static_assert(STAGING_OFFSET + STAGING_BYTES <= BT_RESERVED_OFFSET,
-              "ota のステージングが btstack の bonding バンクに食い込んでいる");
+static_assert(STAGING_OFFSET + STAGING_BYTES <= LOGICAL_FLASH_LIMIT,
+              "ota staging overlaps the logical flash boundary");
+static_assert(LOGICAL_FLASH_LIMIT <= BT_RESERVED_OFFSET,
+              "logical flash partitions overlap BTstack storage");
 static_assert(BT_RESERVED_OFFSET + BT_RESERVED_BYTES == PICO_FLASH_SIZE_BYTES,
               "SDK の末尾予約の計算が合っていない");
 // ★ステージングには**今のファームより大きな像**が入る必要がある (OTA は

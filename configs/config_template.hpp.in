@@ -10,8 +10,17 @@ ${INCLUDE_HEADERS_INSTRUCTION}
 #include "shizuku/templates/kernel_object.hpp"
 
 namespace shizuku{
+#if defined(SHIZUKU_RP2040)
+    using ARCH = shizuku::archs::armv6m;
+    // Historical type name; this backend is shared by Pico and Pico W. LED
+    // selection belongs to peripherals.cpp and the SDK board macros.
+    using BOARD = shizuku::boards::rp2040_pico_w;
+#else
     using ARCH = shizuku::archs::${SHIZUKU_ARCH};
+    // The RP2350 backend is shared by Pico 2 and Pico 2 W; CYW43 stays in the
+    // W-only peripheral dependency graph.
     using BOARD = shizuku::boards::${SHIZUKU_BOARD};
+#endif
     using CPU_MANAGER = shizuku::templates::cpu_manager<ARCH,BOARD,${SHIZUKU_CPU_COUNT}>;
     using MEMORY_MANAGER = ${SHIZUKU_MEMORY_MANAGER};
     using KERNEL = shizuku::templates::kernel<CPU_MANAGER,MEMORY_MANAGER>;

@@ -1,7 +1,9 @@
 #ifndef SHIZUKU_OBJECTS_BLE_UART_HPP
 #define SHIZUKU_OBJECTS_BLE_UART_HPP
 #include <cstdint>
+#if !defined(SHIZUKU_RP2040)
 #include "shizuku/objects/gdb_stub.hpp"
+#endif
 
 namespace shizuku {
 namespace objects {
@@ -44,7 +46,11 @@ enum struct method : uintptr_t {
   GET_RX_STREAM = 1,
   SET_TX_STREAM = 2,
   POLL = 3,
+#if !defined(SHIZUKU_RP2040)
   SET_GDB_STREAMS = 4,
+#else
+  RESERVED_4 = 4, // Keep following BLE method IDs stable without exposing GDB.
+#endif
   GET_OTA_STREAM = 5,
   REQUEST_DISCONNECT = 6,
   GET_CH2_RX_STREAM = 7,

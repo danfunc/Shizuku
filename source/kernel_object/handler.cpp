@@ -10,6 +10,10 @@
 #include "shizuku/kernel.hpp"
 #include "shizuku/kernel_object.hpp"
 
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+extern "C" void shizuku_boot_trace_phase(uint32_t);
+#endif
+
 namespace shizuku {
 
 KERNEL_OBJECT kernel_object_instance;
@@ -104,6 +108,9 @@ template <> bool KERNEL_OBJECT::arena_release(arena &, uintptr_t);
 //   無くすのが正しい。
 uintptr_t handler_entry_point(uintptr_t a0, uintptr_t a1, uintptr_t a2,
                               uintptr_t a3) {
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(419);
+#endif
   return kernel_object_instance.handle(a0, a1, a2, a3);
 }
 
@@ -265,6 +272,9 @@ template <> void KERNEL_OBJECT::reply(object_error error, uintptr_t value) {
 template <>
 uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
                                        uintptr_t flags, object_error &error) {
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(421);
+#endif
   if (id >= OBJECT_COUNT || id == KERNEL_OBJECT_ID || id == ROOT_OBJECT) {
     error = object_error::BAD_OBJECT;
     return 0;
@@ -294,6 +304,9 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
   const char *taken_by = nullptr;
   {
     table_guard guard;
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+    shizuku_boot_trace_phase(422);
+#endif
     if (!m_objects[id].created || replace) {
       m_objects[id].created = true;
       m_objects[id].flags =
@@ -301,6 +314,9 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
       // 最初のメソッドは生成側が与える (オブジェクト自身はまだ走っていないので
       // 自分では登録できない)。以後は EXPORT_METHOD で自分が増やす。
       m_objects[id].methods[0] = (method_t)entry;
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+      shizuku_boot_trace_phase(423);
+#endif
 
       if (is_handler) {
         // ★特権オブジェクトによって専用ハンドラ (HANDLER) として宣言された
@@ -1217,11 +1233,17 @@ uintptr_t KERNEL_OBJECT::memory_owner(uintptr_t handle, object_error &error) {
 template <>
 uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
                                 uintptr_t a3) {
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(420);
+#endif
   object_error error = object_error::OK;
   uintptr_t value = 0;
   switch ((object_api)number) {
   case object_api::CREATE_OBJECT:
     value = create_object(a1, a2, a3, error);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+    shizuku_boot_trace_phase(424);
+#endif
     break;
   case object_api::EXPORT_METHOD:
     value = export_method(a1, a2, error);

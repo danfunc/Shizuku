@@ -64,7 +64,9 @@ extern "C" {
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/objects/ble_uart.hpp"
+#if !defined(SHIZUKU_RP2040)
 #include "shizuku/objects/gdb_stub.hpp" // GDB リンクをストリームで運ぶ
+#endif
 #include "shizuku/objects/peripherals.hpp"
 #include "shizuku/stream.hpp"
 #include <cstdint>
@@ -247,6 +249,7 @@ shizuku::stream::storage<frame_t, 16> g_tx;
 uintptr_t g_tx_in_id = NO_STREAM;
 shizuku::stream::handle<frame_t> g_tx_in;
 
+#if !defined(SHIZUKU_RP2040)
 // ---- GDB リンク (RSP)
 // -------------------------------------------------------- ★NUS とは別の
 // characteristic で運ぶ (ble_uart.gatt 参照)。ここは**運ぶだけ** —
@@ -261,6 +264,7 @@ bool gdb_notify_enabled = false;
 // 参照)。
 link_chunk g_gdb_held{};
 bool g_gdb_held_valid = false;
+#endif
 
 // ---- OTA 受信
 // ----------------------------------------------------------------
@@ -296,12 +300,17 @@ static uint32_t tx_pending(); // 下で定義 (GDB CCC 有効時の補填で先�
 //   が来れば本物なので、それを条件にする。来る前は
 //     スタブが寝ているが、バイトはストリームに溜まるので取りこぼさない
 //     (スタブは起きたときに読む)。
+#if !defined(SHIZUKU_RP2040)
 static bool gdb_saw_traffic = false;
 
 static void update_gdb_connected() {
   shizuku::objects::gdb_link_set_connected(gdb_notify_enabled &&
                                            cmd_authorized && gdb_saw_traffic);
 }
+#else
+// RP2040 has no GDB server; pairing state changes need no GDB notification.
+static void update_gdb_connected() {}
+#endif
 
 // ★このリングは **ble_uart 自身の行専用** (接続状態などの内部メッセージ)。
 //   push するのも pop するのも poll スレッド 1 本だけなので、SPSC が自明に
@@ -482,6 +491,7 @@ static int att_write_callback(hci_con_handle_t connection_handle,
     }
     return 0;
   }
+#if !defined(SHIZUKU_RP2040)
   // ---- GDB リンク ----
   if (att_handle ==
       ATT_CHARACTERISTIC_6E401003_B5A3_F393_E0A9_E50E24DCCA9E_01_CLIENT_CONFIGURATION_HANDLE) {
@@ -529,6 +539,7 @@ static int att_write_callback(hci_con_handle_t connection_handle,
     }
     return 0;
   }
+#endif
   // ---- CH2 リンク (6E403001-...) ----
   if (att_handle ==
       ATT_CHARACTERISTIC_6E403003_B5A3_F393_E0A9_E50E24DCCA9E_01_CLIENT_CONFIGURATION_HANDLE) {
@@ -581,12 +592,14 @@ uint32_t tx_pending() {
   uint32_t n = g_tx.hdl().available();
   if (g_tx_in.valid())
     n += g_tx_in.available();
+#if !defined(SHIZUKU_RP2040)
   if (g_gdb_from_stub.valid())
     n += g_gdb_from_stub.available();
   // ★手元に留めている 1 個も「残り」に数える。数えないと poll ループが
   //   CAN_SEND_NOW を要求しなくなり、**留めたまま二度と出ない**。
   if (g_gdb_held_valid)
     ++n;
+#endif
   if (g_ch2_tx_in.valid())
     n += g_ch2_tx_in.available();
   if (g_ch2_held_valid)
@@ -634,6 +647,7 @@ static void flush_ch2() {
   }
 }
 
+#if !defined(SHIZUKU_RP2040)
 static void flush_gdb() {
   if (con_handle == HCI_CON_HANDLE_INVALID || !gdb_notify_enabled)
     return;
@@ -659,9 +673,12 @@ static void flush_gdb() {
     }
   }
 }
+#endif
 
 static void flush_tx() {
+#if !defined(SHIZUKU_RP2040)
   flush_gdb();
+#endif
   flush_ch2();
   if (con_handle == HCI_CON_HANDLE_INVALID || !tx_notify_enabled)
     return;
@@ -779,9 +796,11 @@ static void packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
     tx_notify_enabled = false;
     can_send_requested = false;
     cmd_authorized = false;
+#if !defined(SHIZUKU_RP2040)
     gdb_notify_enabled = false; // 切断で GDB も落ちる (次の接続で張り直す)
     gdb_saw_traffic = false;
     g_gdb_held_valid = false; // 前の接続の断片を次へ持ち越さない
+#endif
     update_gdb_connected();
     ci_nego_stage = 0;
     nc_pending_handle = HCI_CON_HANDLE_INVALID;
@@ -963,12 +982,14 @@ uintptr_t method_request_disconnect(uintptr_t, uintptr_t, uintptr_t,
   return 0;
 }
 
+#if !defined(SHIZUKU_RP2040)
 uintptr_t method_set_gdb_streams(uintptr_t argument, uintptr_t, uintptr_t,
                                  uintptr_t) {
   g_gdb_to_stub_id = argument >> 16;
   g_gdb_from_stub_id = argument & 0xFFFFu;
   return 1;
 }
+#endif
 
 uintptr_t method_get_rx_stream(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   return g_rx_stream_id;
@@ -1120,8 +1141,10 @@ static void bt_full_chip_restart() {
   tx_notify_enabled = false;
   can_send_requested = false;
   cmd_authorized = false;
+#if !defined(SHIZUKU_RP2040)
   gdb_notify_enabled = false;
   gdb_saw_traffic = false;
+#endif
   update_gdb_connected();
   ci_nego_stage = 0;
   nc_pending_handle = HCI_CON_HANDLE_INVALID;
@@ -1188,6 +1211,7 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   api(shizuku::object_api::STREAM_BIND, g_ota_stream_id,
       (uintptr_t)shizuku::stream::role::PRODUCER);
 
+#if !defined(SHIZUKU_RP2040)
   // ---- GDB リンクの席 ----
   if (g_gdb_to_stub_id != NO_STREAM && g_gdb_from_stub_id != NO_STREAM) {
     const auto to_stub =
@@ -1220,6 +1244,7 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   //     ここで申告するのは資源の階層がまだ無いための繋ぎ。
   shizuku::objects::gdb_link_protect_thread(
       shizuku::kernel_instance.current_thread_id());
+#endif
 
   uint64_t next_adv_ensure_us = 0;
   uint64_t next_bond_check_us = 0;
@@ -1455,8 +1480,10 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       tx_notify_enabled = false;
       can_send_requested = false;
       cmd_authorized = false;
+#if !defined(SHIZUKU_RP2040)
       gdb_notify_enabled = false;
       gdb_saw_traffic = false;
+#endif
       update_gdb_connected();
       ci_nego_stage = 0;
       nc_pending_handle = HCI_CON_HANDLE_INVALID;
@@ -1507,8 +1534,13 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
     //   tx_notify_enabled だけで判定していたため、GDB だけ notify を有効に
     //   した相手 (= まさに GDB クライアント) には CAN_SEND_NOW が一度も
     //   要求されず、stub の返事が出て行かなかった (実機で踏んだ)。
+#if !defined(SHIZUKU_RP2040)
+    const bool notify_enabled = tx_notify_enabled || gdb_notify_enabled;
+#else
+    const bool notify_enabled = tx_notify_enabled;
+#endif
     if (con_handle != HCI_CON_HANDLE_INVALID &&
-        (tx_notify_enabled || gdb_notify_enabled) && tx_pending() != 0 &&
+        notify_enabled && tx_pending() != 0 &&
         !can_send_requested) {
       can_send_requested = true;
       att_server_request_can_send_now_event(con_handle);
@@ -1529,8 +1561,10 @@ uintptr_t ble_uart_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       export_method(method::GET_RX_STREAM, (uintptr_t)&method_get_rx_stream);
   failures +=
       export_method(method::SET_TX_STREAM, (uintptr_t)&method_set_tx_stream);
+#if !defined(SHIZUKU_RP2040)
   failures += export_method(method::SET_GDB_STREAMS,
                             (uintptr_t)&method_set_gdb_streams);
+#endif
   failures += export_method(method::REQUEST_DISCONNECT,
                             (uintptr_t)&method_request_disconnect);
   failures +=
