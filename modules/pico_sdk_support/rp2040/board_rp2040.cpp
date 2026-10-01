@@ -90,9 +90,22 @@ void rp2040_pico_w::boot_trace_stage(uint32_t stage){
   watchdog_update();
 }
 #endif
+static bool g_parked = false;
+
 void rp2040_pico_w::launch_core(void(*entry)()){multicore_launch_core1(entry);}
-void rp2040_pico_w::park_other_cores(){multicore_lockout_start_blocking();}
-void rp2040_pico_w::resume_other_cores(){multicore_lockout_end_blocking();}
+void rp2040_pico_w::park_other_cores(){
+  const uint32_t other = get_core_num() == 0 ? 1u : 0u;
+  if (!multicore_lockout_victim_is_initialized(other))
+    return;
+  multicore_lockout_start_blocking();
+  g_parked = true;
+}
+void rp2040_pico_w::resume_other_cores(){
+  if (!g_parked)
+    return;
+  g_parked = false;
+  multicore_lockout_end_blocking();
+}
 void rp2040_pico_w::diag_mute(bool){}
 int rp2040_pico_w::dma_claim(){return dma_claim_unused_channel(false);}
 void rp2040_pico_w::dma_copy(int ch,const void*src,void*dst,uint32_t n){

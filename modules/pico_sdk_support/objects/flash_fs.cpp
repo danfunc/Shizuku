@@ -14,6 +14,9 @@
 //   別物になるので、必ずファイルスコープの extern "C" で受ける (同じ罠を
 //   __end__ で一度踏んでいる)。
 extern "C" char __flash_binary_end;
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+extern "C" void shizuku_boot_trace_phase(uint32_t stage);
+#endif
 
 namespace shizuku {
 namespace objects {
@@ -203,23 +206,44 @@ void flash_write(uint32_t offset, const uint8_t *ram_data, uint32_t bytes,
   // ★順序が大事: **先に相手を止めてから**自分の割り込みを落とす。逆にすると、
   //   相手を止めるための往復 (FIFO と応答待ち) が割り込みを落とした状態で走る
   //   ことになり、応答が来ないまま固まり得る。
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(810);
+#endif
   KERNEL::BOARD::park_other_cores();
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(811);
+#endif
   const uint32_t interrupts = save_and_disable_interrupts();
   if (erase_first) {
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+    shizuku_boot_trace_phase(812);
+#endif
     const uint64_t began = ::time_us_64();
     ::flash_range_erase(offset, erase_bytes);
     g_erase_us += ::time_us_64() - began;
     ++g_erase_count;
     g_erased_bytes += erase_bytes;
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+    shizuku_boot_trace_phase(813);
+#endif
   }
   if (bytes != 0) {
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+    shizuku_boot_trace_phase(814);
+#endif
     const uint64_t began = ::time_us_64();
     ::flash_range_program(offset, ram_data, bytes);
     g_program_us += ::time_us_64() - began;
     ++g_program_count;
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+    shizuku_boot_trace_phase(815);
+#endif
   }
   restore_interrupts(interrupts);
   KERNEL::BOARD::resume_other_cores();
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(816);
+#endif
 }
 
 // 目録の 1 枠を焼く。★ページ単位でしか書けないので、その枠を含む 256 バイトを
@@ -252,7 +276,13 @@ int free_slot() {
 // 目録セクタを消して、名乗りと生きている項目だけを書き直す。
 // ★これは消去を伴う唯一の目録操作で、枠が尽きたときと FORMAT のときだけ走る。
 void directory_rebuild(bool keep_live) {
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(801);
+#endif
   stop_the_world stopped; // 消去 + 書き直しをまとめて 1 回の停止で済ませる
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(802);
+#endif
   directory_entry saved[ENTRY_COUNT];
   uint32_t kept = 0;
   if (keep_live)
@@ -260,7 +290,13 @@ void directory_rebuild(bool keep_live) {
       if (g_directory[index].state == ENTRY_LIVE)
         saved[kept++] = g_directory[index];
 
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(803);
+#endif
   flash_write(REGION_OFFSET, nullptr, 0, true, FLASH_SECTOR_SIZE);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(804);
+#endif
   for (uint32_t index = 0; index < ENTRY_COUNT; ++index) {
     g_directory[index].state = ENTRY_FREE;
     g_directory[index].address = 0xFFFFFFFFu;
@@ -620,6 +656,9 @@ uintptr_t flash_status_method(uintptr_t argument, uintptr_t, uintptr_t,
 // 0xFF なので、初期化済みかどうかは名乗りで判る** (0 埋めを期待すると、消去直後の
 // 媒体を誤って読む)。
 uintptr_t flash_fs_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(701);
+#endif
   const directory_entry *media = (const directory_entry *)REGION_ADDRESS;
   bool sane = media[0].state == DIRECTORY_MAGIC &&
               media[0].address == DIRECTORY_VERSION;
@@ -638,8 +677,15 @@ uintptr_t flash_fs_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
         sane = false;
     }
   }
-  if (!sane)
+  if (!sane) {
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+    shizuku_boot_trace_phase(702);
+#endif
     directory_rebuild(false); // まだ何も焼かれていない (あるいは別物)
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+    shizuku_boot_trace_phase(703);
+#endif
+  }
   g_mounted = true;
 
   uintptr_t failures = api(object_api::DECLARE_NAME, (uintptr_t) "flashfs").error;
@@ -663,12 +709,18 @@ uintptr_t flash_fs_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
                             (uintptr_t)&flash_open_write_method);
   failures += export_method((uintptr_t)flash_fs_method::CLOSE_WRITE,
                             (uintptr_t)&flash_close_write_method);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(704);
+#endif
   return failures;
 }
 
 } // namespace
 
 uint32_t register_flash_fs() {
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(710);
+#endif
   // ★ファームが領域まで伸びていたら、書いた瞬間に自分を消す。焼く前に気づける
   //   唯一の場所なので、ここで止める (「気をつける」では守れない類の話)。
   if ((uintptr_t)&__flash_binary_end > REGION_ADDRESS) {
@@ -678,11 +730,20 @@ uint32_t register_flash_fs() {
     return 1;
   }
 
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(711);
+#endif
   const call_result created =
       api(object_api::CREATE_OBJECT, FLASH_FS_OBJECT,
           (uintptr_t)&flash_fs_main, OBJECT_PRIVILEGED);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(712);
+#endif
   const call_result started =
       api(object_api::CALL_METHOD, FLASH_FS_OBJECT, 0, 0);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(713);
+#endif
   if (created.error != 0 || started.error != 0 || started.value != 0) {
     KERNEL::BOARD::diag_printf(
         "[FLASHFS] FAILED: create=%lu call=%lu exports_failed=%lu\n",
@@ -691,8 +752,14 @@ uint32_t register_flash_fs() {
     return 1;
   }
   flash_status status{};
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(714);
+#endif
   api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
       (uintptr_t)flash_fs_method::STATUS, (uintptr_t)&status);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(715);
+#endif
   KERNEL::BOARD::diag_printf(
       "[FLASHFS] ready (object %lu) at %p, %lu KiB, %lu files, %lu KiB free\n",
       (unsigned long)FLASH_FS_OBJECT, (void *)status.region_address,

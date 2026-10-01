@@ -22,6 +22,18 @@ void call_ladder();
 // 親 handler 自動バインディングとルーティングの検証プローブ
 void handler_binding_probe();
 
+
+// 呼び出しの費用の実測 (svc 往復 / メソッド呼び出し)。DWT CYCCNT でサイクルを数える。
+// ★「約 600 cycle」という主張に測定コードが無かったので、その穴を埋めるもの。
+void call_cost();
+// ★結果は生存表示にも載せる (起動時の出力はホストが繋ぐ前に消えるため)。
+// 単位はサイクル。測定枠の費用 (cost_baseline) は既に引いてある。
+extern uint32_t cost_baseline;
+extern uint32_t cost_direct;
+extern uint32_t cost_svc;
+extern uint32_t cost_call1;
+extern uint32_t cost_call2;
+
 // スレッドと実行権の梯子: 1 本起こす → 譲り合う → 時限つきで貸す → 返さない相手を
 // 取り上げる。**取り上げが効くこと**が「1 つの暴走が全系を凍らせない」の証拠になる。
 void thread_ladder();

@@ -9,7 +9,7 @@
   // Preserve the live exception/C-call register set around the MMIO write.
   // Four words keep MSP alignment unchanged; r12, LR and r4-r11 are untouched.
   push {r0-r3}
-  ldr r0, =0x40058010
+  ldr r0, =0x4005801C
   ldr r1, =\value
   str r1, [r0]
   pop {r0-r3}
@@ -147,7 +147,10 @@ shizuku_armv6m_enter_thread_mode:
 .global shizuku_armv6m_return_stub
 .type shizuku_armv6m_return_stub,%function
 shizuku_armv6m_return_stub:
-  movs r0, #2
+  mov r2, r0
   movs r1, #1
+  movs r3, #0
+  mov r12, r3
+  movs r0, #2
   svc 0
 1: b 1b

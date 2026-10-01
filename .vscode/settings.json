@@ -14,5 +14,6 @@
   // ビルドは Bazel なので、Pico 拡張の CMake 自動設定は止めておく
   // (走らせると CMakeLists.txt が無いと言って騒ぐだけになる)。
   "cmake.configureOnOpen": false,
-  "cmake.automaticReconfigure": false
+  "cmake.automaticReconfigure": false,
+  "cmake.sourceDirectory": "/Users/ishigakiyua/github/Shizuku/latest_ver_from_flight_robocon/flight_robocon_telemetory_sender"
 }

@@ -78,6 +78,13 @@ uintptr_t leaf(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
   return argument + 1;
 }
 
+uintptr_t leaf_dirty_scratch(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+#if defined(__arm__) || defined(__thumb__)
+  __asm volatile("mov ip, %0" : : "r"(0xDEADBEEFu) : "ip");
+#endif
+  return argument + 100;
+}
+
 // ---- N 段ネスト: 各層が自分の 1 枚だけを落とす (I-6) --------------------------
 // ★ネストの各層で「自分は誰か」「誰に呼ばれたか」「今どれだけ深いか」を記録する。
 //   これが無いと、層をまたいで情報が入れ替わる類のバグ (§12.1 の「黙って化ける」) を
@@ -162,6 +169,31 @@ void call_ladder() {
           2);
     check("call/1 (fp): float preserved", value == 3.5f,
           (unsigned long)(value * 10.0f), 35);
+  }
+
+  // return_stub 回帰テスト: スクラッチレジスタ (r12/ip) 汚染下での通常 return
+  {
+    const api_result rep_res = api(object_api::CREATE_OBJECT, OBJECT_LEAF,
+                                   (uintptr_t)&leaf_dirty_scratch, OBJECT_REPLACE);
+    check("return_stub: replace leaf with dirty scratch",
+          rep_res.error == (uintptr_t)object_error::OK,
+          (unsigned long)rep_res.error, 0);
+
+    const api_result result = call_method(OBJECT_LEAF, 41);
+    check("return_stub: dirty scratch return error",
+          result.error == (uintptr_t)object_error::OK,
+          (unsigned long)result.error, 0);
+    check("return_stub: dirty scratch return value", result.value == 141,
+          (unsigned long)result.value, 141);
+    check("return_stub: depth restored", kernel_instance.current_depth() == 0,
+          (unsigned long)kernel_instance.current_depth(), 0);
+
+    // leaf を元に戻す (復元成功も検査)
+    const api_result rst_res =
+        api(object_api::CREATE_OBJECT, OBJECT_LEAF, (uintptr_t)&leaf, OBJECT_REPLACE);
+    check("return_stub: restore leaf",
+          rst_res.error == (uintptr_t)object_error::OK,
+          (unsigned long)rst_res.error, 0);
   }
 
   // N 段ネスト (6 段)。6+5+4+3+2+1 = 21。
