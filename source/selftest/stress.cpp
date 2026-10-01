@@ -155,6 +155,16 @@ uintptr_t blink(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
           (unsigned long)privileged_control,
           (unsigned long)kernel_instance.faults().count,
           (unsigned long)kernel_instance.faults().pc);
+      // ★呼び出しの費用も毎回出す。起動時の [COST] はホストが繋ぐ前に流れて
+      //   消えるので (実際に USB CDC のバッファ溢れで落ちた)、いつ繋いでも
+      //   数字が読めるようにする。単位はサイクル、測定枠の費用は引いてある。
+      BOARD::diag_printf(
+          "[COST] direct=%lu svc=%lu call1=%lu call2=%lu cyc "
+          "(harness %lu cyc, clk %lu MHz)\n",
+          (unsigned long)cost_direct, (unsigned long)cost_svc,
+          (unsigned long)cost_call1, (unsigned long)cost_call2,
+          (unsigned long)cost_baseline,
+          (unsigned long)BOARD::cycles_per_us());
       late_window = 0;
       led_window = 0;
       led_min = ~(uint64_t)0;

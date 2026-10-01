@@ -175,6 +175,7 @@ int main() {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE)
   const uint32_t saved0 = watchdog_hw->scratch[0];
   const uint32_t saved1 = watchdog_hw->scratch[1];
+  const uint32_t saved4 = watchdog_hw->scratch[4];
   const bool recovered_watchdog = watchdog_caused_reboot() &&
                                   (saved0 >> 16) == 0x5348u;
   const uint32_t failed_stage = saved1 & 0xffffu;
@@ -198,8 +199,9 @@ int main() {
     shizuku::objects::usb_cdc_init();
     for (uint32_t i = 0; i < 30; ++i) {
       const bool hardfault = hardfault_snapshot;
-      printf("[WDT] stage=%lu cause=%02lx mode=%s stack=%s\n",
-             (unsigned long)failed_stage, (unsigned long)fault_cause,
+      printf("[WDT] stage=%lu phase=%lu cause=%02lx mode=%s stack=%s\n",
+             (unsigned long)failed_stage, (unsigned long)saved4,
+             (unsigned long)fault_cause,
              hardfault ? ((fault_cause & 2u) ? "Thread" : "Handler") : "-",
              hardfault ? ((fault_cause & 1u) ? "PSP" : "MSP") : "-");
       fflush(stdout);
@@ -243,6 +245,7 @@ int main() {
   watchdog_hw->scratch[1] = kUsbInit;
   watchdog_hw->scratch[2] = 0;
   watchdog_hw->scratch[3] = 0;
+  watchdog_hw->scratch[4] = 0;
   watchdog_enable(8000, true);
   shizuku::objects::usb_cdc_init();
   boot_stage(kKernelInit);
