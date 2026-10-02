@@ -88,8 +88,13 @@ OCI ランタイムをカーネル内に持ち、ホスト世界とコンテナ�
   からの脱却が動機になっている (Cyrius README の Motivation、Shizuku の D58)。
 - **ABI を種別で切り替える**: Cyrius は `Process.abi` で表を選び、Shizuku は
   `object_kind` (PLAIN / HANDLER) で経路を選ぶ。番号ではなく「誰が走っているか」で
-  決める点が同じ。Shizuku の「一般オブジェクトがハンドラを務める (マルチ ABI)」構成は、
-  Cyrius の「Linux 互換 ABI」をオブジェクトとして載せる余地そのもの。
+  決める点が同じ。ただし Shizuku 側は**互換オブジェクトを作れる構造が既にある**:
+  合成主体 (ROOT / kobj) が `INTERNAL_FLAG_HANDLER` 付きで作ったオブジェクトは
+  HANDLER になり、そのハンドラが作ったオブジェクトの svc は親ハンドラ
+  (`parent_handler_object` / `parent_handler_entry`) へ届く
+  (`handler.cpp` の `create_object`)。つまり Cyrius が syscall 表 2 本を
+  カーネルに焼き込んでいるところを、Shizuku は「ABI = 差し替え可能なハンドラ
+  オブジェクト」として持っており、表の数は構成で決まる。
 - arch 抽象の切り方: Cyrius の `ArchPlatform / ArchTrap / ArchThread / ArchMemory`
   は Shizuku の `concepts::arch_requires` + `board_requires` とほぼ同じ境界。
   Rust 化するなら trait + const generics (`OBJECT_COUNT` 等) にほぼ 1 対 1 で写る。
@@ -99,7 +104,13 @@ OCI ランタイムをカーネル内に持ち、ホスト世界とコンテナ�
 - **MMU が無い**。Cyrius の隔離はアドレス空間とコンテナ VFS に乗っているが、
   Shizuku は MPU region (RP2350 で 8 本) の付け替えでしか守れない。D58 の
   「保護付き / カーネル空間オブジェクトの 2 種別」は、まさにこの制約への答え。
-- **Cyrius は Linux 互換を目的の一部にしている**。Shizuku は互換を持たない代わりに、
+- **Cyrius は Linux 互換を目的の一部にしている**。ただしその互換層
+  (`syscall/linux.rs` 約 2,400 行 + VFS / プロセス / tty) は、Linux の意味論を
+  カーネル内に作り直すものなので、規模が育つほど実質「Linux を fork して
+  持ち歩く」のと同じ保守を背負う。コンテナを第一級にする理由が「Linux の
+  寄せ集めから逃れる」ことなのに、その中身が Linux の再実装になるのは
+  緊張関係にある (Cyrius 自身も「full parity は目指さない」と範囲を絞っている)。
+  Shizuku は互換を持たない代わりに、
   呼び出しフレーム・実行権の貸し借り (GRANT) を ABI の一次語彙にしている。
   リアルタイム側の保証 (期限付きの貸し、強制回収) は Cyrius に相当物が無い。
 - **Rust の効き方**: Cyrius は unsafe 253 箇所 / asm 系 9 箇所で、unsafe の多くが
@@ -110,9 +121,16 @@ OCI ランタイムをカーネル内に持ち、ホスト世界とコンテナ�
 
 ### Shizuku に持ち込む価値があるもの
 
-1. **「環境を作る」と「走らせる」の分離** (Cyrius の create → start)。
-   オブジェクトの登録 (再登録) とスレッドの起動を別操作にしておくと、D58 の
-   ホットスワップで「差し替え中は呼ばせない」状態を素直に表せる。
+1. **外部からオブジェクトを構築する API** (Cyrius の create → start に相当する話)。
+   Shizuku でも「作る」と「走らせる」は既に別操作になっている —
+   `CREATE_OBJECT` は台帳に載せて入口 (methods[0]) を据えるだけで、走らせるのは
+   同期の `CALL_METHOD` か非同期の `SPAWN`。足りないのは、2 個目以降のメソッドを
+   **オブジェクト自身が** `EXPORT_METHOD` で登録する作りなので、使える形に
+   するには一度 main を呼んで自分で組み立てさせる必要がある点 (selftest も
+   CREATE_OBJECT の直後に CALL している)。生成側 (合成主体 / 親ハンドラ) が
+   相手のメソッド表・保護設定を外から組める API が入れば、「構築済みだが
+   まだ一度も走っていない」状態を作れ、D58 の再登録 (ホットスワップ) でも
+   差し替え先を走らせずに据えてから切り替えられる。
 2. **オブジェクトごとの名前空間**。Cyrius はコンテナ VFS によって、プロセスが
    ホストのパスを解決できないことを**構造で**保証している。Shizuku の flash_fs は
    今はグローバルなので、オブジェクト単位のハンドル (ストリーム) からしか触れない形に
