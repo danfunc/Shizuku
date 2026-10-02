@@ -8,7 +8,7 @@
   "configurations": [
     {
       // ★★プローブが要らない構成。ファーム自身が DebugMonitor で止まり、
-      //   USB CDC 越しに GDB と喋る (modules/pico_sdk_support/objects/gdb_stub.cpp)。
+      //   USB CDC 越しに GDB と喋る (modules/pico_sdk_support/rp2350/objects/gdb_stub.cpp)。
       //   halting debug と違って**止まるのは対象のスレッドだけ**で、他は走り続ける。
       //   ★診断出力は**止まらない**。CDC を 2 本に分けたので (D42)、GDB は
       //     専用の channel を使う。診断はそのまま流れ続ける。

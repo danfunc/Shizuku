@@ -1,0 +1,67 @@
+# RP2350 のポート: ARMv8-M の arch (MPU・PSPLIM・文脈退避) + RP2350 の board、
+# および ARMv8-M のデバッグ機構 (DebugMonitor / FPB) に依存する gdb_stub。
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//modules/pico_sdk_support:__subpackages__"])
+
+# config.hpp が include する型 (archs::armv8m / boards::rp2350_pico2)。
+cc_library(
+    name = "headers",
+    hdrs = [
+        "internal_headers/shizuku/archs/armv8m.hpp",
+        "internal_headers/shizuku/boards/rp2350_pico2.hpp",
+    ],
+    includes = ["internal_headers"],
+    target_compatible_with = ["@pico-sdk//bazel/constraint:rp2350"],
+    deps = [
+        "//:internal_headers",
+        "@pico-sdk//src/rp2_common/hardware_sync",
+        "@pico-sdk//src/rp2_common/pico_stdlib",
+    ],
+)
+
+cc_library(
+    name = "port",
+    srcs = [
+        "arch_glue.cpp",
+        "armv8m_ctx.S",
+        "board.cpp",
+    ],
+    # 例外ベクタから引かれるだけのシンボルを落とさない。
+    alwayslink = True,
+    target_compatible_with = ["@pico-sdk//bazel/constraint:rp2350"],
+    deps = [
+        ":headers",
+        "//:kernel",
+        "//configs:config",
+        # ★board → オブジェクトの逆向き依存。診断出力 (diag_printf) と panic 時の
+        #   排出が USB CDC を直に叩いているため (board.cpp, D42)。PORT §7 の
+        #   「固まっても出る経路」へ置き換えたら外す。
+        "//modules/pico_sdk_support/objects:usb_cdc",
+        "@pico-sdk//bazel/config:PICO_TINYUSB_LIB",
+        "@pico-sdk//src/rp2_common/hardware_dma",
+        "@pico-sdk//src/rp2_common/hardware_exception",
+        "@pico-sdk//src/rp2_common/hardware_sync",
+        "@pico-sdk//src/rp2_common/pico_multicore",
+        "@pico-sdk//src/rp2_common/pico_stdlib",
+    ],
+)
+
+# GDB stub (D40/D49)。RP2040 (ARMv6-M) には DebugMonitor が無いので RP2350 専用。
+cc_library(
+    name = "gdb_stub",
+    srcs = ["objects/gdb_stub.cpp"],
+    hdrs = ["internal_headers/shizuku/objects/gdb_stub.hpp"],
+    includes = ["internal_headers"],
+    alwayslink = True,
+    target_compatible_with = ["@pico-sdk//bazel/constraint:rp2350"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//:internal_headers",
+        "//:kernel",
+        "//:kernel_object",
+        "//configs:config",
+        "//modules/pico_sdk_support/objects:usb_cdc",
+        "@pico-sdk//src/rp2_common/pico_stdlib",
+    ],
+)

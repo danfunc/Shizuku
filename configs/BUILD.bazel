@@ -4,6 +4,7 @@ load("@bazel_skylib//rules:expand_template.bzl", "expand_template")
 load("@bazel_skylib//rules:common_settings.bzl", "int_flag", "string_flag")
 load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//configs:kit.bzl", "config_substitutions")
 load(
     "//configs:cyw43_clock.bzl",
     "CYW43_PIO_DIV",
@@ -74,9 +75,21 @@ config_setting(
     },
     visibility = ["//visibility:public"],
 )
+# ★ボード 5 個を毎回列挙しない。select はチップ (rp2040 / rp2350) と
+#   CYW43 の有無 (W ボード) の 2 軸で書く。ボードを足したらここだけ直す。
 selects.config_setting_group(
     name = "rp2040",
     match_any = [":rp2040_pico", ":rp2040_pico_w", ":rp2040_xiao"],
+    visibility = ["//visibility:public"],
+)
+selects.config_setting_group(
+    name = "rp2350",
+    match_any = [":rp2350_pico2", ":rp2350_pico2_w"],
+    visibility = ["//visibility:public"],
+)
+selects.config_setting_group(
+    name = "cyw43",
+    match_any = [":rp2040_pico_w", ":rp2350_pico2_w"],
     visibility = ["//visibility:public"],
 )
 
@@ -101,34 +114,18 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# ★型は SHIZUKU_RP2040 の #if ではなく構成 (select) で決める。どの arch/board を
+#   入れたかが config.hpp を開けばそのまま読めるようにするため。
 expand_template(
     name = "config_hpp",
     out = "internal_headers/shizuku/config.hpp",
-    substitutions = {
-        "${INCLUDE_HEADERS_INSTRUCTION}": "\n".join([
-        "#if defined(SHIZUKU_RP2040)",
-            "#include <shizuku/archs/armv6m.hpp>",
-            "#include <shizuku/boards/rp2040_pico_w.hpp>",
-            "#else",
-            "#include <shizuku/archs/armv8m.hpp>",
-            "#include <shizuku/boards/rp2350_pico2.hpp>",
-            "#endif",
-            "#include <shizuku/memory_managers/pico_sdk.hpp>",
-            "#include <shizuku/app_entry.hpp>",
-        ]),
-        "${SHIZUKU_ARCH}": "armv8m",
-        "${SHIZUKU_BOARD}": "rp2350_pico2",
-        "${SHIZUKU_CPU_COUNT}": "2",
-        "${SHIZUKU_THREAD_COUNT}": "32",
-        # ★flight_robocon_telemetory_sender (XNO 役) が別リポジトリから
-        #   ble_uart/bno055/bme280 等を足すため 32 では埋まる (Shizuku 自身が
-        #   30 使用 + 消費側 2〜3 個で即オーバー、実測: bme280 の CREATE_OBJECT
-        #   が範囲外で失敗した)。余裕を持たせておく。
-        "${SHIZUKU_OBJECT_COUNT}": "64",
-        "${SHIZUKU_METHOD_COUNT}": "16",
-        "${SHIZUKU_CALL_DEPTH}": "32",
-        "${SHIZUKU_MEMORY_MANAGER}": "shizuku::memory_managers::pico_sdk",
-    },
+    substitutions = select({
+        # 型名は歴史的経緯で rp2040_pico_w だが、Pico / Pico W / XIAO 共通の
+        # バックエンド (LED の選び方は peripherals.cpp と SDK のボードマクロ側)。
+        ":rp2040": config_substitutions("armv6m", "rp2040_pico_w"),
+        # Pico 2 / Pico 2 W 共通。CYW43 は W 専用の依存グラフ側にだけ居る。
+        ":rp2350": config_substitutions("armv8m", "rp2350_pico2"),
+    }),
     template = "config_template.hpp.in",
 )
 

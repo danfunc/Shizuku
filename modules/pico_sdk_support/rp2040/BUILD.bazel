@@ -1,0 +1,43 @@
+# RP2040 のポート: ARMv6-M の arch (文脈退避・svc 入口) + RP2040 の board。
+# ★arch と board を同じパッケージに置くのは、この組み合わせ以外で使う予定が
+#   無いから。別の ARMv6-M チップを足すときに archs/armv6m として切り出す。
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//modules/pico_sdk_support:__subpackages__"])
+
+# config.hpp が include する型 (archs::armv6m / boards::rp2040_pico_w)。
+cc_library(
+    name = "headers",
+    hdrs = glob(["internal_headers/**/*.hpp"]),
+    includes = ["internal_headers"],
+    target_compatible_with = ["@pico-sdk//bazel/constraint:rp2040"],
+    deps = [
+        "//:internal_headers",
+        "@pico-sdk//src/rp2_common/hardware_sync",
+        "@pico-sdk//src/rp2_common/pico_stdlib",
+    ],
+)
+
+cc_library(
+    name = "port",
+    srcs = [
+        "arch_glue_v6m.cpp",
+        "armv6m_ctx.S",
+        "board_rp2040.cpp",
+    ],
+    # 例外ベクタから引かれるだけのシンボルを落とさない。
+    alwayslink = True,
+    target_compatible_with = ["@pico-sdk//bazel/constraint:rp2040"],
+    deps = [
+        ":headers",
+        "//:kernel",
+        "//configs:config",
+        "@pico-sdk//bazel/config:PICO_TINYUSB_LIB",
+        "@pico-sdk//src/rp2_common/hardware_dma",
+        "@pico-sdk//src/rp2_common/hardware_exception",
+        "@pico-sdk//src/rp2_common/hardware_sync",
+        "@pico-sdk//src/rp2_common/hardware_watchdog",
+        "@pico-sdk//src/rp2_common/pico_multicore",
+        "@pico-sdk//src/rp2_common/pico_stdlib",
+    ],
+)

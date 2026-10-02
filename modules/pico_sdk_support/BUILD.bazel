@@ -1,12 +1,20 @@
-exports_files(["objects.list"])
-
+# ===========================================================================
+#  pico_sdk_support — pico-sdk 上のポート (PORT §5 の arch / board / objects)
+# ===========================================================================
+#  パッケージの割り方 (依存は上から下への一方向):
+#
+#    //modules/pico_sdk_support          構成が要る最小限 (config.hpp が include する
+#                                        ヘッダ・メモリマネージャ・SDK 設定) と、
+#                                        全部入りの :pico_sdk_support
+#    //modules/pico_sdk_support/rp2040   ARMv6-M の arch + RP2040 の board
+#    //modules/pico_sdk_support/rp2350   ARMv8-M の arch + RP2350 の board + gdb_stub
+#    //modules/pico_sdk_support/objects  チップ非依存のオブジェクト (1 つ 1 ライブラリ)
+#
+#  ★チップの選択はここ (:headers / :pico_sdk_support) の select だけで行う。
+#    カーネルはポートを名指ししない — //configs:config 経由で型として受け取る。
 load("@rules_cc//cc:defs.bzl", "cc_library")
-load("@pico-sdk//bazel:pico_btstack_make_gatt_header.bzl", "pico_btstack_make_gatt_header")
-load("//configs:flash_layout.bzl", "flash_layout_config")
 
-flash_layout_config(
-    name = "generated_flash_layout_config",
-)
+exports_files(["objects.list"])
 
 cc_library(
     name = "btstack_config",
@@ -14,18 +22,6 @@ cc_library(
     includes = ["config"],
     visibility = ["//visibility:public"],
 )
-
-pico_btstack_make_gatt_header(
-    name = "ble_uart_gatt_header",
-    src = select({
-        "//configs:rp2040_pico": "rp2040/ble_uart.gatt",
-        "//configs:rp2040_pico_w": "rp2040/ble_uart.gatt",
-        "//configs:rp2040_xiao": "rp2040/ble_uart.gatt",
-        "//configs:rp2350_pico2": "objects/ble_uart.gatt",
-        "//configs:rp2350_pico2_w": "objects/ble_uart.gatt",
-    }),
-)
-
 
 # ★TinyUSB の設定を差し替える (CDC を 2 本にする)。.bazelrc の
 #   PICO_TINYUSB_CONFIG がこれを指している。
@@ -36,185 +32,64 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-
-# モジュール提供ヘッダ (config.hpp が include するため、実装とは分けて公開する)
+# 構成 (config.hpp) が include するヘッダ。★実装とは分けて公開する — config は
+# カーネルより前に要るので、ここがカーネルに依存すると循環する。
 cc_library(
     name = "headers",
-    hdrs = glob([
-        "internal_headers/**/*.hpp",
-        "rp2040/internal_headers/**/*.hpp",
-        "rp2350/internal_headers/**/*.hpp",
-    ]) + [":generated_flash_layout_config"],
-    includes = ["internal_headers"] + select({
-        "//configs:rp2040_pico": ["rp2040/internal_headers"],
-        "//configs:rp2040_pico_w": ["rp2040/internal_headers"],
-        "//configs:rp2040_xiao": ["rp2040/internal_headers"],
-        "//configs:rp2350_pico2": ["rp2350/internal_headers"],
-        "//configs:rp2350_pico2_w": ["rp2350/internal_headers"],
-    }),
+    hdrs = glob(["internal_headers/**/*.hpp"]),
+    includes = ["internal_headers"],
     visibility = ["//visibility:public"],
     deps = [
         "//:internal_headers",
-        "//:object_ids",
-        "@pico-sdk//src/rp2_common/hardware_adc",
-        "@pico-sdk//src/rp2_common/hardware_dma",
-        "@pico-sdk//src/rp2_common/hardware_exception",
-        "@pico-sdk//src/rp2_common/hardware_flash",
-        "@pico-sdk//src/rp2_common/hardware_sync",
-        "@pico-sdk//src/rp2_common/pico_stdlib",
     ] + select({
-        # flash_map.hpp reads the same BT bank layout constants that the SDK
-        # BTstack target uses. Keep the SDK header and target W-only.
-        "//configs:rp2040_pico_w": ["@pico-sdk//src/rp2_common/pico_btstack"],
-        "//configs:rp2350_pico2_w": ["@pico-sdk//src/rp2_common/pico_btstack"],
-        "//configs:rp2040_pico": [],
-        "//configs:rp2040_xiao": [],
-        "//configs:rp2350_pico2": [],
+        "//configs:rp2040": ["//modules/pico_sdk_support/rp2040:headers"],
+        "//configs:rp2350": ["//modules/pico_sdk_support/rp2350:headers"],
     }),
 )
 
 cc_library(
+    name = "memory_manager",
+    srcs = ["memory_manager.cpp"],
+    # ★カーネル (libkernel.a) から引かれるが、こちらはカーネルに依存しないので
+    #   リンク順でカーネルより前に並びうる。落とされないよう常に含める。
+    alwayslink = True,
+    visibility = ["//visibility:public"],
+    deps = [":headers"],
+)
+
+# 全部入り: firmware が引くのはこれ 1 つ。XNO 側は必要な部品だけを個別に引いてよい。
+# ★alwayslink: 例外ベクタから引かれるだけで、C++ 側から参照の無いシンボル
+#   (ISA の入口) や、TinyUSB の weak コールバックの上書きがあるので、参照が
+#   無くてもリンクに含める。部品側もそれぞれ alwayslink にしてある。
+cc_library(
     name = "pico_sdk_support",
-    srcs = [
-        "memory_manager.cpp",
-        "flash_layout_limit.cpp",
-        "objects/flash_fs.cpp",
-        "objects/usb_cdc.cpp",
-        "objects/peripherals.cpp",
-    ] + select({
-        "//configs:rp2040_pico": [
-            "rp2040/arch_glue_v6m.cpp",
-            "rp2040/armv6m_ctx.S",
-            "rp2040/board_rp2040.cpp",
-        ],
-        "//configs:rp2040_xiao": [
-            "rp2040/arch_glue_v6m.cpp",
-            "rp2040/armv6m_ctx.S",
-            "rp2040/board_rp2040.cpp",
-        ],
-        "//configs:rp2040_pico_w": [
-            "rp2040/arch_glue_v6m.cpp",
-            "rp2040/armv6m_ctx.S",
-            "rp2040/board_rp2040.cpp",
-        ],
-        "//configs:rp2350_pico2": [
-            "rp2350/arch_glue.cpp",
-            "rp2350/armv8m_ctx.S",
-            "rp2350/board.cpp",
-            "rp2350/objects/gdb_stub.cpp",
-        ],
-        "//configs:rp2350_pico2_w": [
-            "rp2350/arch_glue.cpp",
-            "rp2350/armv8m_ctx.S",
-            "rp2350/board.cpp",
-            "rp2350/objects/gdb_stub.cpp",
-        ],
-    }),
-    # 例外ベクタから引かれるだけで、C++ 側から参照の無いシンボル (ISA の入口) が
-    # あるので、参照が無くてもリンクに含める。
     alwayslink = True,
     visibility = ["//visibility:public"],
     deps = [
-        ":headers",
-        "//:internal_headers",
-        "//:kernel",
-        "//configs:config",
-        "@pico-sdk//src/rp2_common/hardware_adc",
-        "@pico-sdk//src/rp2_common/hardware_dma",
-        "@pico-sdk//src/rp2_common/hardware_exception",
-        "@pico-sdk//src/rp2_common/hardware_flash",
-        "@pico-sdk//src/rp2_common/hardware_gpio",
-        "@pico-sdk//src/rp2_common/hardware_i2c",
-        "@pico-sdk//src/rp2_common/hardware_spi",
-        "@pico-sdk//src/rp2_common/hardware_sync",
-        "@pico-sdk//src/rp2_common/hardware_watchdog",
-        # ★poll モード。CYW43 は W ボードだけで使う。
-        # `pico_cyw43_arch_none` は pico-sdk の BUILD.bazel では
-        #   単に `pico_cyw43_arch_threadsafe_background` への alias (「lwIP
-        #   無し」の意味でしかない、poll とは無関係)。flight_robocon 側で
-        #   att_server_notify() が async_context のロック所有者チェックに
-        #   PANIC する不具合の原因だったため、こちらも `pico_cyw43_arch_poll`
-        #   に揃える (flight_robocon/BUILD.bazel のコメント参照、2026-08-24)。
+        ":memory_manager",
+        "//modules/pico_sdk_support/objects:flash_fs",
+        "//modules/pico_sdk_support/objects:flash_layout_limit",
+        "//modules/pico_sdk_support/objects:peripherals",
+        "//modules/pico_sdk_support/objects:usb_cdc",
     ] + select({
-        "//configs:rp2040_pico_w": ["@pico-sdk//src/rp2_common/pico_cyw43_arch:pico_cyw43_arch_poll"],
-        "//configs:rp2350_pico2_w": ["@pico-sdk//src/rp2_common/pico_cyw43_arch:pico_cyw43_arch_poll"],
-        "//configs:rp2040_pico": [],
-        "//configs:rp2040_xiao": [],
-        "//configs:rp2350_pico2": [],
-    }) + [
-        "@pico-sdk//src/rp2_common/pico_multicore",
-        "@pico-sdk//src/rp2_common/pico_stdio",
-        "@pico-sdk//src/rp2_common/pico_bootrom",
-        "@pico-sdk//src/rp2_common/pico_unique_id",
-        "@pico-sdk//src/rp2_common/pico_stdio_usb:reset_interface_headers",
-        "@pico-sdk//src/common/pico_usb_reset_interface_headers",
-        "@pico-sdk//bazel/config:PICO_TINYUSB_LIB",
-        "@pico-sdk//src/rp2_common/pico_stdlib",
-    ],
+        "//configs:rp2040": ["//modules/pico_sdk_support/rp2040:port"],
+        "//configs:rp2350": [
+            "//modules/pico_sdk_support/rp2350:gdb_stub",
+            "//modules/pico_sdk_support/rp2350:port",
+        ],
+    }),
 )
 
-cc_library(
+# 旧ラベルの互換 (分割前に //modules/pico_sdk_support:ble_uart / :ota を
+# 引いていた側 = XNO 役のリポジトリを壊さないため)。
+alias(
     name = "ble_uart",
-    srcs = ["objects/ble_uart.cpp"],
-    hdrs = [
-        "internal_headers/shizuku/objects/ble_uart.hpp",
-    ],
-    includes = ["internal_headers"],
-    deps = [
-        ":headers",
-        ":btstack_config",
-        ":ble_uart_gatt_header",
-        "//:internal_headers",
-        "//:kernel",
-        "//configs:config",
-        "@pico-sdk//src/rp2_common/pico_btstack",
-        "@pico-sdk//src/rp2_common/pico_btstack:pico_btstack_flash_bank",
-    ] + select({
-        "//configs:rp2040_pico_w": ["@pico-sdk//src/rp2_common/pico_cyw43_arch:pico_cyw43_arch_poll"],
-        "//configs:rp2350_pico2_w": ["@pico-sdk//src/rp2_common/pico_cyw43_arch:pico_cyw43_arch_poll"],
-        "//configs:rp2040_pico": [],
-        "//configs:rp2040_xiao": [],
-        "//configs:rp2350_pico2": [],
-    }) + [
-        "@pico-sdk//src/rp2_common/pico_stdlib",
-    ],
-    target_compatible_with = select({
-        "//configs:rp2040_pico_w": [],
-        "//configs:rp2350_pico2_w": [],
-        "//configs:rp2040_pico": ["@platforms//:incompatible"],
-        "//configs:rp2040_xiao": ["@platforms//:incompatible"],
-        "//configs:rp2350_pico2": ["@platforms//:incompatible"],
-    }),
+    actual = "//modules/pico_sdk_support/objects:ble_uart",
     visibility = ["//visibility:public"],
 )
 
-cc_library(
+alias(
     name = "ota",
-    srcs = ["objects/ota.cpp"],
-    hdrs = [
-        "internal_headers/shizuku/objects/inflate.hpp",
-        "internal_headers/shizuku/objects/ota.hpp",
-    ],
-    includes = ["internal_headers"],
-    deps = [
-        ":ble_uart",
-        ":headers",
-        "//:internal_headers",
-        "//:kernel",
-        "//configs:config",
-        "@pico-sdk//src/common/boot_picoboot_headers",
-        "@pico-sdk//src/rp2_common/hardware_flash",
-        "@pico-sdk//src/rp2_common/hardware_sync",
-        "@pico-sdk//src/rp2_common/hardware_uart",
-        "@pico-sdk//src/rp2_common/pico_bootrom",
-        "@pico-sdk//src/rp2_common/pico_flash",
-    ],
-    target_compatible_with = select({
-        "//configs:rp2040_pico_w": [],
-        "//configs:rp2350_pico2_w": [],
-        "//configs:rp2040_pico": ["@platforms//:incompatible"],
-        "//configs:rp2040_xiao": ["@platforms//:incompatible"],
-        "//configs:rp2350_pico2": ["@platforms//:incompatible"],
-    }),
+    actual = "//modules/pico_sdk_support/objects:ota",
     visibility = ["//visibility:public"],
 )

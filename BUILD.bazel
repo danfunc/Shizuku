@@ -54,10 +54,11 @@ cc_library(
         "source/kernel/thread.cpp",
     ],
     visibility = ["//visibility:public"],
+    # ★ポート (//modules/pico_sdk_support) を名指ししない。arch / board は
+    #   //configs:config が型として注入する (configs/kit.bzl)。
     deps = [
         ":internal_headers",
         "//configs:config",
-        "//modules/pico_sdk_support:headers",
     ],
 )
 
@@ -78,7 +79,10 @@ cc_library(
     name = "apps",
     srcs = ["source/apps/thermal.cpp"],
     visibility = ["//visibility:public"],
-    deps = [":kernel_object"],
+    deps = [
+        ":kernel_object",
+        "//modules/pico_sdk_support/objects:peripherals",
+    ],
 )
 
 # 自己テストは「カーネルの一部」ではなく、カーネルを使うオブジェクトの集合。
@@ -98,5 +102,10 @@ cc_library(
         "source/selftest/unprivileged.cpp",
     ],
     visibility = ["//visibility:public"],
-    deps = [":kernel_object"],
+    # flash_stream / stress はオブジェクト (flash_fs / peripherals) を相手に試す。
+    deps = [
+        ":kernel_object",
+        "//modules/pico_sdk_support/objects:flash_fs",
+        "//modules/pico_sdk_support/objects:peripherals",
+    ],
 )
