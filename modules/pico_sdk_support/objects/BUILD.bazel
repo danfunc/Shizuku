@@ -1,0 +1,171 @@
+# チップ非依存のオブジェクト。★1 オブジェクト 1 ライブラリ — XNO 側 (D17) が
+# 要るものだけを引けるようにし、オブジェクト間の依存を BUILD に見えるようにする。
+# ヘッダは internal_headers/shizuku/objects/ (include パスは分割前と同じ)。
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@pico-sdk//bazel:pico_btstack_make_gatt_header.bzl", "pico_btstack_make_gatt_header")
+load("//configs:flash_layout.bzl", "flash_layout_config")
+
+package(default_visibility = ["//visibility:public"])
+
+# W ボード以外では作らない (CYW43 / BTstack が要る)。
+_CYW43_ONLY = select({
+    "//configs:cyw43": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
+_CYW43_ARCH = select({
+    # ★poll モード。`pico_cyw43_arch_none` は pico-sdk の BUILD.bazel では
+    #   単に `pico_cyw43_arch_threadsafe_background` への alias (「lwIP 無し」の
+    #   意味でしかない、poll とは無関係)。flight_robocon 側で att_server_notify() が
+    #   async_context のロック所有者チェックに PANIC する不具合の原因だったため、
+    #   こちらも `pico_cyw43_arch_poll` に揃える (2026-08-24)。
+    "//configs:cyw43": ["@pico-sdk//src/rp2_common/pico_cyw43_arch:pico_cyw43_arch_poll"],
+    "//conditions:default": [],
+})
+
+# ---- flash ------------------------------------------------------------------
+
+flash_layout_config(
+    name = "generated_flash_layout_config",
+)
+
+# flash の区画 (論理容量・BT bank・FS 領域)。flash_fs と ota が共有する。
+cc_library(
+    name = "flash_layout",
+    hdrs = [
+        "internal_headers/shizuku/objects/flash_layout_config.hpp",
+        "internal_headers/shizuku/objects/flash_map.hpp",
+        ":generated_flash_layout_config",
+    ],
+    includes = ["internal_headers"],
+    deps = [
+        "@pico-sdk//src/rp2_common/hardware_flash",
+    ] + select({
+        # flash_map.hpp reads the same BT bank layout constants that the SDK
+        # BTstack target uses. Keep the SDK header and target W-only.
+        "//configs:cyw43": ["@pico-sdk//src/rp2_common/pico_btstack:pico_btstack_flash_bank"],
+        "//conditions:default": [],
+    }),
+)
+
+# 構成した容量が実機の flash に収まるかをリンク時に縛る。
+cc_library(
+    name = "flash_layout_limit",
+    srcs = ["flash_layout_limit.cpp"],
+    alwayslink = True,
+    deps = [":flash_layout"],
+)
+
+cc_library(
+    name = "flash_fs",
+    srcs = ["flash_fs.cpp"],
+    hdrs = ["internal_headers/shizuku/objects/flash_fs.hpp"],
+    includes = ["internal_headers"],
+    alwayslink = True,
+    deps = [
+        ":flash_layout",
+        "//:internal_headers",
+        "//:kernel",
+        "//configs:config",
+        "@pico-sdk//src/rp2_common/hardware_flash",
+        "@pico-sdk//src/rp2_common/hardware_sync",
+        "@pico-sdk//src/rp2_common/pico_stdlib",
+    ],
+)
+
+# ---- I/O --------------------------------------------------------------------
+
+# 自前の USB 記述子 (CDC 2 本: 診断 = CDC0 / GDB = CDC1、D42)。
+cc_library(
+    name = "usb_cdc",
+    srcs = ["usb_cdc.cpp"],
+    hdrs = ["internal_headers/shizuku/objects/usb_cdc.hpp"],
+    includes = ["internal_headers"],
+    alwayslink = True,
+    deps = [
+        "@pico-sdk//bazel/config:PICO_TINYUSB_LIB",
+        "@pico-sdk//src/common/pico_usb_reset_interface_headers",
+        "@pico-sdk//src/rp2_common/pico_bootrom",
+        "@pico-sdk//src/rp2_common/pico_stdio",
+        "@pico-sdk//src/rp2_common/pico_stdio_usb:reset_interface_headers",
+        "@pico-sdk//src/rp2_common/pico_stdlib",
+        "@pico-sdk//src/rp2_common/pico_unique_id",
+    ],
+)
+
+cc_library(
+    name = "peripherals",
+    srcs = ["peripherals.cpp"],
+    hdrs = ["internal_headers/shizuku/objects/peripherals.hpp"],
+    includes = ["internal_headers"],
+    alwayslink = True,
+    deps = [
+        "//:internal_headers",
+        "//:kernel",
+        "//configs:config",
+        "@pico-sdk//src/rp2_common/hardware_adc",
+        "@pico-sdk//src/rp2_common/hardware_gpio",
+        "@pico-sdk//src/rp2_common/hardware_i2c",
+        "@pico-sdk//src/rp2_common/hardware_spi",
+        "@pico-sdk//src/rp2_common/pico_stdlib",
+    ] + _CYW43_ARCH,
+)
+
+# ---- BLE (W ボードのみ) -------------------------------------------------------
+
+pico_btstack_make_gatt_header(
+    name = "ble_uart_gatt_header",
+    src = select({
+        # RP2040 には gdb_stub が無いので GDB 用の service を持たない版。
+        "//configs:rp2040": "rp2040/ble_uart.gatt",
+        "//configs:rp2350": "ble_uart.gatt",
+    }),
+)
+
+cc_library(
+    name = "ble_uart",
+    srcs = ["ble_uart.cpp"],
+    hdrs = ["internal_headers/shizuku/objects/ble_uart.hpp"],
+    includes = ["internal_headers"],
+    target_compatible_with = _CYW43_ONLY,
+    deps = [
+        ":ble_uart_gatt_header",
+        ":peripherals",
+        "//:internal_headers",
+        "//:kernel",
+        "//configs:config",
+        "//modules/pico_sdk_support:btstack_config",
+        "@pico-sdk//src/rp2_common/pico_btstack",
+        "@pico-sdk//src/rp2_common/pico_btstack:pico_btstack_flash_bank",
+        "@pico-sdk//src/rp2_common/pico_stdlib",
+    ] + _CYW43_ARCH + select({
+        # ★GDB リンクを BLE で運ぶ口 (gdb_stub があるチップだけ)。
+        "//configs:rp2350": ["//modules/pico_sdk_support/rp2350:gdb_stub"],
+        "//conditions:default": [],
+    }),
+)
+
+cc_library(
+    name = "ota",
+    srcs = ["ota.cpp"],
+    hdrs = [
+        "internal_headers/shizuku/objects/inflate.hpp",
+        "internal_headers/shizuku/objects/ota.hpp",
+    ],
+    includes = ["internal_headers"],
+    target_compatible_with = _CYW43_ONLY,
+    deps = [
+        ":ble_uart",
+        ":flash_layout",
+        "//:internal_headers",
+        "//:kernel",
+        "//configs:config",
+        "@pico-sdk//src/common/boot_picoboot_headers",
+        "@pico-sdk//src/rp2_common/hardware_flash",
+        "@pico-sdk//src/rp2_common/hardware_sync",
+        "@pico-sdk//src/rp2_common/hardware_uart",
+        "@pico-sdk//src/rp2_common/hardware_watchdog",
+        "@pico-sdk//src/rp2_common/pico_bootrom",
+        "@pico-sdk//src/rp2_common/pico_flash",
+    ],
+)
