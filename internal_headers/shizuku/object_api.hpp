@@ -135,6 +135,9 @@ enum struct object_api : uintptr_t {
   // Root は shadow stack から子を pop し、Root + Handler + Child の 3 フレームを
   // まとめて畳んで Child の呼び出し元 (Caller) へ復帰する。
   FORWARD_CHILD_EXIT = 27,
+  DESTROY_OBJECT = 28, // a1=object, returns ticket; self-destroy may never return
+  DESTROY_STATUS = 29, // a1=ticket, returns 0=pending, 1=complete
+
 };
 
 // 生成時に宣言する、そのオブジェクトが必要とする走らせ方。
@@ -210,6 +213,7 @@ enum struct object_error : uintptr_t {
   NO_STREAM,     // ストリームの枠が尽きた
   ALREADY_NAMED, // 名は付け直せない (誰かが控えた名が別物を指すようになるため)
   NOT_PRIVILEGED, // GRANT_REGION 等、特権オブジェクトしか撃てない番号を非特権が撃った
+  DESTROY_BUSY, // another destroy or unresolved external resource dependency
 };
 
 } // namespace shizuku

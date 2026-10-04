@@ -1,5 +1,6 @@
 #ifndef SHIZUKU_ARCHS_ARMV8M_HPP
 #define SHIZUKU_ARCHS_ARMV8M_HPP
+#include "hardware/sync.h"
 #include <cstddef>
 #include <cstdint>
 #include "hardware/structs/mpu.h"
@@ -42,6 +43,8 @@ namespace archs {
 
 class armv8m {
 public:
+  static uint32_t interrupt_save() { return save_and_disable_interrupts(); }
+  static void interrupt_restore(uint32_t state) { restore_interrupts(state); }
   struct exception_frame_t {
     uint32_t r0, r1, r2, r3, r12, lr, pc, xPSR;
   };

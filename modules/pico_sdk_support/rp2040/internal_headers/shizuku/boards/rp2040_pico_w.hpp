@@ -6,6 +6,7 @@
 namespace shizuku::boards {
 class rp2040_pico_w {
 public:
+  static void notify_core(uint32_t core);
   static constexpr uint32_t CORE_COUNT=2;
   static void init(uint32_t); static void protection_init(); static void launch_core(void(*)());
   static void park_other_cores(); static void resume_other_cores(); static void diag_mute(bool);

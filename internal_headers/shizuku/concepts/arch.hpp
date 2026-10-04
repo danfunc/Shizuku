@@ -83,6 +83,8 @@ concept arch_requires =
       { ARCH::prepare_thread_entry(context, address, address, address, address) };
       { ARCH::timer_oneshot(value) };
       { ARCH::timer_cancel() };
+      { ARCH::interrupt_save() } -> std::same_as<uint32_t>;
+      { ARCH::interrupt_restore(value) };
       { ARCH::pend_context_switch() };
       { ARCH::frame_pc(const_frame) } -> std::same_as<uintptr_t>;
       { ARCH::TIMER_MAX_CYCLES } -> std::convertible_to<uint32_t>;

@@ -15,6 +15,7 @@ public:
   // ハンドラ登録は core0 の 1 回だけ、優先度 (SHPR, banked) は各コアで設定する。
   // ★優先度規約: SVC 最優先 > (タイマ) > PendSV 最低 (concepts/arch.hpp 参照)。
   static void init(uint32_t core);
+  static void notify_core(uint32_t core);
   // このコアのメモリ保護を張る (region は per-core banked なので各コアで呼ぶ)。
   static void protection_init();
   // ★もう一方のコアを起こす。起こされた側は自分で BOARD::init(core) を呼んでから

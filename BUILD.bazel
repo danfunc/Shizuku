@@ -52,6 +52,7 @@ cc_library(
         "source/kernel/dispatch.cpp",
         "source/kernel/init.cpp",
         "source/kernel/thread.cpp",
+        "source/kernel/destroy.cpp",
     ],
     visibility = ["//visibility:public"],
     # ★ポート (//modules/pico_sdk_support) を名指ししない。arch / board は
@@ -69,6 +70,7 @@ cc_library(
     srcs = [
         "source/kernel_object/handler.cpp",
         "source/kernel_object/memory.cpp",
+        "source/kernel_object/destroy.cpp",
     ],
     visibility = ["//visibility:public"],
     deps = [":kernel"],

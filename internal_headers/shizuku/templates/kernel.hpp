@@ -93,6 +93,21 @@ public:
     CONTEXT saved; // 呼び出し元の文脈まるごと (sp を含む = 元フレームの位置)
   };
 
+  static_assert(CORE_COUNT <= 32);
+  // Current ports expose one execution lane per core. Multi-priority ports must
+  // wire context and timer selection before enabling additional task slots.
+  static_assert(CPU_MANAGER::TASK_PRIORITY_COUNT == 1);
+  bool pause_tasks(uint32_t timeout_us);
+  void resume_tasks();
+  bool pause_dispatch();
+  void task_attach(uint32_t thread, uint32_t core);
+  void task_detach(uint32_t thread, uint32_t core);
+  uint32_t thread_tasks(uint32_t thread) const {
+    return ARCH::load_acquire32(&m_threads[thread].thread.task_mask);
+  }
+  // All tasks must be acknowledged paused (the coordinator's lane is local).
+  // Fallbacks are supplied by objectland; no scheduling policy lives here.
+  bool destroy_contexts(uint32_t victims, const uint32_t *fallbacks);
   CPU_MANAGER cpu_manager;
   MEMORY_MANAGER memory_manager;
 
@@ -130,6 +145,7 @@ public:
   // ★スタックも**呼ぶ側が用意して渡す**。どれだけの深さを許すかは方針であって、
   //   カーネルが決めることではない (カーネルは溢れを検出して止めるだけ)。
   struct spawn_request {
+    bool publish = true;
     uintptr_t entry_pc;
     uintptr_t argument;
     uint32_t protection;
@@ -149,6 +165,7 @@ public:
     uintptr_t parent_handler_entry = 0;
   };
   spawn_result spawn(const spawn_request &request);
+  bool publish_thread(uint32_t thread);
   // 走らせずに枠だけ取る。2 本目以降のコアが「今の実行」を採用するために使う
   // (spawn は入口から走らせる形なので、採用には使えない)。
   spawn_result reserve_thread();
@@ -205,6 +222,14 @@ public:
   // スレッドが落ちたときに実行権を渡す先。誰に渡すかは方針なので、composition の
   // 段階でカーネルオブジェクトが教えておく (カーネルは選ばない)。
   void set_recovery_thread(uint32_t thread);
+  void set_core_recovery(uint32_t core, uint32_t thread) {
+    if (core < CORE_COUNT && thread < m_thread_count)
+      ARCH::store_release32(&m_core_recovery[core], thread + 1);
+  }
+  uint32_t recovery_thread() const {
+    const uint32_t value = ARCH::load_acquire32(&m_core_recovery[BOARD::core_num()]);
+    return value ? value - 1 : m_recovery_thread;
+  }
 
   bool thread_debug_protected(uint32_t thread) const {
     return thread < m_thread_count && m_threads[thread].thread.is_debug_protected;
@@ -245,7 +270,7 @@ public:
     return (typename THREAD::state_t)m_threads[thread].thread.state;
   }
   // 今このコアで実行権を借りて走っているか (借り手の yield は貸し手への早期復帰)。
-  bool grant_active() const { return m_grants[BOARD::core_num()].depth != 0; }
+  bool grant_active() const { return cpu_manager.execution_task(BOARD::core_num()).depth != 0; }
 
   // タイマ例外から呼ばれる (期限の監視。切替そのものは最低優先度の遅延例外で行う)。
   void timer_expired();
@@ -267,27 +292,10 @@ private:
   void arm_timer();
   bool claim(uint32_t thread, kernel_error &error);
 
-  // 実行権の貸し出しスタック (per-core)。ネストできるが、内側の残量は外側の残量で
-  // クランプされるので借りた以上は又貸しできない (I-7)。
-  // ★単位は**クロック** (µs ではない)。理由:
-  //   (1) SysTick が数えているのはクロックなので、µs で持つと装填のたびに
-  //       clk_sys で割り戻すことになる。**その clk_sys が変わらない保証がない**
-  //       (オーバークロック、将来の周波数切替)。貸している最中に変われば、
-  //       換算済みの期限は静かにずれ、予定どおりに返ってこない
-  //   (2) 貸し手が本当に縛りたいのは「どれだけ**仕事**をしてよいか」で、仕事は
-  //       おおよそクロック数。µs で書くとクロックを上げた瞬間に、同じ数字が
-  //       黙って倍の仕事を意味するようになる。クロックで書けば意味が動かない
-  //   ★対して SLEEP は µs のまま。あちらは壁時計の話 (「20ms 後に起こして」) で、
-  //     仕事量ではない。**別の量なので単位を揃えてはいけない**。
-  struct grant_frame {
-    uint32_t lender;    // 貸し手 (WAIT_GRANT で待っている)
-    uint64_t remaining; // 残りクロック数 (外側でクランプ済み)
-  };
-  struct grant_stack {
-    static constexpr uint32_t MAX_DEPTH = 8;
-    grant_frame frames[MAX_DEPTH];
-    uint32_t depth;
-  };
+  // CPU-owned task outlives any lender context. Current ports execute one
+  // thread-mode lane per core, serviced by SVC, SysTick and PendSV alike.
+  using grant_stack = typename CPU_MANAGER::TASK;
+  using grant_frame = typename grant_stack::grant_frame;
 
   // 貸してもらった記憶。カーネルはここを所有しない。
   thread_record *m_threads;
@@ -297,9 +305,6 @@ private:
   //   なくコア非依存で持つ — どのコアが対象を復帰させるかは分からない
   //   (対象スレッドはどのコアでも走れるのが既定)。
   uint32_t m_step_target;
-  grant_stack m_grants[CORE_COUNT];
-  // 今タイマへ装填した刻みの大きさ [クロック]。残りから引くために覚えておく。
-  uint32_t m_armed[CORE_COUNT];
   // ★取り上げを見送ったときに、次に見に来るまでの間隔 [クロック]。
   //   借り手がオブジェクトランドのハンドラの中に居る間は切り替えてはいけない
   //   (下の pendsv_dispatch を参照)。短すぎると見送りの割り込みだけが増え、
@@ -310,6 +315,12 @@ private:
   // そのハンドラが名乗るオブジェクト ID (据えるときに教えてもらう)。
   uint32_t m_object_svc_handler_object;
   uint32_t m_recovery_thread;
+  uint32_t m_pause_epoch = 0;
+  uint32_t m_pause_owner = 0; // core + 1; 0 means no coordinator
+  uint32_t m_online[CORE_COUNT]{};
+  uint32_t m_pause_irq = 0;
+  bool m_pause_irq_saved = false;
+  mutable uint32_t m_core_recovery[CORE_COUNT]{};
 
 public:
   // 落ちたスレッドの記録 (自己テストと診断が読む)。
