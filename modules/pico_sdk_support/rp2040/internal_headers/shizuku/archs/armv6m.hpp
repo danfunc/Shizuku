@@ -131,6 +131,7 @@ public:
   static void store_release32(volatile uint32_t *p,uint32_t v){auto *l=atomic_lock();uint32_t irq=spin_lock_blocking(l);asm volatile("dmb":::"memory");*p=v;asm volatile("dmb":::"memory");spin_unlock(l,irq);}
   static uint32_t load_acquire32(volatile uint32_t *p){auto *l=atomic_lock();uint32_t irq=spin_lock_blocking(l);asm volatile("dmb":::"memory");uint32_t v=*p;spin_unlock(l,irq);return v;}
   static constexpr uint32_t DFSR_HALTED=1,DFSR_BKPT=2;
+  static constexpr bool HAS_DEBUGMON = false;
   // M0+ has no DebugMonitor. These API-compatible stubs keep phase-1 builds
   // possible; self-hosted debug is unavailable until a separate design exists.
   static constexpr uintptr_t DFSR_ADDRESS=0xE000ED30u;

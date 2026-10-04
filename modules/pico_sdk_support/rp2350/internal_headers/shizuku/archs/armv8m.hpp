@@ -187,6 +187,7 @@ public:
   static constexpr uint32_t DFSR_HALTED = 1u << 0;
   static constexpr uint32_t DFSR_BKPT = 1u << 1;
   static constexpr uint32_t DFSR_DWTTRAP = 1u << 2;
+  static constexpr bool HAS_DEBUGMON = true;
 
   static volatile uint32_t &at(uintptr_t address) {
     return *(volatile uint32_t *)address;

@@ -302,15 +302,16 @@ static uint32_t tx_pending(); // 下で定義 (GDB CCC 有効時の補填で先�
 //     (スタブは起きたときに読む)。
 #if !defined(SHIZUKU_RP2040)
 static bool gdb_saw_traffic = false;
+#endif
 
 static void update_gdb_connected() {
-  shizuku::objects::gdb_link_set_connected(gdb_notify_enabled &&
-                                           cmd_authorized && gdb_saw_traffic);
-}
-#else
-// RP2040 has no GDB server; pairing state changes need no GDB notification.
-static void update_gdb_connected() {}
+  if constexpr (ARCH::HAS_DEBUGMON) {
+#if !defined(SHIZUKU_RP2040)
+    shizuku::objects::gdb_link_set_connected(gdb_notify_enabled &&
+                                             cmd_authorized && gdb_saw_traffic);
 #endif
+  }
+}
 
 // ★このリングは **ble_uart 自身の行専用** (接続状態などの内部メッセージ)。
 //   push するのも pop するのも poll スレッド 1 本だけなので、SPSC が自明に
@@ -491,55 +492,57 @@ static int att_write_callback(hci_con_handle_t connection_handle,
     }
     return 0;
   }
+  if constexpr (ARCH::HAS_DEBUGMON) {
 #if !defined(SHIZUKU_RP2040)
-  // ---- GDB リンク ----
-  if (att_handle ==
-      ATT_CHARACTERISTIC_6E401003_B5A3_F393_E0A9_E50E24DCCA9E_01_CLIENT_CONFIGURATION_HANDLE) {
-    gdb_notify_enabled =
-        (little_endian_read_16(buffer, 0) ==
-         GATT_CLIENT_CHARACTERISTICS_CONFIGURATION_NOTIFICATION);
-    con_handle = connection_handle;
-    update_gdb_connected();
-    if (gdb_notify_enabled && !can_send_requested && tx_pending() != 0) {
-      can_send_requested = true;
-      att_server_request_can_send_now_event(con_handle);
-    }
-    BOARD::diag_printf("[BLE_UART] gdb notify %s (authorized=%d)\n",
-                       gdb_notify_enabled ? "enabled" : "disabled",
-                       cmd_authorized ? 1 : 0);
-    return 0;
-  }
-  if (att_handle ==
-      ATT_CHARACTERISTIC_6E401002_B5A3_F393_E0A9_E50E24DCCA9E_01_VALUE_HANDLE) {
-    // ★fail-closed。認可前の RSP は捨てる (デバッガは繋がらないだけで、
-    //   こちらの状態は一切変わらない)。
-    if (!cmd_authorized) {
-      BOARD::diag_printf(
-          "[BLE_UART] gdb write dropped (unauthorized, %u byte)\n",
-          buffer_size);
-      return 0;
-    }
-    if (!gdb_saw_traffic) {
-      gdb_saw_traffic = true; // ★本物のデバッガが喋った
+    // ---- GDB リンク ----
+    if (att_handle ==
+        ATT_CHARACTERISTIC_6E401003_B5A3_F393_E0A9_E50E24DCCA9E_01_CLIENT_CONFIGURATION_HANDLE) {
+      gdb_notify_enabled =
+          (little_endian_read_16(buffer, 0) ==
+           GATT_CLIENT_CHARACTERISTICS_CONFIGURATION_NOTIFICATION);
+      con_handle = connection_handle;
       update_gdb_connected();
-      BOARD::diag_printf("[BLE_UART] gdb traffic seen — stub is live\n");
-    }
-    if (!g_gdb_to_stub.valid())
+      if (gdb_notify_enabled && !can_send_requested && tx_pending() != 0) {
+        can_send_requested = true;
+        att_server_request_can_send_now_event(con_handle);
+      }
+      BOARD::diag_printf("[BLE_UART] gdb notify %s (authorized=%d)\n",
+                         gdb_notify_enabled ? "enabled" : "disabled",
+                         cmd_authorized ? 1 : 0);
       return 0;
-    uint32_t offset = 0;
-    while (offset < buffer_size) {
-      link_chunk c{};
-      uint32_t n = buffer_size - offset;
-      if (n > sizeof(c.data))
-        n = sizeof(c.data);
-      c.len = (uint16_t)n;
-      memcpy(c.data, buffer + offset, n);
-      g_gdb_to_stub.push(c);
-      offset += n;
     }
-    return 0;
-  }
+    if (att_handle ==
+        ATT_CHARACTERISTIC_6E401002_B5A3_F393_E0A9_E50E24DCCA9E_01_VALUE_HANDLE) {
+      // ★fail-closed。認可前の RSP は捨てる (デバッガは繋がらないだけで、
+      //   こちらの状態は一切変わらない)。
+      if (!cmd_authorized) {
+        BOARD::diag_printf(
+            "[BLE_UART] gdb write dropped (unauthorized, %u byte)\n",
+            buffer_size);
+        return 0;
+      }
+      if (!gdb_saw_traffic) {
+        gdb_saw_traffic = true; // ★本物のデバッガが喋った
+        update_gdb_connected();
+        BOARD::diag_printf("[BLE_UART] gdb traffic seen — stub is live\n");
+      }
+      if (!g_gdb_to_stub.valid())
+        return 0;
+      uint32_t offset = 0;
+      while (offset < buffer_size) {
+        link_chunk c{};
+        uint32_t n = buffer_size - offset;
+        if (n > sizeof(c.data))
+          n = sizeof(c.data);
+        c.len = (uint16_t)n;
+        memcpy(c.data, buffer + offset, n);
+        g_gdb_to_stub.push(c);
+        offset += n;
+      }
+      return 0;
+    }
 #endif
+  }
   // ---- CH2 リンク (6E403001-...) ----
   if (att_handle ==
       ATT_CHARACTERISTIC_6E403003_B5A3_F393_E0A9_E50E24DCCA9E_01_CLIENT_CONFIGURATION_HANDLE) {
@@ -592,14 +595,16 @@ uint32_t tx_pending() {
   uint32_t n = g_tx.hdl().available();
   if (g_tx_in.valid())
     n += g_tx_in.available();
+  if constexpr (ARCH::HAS_DEBUGMON) {
 #if !defined(SHIZUKU_RP2040)
-  if (g_gdb_from_stub.valid())
-    n += g_gdb_from_stub.available();
-  // ★手元に留めている 1 個も「残り」に数える。数えないと poll ループが
-  //   CAN_SEND_NOW を要求しなくなり、**留めたまま二度と出ない**。
-  if (g_gdb_held_valid)
-    ++n;
+    if (g_gdb_from_stub.valid())
+      n += g_gdb_from_stub.available();
+    // ★手元に留めている 1 個も「残り」に数える。数えないと poll ループが
+    //   CAN_SEND_NOW を要求しなくなり、**留めたまま二度と出ない**。
+    if (g_gdb_held_valid)
+      ++n;
 #endif
+  }
   if (g_ch2_tx_in.valid())
     n += g_ch2_tx_in.available();
   if (g_ch2_held_valid)
@@ -676,9 +681,11 @@ static void flush_gdb() {
 #endif
 
 static void flush_tx() {
+  if constexpr (ARCH::HAS_DEBUGMON) {
 #if !defined(SHIZUKU_RP2040)
-  flush_gdb();
+    flush_gdb();
 #endif
+  }
   flush_ch2();
   if (con_handle == HCI_CON_HANDLE_INVALID || !tx_notify_enabled)
     return;
@@ -796,11 +803,13 @@ static void packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
     tx_notify_enabled = false;
     can_send_requested = false;
     cmd_authorized = false;
+    if constexpr (ARCH::HAS_DEBUGMON) {
 #if !defined(SHIZUKU_RP2040)
-    gdb_notify_enabled = false; // 切断で GDB も落ちる (次の接続で張り直す)
-    gdb_saw_traffic = false;
-    g_gdb_held_valid = false; // 前の接続の断片を次へ持ち越さない
+      gdb_notify_enabled = false; // 切断で GDB も落ちる (次の接続で張り直す)
+      gdb_saw_traffic = false;
+      g_gdb_held_valid = false; // 前の接続の断片を次へ持ち越さない
 #endif
+    }
     update_gdb_connected();
     ci_nego_stage = 0;
     nc_pending_handle = HCI_CON_HANDLE_INVALID;
@@ -1141,10 +1150,12 @@ static void bt_full_chip_restart() {
   tx_notify_enabled = false;
   can_send_requested = false;
   cmd_authorized = false;
+  if constexpr (ARCH::HAS_DEBUGMON) {
 #if !defined(SHIZUKU_RP2040)
-  gdb_notify_enabled = false;
-  gdb_saw_traffic = false;
+    gdb_notify_enabled = false;
+    gdb_saw_traffic = false;
 #endif
+  }
   update_gdb_connected();
   ci_nego_stage = 0;
   nc_pending_handle = HCI_CON_HANDLE_INVALID;
@@ -1211,40 +1222,42 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   api(shizuku::object_api::STREAM_BIND, g_ota_stream_id,
       (uintptr_t)shizuku::stream::role::PRODUCER);
 
+  if constexpr (ARCH::HAS_DEBUGMON) {
 #if !defined(SHIZUKU_RP2040)
-  // ---- GDB リンクの席 ----
-  if (g_gdb_to_stub_id != NO_STREAM && g_gdb_from_stub_id != NO_STREAM) {
-    const auto to_stub =
-        api(shizuku::object_api::STREAM_OPEN, g_gdb_to_stub_id);
-    const auto from_stub =
-        api(shizuku::object_api::STREAM_OPEN, g_gdb_from_stub_id);
-    if (to_stub.error == 0 && to_stub.value != 0 && from_stub.error == 0 &&
-        from_stub.value != 0) {
-      g_gdb_to_stub = shizuku::stream::handle<link_chunk>(
-          (shizuku::stream::descriptor *)to_stub.value);
-      g_gdb_from_stub = shizuku::stream::handle<link_chunk>(
-          (shizuku::stream::descriptor *)from_stub.value);
-      api(shizuku::object_api::STREAM_BIND, g_gdb_to_stub_id,
-          (uintptr_t)shizuku::stream::role::PRODUCER);
-      api(shizuku::object_api::STREAM_BIND, g_gdb_from_stub_id,
-          (uintptr_t)shizuku::stream::role::CONSUMER);
-      BOARD::diag_printf("[BLE_UART] gdb link on streams %lu/%lu\n",
-                         (unsigned long)g_gdb_to_stub_id,
-                         (unsigned long)g_gdb_from_stub_id);
-    } else {
-      BOARD::diag_printf("[BLE_UART] gdb link streams could not be opened\n");
+    // ---- GDB リンクの席 ----
+    if (g_gdb_to_stub_id != NO_STREAM && g_gdb_from_stub_id != NO_STREAM) {
+      const auto to_stub =
+          api(shizuku::object_api::STREAM_OPEN, g_gdb_to_stub_id);
+      const auto from_stub =
+          api(shizuku::object_api::STREAM_OPEN, g_gdb_from_stub_id);
+      if (to_stub.error == 0 && to_stub.value != 0 && from_stub.error == 0 &&
+          from_stub.value != 0) {
+        g_gdb_to_stub = shizuku::stream::handle<link_chunk>(
+            (shizuku::stream::descriptor *)to_stub.value);
+        g_gdb_from_stub = shizuku::stream::handle<link_chunk>(
+            (shizuku::stream::descriptor *)from_stub.value);
+        api(shizuku::object_api::STREAM_BIND, g_gdb_to_stub_id,
+            (uintptr_t)shizuku::stream::role::PRODUCER);
+        api(shizuku::object_api::STREAM_BIND, g_gdb_from_stub_id,
+            (uintptr_t)shizuku::stream::role::CONSUMER);
+        BOARD::diag_printf("[BLE_UART] gdb link on streams %lu/%lu\n",
+                           (unsigned long)g_gdb_to_stub_id,
+                           (unsigned long)g_gdb_from_stub_id);
+      } else {
+        BOARD::diag_printf("[BLE_UART] gdb link streams could not be opened\n");
+      }
     }
-  }
 
-  // ★★このスレッドは**止められては困る** (D56)。GDB の `monitor target` で
-  //   これを選べてしまうと、止めた瞬間に RSP を運ぶ者が居なくなり、
-  //   デバッガ自身が黙る = 止めた本人が復旧できない。無線だと電源再投入まで
-  //   戻らないので、「やってみて壊れる」に任せてよい種類の操作ではない。
-  //   ★本来は System Object が「誰が誰を止めてよいか」を持つべきで、
-  //     ここで申告するのは資源の階層がまだ無いための繋ぎ。
-  shizuku::objects::gdb_link_protect_thread(
-      shizuku::kernel_instance.current_thread_id());
+    // ★★このスレッドは**止められては困る** (D56)。GDB の `monitor target` で
+    //   これを選べてしまうと、止めた瞬間に RSP を運ぶ者が居なくなり、
+    //   デバッガ自身が黙る = 止めた本人が復旧できない。無線だと電源再投入まで
+    //   戻らないので、「やってみて壊れる」に任せてよい種類の操作ではない。
+    //   ★本来は System Object が「誰が誰を止めてよいか」を持つべきで、
+    //     ここで申告するのは資源の階層がまだ無いための繋ぎ。
+    shizuku::objects::gdb_link_protect_thread(
+        shizuku::kernel_instance.current_thread_id());
 #endif
+  }
 
   uint64_t next_adv_ensure_us = 0;
   uint64_t next_bond_check_us = 0;
@@ -1480,10 +1493,12 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       tx_notify_enabled = false;
       can_send_requested = false;
       cmd_authorized = false;
+      if constexpr (ARCH::HAS_DEBUGMON) {
 #if !defined(SHIZUKU_RP2040)
-      gdb_notify_enabled = false;
-      gdb_saw_traffic = false;
+        gdb_notify_enabled = false;
+        gdb_saw_traffic = false;
 #endif
+      }
       update_gdb_connected();
       ci_nego_stage = 0;
       nc_pending_handle = HCI_CON_HANDLE_INVALID;
@@ -1534,11 +1549,12 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
     //   tx_notify_enabled だけで判定していたため、GDB だけ notify を有効に
     //   した相手 (= まさに GDB クライアント) には CAN_SEND_NOW が一度も
     //   要求されず、stub の返事が出て行かなかった (実機で踏んだ)。
+    bool notify_enabled = tx_notify_enabled;
+    if constexpr (ARCH::HAS_DEBUGMON) {
 #if !defined(SHIZUKU_RP2040)
-    const bool notify_enabled = tx_notify_enabled || gdb_notify_enabled;
-#else
-    const bool notify_enabled = tx_notify_enabled;
+      notify_enabled = notify_enabled || gdb_notify_enabled;
 #endif
+    }
     if (con_handle != HCI_CON_HANDLE_INVALID &&
         notify_enabled && tx_pending() != 0 &&
         !can_send_requested) {
@@ -1561,10 +1577,12 @@ uintptr_t ble_uart_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       export_method(method::GET_RX_STREAM, (uintptr_t)&method_get_rx_stream);
   failures +=
       export_method(method::SET_TX_STREAM, (uintptr_t)&method_set_tx_stream);
+  if constexpr (ARCH::HAS_DEBUGMON) {
 #if !defined(SHIZUKU_RP2040)
-  failures += export_method(method::SET_GDB_STREAMS,
-                            (uintptr_t)&method_set_gdb_streams);
+    failures += export_method(method::SET_GDB_STREAMS,
+                              (uintptr_t)&method_set_gdb_streams);
 #endif
+  }
   failures += export_method(method::REQUEST_DISCONNECT,
                             (uintptr_t)&method_request_disconnect);
   failures +=

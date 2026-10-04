@@ -76,6 +76,7 @@ concept arch_requires =
       { ARCH::stack_limit_set(context, address) };
       { ARCH::stack_limit(const_context) } -> std::same_as<uintptr_t>;
       { ARCH::region_range_representable(address, address) } -> std::same_as<bool>;
+      { ARCH::HAS_DEBUGMON } -> std::convertible_to<bool>;
       { ARCH::CALL_HEADROOM } -> std::convertible_to<uint32_t>;
       { ARCH::cas32(shared_word, value, value) } -> std::same_as<bool>;
       { ARCH::store_release32(shared_word, value) };
