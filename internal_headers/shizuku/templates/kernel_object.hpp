@@ -52,6 +52,19 @@ public:
 
   // 表を初期化する (ブート時・スレッドモード。まだ svc は飛んでこない)。
   void init();
+  // Async lifetime management. The hook unregisters external IRQ callbacks and
+  // borrowed pointers; return false until those users have quiesced. It runs
+  // on the destroy worker with all execution lanes stopped and IRQs masked;
+  // it must not block, allocate, issue syscalls, or wait for an interrupt.
+  using destroy_hook = bool (*)(uint32_t);
+  void set_destroy_hook(uint32_t object, destroy_hook hook);
+  uintptr_t destroy_object(uintptr_t object, object_error &error);
+  uintptr_t destroy_status(uintptr_t ticket, object_error &error);
+  bool destroy_poll();
+  bool ensure_destroy_runtime();
+  uint32_t spawn_system_thread(uintptr_t entry, uint32_t core, bool worker);
+  void release_object_memory(uint32_t object);
+
   // カーネルに据えるハンドラの入口 (ARCH の ABI シムを通したアドレス)。
   static uintptr_t handler_entry();
 
@@ -159,6 +172,7 @@ public:
 private:
   struct object_t {
     bool created;
+    uint32_t closing = 0;
     // ★名前はここではなく別配列に置く。object_t は呼び出し経路 (created / flags /
     //   methods) で毎回触るので、経路に関係ない名前を混ぜてキャッシュ行を汚さない。
 
@@ -184,6 +198,16 @@ private:
   // オブジェクト番号で 2 回踏んだのと同じ衝突が起きる。D28)。
   static constexpr uintptr_t STREAM_COUNT = 16;
   stream::descriptor *m_streams[STREAM_COUNT];
+  uint32_t m_stream_owner[STREAM_COUNT];
+  destroy_hook m_destroy_hooks[OBJECT_COUNT]{};
+  uint32_t m_destroy_ticket[OBJECT_COUNT]{};
+  uint32_t m_destroy_result[OBJECT_COUNT]{};
+  uint32_t m_destroy_serial = 0;
+  uint32_t m_destroy_target = NO_OBJECT;
+  uint32_t m_destroy_victims = 0; // retired contexts whose resources are pinned
+  uint32_t m_destroy_worker = UINT32_MAX;
+  uint32_t m_destroy_fallback[KERNEL::CORE_COUNT]{};
+  bool m_destroy_runtime = false;
   // 接続 (DMA ポンプ)。★1 本につき DMA チャネルを 1 つ握る。チャネルは
   //   オブジェクトへは渡さない — DMA は MPU を素通りするため。
   static constexpr uintptr_t CONNECTION_COUNT = 4;

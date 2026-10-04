@@ -1,5 +1,6 @@
 #ifndef SHIZUKU_ARCHS_ARMV6M_HPP
 #define SHIZUKU_ARCHS_ARMV6M_HPP
+#include "hardware/sync.h"
 #include <cstddef>
 #include <cstdint>
 #include "hardware/structs/systick.h"
@@ -28,6 +29,8 @@ shizuku_armv6m_context *shizuku_current_context();
 namespace shizuku::archs {
 class armv6m {
 public:
+  static uint32_t interrupt_save() { return save_and_disable_interrupts(); }
+  static void interrupt_restore(uint32_t state) { restore_interrupts(state); }
   struct exception_frame_t { uint32_t r0,r1,r2,r3,r12,lr,pc,xPSR; };
   static constexpr uint32_t CONTROL_PRIV_PSP=2, CONTROL_UNPRIV_PSP=3;
   static constexpr uint32_t CALL_HEADROOM=512;

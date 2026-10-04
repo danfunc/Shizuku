@@ -76,6 +76,7 @@ KERNEL::spawn_result KERNEL::spawn(const KERNEL::spawn_request &request) {
   thread.context = &m_threads[index].context;
   *thread.context = CONTEXT{};
   thread.call_stack = {};
+  thread.task_mask = 0;
   thread.current_object = request.object_id; // ★READYを公開する前に確実に設定
   thread.current_kind = request.kind;        // ★種別も同じく公開前に確定させる
   thread.current_handler_object = request.parent_handler_object;
@@ -101,8 +102,16 @@ KERNEL::spawn_result KERNEL::spawn(const KERNEL::spawn_request &request) {
                              request.argument);
   // ★READY は最後に release で公開する。ここまでの初期化が全部見えてから他コアが
   //   claim できるようにするため (先に公開すると途中初期化のまま走り出せる)。
-  ARCH::store_release32(&thread.state, (uint32_t)THREAD::state_t::READY);
+  if (request.publish)
+    ARCH::store_release32(&thread.state, (uint32_t)THREAD::state_t::READY);
   return {kernel_error::OK, index};
+}
+
+template <> bool KERNEL::publish_thread(uint32_t thread) {
+  return thread < m_thread_count &&
+      ARCH::cas32(&m_threads[thread].thread.state,
+                  (uint32_t)THREAD::state_t::RESERVED,
+                  (uint32_t)THREAD::state_t::READY);
 }
 
 // 走らせずに枠だけ取る。★spawn と同じ CAS で取るので、他コアと競っても二重取りに
@@ -146,7 +155,7 @@ template <> bool KERNEL::terminate_if_idle(uint32_t thread) {
 // 枠を返す。記憶そのものを返すのは貸し主 (オブジェクトランド) の仕事で、
 // ここは「もう誰も使っていない」ことにするだけ。
 template <> void KERNEL::release(uint32_t thread) {
-  if (thread >= m_thread_count || thread == 0)
+  if (thread >= m_thread_count)
     return;
   if (m_threads[thread].thread.state !=
       (uint32_t)THREAD::state_t::TERMINATED)
@@ -161,6 +170,12 @@ template <> void KERNEL::release(uint32_t thread) {
 // ---- 実行権の受け渡し -------------------------------------------------------
 // READY → RUNNING を CAS で取る。これが「2 コアが同じ文脈を走らせない」根。
 template <> bool KERNEL::claim(uint32_t thread, kernel_error &error) {
+  const uint32_t core = BOARD::core_num();
+  if (ARCH::load_acquire32(&cpu_manager.execution_task(core).move_blocked) != 0 &&
+      ARCH::load_acquire32(&m_pause_owner) != core + 1) {
+    error = kernel_error::NOT_READY;
+    return false;
+  }
   if (thread >= m_thread_count) {
     error = kernel_error::NOT_READY;
     return false;
@@ -174,6 +189,7 @@ template <> bool KERNEL::claim(uint32_t thread, kernel_error &error) {
     error = kernel_error::NOT_READY;
     return false;
   }
+  task_attach(thread, core);
   return true;
 }
 
@@ -181,7 +197,7 @@ template <> kernel_error KERNEL::do_switch(uint32_t target) {
   const uint32_t core = BOARD::core_num();
   // ★借り手として走っている最中の switch は「早めに返す」の意味にする。対象は見ない
   //   — 借りた実行権を第三者へ又貸しできてしまうと、貸し手の期限が意味を失う。
-  if (m_grants[core].depth != 0) {
+  if (cpu_manager.execution_task(core).depth != 0) {
     grant_unwind(grant_end::YIELDED);
     return kernel_error::OK;
   }
@@ -201,6 +217,7 @@ template <> kernel_error KERNEL::do_switch(uint32_t target) {
   ARCH::cas32(&m_threads[current].thread.state,
               (uint32_t)THREAD::state_t::RUNNING,
               (uint32_t)THREAD::state_t::READY);
+  task_detach(current, core);
   return kernel_error::OK;
 }
 
@@ -210,7 +227,7 @@ kernel_error KERNEL::do_grant(uint32_t target, uint32_t cycles) {
   const uint32_t current = m_current[core];
   if (target == current)
     return kernel_error::OK; // 自分へ貸すのは何もしないのと同じ
-  grant_stack &grants = m_grants[core];
+  grant_stack &grants = cpu_manager.execution_task(core);
   if (grants.depth >= grant_stack::MAX_DEPTH)
     return kernel_error::GRANT_DEPTH;
   // ★外側の残りを読む前に、今の刻みで使ったぶんを引いておく。引かずに読むと
@@ -230,7 +247,9 @@ kernel_error KERNEL::do_grant(uint32_t target, uint32_t cycles) {
   kernel_error error = kernel_error::OK;
   if (!claim(target, error))
     return error;
-  grants.frames[grants.depth++] = {current, budget};
+  task_attach(current, core);
+  grants.frames[grants.depth++] = {
+      current, m_threads[current].thread.generation, budget};
   // 貸し手は WAIT_GRANT。READY ではないので他コアに拾われず、復帰はこのコアの
   // 巻き取り経路 (期限 or 早期復帰) だけになる。
   m_threads[current].thread.set_state(THREAD::state_t::WAIT_GRANT);
@@ -242,31 +261,61 @@ kernel_error KERNEL::do_grant(uint32_t target, uint32_t cycles) {
 // 貸した実行権を 1 段巻き取る。期限切れ (EXPIRED) と早期復帰 (YIELDED) の共通経路。
 template <> void KERNEL::grant_unwind(grant_end reason) {
   const uint32_t core = BOARD::core_num();
-  grant_stack &grants = m_grants[core];
+  grant_stack &grants = cpu_manager.execution_task(core);
   if (grants.depth == 0)
     return;
   grant_charge(); // 巻き取る前に、今の刻みで使ったぶんを外側にも負担させる
   const uint32_t borrower = m_current[core];
-  const uint32_t lender = grants.frames[grants.depth - 1].lender;
-  grants.depth--;
-  // 貸し手が待っていた syscall の戻り値を書く (a0 は貸した時点で OK 済み)。
-  ARCH::set_result(*m_threads[lender].thread.context->sp, (uintptr_t)kernel_error::OK,
-                   (uintptr_t)reason);
-  // ★★貸し手が**止められている**なら RUNNING へ戻さない (D54)。戻すと
-  //   デバッガの停止が無かったことになる (「止めたのに走り続ける」の経路の
-  //   1 つがこれだった)。状態を残しておけば、次に schedule() が候補を選ぶとき
-  //   READY でないので拾われない。
-  if (!m_threads[lender].thread.is_state(THREAD::state_t::SUSPENDED))
-    m_threads[lender].thread.set_state(THREAD::state_t::RUNNING);
-  m_current[core] = lender;
-  // 借り手を返す。走り終えていたらそのまま (終了させたスレッドを生き返らせない)。
-  if (m_threads[borrower].thread.is_state(THREAD::state_t::RUNNING))
-    ARCH::store_release32(&m_threads[borrower].thread.state,
-                          (uint32_t)THREAD::state_t::READY);
+  using state_t = THREAD::state_t;
+  bool returned = false;
+  while (grants.depth != 0) {
+    const grant_frame saved = grants.frames[--grants.depth];
+    if (saved.lender < m_thread_count &&
+        m_threads[saved.lender].thread.generation == saved.generation)
+      task_detach(saved.lender, core);
+    if (saved.lender >= m_thread_count)
+      continue;
+    THREAD &lender = m_threads[saved.lender].thread;
+    // Validate identity and liveness BEFORE dereferencing the saved context.
+    // A destruction coordinator must serialize context reclamation with the
+    // owning core; generation checks do not replace that acknowledgement.
+    if (lender.generation != saved.generation)
+      continue;
+    const auto state = (state_t)ARCH::load_acquire32(&lender.state);
+    if (state != state_t::WAIT_GRANT && state != state_t::SUSPENDED)
+      continue;
+    ARCH::set_result(*lender.context->sp, (uintptr_t)kernel_error::OK,
+                     (uintptr_t)reason);
+    // Preserve debugger suspension. Its GRANT has completed, but this context
+    // must not be selected until the debugger explicitly resumes it.
+    if (!ARCH::cas32(&lender.state, (uint32_t)state_t::WAIT_GRANT,
+                     (uint32_t)state_t::RUNNING))
+      continue;
+    task_attach(saved.lender, core);
+    m_current[core] = saved.lender;
+    returned = true;
+    break;
+  }
+  if (!returned) {
+    kernel_error error = kernel_error::OK;
+    if (claim(recovery_thread(), error)) {
+      m_current[core] = recovery_thread();
+    } else if (m_threads[borrower].thread.is_state(state_t::RUNNING)) {
+      // No lender survives. A live borrower can continue without the loan;
+      // never resurrect a suspended/terminated borrower as a fallback.
+      m_current[core] = borrower;
+    } else {
+      BOARD::panic("no live context after grant unwind");
+    }
+  }
+  if (m_current[core] != borrower)
+    ARCH::cas32(&m_threads[borrower].thread.state,
+                (uint32_t)state_t::RUNNING, (uint32_t)state_t::READY);
+  task_detach(borrower, core);
   // 外側の残量へ張り替える (空なら止める。使い切っていれば即もう一段巻き取らせる)。
   if (grants.depth == 0) {
     ARCH::timer_cancel();
-    m_armed[core] = 0;
+    grants.armed = 0;
   } else if (grants.frames[grants.depth - 1].remaining == 0) {
     ARCH::pend_context_switch();
   } else {
@@ -276,13 +325,13 @@ template <> void KERNEL::grant_unwind(grant_end reason) {
 
 // 今の刻みで使ったぶんを**全段から**引く。内側が走っている間は外側の時間も
 // 減っている (だから又貸しで延長できない) ので、一番内側だけ引くのでは足りない。
-// ★何度呼んでも壊れない: 引いたあと m_armed を「まだ引いていない残り」に
+// ★何度呼んでも壊れない: 引いたあと task.armed を「まだ引いていない残り」に
 //   更新するので、続けて呼べば 2 回目は 0 を引く。
 template <> void KERNEL::grant_charge() {
   const uint32_t core = BOARD::core_num();
-  grant_stack &grants = m_grants[core];
-  if (grants.depth == 0 || m_armed[core] == 0) {
-    m_armed[core] = 0;
+  grant_stack &grants = cpu_manager.execution_task(core);
+  if (grants.depth == 0 || grants.armed == 0) {
+    grants.armed = 0;
     return;
   }
   bool wrapped = false;
@@ -290,12 +339,9 @@ template <> void KERNEL::grant_charge() {
   // 折り返していた = 刻みは撃ち切った。多めに数える側へ倒す (少なく数えると
   // 貸した実行権が予定より長く握られる)。
   const uint64_t used =
-      (wrapped || left == 0) ? m_armed[core] : (uint64_t)(m_armed[core] - left);
-  for (uint32_t index = 0; index < grants.depth; ++index) {
-    grant_frame &frame = grants.frames[index];
-    frame.remaining = frame.remaining > used ? frame.remaining - used : 0;
-  }
-  m_armed[core] = wrapped ? 0 : left;
+      (wrapped || left == 0) ? grants.armed : (uint64_t)(grants.armed - left);
+  grants.charge(used);
+  grants.armed = wrapped ? 0 : left;
 }
 
 // 一番内側の残量をタイマへ装填する。★換算が要らない — 残量もタイマもクロックで
@@ -303,10 +349,10 @@ template <> void KERNEL::grant_charge() {
 // 割り戻していて、その clk_sys が変わらない保証は無かった。
 template <> void KERNEL::arm_timer() {
   const uint32_t core = BOARD::core_num();
-  grant_stack &grants = m_grants[core];
+  grant_stack &grants = cpu_manager.execution_task(core);
   if (grants.depth == 0) {
     ARCH::timer_cancel();
-    m_armed[core] = 0;
+    grants.armed = 0;
     return;
   }
   uint64_t chunk = grants.frames[grants.depth - 1].remaining;
@@ -317,7 +363,7 @@ template <> void KERNEL::arm_timer() {
   // わずかに超過して返ることになる (下限ぶんの誤差は仕様として飲む)。
   if (chunk < ARCH::TIMER_MIN_CYCLES)
     chunk = ARCH::TIMER_MIN_CYCLES;
-  m_armed[core] = (uint32_t)chunk;
+  grants.armed = (uint32_t)chunk;
   ARCH::timer_oneshot((uint32_t)chunk);
 }
 
@@ -326,10 +372,10 @@ template <> void KERNEL::arm_timer() {
 // 与える規約 (DESIGN §14.5.1)。
 template <> void KERNEL::timer_expired() {
   const uint32_t core = BOARD::core_num();
-  grant_stack &grants = m_grants[core];
+  grant_stack &grants = cpu_manager.execution_task(core);
   if (grants.depth == 0) {
     ARCH::timer_cancel(); // 早期復帰と競合した後の遅れて来た発火
-    m_armed[core] = 0;
+    grants.armed = 0;
     return;
   }
   // ここへ来た時点で刻みは撃ち切っている (COUNTFLAG が立つので grant_charge が
@@ -404,13 +450,14 @@ template <> void KERNEL::debug_dispatch(KERNEL::CONTEXT *context) {
 
   // 借り手として走っていたなら貸し手へ返す。そうでなければ復帰先へ渡す。
   // ★フォールトと同じ判断 — 「このコアで次に誰を走らせるか」は 1 か所で決める。
-  if (m_grants[core].depth != 0) {
+  if (cpu_manager.execution_task(core).depth != 0) {
     grant_unwind(grant_end::EXPIRED);
     return;
   }
   kernel_error error = kernel_error::OK;
-  if (m_recovery_thread < m_thread_count && claim(m_recovery_thread, error)) {
-    m_current[core] = m_recovery_thread;
+  if (recovery_thread() < m_thread_count && claim(recovery_thread(), error)) {
+    m_current[core] = recovery_thread();
+    task_detach(thread, core);
     return;
   }
   // ★渡す先が無いなら**止めるのをやめる**。フォールトと違ってデバッグ事象は
@@ -472,15 +519,16 @@ template <> void KERNEL::fault_dispatch(KERNEL::CONTEXT *context) {
 
   // 借り手として走っていたなら、貸し手へ返すのが自然な復帰先 (貸した側は
   // 「期限が来た」のと同じ形で戻ってくる)。
-  if (m_grants[core].depth != 0) {
+  if (cpu_manager.execution_task(core).depth != 0) {
     grant_unwind(grant_end::EXPIRED);
     return;
   }
   // そうでなければ、あらかじめ教えられている復帰先へ渡す。誰に渡すかは方針なので
   // カーネルは選ばない — 教えられていないなら渡す先が無い。
   kernel_error error = kernel_error::OK;
-  if (m_recovery_thread < m_thread_count && claim(m_recovery_thread, error)) {
-    m_current[core] = m_recovery_thread;
+  if (recovery_thread() < m_thread_count && claim(recovery_thread(), error)) {
+    m_current[core] = recovery_thread();
+    task_detach(thread, core);
     return;
   }
   BOARD::diag_printf("[FAULT] 渡す先が無い (recovery=%lu)\n",

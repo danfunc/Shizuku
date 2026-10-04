@@ -37,6 +37,9 @@ template <typename CONTEXT> struct thread {
   uint32_t state = (uint32_t)state_t::UNINITIALIZED;
   CONTEXT *context = nullptr;
   call_stack_t call_stack;
+  // Bit i records registration with CPU task i (current execution or lender).
+  // Updated before publishing a runnable context; cleared after its last use.
+  uint32_t task_mask = 0;
   uint32_t affinity = 0b1; // bit0 = core0 (どのコアで走ってよいか)
   uint32_t current_object = 0;
   // ★今走っているオブジェクトの**種別**。ID とは独立に持つ (ID は名前であって

@@ -165,6 +165,14 @@ kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
 }
 
 template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
+  struct retry_pause {
+    KERNEL *kernel;
+    ~retry_pause() {
+      if (ARCH::load_acquire32(&kernel->cpu_manager.execution_task(
+                                  BOARD::core_num()).move_blocked))
+        ARCH::pend_context_switch();
+    }
+  } retry{this};
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(410);
 #endif
@@ -290,8 +298,10 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
 //   競っても「もう貸していない / まだ期限前」なら何もしないで戻るだけ。
 template <> void KERNEL::pendsv_dispatch(KERNEL::CONTEXT *context) {
   (void)context; // 借り手の文脈退避は例外入口が済ませている
+  if (pause_dispatch())
+    return;
   const uint32_t core = BOARD::core_num();
-  grant_stack &grants = m_grants[core];
+  grant_stack &grants = cpu_manager.execution_task(core);
   if (grants.depth == 0)
     return;
   grant_charge();

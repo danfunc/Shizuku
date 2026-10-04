@@ -33,6 +33,7 @@ cc_library(
     deps = [
         ":headers",
         "//:kernel",
+        "//modules/pico_sdk_support/core_notify",
         "//configs:config",
         # ★board → オブジェクトの逆向き依存。診断出力 (diag_printf) と panic 時の
         #   排出が USB CDC を直に叩いているため (board.cpp, D42)。PORT §7 の

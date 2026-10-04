@@ -1,3 +1,4 @@
+#include "core_notify.hpp"
 #include <cstdarg>
 #include <cstdio>
 #include "hardware/clocks.h"
@@ -22,7 +23,11 @@ extern "C" char __flash_binary_end;
 extern "C" char __data_start__[];
 extern "C" char __data_end__[];
 namespace shizuku::boards {
+void rp2040_pico_w::notify_core(uint32_t core) { ports::core_notify(core); }
+
 void rp2040_pico_w::init(uint32_t core){
+  ports::core_notify_init(core, [] { shizuku::archs::armv6m::pend_context_switch(); });
+
   if(core==0){
     exception_set_exclusive_handler(SVCALL_EXCEPTION,shizuku_armv6m_svc_entry);
     exception_set_exclusive_handler(PENDSV_EXCEPTION,shizuku_armv6m_pendsv_entry);

@@ -1,3 +1,4 @@
+#include "core_notify.hpp"
 #include "hardware/clocks.h"
 #include "hardware/regs/addressmap.h"
 #include "hardware/exception.h"
@@ -37,7 +38,11 @@ static void (*g_usb_irq_poll)() = nullptr;
 namespace shizuku {
 namespace boards {
 
+void rp2350_pico2::notify_core(uint32_t core) { ports::core_notify(core); }
+
 void rp2350_pico2::init(uint32_t core) {
+  ports::core_notify_init(core, [] { ARCH_TYPE::pend_context_switch(); });
+
   if (core == 0) {
     // RAM ベクタテーブルは両コア共有: 登録は core0 の 1 回だけ
     // (exclusive 登録は二重登録で panic するため、core1 で再登録しない)。

@@ -13,6 +13,8 @@ namespace concepts {
 //                    (concepts/arch.hpp の前提規約を参照)。ベクタテーブルが全コア
 //                    共有の場合、登録自体を 1 回に抑える責務も board が持つ
 // - core_num()     : 自コア番号 (0 起点)
+// - notify_core(core): independently pend the target core's context-switch
+//                      handler; no dependence on its current grant timer.
 // - launch_core()  : もう一方のコアを起こす
 // - park/resume_other_cores() : 他コアを一時停止 / 再開 (XIP が止まる操作のため)
 // - dma_claim/copy/busy/release : ストリームの接続に使う DMA (特権側が握る)
@@ -33,6 +35,7 @@ namespace concepts {
 template <typename BOARD>
 concept board_requires = requires(uint32_t core, const char *text) {
   { BOARD::init(core) };
+  { BOARD::notify_core(core) }; // request a deferred kernel rendezvous
   { BOARD::core_num() } -> std::same_as<uint32_t>;
   // もう一方のコアを起こす (CORE_COUNT == 1 の構成でも口は要る)。
   { BOARD::launch_core((void (*)())nullptr) };

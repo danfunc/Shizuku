@@ -126,6 +126,7 @@ alignas(8) static uint8_t g_bookkeeping_storage[8192];
 template <> void KERNEL_OBJECT::init() {
   for (uintptr_t id = 0; id < OBJECT_COUNT; ++id) {
     m_objects[id].created = false;
+    m_objects[id].closing = 0;
     m_objects[id].flags = 0;
     m_objects[id].region_base = 0;
     m_objects[id].region_limit = 0;
@@ -144,6 +145,16 @@ template <> void KERNEL_OBJECT::init() {
   }
   for (uintptr_t core = 0; core < KERNEL::CORE_COUNT; ++core)
     m_rotor[core] = 0;
+  m_destroy_target = NO_OBJECT;
+  m_destroy_victims = 0;
+  m_destroy_worker = UINT32_MAX;
+  m_destroy_runtime = false;
+  m_destroy_serial = 0;
+  for (auto &t : m_destroy_fallback) t = UINT32_MAX;
+  for (auto &h : m_destroy_hooks) h = nullptr;
+  for (auto &t : m_destroy_ticket) t = 0;
+  for (auto &r : m_destroy_result) r = 0;
+  for (auto &o : m_stream_owner) o = NO_OBJECT;
   m_table_lock = 0;
   for (uintptr_t thread = 0; thread < THREAD_COUNT; ++thread)
     m_thread_stack[thread] = 0;
@@ -307,6 +318,14 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     shizuku_boot_trace_phase(422);
 #endif
+    if (ARCH::load_acquire32(&m_objects[creator].closing)) {
+      error = object_error::DESTROY_BUSY;
+      return 0;
+    }
+    if (ARCH::load_acquire32(&m_objects[id].closing)) {
+      error = object_error::DESTROY_BUSY;
+      return 0;
+    }
     if (!m_objects[id].created || replace) {
       m_objects[id].created = true;
       m_objects[id].flags =
@@ -383,7 +402,7 @@ template <> uint32_t KERNEL_OBJECT::object_affinity(uintptr_t id) const {
 template <>
 uintptr_t KERNEL_OBJECT::set_object_affinity(uintptr_t id, uintptr_t cores,
                                              object_error &error) {
-  if (id >= OBJECT_COUNT || !m_objects[id].created) {
+  if (id >= OBJECT_COUNT || !m_objects[id].created || ARCH::load_acquire32(&m_objects[id].closing)) {
     error = object_error::BAD_OBJECT;
     return 0;
   }
@@ -443,7 +462,7 @@ uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
                                      uintptr_t argument, object_error &error) {
   const uint32_t thread = kernel_instance.current_thread_id();
   const uintptr_t caller = current_object(thread);
-  if (id >= OBJECT_COUNT || !m_objects[id].created) {
+  if (id >= OBJECT_COUNT || !m_objects[id].created || ARCH::load_acquire32(&m_objects[id].closing)) {
     error = object_error::BAD_OBJECT;
     return 0;
   }
@@ -587,7 +606,7 @@ void KERNEL_OBJECT::forward_child_exit(uintptr_t value, uintptr_t error) {
 template <>
 uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
                                       uintptr_t argument, object_error &error) {
-  if (id >= OBJECT_COUNT || !m_objects[id].created) {
+  if (id >= OBJECT_COUNT || !m_objects[id].created || ARCH::load_acquire32(&m_objects[id].closing)) {
     error = object_error::BAD_OBJECT;
     return 0;
   }
@@ -612,6 +631,7 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
     return 0;
   }
   KERNEL::spawn_request request{};
+  request.publish = false;
   request.entry_pc = (uintptr_t)entry;
   request.argument = argument;
   request.protection = object_protection(id);
@@ -641,6 +661,7 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
   m_shadow[spawned.thread].depth = 0;
   m_wake_at[spawned.thread] = 0;
   m_budget[spawned.thread] = DEFAULT_BUDGET_CYCLES;
+  kernel_instance.publish_thread(spawned.thread);
   return spawned.thread;
 }
 
@@ -659,8 +680,15 @@ template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
   pump_connections();
   for (uint32_t step = 1; step <= THREAD_COUNT; ++step) {
     const uint32_t candidate = (m_rotor[core] + step) % THREAD_COUNT;
-    if (candidate == self)
+    if (candidate == self ||
+        (ARCH::load_acquire32(&m_destroy_victims) & (1u << candidate)))
       continue;
+    bool fallback = false;
+    for (auto &idle : m_destroy_fallback)
+      fallback |= candidate == ARCH::load_acquire32(&idle);
+    if (fallback) continue; // reserve a READY recovery context for each core
+    if (candidate == ARCH::load_acquire32(&m_destroy_worker) &&
+        ARCH::load_acquire32(&m_destroy_target) == NO_OBJECT) continue;
     // ★止めてくれと言われた相手は、**どのコアでも二度と選ばない**。見るのは
     //   自分たちの旗だけで、共有の状態語には触らない — ここが要点で、
     //   **SUSPENDED を使うとデバッガと喧嘩する** (D55):
@@ -950,7 +978,7 @@ uintptr_t KERNEL_OBJECT::declare_name(uintptr_t name, object_error &error) {
 
 template <>
 uintptr_t KERNEL_OBJECT::object_name(uintptr_t id, object_error &error) {
-  if (id >= OBJECT_COUNT || !m_objects[id].created) {
+  if (id >= OBJECT_COUNT || !m_objects[id].created || ARCH::load_acquire32(&m_objects[id].closing)) {
     error = object_error::BAD_OBJECT;
     return 0;
   }
@@ -967,10 +995,15 @@ uintptr_t KERNEL_OBJECT::stream_create(uintptr_t desc, object_error &error) {
     return 0;
   }
   table_guard guard;
+  if (ARCH::load_acquire32(&m_objects[current_object(kernel_instance.current_thread_id())].closing)) {
+    error = object_error::DESTROY_BUSY;
+    return 0;
+  }
   for (uintptr_t index = 0; index < STREAM_COUNT; ++index) {
     if (m_streams[index] != nullptr)
       continue;
     m_streams[index] = (stream::descriptor *)desc;
+    m_stream_owner[index] = (uint32_t)current_object(kernel_instance.current_thread_id());
     return index;
   }
   error = object_error::NO_STREAM;
@@ -980,7 +1013,8 @@ uintptr_t KERNEL_OBJECT::stream_create(uintptr_t desc, object_error &error) {
 template <>
 uintptr_t KERNEL_OBJECT::stream_open(uintptr_t id, object_error &error) {
   table_guard guard;
-  if (id >= STREAM_COUNT || m_streams[id] == nullptr) {
+  if (id >= STREAM_COUNT || m_streams[id] == nullptr ||
+      ARCH::load_acquire32(&m_objects[m_stream_owner[id]].closing)) {
     error = object_error::BAD_STREAM;
     return 0;
   }
@@ -995,7 +1029,8 @@ uintptr_t KERNEL_OBJECT::stream_bind(uintptr_t id, uintptr_t which,
                                      object_error &error) {
   const uintptr_t self = current_object(kernel_instance.current_thread_id());
   table_guard guard;
-  if (id >= STREAM_COUNT || m_streams[id] == nullptr) {
+  if (id >= STREAM_COUNT || m_streams[id] == nullptr ||
+      ARCH::load_acquire32(&m_objects[m_stream_owner[id]].closing)) {
     error = object_error::BAD_STREAM;
     return 0;
   }
@@ -1019,7 +1054,8 @@ uintptr_t KERNEL_OBJECT::stream_connect(uintptr_t src, uintptr_t dst,
                                         object_error &error) {
   table_guard guard;
   if (src >= STREAM_COUNT || dst >= STREAM_COUNT || src == dst ||
-      m_streams[src] == nullptr || m_streams[dst] == nullptr) {
+      m_streams[src] == nullptr || m_streams[dst] == nullptr ||
+      ARCH::load_acquire32(&m_objects[m_stream_owner[src]].closing) || ARCH::load_acquire32(&m_objects[m_stream_owner[dst]].closing)) {
     error = object_error::BAD_STREAM;
     return 0;
   }
@@ -1238,7 +1274,22 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
 #endif
   object_error error = object_error::OK;
   uintptr_t value = 0;
+  const auto caller = current_object(kernel_instance.current_thread_id());
+  const auto api = (object_api)number;
+  if (caller < OBJECT_COUNT && ARCH::load_acquire32(&m_objects[caller].closing) &&
+      api != object_api::EXIT_METHOD && api != object_api::FORWARD_CHILD_EXIT &&
+      api != object_api::YIELD && api != object_api::EXIT_THREAD &&
+      api != object_api::DESTROY_STATUS) {
+    reply(object_error::DESTROY_BUSY, 0);
+    return 0;
+  }
   switch ((object_api)number) {
+  case object_api::DESTROY_OBJECT:
+    value = destroy_object(a1, error);
+    break;
+  case object_api::DESTROY_STATUS:
+    value = destroy_status(a1, error);
+    break;
   case object_api::CREATE_OBJECT:
     value = create_object(a1, a2, a3, error);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0

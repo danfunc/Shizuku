@@ -11,6 +11,8 @@ namespace archs {
 // 「要件を足したが実装を忘れた」を最短で検出するための当て板。
 class dummy {
 public:
+  static uint32_t interrupt_save() { return 0; }
+  static void interrupt_restore(uint32_t) {}
   struct exception_frame_t {
     uintptr_t slot[8];
   };

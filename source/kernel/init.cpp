@@ -12,9 +12,14 @@ template <> void KERNEL::init() {
   //   set_thread_storage で渡されるまでスレッドは 1 本も存在しない。
   m_threads = nullptr;
   m_thread_count = 0;
+  cpu_manager.reset_tasks();
+  m_pause_owner = 0;
+  m_pause_epoch = 0;
+  m_pause_irq_saved = false;
   for (uintptr_t core = 0; core < CORE_COUNT; ++core) {
     m_current[core] = 0;
-    m_armed[core] = 0;
+    m_online[core] = 0;
+    m_core_recovery[core] = 0;
   }
   m_step_target = NO_STEP_TARGET;
   m_object_svc_handler = 0;
@@ -51,6 +56,8 @@ template <> void KERNEL::bootstrap(void (*entry)(), uintptr_t stack_base,
   ARCH::stack_limit_set(*thread.context, limit);
   ARCH::set_priv(*thread.context, true);
   m_current[BOARD::core_num()] = 0;
+  task_attach(0, BOARD::core_num());
+  ARCH::store_release32(&m_online[BOARD::core_num()], 1);
 
   // スレッドスタックへ移って entry を呼ぶ (戻らない)。以後このスレッドは
   // 「フレームを 1 枚も積んでいない」= ハンドラの枠の外なので、撃った svc は
@@ -86,6 +93,8 @@ void KERNEL::bootstrap_secondary(uint32_t thread, void (*entry)(),
   ARCH::stack_limit_set(*adopted.context, limit);
   ARCH::set_priv(*adopted.context, true);
   m_current[BOARD::core_num()] = thread;
+  task_attach(thread, BOARD::core_num());
+  ARCH::store_release32(&m_online[BOARD::core_num()], 1);
 
   ARCH::enter_thread_mode(top, limit, entry);
 }
