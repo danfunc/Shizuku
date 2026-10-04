@@ -340,6 +340,9 @@ public:
     context.region_base = (uint32_t)base;
     context.region_limit = (uint32_t)limit;
   }
+  static bool region_range_representable(uintptr_t, uintptr_t) {
+    return true;
+  }
   // GRANT_REGION が使う MPU region。0/1 は固定 (board.cpp)、2
   // 以降は空いている。
   static constexpr uint32_t GRANT_REGION_INDEX = 2;

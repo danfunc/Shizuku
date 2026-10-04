@@ -144,10 +144,8 @@ kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
       request.callee_object == m_object_svc_handler_object) {
     return kernel_error::BAD_REQUEST;
   }
-#if defined(SHIZUKU_RP2040)
   if (!ARCH::region_range_representable(request.region_base, request.region_limit))
     return kernel_error::BAD_REQUEST;
-#endif
   if (!call_frame_push(thread, context, frame))
     return kernel_error::NO_STACK;
   thread.current_object = request.callee_object; // ★呼び先オブジェクトIDへ遷移

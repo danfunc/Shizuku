@@ -54,10 +54,8 @@ template <>
 KERNEL::spawn_result KERNEL::spawn(const KERNEL::spawn_request &request) {
   if (request.stack_base == 0 || request.stack_bytes < 256)
     return {kernel_error::NO_MEMORY, 0};
-#if defined(SHIZUKU_RP2040)
   if (!ARCH::region_range_representable(request.region_base, request.region_limit))
     return {kernel_error::BAD_REQUEST, 0};
-#endif
   // ★「空いているか見てから作る」は 2 コアで TOCTOU になる。CAS で枠を予約してから
   //   中身を書く (参照実装はここで二重初期化検査に引っかかり panic していた = I-9 違反)。
   uint32_t index = m_thread_count;
