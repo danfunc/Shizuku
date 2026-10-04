@@ -223,8 +223,14 @@ source/kernel/                機構だけ (dispatch / thread / init)
 source/kernel_object/         方針 (handler = svc の配り口, memory = O(1) arena)
 source/apps/                  アプリ (thermal)。いずれ XNO へ
 source/selftest/              梯子。**ここが仕様書**
-modules/pico_sdk_support/     board / arch / ペリフェラル / flash FS / USB / GDB stub
-configs/                      型注入 (config.hpp) と CYW43 クロックの導出
+modules/pico_sdk_support/     ポート。構成用ヘッダ・メモリマネージャ・全部入りの :pico_sdk_support
+  rp2040/                     ARMv6-M arch + RP2040 board (Bazel パッケージ)
+  rp2350/                     ARMv8-M arch + RP2350 board + GDB stub (Bazel パッケージ)
+  objects/                    チップ非依存のオブジェクト。1 つ 1 ライブラリ
+                              (flash_fs / usb_cdc / peripherals / ble_uart / ota)
+configs/                      型注入 (config.hpp、arch/board は kit.bzl を select で) と
+                              CYW43 クロックの導出。select はチップ (rp2040/rp2350) と
+                              cyw43 (W ボード) のグループで書く
 tools/gen_object_ids.py       オブジェクト番号を振る (各 objects.list を読む)
 docs/03_porting_policy.md     決定 D1 (廃止)〜D58 と未決 Q1〜Q7 ← **設計の理由はここ**
 ```
