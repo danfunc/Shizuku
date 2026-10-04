@@ -15,5 +15,6 @@
   // (走らせると CMakeLists.txt が無いと言って騒ぐだけになる)。
   "cmake.configureOnOpen": false,
   "cmake.automaticReconfigure": false,
-  "cmake.sourceDirectory": "/Users/ishigakiyua/github/Shizuku/latest_ver_from_flight_robocon/flight_robocon_telemetory_sender"
+  // 参照実装 (CMake) を開くときだけ使う。絶対パスは書かない (他の環境で壊れる)。
+  "cmake.sourceDirectory": "${workspaceFolder}/latest_ver_from_flight_robocon/flight_robocon_telemetory_sender"
 }
