@@ -825,7 +825,13 @@ void begin_commit() {
   commit_op op{
       STAGING_OFFSET, dst_offset,
       sectors,        erase_blocks,
-      g_sector,       (reboot_fn)rom_func_lookup_inline(ROM_FUNC_REBOOT)};
+      g_sector,
+#if defined(SHIZUKU_RP2040) || PICO_RP2040
+      nullptr
+#else
+      (reboot_fn)rom_func_lookup_inline(ROM_FUNC_REBOOT)
+#endif
+  };
 
   flash_quiet quiet;
   const int rc = ::flash_safe_execute(commit_blast, &op, 10000);
