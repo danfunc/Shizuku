@@ -69,35 +69,28 @@ constexpr uint32_t LOGICAL_FLASH_LIMIT =
 
 // ---- 先頭: 走っているファームウェア ---------------------------------------
 constexpr uint32_t FIRMWARE_OFFSET = 0;
-#if defined(SHIZUKU_RP2040)
-// RP2040 reserves fixed, equal firmware and OTA windows. Keep the firmware
-// ceiling in this one constant; the remaining pre-BT area belongs to flash FS.
-constexpr uint32_t RP2040_FIRMWARE_BYTES = SHIZUKU_FIRMWARE_BYTES;
-constexpr uint32_t RP2040_STAGING_BYTES = SHIZUKU_STAGING_BYTES;
-static_assert(RP2040_FIRMWARE_BYTES <= LOGICAL_FLASH_LIMIT,
+constexpr uint32_t FIRMWARE_BYTES = SHIZUKU_FIRMWARE_BYTES;
+constexpr uint32_t FS_OFFSET = FIRMWARE_OFFSET + FIRMWARE_BYTES;
+constexpr uintptr_t FS_ADDRESS = XIP_BASE + FS_OFFSET;
+
+#if defined(SHIZUKU_STAGING_BYTES) && (SHIZUKU_STAGING_BYTES > 0)
+// When a fixed staging ceiling is configured (e.g. RP2040), staging is anchored
+// before the reserved BT area, and the remaining space belongs to flash FS.
+static_assert(FIRMWARE_BYTES <= LOGICAL_FLASH_LIMIT,
               "firmware reservation exceeds flash before BT storage");
-static_assert(RP2040_STAGING_BYTES <=
-                  LOGICAL_FLASH_LIMIT - RP2040_FIRMWARE_BYTES,
+static_assert(SHIZUKU_STAGING_BYTES <=
+                  LOGICAL_FLASH_LIMIT - FIRMWARE_BYTES,
               "firmware and OTA reservations exceed flash before BT storage");
 static_assert(LOGICAL_FLASH_LIMIT >=
-                  RP2040_FIRMWARE_BYTES + RP2040_STAGING_BYTES + FLASH_SECTOR_SIZE,
+                  FIRMWARE_BYTES + SHIZUKU_STAGING_BYTES + FLASH_SECTOR_SIZE,
               "logical flash capacity cannot contain firmware, OTA, and one FS sector");
-constexpr uint32_t FIRMWARE_BYTES = RP2040_FIRMWARE_BYTES;
-constexpr uint32_t FS_OFFSET = FIRMWARE_OFFSET + FIRMWARE_BYTES;
+constexpr uint32_t STAGING_OFFSET = LOGICAL_FLASH_LIMIT - SHIZUKU_STAGING_BYTES;
 constexpr uint32_t FS_BYTES =
-    LOGICAL_FLASH_LIMIT - RP2040_FIRMWARE_BYTES - RP2040_STAGING_BYTES -
+    LOGICAL_FLASH_LIMIT - FIRMWARE_BYTES - SHIZUKU_STAGING_BYTES -
     FIRMWARE_OFFSET;
-constexpr uintptr_t FS_ADDRESS = XIP_BASE + FS_OFFSET;
-constexpr uint32_t STAGING_OFFSET = LOGICAL_FLASH_LIMIT - RP2040_STAGING_BYTES;
 #else
-constexpr uint32_t FIRMWARE_BYTES = SHIZUKU_FIRMWARE_BYTES;
-
-// ---- flash FS ------------------------------------------------------------
-constexpr uint32_t FS_OFFSET = FIRMWARE_OFFSET + FIRMWARE_BYTES;
+// When a fixed FS size is configured (e.g. RP2350), staging takes the remainder.
 constexpr uint32_t FS_BYTES = SHIZUKU_FS_BYTES;
-constexpr uintptr_t FS_ADDRESS = XIP_BASE + FS_OFFSET;
-
-// ---- ota のステージング (bonding バンクの直下で終わる) --------------------
 constexpr uint32_t STAGING_OFFSET = FS_OFFSET + FS_BYTES;
 #endif
 static_assert(LOGICAL_FLASH_LIMIT >= STAGING_OFFSET + FIRMWARE_BYTES,

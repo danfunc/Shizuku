@@ -11,14 +11,5 @@
 #define SHIZUKU_LOGICAL_FLASH_BYTES SHIZUKU_FLASH_CAPACITY_BYTES
 #endif
 
-// Single source for firmware/staging ceilings; the linker consumes the
-// absolute symbols emitted by flash_layout_limit.cpp.
-#if defined(SHIZUKU_RP2040)
-#define SHIZUKU_FIRMWARE_BYTES (512 * 1024)
-#define SHIZUKU_STAGING_BYTES SHIZUKU_FIRMWARE_BYTES
-#else
-#define SHIZUKU_FIRMWARE_BYTES (1024 * 1024)
-#define SHIZUKU_FS_BYTES (1024 * 1024)
 #endif
 
-#endif

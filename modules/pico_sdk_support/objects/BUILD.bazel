@@ -27,6 +27,18 @@ _CYW43_ARCH = select({
 
 flash_layout_config(
     name = "generated_flash_layout_config",
+    firmware_bytes = select({
+        "//configs:rp2040": 512 * 1024,
+        "//conditions:default": 1024 * 1024,
+    }),
+    fs_bytes = select({
+        "//configs:rp2040": 0,
+        "//conditions:default": 1024 * 1024,
+    }),
+    staging_bytes = select({
+        "//configs:rp2040": 512 * 1024,
+        "//conditions:default": 0,
+    }),
 )
 
 # flash の区画 (論理容量・BT bank・FS 領域)。flash_fs と ota が共有する。
