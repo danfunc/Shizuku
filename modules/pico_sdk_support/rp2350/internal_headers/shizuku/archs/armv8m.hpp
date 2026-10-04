@@ -21,8 +21,9 @@ void shizuku_armv8m_pendsv_entry();
 void shizuku_armv8m_systick_entry();
 // フォールト入口 (退避 → 判断 → 復帰。普通の例外と同じ経路)。
 void shizuku_armv8m_fault_entry();
-struct shizuku_armv8m_context;
-void shizuku_fault_dispatch(shizuku_armv8m_context *context);
+struct shizuku_context;
+using shizuku_armv8m_context = shizuku_context;
+void shizuku_fault_dispatch(shizuku_context *context);
 // 呼び先が普通に return したときの戻り口 (RETURN プリミティブを 1 段ぶん発行)。
 void shizuku_armv8m_return_stub();
 // スレッドスタック (PSP) へ移って entry を呼ぶ。戻らない。
@@ -31,10 +32,9 @@ void shizuku_armv8m_debugmon_entry();
                                                    uintptr_t stack_limit,
                                                    void (*entry)());
 // asm から呼ばれるフック。実体は modules/pico_sdk_support/arch_glue.cpp。
-struct shizuku_armv8m_context;
-shizuku_armv8m_context *shizuku_current_context();
-void shizuku_svc_dispatch(shizuku_armv8m_context *context);
-void shizuku_pendsv_dispatch(shizuku_armv8m_context *context);
+shizuku_context *shizuku_current_context();
+void shizuku_svc_dispatch(shizuku_context *context);
+void shizuku_pendsv_dispatch(shizuku_context *context);
 }
 
 namespace shizuku {

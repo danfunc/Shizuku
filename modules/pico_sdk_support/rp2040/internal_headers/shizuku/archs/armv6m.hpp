@@ -13,16 +13,17 @@ void shizuku_armv6m_pendsv_entry();
 void shizuku_armv6m_systick_entry();
 void shizuku_armv6m_fault_entry();
 void shizuku_armv6m_debugmon_entry();
-struct shizuku_armv6m_context;
-void shizuku_fault_dispatch(shizuku_armv6m_context *);
-void shizuku_svc_dispatch(shizuku_armv6m_context *);
-void shizuku_pendsv_dispatch(shizuku_armv6m_context *);
-void shizuku_debug_dispatch(shizuku_armv6m_context *);
+struct shizuku_context;
+using shizuku_armv6m_context = shizuku_context;
+void shizuku_fault_dispatch(shizuku_context *);
+void shizuku_svc_dispatch(shizuku_context *);
+void shizuku_pendsv_dispatch(shizuku_context *);
+void shizuku_debug_dispatch(shizuku_context *);
 void shizuku_arm_pending_step();
 void shizuku_restore_region_window();
 void shizuku_armv6m_return_stub();
 [[noreturn]] void shizuku_armv6m_enter_thread_mode(uintptr_t, void (*)());
-shizuku_armv6m_context *shizuku_current_context();
+shizuku_context *shizuku_current_context();
 }
 
 namespace shizuku::archs {

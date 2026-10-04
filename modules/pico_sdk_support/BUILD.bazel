@@ -57,6 +57,18 @@ cc_library(
     deps = [":headers"],
 )
 
+cc_library(
+    name = "arch_glue",
+    srcs = ["arch_glue.cpp"],
+    alwayslink = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        ":headers",
+        "//:kernel",
+        "//configs:config",
+    ],
+)
+
 # 全部入り: firmware が引くのはこれ 1 つ。XNO 側は必要な部品だけを個別に引いてよい。
 # ★alwayslink: 例外ベクタから引かれるだけで、C++ 側から参照の無いシンボル
 #   (ISA の入口) や、TinyUSB の weak コールバックの上書きがあるので、参照が
@@ -66,6 +78,7 @@ cc_library(
     alwayslink = True,
     visibility = ["//visibility:public"],
     deps = [
+        ":arch_glue",
         ":memory_manager",
         "//modules/pico_sdk_support/objects:flash_fs",
         "//modules/pico_sdk_support/objects:flash_layout_limit",
