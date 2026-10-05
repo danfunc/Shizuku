@@ -6,6 +6,12 @@
 //  リセットインターフェースはそのまま残してある。
 #include "hardware/irq.h"
 #include "hardware/timer.h"
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_USB_ALARM_STARTUP_DIAGNOSTIC) && \
+    SHIZUKU_USB_ALARM_STARTUP_DIAGNOSTIC > 0
+#include <cstdio>
+#include "hardware/structs/scb.h"
+#include "pico/platform.h"
+#endif
 #include "pico/bootrom.h"
 #include "pico/stdio/driver.h"
 #include "pico/time.h"
@@ -29,9 +35,9 @@ namespace {
 //   変えると書き込み手順が壊れる (参照実装が明記している罠)。
 // PID は Pico SDK 本家の使い分け (RP2040=0x000a / それ以外=0x0009) に揃える。
 // picotool (picoboot_connection.c の PID switch) は 0x0009/0x000a のどちらも
-// stdio_usb (reset 対象) に分類し、違いは報告するチップ名だけなので
+// dr_vidpid_stdio_usb (reset 対象) に分類し、違いは報告するチップ名だけなので
 // reset-via-baud には影響しない。PID 固定のままだと RP2040 実機が
-// "RP2350 device" と誤認表示される。
+// "RP2350 device" と誤認表示される (D.. 参照)。
 constexpr uint16_t USBD_VID = 0x2E8A;
 #if defined(SHIZUKU_RP2040)
 constexpr uint16_t USBD_PID = 0x000a;
@@ -173,6 +179,34 @@ void usb_cdc_init() {
   irq_set_enabled(g_task_irq, true);
   add_alarm_in_us(1000, usb_task_timer, nullptr, true);
   stdio_set_driver_enabled(&g_diag_driver, true);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_USB_ALARM_STARTUP_DIAGNOSTIC) && \
+    SHIZUKU_USB_ALARM_STARTUP_DIAGNOSTIC > 0
+  // This is an observation from normal context after the existing alarm was
+  // installed and after the diagnostic stdio driver became active. It does
+  // not inspect SDK-private pools[] or claim to identify a later corruption.
+  alarm_pool_t *startup_pool = alarm_pool_get_default();
+  alarm_pool_timer_t *startup_timer = alarm_pool_get_default_timer();
+  const uint startup_alarm = alarm_pool_timer_alarm_num(startup_pool);
+  const uint startup_irq = TIMER_ALARM_IRQ_NUM(
+      (timer_hw_t *)startup_timer, startup_alarm);
+  const irq_handler_t startup_vtable_handler =
+      irq_get_vtable_handler(startup_irq);
+  const irq_handler_t startup_exclusive_handler =
+      irq_get_exclusive_handler(startup_irq);
+  printf("[ALARM_DIAG] startup observation only: core=%lu pool=%08lx "
+         "timer=%08lx pool_core=%lu alarm=%lu irq=%lu enabled=%u "
+         "vtor=%08lx vtable=%08lx exclusive=%08lx task_irq=%u\n",
+         (unsigned long)get_core_num(),
+         (unsigned long)(uintptr_t)startup_pool,
+         (unsigned long)(uintptr_t)startup_timer,
+         (unsigned long)alarm_pool_core_num(startup_pool),
+         (unsigned long)startup_alarm, (unsigned long)startup_irq,
+         (unsigned)irq_is_enabled(startup_irq),
+         (unsigned long)scb_hw->vtor,
+         (unsigned long)(uintptr_t)startup_vtable_handler,
+         (unsigned long)(uintptr_t)startup_exclusive_handler,
+         (unsigned)g_task_irq);
+#endif
 }
 
 // ★panic からしか呼ばない (board.cpp)。USB を生かすのに要る 3 本の IRQ だけ

@@ -134,7 +134,21 @@ shizuku_armv6m_debugmon_entry:
 .type shizuku_armv6m_systick_entry,%function
 shizuku_armv6m_systick_entry:
   push {r4, lr}
+#if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+  mov r1, lr
+  movs r2, #4
+  tst r1, r2
+  beq 1f
+  mrs r0, PSP
+  b 2f
+1:
+  mrs r0, MSP
+  adds r0, #8
+2:
+  bl shizuku_armv6m_systick_dispatch_frame
+#else
   bl shizuku_armv6m_systick_dispatch
+#endif
   pop {r4, pc}
 .global shizuku_armv6m_enter_thread_mode
 .type shizuku_armv6m_enter_thread_mode,%function

@@ -10,6 +10,9 @@
 //    「1 つの暴走が全系を凍らせない」ための安全網。
 #include "shizuku/kernel.hpp"
 
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+extern "C" void shizuku_selftest_fault_phase(uint32_t, uint32_t);
+#endif
 namespace shizuku {
 
 // 実装より前に使う (do_switch が grant_unwind を、grant_unwind が arm_timer を呼ぶ)
@@ -443,6 +446,10 @@ template <> void KERNEL::fault_dispatch(KERNEL::CONTEXT *context) {
   const uint32_t core = BOARD::core_num();
   const uint32_t thread = m_current[core];
   const uint32_t status = ARCH::fault_status();
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+  shizuku_selftest_fault_phase(10, thread);
+#endif
+
   // ★触ろうとした先は**消す前に**読む。違反の記録を消すと同時に無効になるので、
   //   順序を逆にすると意味のない値を報告してしまう (実際それで嘘の値が出た)。
   const uintptr_t address = ARCH::fault_address();
@@ -452,6 +459,10 @@ template <> void KERNEL::fault_dispatch(KERNEL::CONTEXT *context) {
   m_faults.status = status;
   m_faults.thread = thread;
   ARCH::fault_status_clear();
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+  shizuku_selftest_fault_phase(11, m_grants[core].depth);
+#endif
+
 
   // ★止めても直らないのは「カーネル自身が落ちた」場合だけ。スレッドモードで
   //   落ちたのなら、そのスレッドを止めれば系は続けられる。
@@ -460,31 +471,56 @@ template <> void KERNEL::fault_dispatch(KERNEL::CONTEXT *context) {
                        (unsigned long)pc, (unsigned long)status);
     BOARD::panic("fault in kernel context");
   }
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+  shizuku_selftest_fault_phase(12, 0);
+#endif
+
 
   BOARD::diag_printf("[FAULT] thread %lu stopped: pc=%08lx addr=%08lx "
                      "cfsr=%08lx sp=%08lx (系は継続)\n",
                      (unsigned long)thread, (unsigned long)pc,
                      (unsigned long)address,
                      (unsigned long)status, (unsigned long)(uintptr_t)context->sp);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+  shizuku_selftest_fault_phase(13, 0);
+#endif
+
 
   ARCH::store_release32(&m_threads[thread].thread.state,
                         (uint32_t)THREAD::state_t::TERMINATED);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+  shizuku_selftest_fault_phase(14, 0);
+#endif
+
 
   // 借り手として走っていたなら、貸し手へ返すのが自然な復帰先 (貸した側は
   // 「期限が来た」のと同じ形で戻ってくる)。
   if (m_grants[core].depth != 0) {
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+    shizuku_selftest_fault_phase(15, 0);
+#endif
     grant_unwind(grant_end::EXPIRED);
     return;
   }
   // そうでなければ、あらかじめ教えられている復帰先へ渡す。誰に渡すかは方針なので
   // カーネルは選ばない — 教えられていないなら渡す先が無い。
   kernel_error error = kernel_error::OK;
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+  shizuku_selftest_fault_phase(16, m_recovery_thread);
+#endif
   if (m_recovery_thread < m_thread_count && claim(m_recovery_thread, error)) {
     m_current[core] = m_recovery_thread;
     return;
   }
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+  shizuku_selftest_fault_phase(17, m_recovery_thread);
+#endif
   BOARD::diag_printf("[FAULT] 渡す先が無い (recovery=%lu)\n",
                      (unsigned long)m_recovery_thread);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+  shizuku_selftest_fault_phase(18, m_recovery_thread);
+#endif
+
   BOARD::panic("no thread to run after fault");
 }
 

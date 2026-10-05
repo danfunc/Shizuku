@@ -11,6 +11,13 @@
 #include "shizuku/selftest.hpp"
 #include "shizuku/stream.hpp"
 
+#if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+extern "C" void shizuku_selftest_progress_mark(uint32_t stage, uint32_t a, uint32_t b);
+#define SHIZUKU_PROG(stage, a, b) shizuku_selftest_progress_mark((stage), (a), (b))
+#else
+#define SHIZUKU_PROG(stage, a, b) ((void)0)
+#endif
+
 namespace shizuku {
 namespace selftest {
 namespace {
@@ -54,7 +61,13 @@ api_result api(object_api number, uintptr_t a1 = 0, uintptr_t a2 = 0,
 }
 
 uintptr_t producer(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+#if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+  const api_result bound =
+      api(object_api::STREAM_BIND, g_stream_id, (uintptr_t)stream::role::PRODUCER);
+  SHIZUKU_PROG(50, (uint32_t)bound.error, (uint32_t)bound.value);
+#else
   api(object_api::STREAM_BIND, g_stream_id, (uintptr_t)stream::role::PRODUCER);
+#endif
   auto out = g_ring.hdl();
   for (uint32_t index = 1; index <= RECORDS; ++index) {
     item record{index, BOARD::core_num()};
@@ -70,7 +83,13 @@ uintptr_t producer(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 }
 
 uintptr_t consumer(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+#if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+  const api_result bound =
+      api(object_api::STREAM_BIND, g_stream_id, (uintptr_t)stream::role::CONSUMER);
+  SHIZUKU_PROG(51, (uint32_t)bound.error, (uint32_t)bound.value);
+#else
   api(object_api::STREAM_BIND, g_stream_id, (uintptr_t)stream::role::CONSUMER);
+#endif
   auto in = g_ring.hdl();
   uint32_t expected = 1;
   uint32_t idle = 0;
@@ -111,6 +130,7 @@ void check(const char *name, bool ok, unsigned long got, unsigned long want) {
 
 void stream_ladder() {
   BOARD::diag_printf("[SELFTEST] stream ladder start\n");
+  SHIZUKU_PROG(1, 0, 0);
   g_ring.init(stream::LOSSLESS);
 
   const api_result created =
@@ -122,15 +142,69 @@ void stream_ladder() {
   const api_result opened = api(object_api::STREAM_OPEN, g_stream_id);
   check("stream: opened by id", opened.value == (uintptr_t)&g_ring.desc,
         (unsigned long)opened.value, (unsigned long)&g_ring.desc);
+  SHIZUKU_PROG(10, (uint32_t)created.error, (uint32_t)(opened.value == (uintptr_t)&g_ring.desc));
 
+#if !(defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0)
   api(object_api::CREATE_OBJECT, OBJECT_PRODUCER, (uintptr_t)&producer, 0);
   api(object_api::CREATE_OBJECT, OBJECT_CONSUMER, (uintptr_t)&consumer, 0);
   api(object_api::SPAWN, OBJECT_PRODUCER, METHOD_MAIN, 0);
   api(object_api::SPAWN, OBJECT_CONSUMER, METHOD_MAIN, 0);
+#else
+  const api_result created_producer =
+      api(object_api::CREATE_OBJECT, OBJECT_PRODUCER, (uintptr_t)&producer, 0);
+  SHIZUKU_PROG(20, (uint32_t)created_producer.error, (uint32_t)created_producer.value);
+#if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+  BOARD::diag_printf("[SELFTEST_PROG] CREATE_OBJECT producer: error=%lu value=%lu\n",
+                      (unsigned long)created_producer.error,
+                      (unsigned long)created_producer.value);
+#endif
+  const api_result created_consumer =
+      api(object_api::CREATE_OBJECT, OBJECT_CONSUMER, (uintptr_t)&consumer, 0);
+  SHIZUKU_PROG(21, (uint32_t)created_consumer.error, (uint32_t)created_consumer.value);
+#if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+  BOARD::diag_printf("[SELFTEST_PROG] CREATE_OBJECT consumer: error=%lu value=%lu\n",
+                      (unsigned long)created_consumer.error,
+                      (unsigned long)created_consumer.value);
+#endif
+  const api_result spawned_producer =
+      api(object_api::SPAWN, OBJECT_PRODUCER, METHOD_MAIN, 0);
+  SHIZUKU_PROG(22, (uint32_t)spawned_producer.error, (uint32_t)spawned_producer.value);
+#if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+  BOARD::diag_printf("[SELFTEST_PROG] SPAWN producer: error=%lu value=%lu\n",
+                      (unsigned long)spawned_producer.error,
+                      (unsigned long)spawned_producer.value);
+#endif
+  const api_result spawned_consumer =
+      api(object_api::SPAWN, OBJECT_CONSUMER, METHOD_MAIN, 0);
+  SHIZUKU_PROG(23, (uint32_t)spawned_consumer.error, (uint32_t)spawned_consumer.value);
+#if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+  BOARD::diag_printf("[SELFTEST_PROG] SPAWN consumer: error=%lu value=%lu\n",
+                      (unsigned long)spawned_consumer.error,
+                      (unsigned long)spawned_consumer.value);
+#endif
+#endif
 
   for (uint32_t guard = 0;
-       guard < 400000 && (g_producer_done == 0 || g_consumer_done == 0); ++guard)
+       guard < 400000 && (g_producer_done == 0 || g_consumer_done == 0); ++guard) {
+#if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+    if ((guard % 10000) == 0) {
+      SHIZUKU_PROG(30, guard, (g_pushed & 0xffffu) | ((g_popped & 0xffffu) << 16));
+      BOARD::diag_printf(
+          "[SELFTEST_PROG] guard=%lu pushed=%lu popped=%lu prod_done=%lu cons_done=%lu full_hits=%lu\n",
+          (unsigned long)guard, (unsigned long)g_pushed, (unsigned long)g_popped,
+          (unsigned long)g_producer_done, (unsigned long)g_consumer_done,
+          (unsigned long)g_full_hits);
+    }
+#endif
     api(object_api::YIELD);
+  }
+  SHIZUKU_PROG(40, (uint32_t)g_pushed, (g_producer_done ? 1u : 0u) | (g_consumer_done ? 2u : 0u));
+#if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+  BOARD::diag_printf(
+      "[SELFTEST_PROG] guard loop ended: pushed=%lu popped=%lu prod_done=%lu cons_done=%lu\n",
+      (unsigned long)g_pushed, (unsigned long)g_popped,
+      (unsigned long)g_producer_done, (unsigned long)g_consumer_done);
+#endif
 
   check("stream: the producer sent every record", g_pushed == RECORDS,
         (unsigned long)g_pushed, (unsigned long)RECORDS);

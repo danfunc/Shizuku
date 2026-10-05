@@ -14,6 +14,36 @@
 //   別物になるので、必ずファイルスコープの extern "C" で受ける (同じ罠を
 //   __end__ で一度踏んでいる)。
 extern "C" char __flash_binary_end;
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+extern "C" void shizuku_selftest_progress_mark(uint32_t, uint32_t, uint32_t);
+#define FS_PROG(stage, a) shizuku_selftest_progress_mark((stage), (a), 0)
+#include "hardware/structs/scb.h"
+#include "hardware/structs/watchdog.h"
+#include "pico/multicore.h"
+extern "C" void __not_in_flash_func(shizuku_fs_fault_c)(uint32_t *frame) {
+  watchdog_hw->scratch[4] = 0xFA17FA17u;
+  watchdog_hw->scratch[5] = frame[6];
+  watchdog_hw->scratch[6] = frame[5];
+  watchdog_hw->scratch[7] = frame[7];
+  for (;;) {
+  }
+}
+extern "C" __attribute__((naked, section(".time_critical.fs_fault_entry"))) void
+shizuku_fs_fault_entry() {
+  __asm volatile("mov r0, lr\n\t"
+                 "movs r1, #4\n\t"
+                 "tst r0, r1\n\t"
+                 "bne 1f\n\t"
+                 "mrs r0, msp\n\t"
+                 "b 2f\n\t"
+                 "1: mrs r0, psp\n\t"
+                 "2: ldr r1, =shizuku_fs_fault_c\n\t"
+                 "bx r1\n\t"
+                 ".ltorg\n\t");
+}
+#else
+#define FS_PROG(stage, a) ((void)0)
+#endif
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
 extern "C" void shizuku_boot_trace_phase(uint32_t stage);
 #endif
@@ -209,7 +239,9 @@ void flash_write(uint32_t offset, const uint8_t *ram_data, uint32_t bytes,
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(810);
 #endif
+  FS_PROG(700, offset);
   KERNEL::BOARD::park_other_cores();
+  FS_PROG(701, offset);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(811);
 #endif
@@ -217,12 +249,30 @@ void flash_write(uint32_t offset, const uint8_t *ram_data, uint32_t bytes,
   // ★消去・書込み中の ROM ルーチンは XIP 領域や周辺レジスタを特権で触る。MPU が
   //   有効だとそこで fault するので、割込み禁止・他コア停止の区間だけ止める。
   ARCH::protection_disable();
+  FS_PROG(702, offset);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+  uint32_t fs_control, fs_primask;
+  __asm volatile("mrs %0, control" : "=r"(fs_control));
+  __asm volatile("mrs %0, primask" : "=r"(fs_primask));
+  const uint32_t fs_info = (multicore_lockout_victim_is_initialized(1) ? 1u : 0u) |
+                           ((fs_control & 1u) << 1) | ((fs_primask & 1u) << 2) |
+                           (get_core_num() << 3);
+  volatile uint32_t *fs_vtable = (volatile uint32_t *)scb_hw->vtor;
+  const uint32_t fs_old_fault = fs_vtable[3];
+  fs_vtable[3] = (uint32_t)shizuku_fs_fault_entry | 1u;
+  __asm volatile("dsb\n\tisb" ::: "memory");
+  watchdog_hw->scratch[4] = 0;
+#endif
   if (erase_first) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     shizuku_boot_trace_phase(812);
 #endif
     const uint64_t began = ::time_us_64();
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+    shizuku_selftest_progress_mark(703, offset, fs_info);
+#endif
     ::flash_range_erase(offset, erase_bytes);
+    FS_PROG(704, offset);
     g_erase_us += ::time_us_64() - began;
     ++g_erase_count;
     g_erased_bytes += erase_bytes;
@@ -235,16 +285,23 @@ void flash_write(uint32_t offset, const uint8_t *ram_data, uint32_t bytes,
     shizuku_boot_trace_phase(814);
 #endif
     const uint64_t began = ::time_us_64();
+    FS_PROG(705, offset);
     ::flash_range_program(offset, ram_data, bytes);
+    FS_PROG(706, offset);
     g_program_us += ::time_us_64() - began;
     ++g_program_count;
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     shizuku_boot_trace_phase(815);
 #endif
   }
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+  fs_vtable[3] = fs_old_fault;
+#endif
   ARCH::protection_enable();
   restore_interrupts(interrupts);
+  FS_PROG(707, offset);
   KERNEL::BOARD::resume_other_cores();
+  FS_PROG(708, offset);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(816);
 #endif
@@ -813,8 +870,10 @@ uint32_t flash_fs_probe() {
   // (1) 前回焼いたものが残っているか。★これは「今書いて今読む」では確かめられない
   //     ので、**書く前に**見る。
   flash_lookup lookup{"probe.txt", 0, 0};
+  FS_PROG(710, 0);
   api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
       (uintptr_t)flash_fs_method::LOOKUP, (uintptr_t)&lookup);
+  FS_PROG(711, 0);
   bool survived = lookup.address != 0 && lookup.bytes == PAYLOAD_BYTES;
   if (survived) {
     const char *previous = (const char *)lookup.address;
@@ -835,7 +894,9 @@ uint32_t flash_fs_probe() {
   //     ★これは多コアの試験でもある: 消去中は XIP が止まるので、もう一方のコアが
   //       止められていなければそのコアは flash 上のコードを踏んで即死する。
   uintptr_t first = 0;
+  FS_PROG(712, 0);
   failures += store_and_report("probe.txt", PAYLOAD, PAYLOAD_BYTES, first);
+  FS_PROG(713, 0);
   if (first == 0) {
     // 空きが尽きた。★ここが「詰め直さない」設計の代償を払う場所 —
     //   配ったアドレスを動かせない以上、まとめて捨てる以外に回収の道が無い (D21)。

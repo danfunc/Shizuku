@@ -18,9 +18,17 @@
 #include "hardware/structs/watchdog.h"
 #include "pico/bootrom.h"
 #endif
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+#include "hardware/watchdog.h"
+#include "hardware/structs/watchdog.h"
+#include "pico/bootrom.h"
+#endif
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
 extern "C" bool shizuku_boot_fault_registers(uint32_t *);
 extern "C" void shizuku_boot_trace_stack(uint32_t,uint32_t);
+extern "C" bool shizuku_boot_diag_data(uint32_t *, uint32_t);
+extern "C" void shizuku_boot_diag_get_summary(uint32_t *, uint32_t *, uint32_t *);
+extern "C" bool shizuku_boot_diag_get_ring_entry(uint32_t, uint32_t *, uint32_t *, uint32_t *, uint32_t *, uint32_t *, uint32_t *);
 #endif
 
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
@@ -58,6 +66,13 @@ void boot_stage(uint32_t stage) {
 // スレッド 0 が最初に走らせるコード = 系の組み立て。ここはまだどのオブジェクトの
 // メソッドでもない (フレーム 0 段) ので、撃った svc はオブジェクトと同じ経路で
 // カーネルオブジェクトのハンドラへ届く。
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+extern "C" void shizuku_selftest_progress_mark(uint32_t, uint32_t, uint32_t);
+extern "C" bool shizuku_selftest_fault_read(uint32_t *);
+#define APP_PROG(stage) shizuku_selftest_progress_mark((stage), 0, 0)
+#else
+#define APP_PROG(stage) ((void)0)
+#endif
 void shizuku::app_entry() {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   boot_stage(kAppEntry);
@@ -124,11 +139,14 @@ void shizuku::app_entry() {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   boot_stage(kFlashFsProbe);
 #endif
+  APP_PROG(60);
   shizuku::objects::flash_fs_probe();
+  APP_PROG(61);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   boot_stage(kFlashStream);
 #endif
   shizuku::selftest::flash_stream_ladder();
+  APP_PROG(62);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   boot_stage(kThermal);
 #endif
@@ -139,12 +157,14 @@ void shizuku::app_entry() {
   // 温度の履歴アプリ。★負荷試験より前に起こして、負荷の下で周期がどれだけ
   //   揺らぐかを見る (静かな系で測っても揺らぎの話にならない)。
   shizuku::apps::start_thermal();
+  APP_PROG(63);
 
   // 負荷試験を起動する。以後、点滅と報告は専用スレッドが行う。
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   boot_stage(kStress);
 #endif
   const uint32_t blink_thread = shizuku::selftest::stress_launch();
+  APP_PROG(64);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   boot_stage(kBootComplete);
   for (uint32_t second = 0; second < 40; ++second) {
@@ -191,6 +211,8 @@ int main() {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   fault_regs_valid=shizuku_boot_fault_registers(fault_regs) &&
                    recovered_watchdog && hardfault_snapshot;
+  uint32_t diag_words[16]={};
+  bool diag_valid=shizuku_boot_diag_data(diag_words, 16) && recovered_watchdog;
 #endif
   watchdog_disable();
   if (recovered_watchdog)
@@ -218,6 +240,37 @@ int main() {
       if(fault_regs_valid)
         printf("boot_stack=[%08lx,%08lx)\n",
                (unsigned long)fault_regs[5], (unsigned long)fault_regs[6]);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+      if(diag_valid) {
+        printf("diag min_sp=%08lx last_sp=%08lx near_bottom_hits=%lu\n",
+               (unsigned long)diag_words[0], (unsigned long)diag_words[1],
+               (unsigned long)diag_words[2]);
+        printf("diag last_prim=%lu sp_before=%08lx sp_after=%08lx\n",
+               (unsigned long)diag_words[3], (unsigned long)diag_words[4],
+               (unsigned long)diag_words[5]);
+        printf("diag pools=[%08lx,%08lx,%08lx,%08lx]\n",
+               (unsigned long)diag_words[6], (unsigned long)diag_words[7],
+               (unsigned long)diag_words[8], (unsigned long)diag_words[9]);
+        printf("diag def_pool=[%08lx,%08lx,%08lx,%08lx,%08lx,%08lx]\n",
+               (unsigned long)diag_words[10], (unsigned long)diag_words[11],
+               (unsigned long)diag_words[12], (unsigned long)diag_words[13],
+               (unsigned long)diag_words[14], (unsigned long)diag_words[15]);
+        uint32_t max_depth = 0, max_depth_sp = 0, ring_count = 0;
+        shizuku_boot_diag_get_summary(&max_depth, &max_depth_sp, &ring_count);
+        printf("diag max_depth=%lu max_depth_sp=%08lx total_pushes=%lu\n",
+               (unsigned long)max_depth, (unsigned long)max_depth_sp,
+               (unsigned long)ring_count);
+        for(uint32_t ring_i = 0; ring_i < 24; ++ring_i) {
+          uint32_t thr = 0, depth = 0, obj = 0, kind = 0, hobj = 0, sp = 0;
+          if(shizuku_boot_diag_get_ring_entry(ring_i, &thr, &depth, &obj, &kind, &hobj, &sp)) {
+            printf("diag ring %lu: thr=%lu depth=%lu obj=%lu kind=%lu hobj=%lu sp=%08lx\n",
+                   (unsigned long)ring_i, (unsigned long)thr, (unsigned long)depth,
+                   (unsigned long)obj, (unsigned long)kind, (unsigned long)hobj,
+                   (unsigned long)sp);
+          }
+        }
+      }
+#endif
       fflush(stdout);
       sleep_ms(900);
     }
@@ -266,6 +319,54 @@ int main() {
   shizuku::kernel_instance.bootstrap(shizuku::app_entry, boot.base, boot.bytes);
 #endif
 #else
+#if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+  // ★stream_ladder 等が割込み禁止のまま止まったとき (SysTick も死ぬので
+  //   shizuku_armv6m_systick_dispatch の feed も止まる) に、watchdog リセット
+  //   で確実に BOOTSEL へ戻す。scratch レジスタは電源断を伴わないリセットでは
+  //   保持されるので、停止直前の進捗 (shizuku_selftest_progress_mark) を読める。
+  constexpr uint32_t kSelftestProgressMagic = 0x53505247u; // "SPRG"
+  const bool selftest_progress_recovered =
+      watchdog_caused_reboot() && watchdog_hw->scratch[0] == kSelftestProgressMagic;
+  const uint32_t selftest_progress_stage = watchdog_hw->scratch[1];
+  const uint32_t selftest_progress_a = watchdog_hw->scratch[2];
+  const uint32_t selftest_progress_b = watchdog_hw->scratch[3];
+  const uint32_t selftest_fault4 = watchdog_hw->scratch[4];
+  const uint32_t selftest_fault5 = watchdog_hw->scratch[5];
+  const uint32_t selftest_fault6 = watchdog_hw->scratch[6];
+  const uint32_t selftest_fault7 = watchdog_hw->scratch[7];
+  uint32_t st_fault[18] = {};
+  const bool st_fault_valid = selftest_progress_recovered && shizuku_selftest_fault_read(st_fault);
+  watchdog_disable();
+  if (selftest_progress_recovered) {
+    shizuku::objects::usb_cdc_init();
+    for (uint32_t i = 0; i < 20; ++i) {
+      printf("[SELFTEST_PROG] watchdog reset: stage=%lu a=%lu b=%lu\n",
+             (unsigned long)selftest_progress_stage,
+             (unsigned long)selftest_progress_a,
+             (unsigned long)selftest_progress_b);
+      printf("[SELFTEST_PROG] fs_fault=%08lx pc=%08lx lr=%08lx xpsr=%08lx\n",
+             (unsigned long)selftest_fault4, (unsigned long)selftest_fault5,
+             (unsigned long)selftest_fault6, (unsigned long)selftest_fault7);
+      if (st_fault_valid) {
+        printf("[SELFTEST_PROG] kfault phase=%lu arg=%lu count=%lu pc=%08lx lr=%08lx xpsr=%08lx\n",
+               (unsigned long)st_fault[0], (unsigned long)st_fault[17], (unsigned long)st_fault[1],
+               (unsigned long)st_fault[2], (unsigned long)st_fault[3], (unsigned long)st_fault[4]);
+        printf("[SELFTEST_PROG] kfault r0-3=%08lx %08lx %08lx %08lx excret=%08lx ctl=%lu ipsr=%lu\n",
+               (unsigned long)st_fault[5], (unsigned long)st_fault[6], (unsigned long)st_fault[7],
+               (unsigned long)st_fault[8], (unsigned long)st_fault[9], (unsigned long)st_fault[10],
+               (unsigned long)st_fault[11]);
+        printf("[SELFTEST_PROG] tick sample pc=%08lx lr=%08lx xpsr=%08lx hits=%lu stage=%lu\n",
+               (unsigned long)st_fault[12], (unsigned long)st_fault[13], (unsigned long)st_fault[14],
+               (unsigned long)st_fault[15], (unsigned long)st_fault[16]);
+      }
+      fflush(stdout);
+      sleep_ms(200);
+    }
+    reset_usb_boot(0, 0);
+  }
+  watchdog_hw->scratch[0] = 0;
+  watchdog_enable(8000, true);
+#endif
   // ★USB は自前で持つ (CDC 2 本: 診断と GDB)。pico_stdio_usb は 1 本前提で、
   //   記述子も差し替えられないため (D42)。
   shizuku::objects::usb_cdc_init();

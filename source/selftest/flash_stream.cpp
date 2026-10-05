@@ -20,6 +20,12 @@
 #include "shizuku/selftest.hpp"
 #include "shizuku/stream.hpp"
 
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+extern "C" void shizuku_selftest_progress_mark(uint32_t, uint32_t, uint32_t);
+#define FSTREAM_PROG(stage) shizuku_selftest_progress_mark((stage), 0, 0)
+#else
+#define FSTREAM_PROG(stage) ((void)0)
+#endif
 namespace shizuku {
 namespace selftest {
 namespace {
@@ -120,6 +126,7 @@ void check(const char *name, bool ok, unsigned long got, unsigned long want) {
 void flash_stream_ladder() {
   using namespace shizuku::objects;
   BOARD::diag_printf("[SELFTEST] flash stream ladder start\n");
+  FSTREAM_PROG(610);
 
   api(object_api::CREATE_OBJECT, OBJECT_WRITER, (uintptr_t)&unprivileged_writer,
       OBJECT_UNPRIVILEGED);
@@ -129,25 +136,30 @@ void flash_stream_ladder() {
       OBJECT_UNPRIVILEGED);
   api(object_api::CREATE_OBJECT, OBJECT_TRESPASSER,
       (uintptr_t)&flash_trespasser, OBJECT_UNPRIVILEGED);
+  FSTREAM_PROG(611);
 
   // ---- 書き: 非特権がバイトを流し、特権側が焼く ----------------------------
   flash_open opening{"unpriv.bin", 4096, 0, 0, 0, 0};
   const api_result opened =
       api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
           (uintptr_t)flash_fs_method::OPEN_WRITE, (uintptr_t)&opening);
+  FSTREAM_PROG(612);
   check("flash stream: opened for writing", opened.value != 0,
         (unsigned long)opened.value, 1);
   if (opened.value == 0)
     return;
   const api_result write_desc = api(object_api::STREAM_OPEN, opening.stream);
   // ★席を明け渡す: producer は非特権の書き手にする。FS は consumer のまま。
+  FSTREAM_PROG(613);
   const api_result wrote = api(object_api::CALL_METHOD, OBJECT_WRITER, 0,
                                write_desc.value);
+  FSTREAM_PROG(614);
   check("flash stream: the unprivileged writer ran non-privileged",
         (wrote.value & 1u) == 1u, (unsigned long)wrote.value, 1);
   const api_result closed =
       api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
           (uintptr_t)flash_fs_method::CLOSE_WRITE, 0);
+  FSTREAM_PROG(615);
   check("flash stream: the whole payload reached flash",
         closed.value == PAYLOAD_BYTES, (unsigned long)closed.value,
         (unsigned long)PAYLOAD_BYTES);

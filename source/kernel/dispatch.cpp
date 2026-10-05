@@ -36,6 +36,14 @@
 
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
 extern "C" void shizuku_boot_trace_phase(uint32_t);
+extern "C" void shizuku_boot_trace_push(uint32_t);
+extern "C" void shizuku_boot_trace_push_context(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+extern "C" void shizuku_boot_trace_primitive_number(uint32_t);
+extern "C" void shizuku_boot_trace_call_enter(uint32_t, uint32_t);
+extern "C" void shizuku_boot_trace_call_leave(uint32_t, uint32_t);
+extern "C" void shizuku_boot_trace_return_enter(uint32_t, uint32_t);
+extern "C" void shizuku_boot_trace_return_leave(uint32_t, uint32_t);
+extern "C" void shizuku_boot_trace_primitive_stage(uint32_t);
 #endif
 
 namespace shizuku {
@@ -107,6 +115,15 @@ bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   *frame = context->sp;
   thread.call_stack.top = snapshot;
   thread.call_stack.depth++;
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_push_context(
+      (uint32_t)callee_frame,
+      (uint32_t)m_current[BOARD::core_num()],
+      thread.call_stack.depth,
+      thread.current_object,
+      thread.current_kind,
+      thread.current_handler_object);
+#endif
   return true;
 }
 
@@ -180,8 +197,14 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
     shizuku_boot_trace_phase(411);
 #endif
     const uintptr_t number = ARCH::arg(*frame, 0);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+    shizuku_boot_trace_primitive_number((uint32_t)number);
+#endif
     switch ((primitive)number) {
     case primitive::CALL: {
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+      shizuku_boot_trace_call_enter((uint32_t)context->sp, (uint32_t)frame);
+#endif
       const call_request *pointer = (const call_request *)ARCH::arg(*frame, 1);
       if (pointer == nullptr) {
         ARCH::set_result(*frame, (uintptr_t)kernel_error::BAD_REQUEST, 0);
@@ -189,11 +212,17 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
       }
       const call_request request = *pointer;
       const kernel_error error = do_call(thread, context, &frame, request);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+      shizuku_boot_trace_call_leave((uint32_t)context->sp, (uint32_t)frame);
+#endif
       if (error != kernel_error::OK)
         ARCH::set_result(*frame, (uintptr_t)error, 0);
       break;
     }
     case primitive::RETURN: {
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+      shizuku_boot_trace_return_enter((uint32_t)context->sp, (uint32_t)frame);
+#endif
       const uintptr_t count = ARCH::arg(*frame, 1);
       const uintptr_t value = ARCH::arg(*frame, 2);
       const uintptr_t error = ARCH::arg(*frame, 3);
@@ -213,15 +242,24 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
       }
       for (uintptr_t index = 0; index < count; ++index)
         call_frame_pop(thread, context, &frame);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+      shizuku_boot_trace_return_leave((uint32_t)context->sp, (uint32_t)frame);
+#endif
       ARCH::set_result(*frame, error, value);
       break;
     }
     case primitive::SWITCH: {
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+      shizuku_boot_trace_primitive_stage(417);
+#endif
       const kernel_error error = do_switch((uint32_t)ARCH::arg(*frame, 1));
       ARCH::set_result(*frame, (uintptr_t)error, 0);
       break;
     }
     case primitive::GRANT: {
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+      shizuku_boot_trace_primitive_stage(418);
+#endif
       const uint32_t target = (uint32_t)ARCH::arg(*frame, 1);
       const uint32_t cycles = (uint32_t)ARCH::arg(*frame, 2);
       ARCH::set_result(*frame, (uintptr_t)kernel_error::OK,
@@ -235,6 +273,9 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
       BOARD::panic("unknown kernel primitive");
       break;
     }
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+    shizuku_boot_trace_primitive_stage(425);
+#endif
     return;
   }
 
