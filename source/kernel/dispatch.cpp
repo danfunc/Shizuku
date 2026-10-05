@@ -95,6 +95,9 @@ bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   header->prev = thread.call_stack.top;
   header->total_bytes = total;
   header->frame_bytes = frame_bytes;
+  // ★以下 4 つは pop 時に thread.current_* を**戻り先の文脈として復元する**ためだけに
+  //   退避する。identity の判定 (caller や exit の行き先) には使わない: ヘッダは
+  //   スレッドスタック上にあり、その判定は kobj の影スタックから導く。
   header->caller_object = thread.current_object; // ★呼び出し元オブジェクトを退避
   header->caller_kind = thread.current_kind;     // ★その種別も一緒に退避
   header->caller_handler_object = thread.current_handler_object; // ★親ハンドラ情報も退避

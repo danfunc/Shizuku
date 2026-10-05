@@ -220,12 +220,6 @@ public:
     return m_threads[current_thread_id()].thread;
   }
   uint32_t current_depth() const { return current_thread().call_stack.depth; }
-  uint32_t current_caller_object() const {
-    const auto top = current_thread().call_stack.top;
-    if (top == 0)
-      return 0;
-    return ((const call_frame_header *)top)->caller_object;
-  }
   // スケジューリング方針 (kobj 側) が候補を探すための読み出し。
   // そのスレッドを走らせてよいコアの集合 (方針側が候補を絞るために読む)。
   uint32_t thread_affinity(uint32_t thread) const {

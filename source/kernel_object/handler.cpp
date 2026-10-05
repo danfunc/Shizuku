@@ -262,6 +262,21 @@ template <> uint32_t KERNEL_OBJECT::claimed_depth() const {
   return 2u * m_shadow[kernel_instance.current_thread_id()].depth + 1u;
 }
 
+template <>
+uint32_t KERNEL_OBJECT::interposed_handler(uint32_t thread) const {
+  const shadow_t &shadow = m_shadow[thread];
+  if (shadow.depth == 0 ||
+      kernel_instance.current_depth() != 2u * shadow.depth + 2u)
+    return (uint32_t)NO_OBJECT;
+  const uint32_t child = shadow.object[shadow.depth - 1];
+  if (child >= OBJECT_COUNT)
+    return (uint32_t)NO_OBJECT;
+  const uint32_t handler = m_objects[child].parent_handler_object;
+  if (handler >= OBJECT_COUNT || m_objects[handler].kind != object_kind::HANDLER)
+    return (uint32_t)NO_OBJECT;
+  return handler;
+}
+
 // 巻き戻さずにその場で答える。**エラーを黙って捨てない**ための共通口 (D12)。
 template <> void KERNEL_OBJECT::reply(object_error error, uintptr_t value) {
   ARCH::syscall((uintptr_t)primitive::RETURN, 1, value, (uintptr_t)error,
@@ -494,13 +509,11 @@ template <>
 void KERNEL_OBJECT::exit_method(uintptr_t levels, uintptr_t value,
                                 uintptr_t error) {
   const uint32_t thread = kernel_instance.current_thread_id();
-  const uint32_t caller = kernel_instance.current_caller_object();
   shadow_t &shadow = m_shadow[thread];
 
   // ★専用ハンドラ (HANDLER) が child の処理を終えて通常 return してきた場合 (指摘 6)
-  if (caller != 0 && caller < OBJECT_COUNT &&
-      m_objects[caller].kind == object_kind::HANDLER &&
-      (shadow.depth == 0 || shadow.object[shadow.depth - 1] != caller)) {
+  //   発行元は影スタックから導く (フレームヘッダの caller_object は信用しない)。
+  if (interposed_handler(thread) != (uint32_t)NO_OBJECT) {
     const uint32_t cur_depth = kernel_instance.current_depth();
     const uintptr_t count = 2; // kobj (Frame 2) と dedicated handler (Frame 1) の 2 枚
     if (cur_depth >= count) {
@@ -534,26 +547,12 @@ void KERNEL_OBJECT::exit_method(uintptr_t levels, uintptr_t value,
 template <>
 void KERNEL_OBJECT::forward_child_exit(uintptr_t value, uintptr_t error) {
   const uint32_t thread = kernel_instance.current_thread_id();
-  const uint32_t caller = kernel_instance.current_caller_object();
   shadow_t &shadow = m_shadow[thread];
 
-  // 呼び出し元は専用ハンドラ (HANDLER) でなければならない (重大指摘 1, 2)
-  if (caller == 0 || caller >= OBJECT_COUNT ||
-      m_objects[caller].kind != object_kind::HANDLER) {
-    reply(object_error::NOT_PRIVILEGED, 0);
-    return;
-  }
-
-  // shadow stack の top に子オブジェクトが積まれていることを確認
-  if (shadow.depth == 0) {
-    reply(object_error::UNWIND_REJECTED, 0);
-    return;
-  }
-
-  const uint32_t child_id = shadow.object[shadow.depth - 1];
-  // さらに、その子オブジェクトの親ハンドラがこの caller であることを確認 (なりすまし転送防止)
-  if (child_id >= OBJECT_COUNT ||
-      m_objects[child_id].parent_handler_object != caller) {
+  // 発行元は専用ハンドラ (HANDLER) でなければならない (重大指摘 1, 2)。
+  // ★影スタック先端の子の親ハンドラが、今 SVC を撃っている段として在席していること
+  //   (= なりすまし転送防止) を interposed_handler がまとめて確かめる。
+  if (interposed_handler(thread) == (uint32_t)NO_OBJECT) {
     reply(object_error::NOT_PRIVILEGED, 0);
     return;
   }

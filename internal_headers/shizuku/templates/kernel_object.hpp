@@ -283,6 +283,12 @@ private:
   void reply(object_error error, uintptr_t value);
   // 巻き戻しで申告する「今のネスト数」を**自分の台帳から**計算する (§9.3)。
   uint32_t claimed_depth() const;
+  // 今の SVC を発行したのが、影スタック先端の子の**専用ハンドラ**かどうか。
+  // ★影スタックと自分の台帳 (object 表) だけから導く。フレームヘッダの値は読まない。
+  //   ハンドラは call_method を経由せず svc の振り分けで走るので影スタックには載らないが、
+  //   載っていれば 2*depth+1 のはずのカーネル段数が 1 枚多くなる。その差で在席を知り、
+  //   誰かは先端の子の parent_handler_object から引く。居なければ NO_OBJECT。
+  uint32_t interposed_handler(uint32_t thread) const;
 
   void arena_init(arena &target, uintptr_t base, uintptr_t bytes);
   uintptr_t arena_allocate(arena &target, uintptr_t bytes, uintptr_t owner);
