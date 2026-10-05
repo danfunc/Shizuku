@@ -54,7 +54,8 @@ uintptr_t unprivileged_writer(uintptr_t descriptor, uintptr_t, uintptr_t,
   stream::handle<objects::flash_chunk> out((stream::descriptor *)descriptor);
   uint32_t sent = 0;
   while (sent < PAYLOAD_BYTES) {
-    objects::flash_chunk chunk{};
+    objects::flash_chunk chunk;
+    shizuku_zero_record(&chunk); // `{}` は暗黙に memset を呼ぶ (非特権では落ちる)
     chunk.bytes = PAYLOAD_BYTES - sent < objects::FLASH_CHUNK_BYTES
                       ? PAYLOAD_BYTES - sent
                       : objects::FLASH_CHUNK_BYTES;
