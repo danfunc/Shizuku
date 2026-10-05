@@ -145,6 +145,52 @@ def drain_queue(q: asyncio.Queue) -> List[str]:
 
 
 # ===========================================================================
+#  受信判定ヘルパー (純関数: テスト可能)
+# ===========================================================================
+def is_transfer_error_line(line: str) -> bool:
+    """デバイス側エラー通知 (crc MISMATCH, FAILED, erase failed) の判定"""
+    return any(err in line for err in ["crc MISMATCH", "FAILED", "erase failed"])
+
+
+def check_done_line(line: str, expected_len: int, expected_crc32: int) -> bool:
+    """done 通知行の検証を行う純関数
+    成功条件:
+      - 'done:' かつ 'OK' を含む
+      - '<total> bytes' が expected_len と一致
+      - 'crc=<8桁hex>' が expected_crc32 と一致 (小文字hex)
+      - 'crc MISMATCH', 'FAILED', 'erase failed' を含まない
+    """
+    if is_transfer_error_line(line):
+        return False
+    if "done:" not in line or "OK" not in line:
+        return False
+    if f"{expected_len} bytes" not in line:
+        return False
+    expected_crc_hex = f"{expected_crc32 & 0xFFFFFFFF:08x}"
+    if f"crc={expected_crc_hex}" not in line.lower():
+        return False
+    return True
+
+
+def check_nus_response(received_lines: List[str]) -> bool:
+    """NUS 応答判定: 1 行以上の通知を受信していれば True、0 行なら False"""
+    return len(received_lines) > 0
+
+
+def check_ready_timeout(ready_ok: bool) -> bool:
+    """ready 応答待ち判定: タイムアウト(False)時は失敗(False)"""
+    return bool(ready_ok)
+
+
+def check_commit_line(line: str) -> bool:
+    """commit 受理通知判定: 'commit:' を含みエラー通知でなければ True"""
+    if "commit rejected" in line or "could not start" in line:
+        return False
+    return "commit:" in line
+
+
+
+# ===========================================================================
 #  自己検査 (--selfcheck)
 # ===========================================================================
 def run_selfcheck() -> bool:
@@ -231,7 +277,33 @@ def run_selfcheck() -> bool:
     asyncio.run(_test_q())
     log("  [PASS] キュー・ドレイン動作検算")
 
-    log("=== [SELFCHECK] ALL TESTS PASSED (全 7 項目合格) ===")
+    # 8. done 行判定検算 (意味のある失敗経路テスト)
+    valid_done = "done: 12345 bytes crc=abcdef01 OK (staged at 0x100000)"
+    assert check_done_line(valid_done, 12345, 0xABCDEF01) is True, "valid done line must return True"
+    assert check_done_line("done: 12345 bytes crc=11223344 OK (staged at 0x100000)", 12345, 0xABCDEF01) is False, "crc mismatch must return False"
+    assert check_done_line("done: 99999 bytes crc=abcdef01 OK (staged at 0x100000)", 12345, 0xABCDEF01) is False, "length mismatch must return False"
+    assert check_done_line("done: 12345 bytes crc=abcdef01 NG", 12345, 0xABCDEF01) is False, "missing OK must return False"
+    assert check_done_line("done: crc MISMATCH: expected 0xabcdef01, got 0x11223344", 12345, 0xABCDEF01) is False, "crc MISMATCH must return False"
+    assert check_done_line("FAILED: erase failed", 12345, 0xABCDEF01) is False, "erase failed must return False"
+    log("  [PASS] done 行判定検算 (正常系 / CRC不一致 / 長さ不一致 / OK欠落 / crc MISMATCH / エラー通知)")
+
+    # 9. nus 応答判定検算
+    assert check_nus_response([]) is False, "nus empty response must return False"
+    assert check_nus_response(["reply from dev\n"]) is True, "nus non-empty response must return True"
+    log("  [PASS] NUS 応答判定検算 (無応答時は False / 応答時は True)")
+
+    # 10. ready タイムアウト判定検算
+    assert check_ready_timeout(False) is False, "ready timeout (False) must return False (failure)"
+    assert check_ready_timeout(True) is True, "ready received (True) must return True"
+    log("  [PASS] ready タイムアウト判定検算 (タイムアウト時は失敗)")
+
+    # 11. commit 受理判定検算
+    assert check_commit_line("commit: 12345 bytes -> 0x100000 (4 sectors), no return") is True, "valid commit must return True"
+    assert check_commit_line("commit rejected: size") is False, "commit rejected must return False"
+    assert check_commit_line("commit could not start (rc=-1)") is False, "commit could not start must return False"
+    log("  [PASS] commit 受理判定検算 (正常 / rejected / start失敗)")
+
+    log("=== [SELFCHECK] ALL TESTS PASSED (全 11 項目合格) ===")
     return True
 
 
@@ -297,6 +369,13 @@ async def do_nus(address: str, text: str, timeout: float = 5.0) -> bool:
         await asyncio.sleep(timeout)
         await client.stop_notify(NUS_TX_CHAR_UUID)
 
+    if not check_nus_response(rx_lines):
+        log("NUS: 往復未確認 (タイムアウトまでに NUS TX 通知を受信できませんでした)")
+        return False
+
+    log(f"NUS: 受信確認 ({len(rx_lines)} 件の通知を受信):")
+    for l in rx_lines:
+        log(f"  <- {l.strip()}")
     log("NUS 完了")
     return True
 
@@ -439,8 +518,9 @@ async def do_send(
                 drain_queue(notify_queue)
                 await client.write_gatt_char(OTA_RX_CHAR_UUID, reset_frame, response=True)
                 reset_ok = await wait_for_notify_matching(notify_queue, r"reset", timeout=2.0)
-                if not reset_ok:
-                    log("警告: デバイスからの 'reset' 応答がありませんでしたが続行します")
+                if not check_ready_timeout(reset_ok):
+                    log("ERROR: デバイスからの 'reset' 応答タイムアウト (失敗)")
+                    return False
 
                 # 初期化ヘッダ送信 (XNOR / XNOU)
                 if mode == "xnor":
@@ -455,8 +535,9 @@ async def do_send(
                 drain_queue(notify_queue)
                 await client.write_gatt_char(OTA_RX_CHAR_UUID, init_hdr, response=True)
                 ready_ok = await wait_for_notify_matching(notify_queue, r"ready", timeout=10.0)
-                if not ready_ok:
-                    log("警告: デバイスからの 'ready' 応答がありませんでしたが続行します")
+                if not check_ready_timeout(ready_ok):
+                    log("ERROR: デバイスからの 'ready' 応答タイムアウト (失敗)")
+                    return False
             else:
                 # 再接続時: すでに OTA セッションが残っているため、RESET ではなく QUERY で同期
                 log("再接続後: QUERY フレームを送信して現在の受領状態を確認します...")
@@ -542,9 +623,12 @@ async def do_send(
                             try:
                                 line = await asyncio.wait_for(notify_queue.get(), timeout=1.5)
                                 round_lines.append(line)
+                                if is_transfer_error_line(line):
+                                    log(f"ERROR: デバイス側エラー通知を受信: {line.strip()}")
+                                    return False
                                 if "NEEDEND" in line:
                                     saw_needend = True
-                                if "done:" in line and "OK" in line:
+                                if check_done_line(line, total_len, image_crc32):
                                     transfer_done = True
                                 m = re.search(r"NEED n=(\d+) of=(\d+)", line)
                                 if m:
@@ -566,9 +650,30 @@ async def do_send(
                     if missing_count is not None:
                         if missing_count == 0:
                             log("欠損 0。完了行 (done: OK) を待機します...")
-                            await wait_for_notify_matching(notify_queue, r"done:", timeout=3.0)
-                            transfer_done = True
-                            break
+                            done_lines: List[str] = []
+                            await wait_for_notify_matching(notify_queue, r"done:", timeout=3.0, collected_lines=done_lines)
+                            for l in done_lines:
+                                if is_transfer_error_line(l):
+                                    log(f"ERROR: デバイス側エラー通知を受信: {l.strip()}")
+                                    return False
+                                if check_done_line(l, total_len, image_crc32):
+                                    transfer_done = True
+                                    break
+                            if not transfer_done:
+                                for l in drain_queue(notify_queue):
+                                    if is_transfer_error_line(l):
+                                        log(f"ERROR: デバイス側エラー通知を受信: {l.strip()}")
+                                        return False
+                                    if check_done_line(l, total_len, image_crc32):
+                                        transfer_done = True
+                                        break
+                            if transfer_done:
+                                elapsed_total = time.time() - t_total_start
+                                log(f"★ ファームウェア転送完了！ (device reports done: OK, 全所要時間: {elapsed_total:.2f}s)")
+                                break
+                            else:
+                                log("ERROR: 欠損 0 ですが正しい done: 行 (サイズ・CRC一致) を受信できませんでした")
+                                return False
                         else:
                             parsed_needed = parse_needseq_lines(round_lines)
                             if parsed_needed:
@@ -594,18 +699,55 @@ async def do_send(
                     if packet_delay > 0:
                         await asyncio.sleep(packet_delay)
                 log("全データ送信完了。結果待機中...")
-                await wait_for_notify_matching(notify_queue, r"done:", timeout=5.0)
+                xnou_lines: List[str] = []
+                await wait_for_notify_matching(notify_queue, r"done:", timeout=5.0, collected_lines=xnou_lines)
+                for l in xnou_lines:
+                    if is_transfer_error_line(l):
+                        log(f"ERROR: デバイス側エラー通知を受信: {l.strip()}")
+                        return False
+                    if check_done_line(l, total_len, image_crc32):
+                        transfer_done = True
+                        break
+                if not transfer_done:
+                    for l in drain_queue(notify_queue):
+                        if is_transfer_error_line(l):
+                            log(f"ERROR: デバイス側エラー通知を受信: {l.strip()}")
+                            return False
+                        if check_done_line(l, total_len, image_crc32):
+                            transfer_done = True
+                            break
+                if not transfer_done:
+                    log("ERROR: XNOU 送信完了後に正しい done: 行 (サイズ・CRC一致) を受信できませんでした")
+                    return False
+                log("★ XNOU ファームウェア転送完了！ (device reports done: OK)")
+
+            if not transfer_done:
+                log("ERROR: 転送完了が確認されませんでした")
+                return False
 
             # ---------------------------------------------------------------
             # 3. コミット (--commit)
             # ---------------------------------------------------------------
             if commit:
-                log("=== --commit 指定: XNOC コミットヘッダを送信 ===")
+                log("=== --commit 指定: XNOC 要求を送出 ===")
                 commit_hdr = make_init_header("XNOC", total_len, image_crc32)
+                drain_queue(notify_queue)
                 await client.write_gatt_char(OTA_RX_CHAR_UUID, commit_hdr, response=True)
-                log("XNOC 送信完了。デバイスの再起動メッセージを待機中...")
-                await asyncio.sleep(2.0)
-                log("コミット完了 (デバイスは再起動に入りました)")
+                log("XNOC 要求を送出しました。デバイスからの commit 受理通知を待機中...")
+                commit_lines: List[str] = []
+                await wait_for_notify_matching(notify_queue, r"commit:", timeout=5.0, collected_lines=commit_lines)
+                valid_commit = any(check_commit_line(l) for l in commit_lines)
+                if not valid_commit:
+                    for l in drain_queue(notify_queue):
+                        if check_commit_line(l):
+                            valid_commit = True
+                            break
+                if not valid_commit:
+                    log("XNOC 要求を送出・デバイスから commit 受理通知(commit: を含む行)を未確認 (失敗)")
+                    log("再起動後の新ビルド起動確認は外部シリアルの [BOOT] build: で別途必要")
+                    return False
+                log("XNOC 要求を送出・デバイスから commit 受理通知(commit: を含む行)を確認")
+                log("再起動後の新ビルド起動確認は外部シリアルの [BOOT] build: で別途必要")
 
             await client.stop_notify(NUS_TX_CHAR_UUID)
             log("OTA プロセス正常終了 (SUCCESS)")
