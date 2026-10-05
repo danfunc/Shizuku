@@ -33,6 +33,7 @@
 //    今のネスト数を渡す。オブジェクトは exit API に何段戻すかを載せて撃ち、
 //    ハンドラがその段数で巻き戻す (D5)。
 #include "shizuku/kernel.hpp"
+#include "shizuku/object_api.hpp"
 
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
 extern "C" void shizuku_boot_trace_phase(uint32_t);
@@ -303,7 +304,10 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
   shizuku_boot_trace_phase(412);
 #endif
   if (!call_frame_push(thread, context, &frame)) {
-    ARCH::set_result(*frame, KERNEL_ERROR_MARK | (uintptr_t)kernel_error::NO_STACK, 0);
+    // ★この拒否は object_api の呼出しへの答え。object 版 NO_STACK で返し、呼出し元が
+    //   「どちらの push で断られたか」を区別しなくて済むようにする (KERNEL_ERROR_MARK は
+    //   語彙を持たないエラー用に残す)。
+    ARCH::set_result(*frame, (uintptr_t)object_error::NO_STACK, 0);
     return;
   }
 
