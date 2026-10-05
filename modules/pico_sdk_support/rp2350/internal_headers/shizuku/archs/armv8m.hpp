@@ -193,6 +193,30 @@ public:
     return *(volatile uint32_t *)address;
   }
 
+  // DWT サイクルカウンタ。HAS_CYCLE_COUNTER が true の arch だけが持つ
+  // (concepts/arch.hpp が条件付きで要求する)。TRCENA が元栓、DWT_CTRL bit0 が CYCCNT。
+  static constexpr uintptr_t DWT_CTRL_ADDRESS = 0xE0001000u;
+  static constexpr uintptr_t DWT_CYCCNT_ADDRESS = 0xE0001004u;
+  static constexpr uint32_t DWT_CTRL_CYCCNTENA = 1u << 0;
+
+  // 動いていることを確かめてから true を返す。実装されていない / 元栓が閉まって
+  // いると 0 のままで、気づかないと「0 サイクルで呼べた」と報告してしまう。
+  static bool cycle_counter_enable() {
+    at(DEMCR_ADDRESS) = at(DEMCR_ADDRESS) | DEMCR_TRCENA;
+    asm volatile("dsb" ::: "memory");
+    asm volatile("isb" ::: "memory");
+    at(DWT_CYCCNT_ADDRESS) = 0;
+    at(DWT_CTRL_ADDRESS) = at(DWT_CTRL_ADDRESS) | DWT_CTRL_CYCCNTENA;
+    asm volatile("dsb" ::: "memory");
+    asm volatile("isb" ::: "memory");
+    const uint32_t first = at(DWT_CYCCNT_ADDRESS);
+    for (uint32_t spin = 0; spin < 64; ++spin)
+      asm volatile("nop" ::: "memory");
+    return at(DWT_CYCCNT_ADDRESS) != first;
+  }
+
+  static uint32_t cycle_counter_read() { return at(DWT_CYCCNT_ADDRESS); }
+
   static void debug_enable(bool on) {
     uint32_t demcr = at(DEMCR_ADDRESS);
     // TRCENA は DWT/FPB を動かすのに要る (デバッグ機能全体の元栓)。

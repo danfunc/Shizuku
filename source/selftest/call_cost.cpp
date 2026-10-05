@@ -37,40 +37,12 @@ constexpr uintptr_t OBJECT_COST_LEAF = object_id::cost_leaf;
 constexpr uintptr_t OBJECT_COST_NEST = object_id::cost_nest;
 constexpr uintptr_t METHOD_MAIN = 0;
 
-// ---- DWT サイクルカウンタ ---------------------------------------------------
-// TRCENA (DEMCR bit24) がデバッグ機能全体の元栓。DWT_CTRL bit0 で CYCCNT が動く。
-constexpr uintptr_t DEMCR_ADDRESS = 0xE000EDFCu;
-constexpr uintptr_t DWT_CTRL_ADDRESS = 0xE0001000u;
-constexpr uintptr_t DWT_CYCCNT_ADDRESS = 0xE0001004u;
-constexpr uint32_t DEMCR_TRCENA = 1u << 24;
-constexpr uint32_t DWT_CTRL_CYCCNTENA = 1u << 0;
-
-volatile uint32_t &at(uintptr_t address) {
-  return *(volatile uint32_t *)address;
-}
-
-bool cycle_counter_enable() {
-  at(DEMCR_ADDRESS) = at(DEMCR_ADDRESS) | DEMCR_TRCENA;
-  __asm__ volatile("dsb" ::: "memory");
-  __asm__ volatile("isb" ::: "memory");
-  at(DWT_CYCCNT_ADDRESS) = 0;
-  at(DWT_CTRL_ADDRESS) = at(DWT_CTRL_ADDRESS) | DWT_CTRL_CYCCNTENA;
-  __asm__ volatile("dsb" ::: "memory");
-  __asm__ volatile("isb" ::: "memory");
-  // ★動いていることを確かめてから使う。実装されていない / 元栓が閉まっている
-  //   ときは 0 のままで、それに気づかないと「0 サイクルで呼べた」と報告してしまう。
-  const uint32_t first = at(DWT_CYCCNT_ADDRESS);
-  for (uint32_t spin = 0; spin < 64; ++spin)
-    __asm__ volatile("nop" ::: "memory");
-  return at(DWT_CYCCNT_ADDRESS) != first;
-}
-
 // ★isb で挟む。挟まないとコンパイラとパイプラインが読み出しを前後へ動かせるので、
 //   測っている区間が実際の区間とずれる。isb 自身の費用は (1) にも同じだけ乗るので
 //   引き算で消える。
-inline uint32_t cycles_now() {
+template <typename A> inline uint32_t cycles_now() {
   __asm__ volatile("isb" ::: "memory");
-  const uint32_t cycles = at(DWT_CYCCNT_ADDRESS);
+  const uint32_t cycles = A::cycle_counter_read();
   __asm__ volatile("isb" ::: "memory");
   return cycles;
 }
@@ -157,6 +129,7 @@ struct stat_t {
 
 // ★op は関数ポインタで呼ぶ。(1) も同じ経路を通るので、ポインタ経由の分は
 //   差し引きで消える。インライン展開の差で不公平が出るのも防げる。
+template <typename A>
 __attribute__((noinline)) stat_t measure(op_t requested, uint32_t rounds) {
   // ★volatile を 1 枚挟む。挟まないと measure(op_nothing, ...) のような
   //   「定数の関数ポインタ」をコンパイラが見抜いて呼び先ごとに特殊化し、
@@ -170,9 +143,9 @@ __attribute__((noinline)) stat_t measure(op_t requested, uint32_t rounds) {
   uint32_t best = 0xFFFFFFFFu;
   uint64_t total = 0;
   for (uint32_t round = 0; round < rounds; ++round) {
-    const uint32_t started = cycles_now();
+    const uint32_t started = cycles_now<A>();
     g_sink = op(g_argument);
-    const uint32_t ended = cycles_now();
+    const uint32_t ended = cycles_now<A>();
     const uint32_t elapsed = ended - started; // 32bit の巻き戻りはこれで正しい
     if (elapsed < best)
       best = elapsed;
@@ -194,16 +167,12 @@ void report(const char *name, stat_t raw, uint32_t baseline,
       (unsigned long)raw.min);
 }
 
-} // namespace
 
-void call_cost() {
+// ★ARCH::HAS_CYCLE_COUNTER が false の arch ではこのテンプレートは実体化されない。
+//   CYCCNT の番地も有効化手順も arch 側にあり、ここには DWT を知るコードが無い。
+template <typename A> void bench() {
   BOARD::diag_printf("[COST] call cost bench start\n");
-
-  if (!ARCH::HAS_CYCLE_COUNTER) {
-    BOARD::diag_printf("[COST] SKIP no DWT cycle counter on this arch\n");
-    return;
-  }
-  if (!cycle_counter_enable()) {
+  if (!A::cycle_counter_enable()) {
     // ★測れないなら測れないと言う。0 を報告して数字があるように見せない。
     BOARD::diag_printf("[COST] FAIL DWT CYCCNT is not counting - no numbers\n");
     record_fail("COST DWT CYCCNT is not counting", 0, 1);
@@ -236,11 +205,11 @@ void call_cost() {
   // ★ウォームアップは measure の中で行う (呼び出し経路そのものを温めるため)。
 
   constexpr uint32_t ROUNDS = 2048;
-  const stat_t nothing = measure(op_nothing, ROUNDS);
-  const stat_t direct = measure(op_direct, ROUNDS);
-  const stat_t svc = measure(op_svc, ROUNDS);
-  const stat_t call1 = measure(op_call, ROUNDS);
-  const stat_t call2 = measure(op_call2, ROUNDS);
+  const stat_t nothing = measure<A>(op_nothing, ROUNDS);
+  const stat_t direct = measure<A>(op_direct, ROUNDS);
+  const stat_t svc = measure<A>(op_svc, ROUNDS);
+  const stat_t call1 = measure<A>(op_call, ROUNDS);
+  const stat_t call2 = measure<A>(op_call2, ROUNDS);
 
   BOARD::diag_printf("[COST] harness baseline = %lu cyc (subtracted below)\n",
                      (unsigned long)nothing.min);
@@ -276,6 +245,16 @@ void call_cost() {
                        (unsigned long)checked.value);
   }
   BOARD::diag_printf("[COST] call cost bench done\n");
+}
+
+} // namespace
+
+void call_cost() {
+  if constexpr (ARCH::HAS_CYCLE_COUNTER) {
+    bench<ARCH>();
+  } else {
+    BOARD::diag_printf("[COST] SKIP no DWT cycle counter on this arch\n");
+  }
 }
 
 } // namespace selftest

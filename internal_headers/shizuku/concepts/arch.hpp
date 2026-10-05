@@ -75,6 +75,11 @@ concept arch_requires =
       { ARCH::set_priv(context, flag) };
       { ARCH::stack_limit_set(context, address) };
       { ARCH::stack_limit(const_context) } -> std::same_as<uintptr_t>;
+      { ARCH::HAS_CYCLE_COUNTER } -> std::convertible_to<bool>;
+      requires(!bool(ARCH::HAS_CYCLE_COUNTER)) || requires {
+        { ARCH::cycle_counter_enable() } -> std::same_as<bool>;
+        { ARCH::cycle_counter_read() } -> std::same_as<uint32_t>;
+      };
       { ARCH::CALL_HEADROOM } -> std::convertible_to<uint32_t>;
       { ARCH::cas32(shared_word, value, value) } -> std::same_as<bool>;
       { ARCH::store_release32(shared_word, value) };
