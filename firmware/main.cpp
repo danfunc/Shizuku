@@ -18,7 +18,7 @@
 #include "hardware/structs/watchdog.h"
 #include "pico/bootrom.h"
 #endif
-#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+#if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
 #include "hardware/watchdog.h"
 #include "hardware/structs/watchdog.h"
 #include "pico/bootrom.h"
@@ -66,9 +66,13 @@ void boot_stage(uint32_t stage) {
 // スレッド 0 が最初に走らせるコード = 系の組み立て。ここはまだどのオブジェクトの
 // メソッドでもない (フレーム 0 段) ので、撃った svc はオブジェクトと同じ経路で
 // カーネルオブジェクトのハンドラへ届く。
-#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+#if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
 extern "C" void shizuku_selftest_progress_mark(uint32_t, uint32_t, uint32_t);
 extern "C" bool shizuku_selftest_fault_read(uint32_t *);
+#if !defined(SHIZUKU_RP2040)
+extern "C" bool shizuku_selftest_fault_read2(uint32_t *);
+extern "C" bool shizuku_selftest_deep_read(uint32_t *);
+#endif
 #define APP_PROG(stage) shizuku_selftest_progress_mark((stage), 0, 0)
 #else
 #define APP_PROG(stage) ((void)0)
@@ -96,6 +100,7 @@ void shizuku::app_entry() {
   boot_stage(kCallLadder);
 #endif
   shizuku::selftest::call_ladder();
+  APP_PROG(10);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   boot_stage(kHandlerBinding);
 #endif
@@ -337,6 +342,12 @@ int main() {
   const uint32_t selftest_fault7 = watchdog_hw->scratch[7];
   uint32_t st_fault[18] = {};
   const bool st_fault_valid = selftest_progress_recovered && shizuku_selftest_fault_read(st_fault);
+#if !defined(SHIZUKU_RP2040)
+  uint32_t st_fpre[10] = {};
+  const bool st_fpre_valid = selftest_progress_recovered && shizuku_selftest_fault_read2(st_fpre);
+  uint32_t st_deep[3] = {};
+  const bool st_deep_valid = selftest_progress_recovered && shizuku_selftest_deep_read(st_deep);
+#endif
   watchdog_disable();
   if (selftest_progress_recovered) {
     shizuku::objects::usb_cdc_init();
@@ -348,6 +359,27 @@ int main() {
       printf("[SELFTEST_PROG] fs_fault=%08lx pc=%08lx lr=%08lx xpsr=%08lx\n",
              (unsigned long)selftest_fault4, (unsigned long)selftest_fault5,
              (unsigned long)selftest_fault6, (unsigned long)selftest_fault7);
+#if !defined(SHIZUKU_RP2040)
+      if (st_deep_valid)
+        printf("[SELFTEST_PROG] deep last depth=%lu sp=%08lx calls=%lu\n",
+               (unsigned long)st_deep[0], (unsigned long)st_deep[1], (unsigned long)st_deep[2]);
+      if (st_fpre_valid) {
+        printf("[SELFTEST_PROG] fault_pre count=%lu cfsr=%08lx hfsr=%08lx mmfar=%08lx bfar=%08lx\n",
+               (unsigned long)st_fpre[0], (unsigned long)st_fpre[1], (unsigned long)st_fpre[2],
+               (unsigned long)st_fpre[3], (unsigned long)st_fpre[4]);
+        printf("[SELFTEST_PROG] fault_pre psp=%08lx psplim=%08lx excret=%08lx pc=%08lx stage=%lu\n",
+               (unsigned long)st_fpre[5], (unsigned long)st_fpre[6], (unsigned long)st_fpre[7],
+               (unsigned long)st_fpre[8], (unsigned long)st_fpre[9]);
+      }
+      if (st_fault_valid) {
+        printf("[SELFTEST_PROG] tick sample pc=%08lx lr=%08lx xpsr=%08lx hits=%lu stage=%lu\n",
+               (unsigned long)st_fault[12], (unsigned long)st_fault[13], (unsigned long)st_fault[14],
+               (unsigned long)st_fault[15], (unsigned long)st_fault[16]);
+        printf("[SELFTEST_PROG] cfsr=%08lx hfsr=%08lx primask=%lu control=%lu ipsr=%lu\n",
+               (unsigned long)st_fault[5], (unsigned long)st_fault[6], (unsigned long)st_fault[7],
+               (unsigned long)st_fault[10], (unsigned long)st_fault[11]);
+      }
+#else
       if (st_fault_valid) {
         printf("[SELFTEST_PROG] kfault phase=%lu arg=%lu count=%lu pc=%08lx lr=%08lx xpsr=%08lx\n",
                (unsigned long)st_fault[0], (unsigned long)st_fault[17], (unsigned long)st_fault[1],
@@ -360,6 +392,7 @@ int main() {
                (unsigned long)st_fault[12], (unsigned long)st_fault[13], (unsigned long)st_fault[14],
                (unsigned long)st_fault[15], (unsigned long)st_fault[16]);
       }
+#endif
       fflush(stdout);
       sleep_ms(200);
     }

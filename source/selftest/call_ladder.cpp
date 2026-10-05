@@ -14,6 +14,29 @@
 #include "shizuku/object_ids.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/selftest.hpp"
+#if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+extern "C" void shizuku_selftest_progress_mark(uint32_t, uint32_t, uint32_t);
+#define CL_PROG(n) shizuku_selftest_progress_mark((n), 0, 0)
+#include "pico/platform.h"
+namespace {
+struct deep_trace_t { uint32_t magic, depth, sp, calls; };
+volatile deep_trace_t __uninitialized_ram(g_deep_trace);
+}
+extern "C" bool shizuku_selftest_deep_read(uint32_t *out) {
+  if (g_deep_trace.magic != 0x44454550u) return false;
+  out[0] = g_deep_trace.depth; out[1] = g_deep_trace.sp; out[2] = g_deep_trace.calls;
+  g_deep_trace.magic = 0;
+  return true;
+}
+#define DEEP_TRACE(d) do { \
+    if ((d) == 0) { g_deep_trace.calls = 0; } \
+    g_deep_trace.magic = 0x44454550u; g_deep_trace.depth = (d); \
+    g_deep_trace.sp = (uint32_t)__builtin_frame_address(0); \
+    g_deep_trace.calls = g_deep_trace.calls + 1u; } while (0)
+#else
+#define CL_PROG(n) ((void)0)
+#define DEEP_TRACE(d) ((void)0)
+#endif
 
 namespace shizuku {
 namespace selftest {
@@ -117,6 +140,7 @@ uintptr_t nest(uintptr_t remaining, uintptr_t, uintptr_t, uintptr_t) {
 uint32_t g_deep_max = 0;
 
 uintptr_t deep(uintptr_t depth, uintptr_t, uintptr_t, uintptr_t) {
+  DEEP_TRACE(depth);
   const api_result result = call_method(OBJECT_DEEP, depth + 1);
   if (result.error == (uintptr_t)object_error::NO_STACK) {
     g_deep_max = (uint32_t)depth;
@@ -209,9 +233,11 @@ void call_ladder() {
           kernel_instance.current_depth() == 0,
           (unsigned long)kernel_instance.current_depth(), 0);
 
+    CL_PROG(800);
     // ★各層の identity と深さを突き合わせる。層をまたいで混ざっていないこと。
     check("nested: levels entered", g_nest_levels == 7,
           (unsigned long)g_nest_levels, 7);
+    CL_PROG(801);
     uint32_t identity_bad = 0;
     uint32_t depth_bad = 0;
     for (uint32_t level = 0; level < g_nest_levels; ++level) {
@@ -224,27 +250,34 @@ void call_ladder() {
       if (g_nest_depth[level] != 2u * (level + 1u))
         ++depth_bad;
     }
+    CL_PROG(802);
     check("nested: identity at every level", identity_bad == 0,
           (unsigned long)identity_bad, 0);
+    CL_PROG(803);
     check("nested: depth grows by 2 per level", depth_bad == 0,
           (unsigned long)depth_bad, 0);
   }
 
+    CL_PROG(804);
   // 未知の API 番号と未生成オブジェクト。黙って消えず、エラーで返ること。
   {
+    CL_PROG(805);
     const auto unknown = ARCH::syscall(0xDEAD, 0, 0, 0);
     check("unknown api: rejected",
           unknown.error == (uintptr_t)object_error::UNKNOWN_API,
           (unsigned long)unknown.error,
           (unsigned long)object_error::UNKNOWN_API);
+    CL_PROG(806);
     const api_result absent = call_method(OBJECT_DEEP + 10, 0);
     check("absent object: rejected",
           absent.error == (uintptr_t)object_error::BAD_OBJECT,
           (unsigned long)absent.error, (unsigned long)object_error::BAD_OBJECT);
   }
 
+    CL_PROG(807);
   // スタックを掘り切る。panic でも無音ロックアップでもなく NO_STACK が返ること。
   {
+    CL_PROG(808);
     const api_result result = call_method(OBJECT_DEEP, 0);
     check("stack exhaustion: returned NO_STACK",
           result.error == (uintptr_t)object_error::OK && g_deep_max > 0,
@@ -252,10 +285,12 @@ void call_ladder() {
     check("stack exhaustion: depth restored",
           kernel_instance.current_depth() == 0,
           (unsigned long)kernel_instance.current_depth(), 0);
+    CL_PROG(809);
     BOARD::diag_printf("[SELFTEST] max nesting before NO_STACK: %lu\n",
                        (unsigned long)g_deep_max);
   }
 
+    CL_PROG(810);
   // ---- 名乗り (System Object が起動するまでの暫定の宿) --------------------
   // ★名前は診断のためだけではない。番号の衝突が**声を出す**ようになるのが本命で、
   //   今日はそれが無かったせいで 2 回とも黙って別物が動いた。
