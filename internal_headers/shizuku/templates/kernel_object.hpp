@@ -24,8 +24,8 @@ namespace templates {
 //    (c) ここがその段数で RETURN する。段数は必ず申告し、カーネルが実際の深さと
 //        突き合わせる (§9.3 の両側チェック)
 //
-//  ★identity の台帳は「影スタック」で持つ。呼び出しを積むのも巻き戻すのも自分なので
-//    追跡でき、カーネルの助けは要らない (PORT §3.1 の「カーネル支援不要」の実装形)。
+//  ★identity 台帳はカーネルに貸す特権メモリに置く。オブジェクト側は読み出し API
+//    から状態を導き、スタック上の申告値を信頼しない。
 template <typename KERNEL_T, uintptr_t OBJECT_COUNT_T,
           uintptr_t METHOD_COUNT_T, uintptr_t MAX_DEPTH_T,
           uintptr_t THREAD_COUNT_T>
@@ -37,6 +37,7 @@ public:
   static constexpr uintptr_t OBJECT_COUNT = OBJECT_COUNT_T;
   static constexpr uintptr_t METHOD_COUNT = METHOD_COUNT_T;
   static constexpr uintptr_t MAX_DEPTH = MAX_DEPTH_T;
+  static constexpr uint32_t LEDGER_CAPACITY = 2 * MAX_DEPTH + 2;
   // ★スレッドを何本まで作れるかは**こちらが決める** (記憶を出すのがこちらなので)。
   static constexpr uintptr_t THREAD_COUNT = THREAD_COUNT_T;
   // 1 スレッドあたりのスタック。深さの上限も方針。
@@ -66,12 +67,12 @@ public:
   //  共有台帳の相互排除 (2 コア用)
   // -------------------------------------------------------------------------
   //  ★1 コアのときは無償だった。svc は最優先、切替は最低優先度、さらに
-  //    「ハンドラ走行中は取り上げを見送る」(pendsv のパリティ判定) があるので、
+  //    「ハンドラ走行中は取り上げを見送る」(pendsv の kind 判定) があるので、
   //    ハンドラの中は誰にも割り込まれなかった。**2 コアになるとこれが消える** —
   //    両方のコアが同時にハンドラへ入れる。参照実装も同じ罠を踏んで
   //    「協調型単一コアだから実質直列」に依存していた (デュアルコア化で崩れる)。
   //  ★守る対象はオブジェクト表・arena・名前・スレッドスタックの控え。
-  //    per-thread の台帳 (shadow / wake_at / budget) は持ち主しか触らないので要らない。
+  //    per-thread の wake_at / budget は持ち主しか触らないので要らない。
   //  ★★**握ったまま実行権を手放さないこと**。schedule() は中で SWITCH/GRANT を
   //    撃つので、その前に必ず放す。握ったまま切り替えると、相手のコアは
   //    「走っていない持ち主」を待って回り続ける (デッドロック)。
@@ -88,6 +89,8 @@ public:
   struct lent_stack {
     uintptr_t base;
     uintptr_t bytes;
+    KERNEL::call_ledger_entry *ledger;
+    uint32_t ledger_capacity;
   };
   lent_stack lend_boot_stack();
 
@@ -135,21 +138,8 @@ public:
   };
 
   // 台帳の読み出し (自己テスト・将来のアクセス制御用)。
-  uintptr_t current_object(uint32_t thread) const {
-    const shadow_t &shadow = m_shadow[thread];
-    // 呼び出しの中でなければ「そのスレッドを持っているオブジェクト」。
-    return shadow.depth == 0 ? m_thread_object[thread]
-                             : shadow.object[shadow.depth - 1];
-  }
-  uintptr_t caller_object(uint32_t thread) const {
-    const shadow_t &shadow = m_shadow[thread];
-    if (shadow.depth == 0)
-      return NO_OBJECT;
-    // ★発行元は保持せず影スタックの 1 段下から導出する (設定時点が曖昧な値を持たない)。
-    //   影スタックは call_method だけが積むので、振り分けだけの SVC / 親ハンドラは現れない。
-    return shadow.depth == 1 ? m_thread_object[thread]
-                             : shadow.object[shadow.depth - 2];
-  }
+  uintptr_t current_object(uint32_t thread) const;
+  uintptr_t caller_object(uint32_t thread) const;
   // ★専用ハンドラ (HANDLER) 付与用の信頼済み内部フラグ (重大指摘 1)。
   //   公開 flags (object_api.hpp) には置かず、ROOT_OBJECT / KERNEL_OBJECT 本人による
   //   create_object 時のみ受理される。一般オブジェクトの指定は NOT_PRIVILEGED で拒否。
@@ -219,10 +209,6 @@ private:
   //    フレームは非特権オブジェクトが読み書きできる場所に住んでいるので、
   //    そこから identity を読むと**自分の呼び出し元を書き換えて他人を騙れる**。
   //    台帳をこちら側 (非特権から届かない場所) に持つのが偽装できない根拠。
-  struct shadow_t {
-    uint16_t object[MAX_DEPTH]; // 呼び出しごとの呼び先
-    uint32_t depth;
-  };
 
   // 各 API。戻り値はそのまま発行元へ返る値。エラーは error 引数へ書く。
   uintptr_t create_object(uintptr_t id, uintptr_t entry, uintptr_t flags,
@@ -283,11 +269,8 @@ private:
   void reply(object_error error, uintptr_t value);
   // 巻き戻しで申告する「今のネスト数」を**自分の台帳から**計算する (§9.3)。
   uint32_t claimed_depth() const;
-  // 今の SVC を発行したのが、影スタック先端の子の**専用ハンドラ**かどうか。
-  // ★影スタックと自分の台帳 (object 表) だけから導く。フレームヘッダの値は読まない。
-  //   ハンドラは call_method を経由せず svc の振り分けで走るので影スタックには載らないが、
-  //   載っていれば 2*depth+1 のはずのカーネル段数が 1 枚多くなる。その差で在席を知り、
-  //   誰かは先端の子の parent_handler_object から引く。居なければ NO_OBJECT。
+  // 今の SVC を発行したのが、特権台帳に明示された専用ハンドラ段かどうか。
+  // CALL/DISPATCH の並びと child の parent_handler_object を照合する。
   uint32_t interposed_handler(uint32_t thread) const;
 
   void arena_init(arena &target, uintptr_t base, uintptr_t bytes);
@@ -304,7 +287,6 @@ private:
   uintptr_t owner_of(uintptr_t handle, object_error &error) const;
 
   object_t m_objects[OBJECT_COUNT];
-  shadow_t m_shadow[THREAD_COUNT];
   // スレッドごとの「どのオブジェクトのために作ったか」。方針側の台帳なのでここ。
   uint16_t m_thread_object[THREAD_COUNT];
   // 停止要求が出ているスレッド。★要求と回収を分けるための旗 (D55)。
@@ -319,6 +301,10 @@ private:
   uint32_t m_budget[THREAD_COUNT];
   // 貸したスタック (終わったスレッドから返してもらうために覚えておく)。
   uintptr_t m_thread_stack[THREAD_COUNT];
+  // 台帳は静的な特権専用簿記 arena から借りる。スタック上端への配置と MPU
+  // 境界分割は採らない: PMSAv8 は有効 region の重複を許さず、他スレッド台帳の
+  // 穴を開けられないため、休止中の別スレッドの台帳を書けてしまう。RP2040 も同様。
+  uintptr_t m_thread_ledger[THREAD_COUNT];
   // 次に見るスレッド (round-robin の回転子)。自分の直後だけを見ると飢餓が出る。
   // ★rotor はコアごと。共有すると 2 コアが同じ順で舐めて同じ相手を取り合う
   //   (claim の CAS が正しく弾くので壊れはしないが、片方が毎回競り負けて空回りする)。

@@ -27,8 +27,9 @@ template <> void KERNEL::init() {
     BOARD::panic("memory manager init failed");
 }
 
-template <> void KERNEL::bootstrap(void (*entry)(), uintptr_t stack_base,
-                                   uintptr_t stack_bytes) {
+template <> void KERNEL::bootstrap(
+    void (*entry)(), uintptr_t stack_base, uintptr_t stack_bytes,
+    KERNEL::call_ledger_entry *ledger, uint32_t ledger_capacity) {
   if (m_threads == nullptr)
     BOARD::panic("thread storage not provided before bootstrap");
   if (stack_base == 0 || stack_bytes < 256)
@@ -39,14 +40,12 @@ template <> void KERNEL::bootstrap(void (*entry)(), uintptr_t stack_base,
 
   THREAD &thread = m_threads[0].thread;
   thread.context = &m_threads[0].context;
-  thread.call_stack = {};
-  thread.current_object = 1; // ROOT_OBJECT (1)
+  set_thread_ledger(0, ledger, ledger_capacity, 1,
+                    (uint32_t)object_kind::PLAIN,
+                    m_object_svc_handler_object, m_object_svc_handler);
   // ★ブートスレッドは一般オブジェクトとして走り出す。svc はトランポリンを通って
   //   ハンドラへ届く (ここを HANDLER にすると、ブート直後の svc がハンドラを
   //   経由せずプリミティブとして解釈されてしまう)。
-  thread.current_kind = (uint32_t)object_kind::PLAIN;
-  thread.current_handler_object = m_object_svc_handler_object;
-  thread.current_handler_entry = m_object_svc_handler;
   thread.set_state(THREAD::state_t::RUNNING);
   ARCH::stack_limit_set(*thread.context, limit);
   ARCH::set_priv(*thread.context, true);
@@ -62,7 +61,9 @@ template <> void KERNEL::bootstrap(void (*entry)(), uintptr_t stack_base,
 // スレッドモードへ移る (優先度・MPU・SysTick は per-core banked)。
 template <>
 void KERNEL::bootstrap_secondary(uint32_t thread, void (*entry)(),
-                                 uintptr_t stack_base, uintptr_t stack_bytes) {
+                                 uintptr_t stack_base, uintptr_t stack_bytes,
+                                 KERNEL::call_ledger_entry *ledger,
+                                 uint32_t ledger_capacity) {
   if (m_threads == nullptr || thread >= m_thread_count)
     BOARD::panic("secondary core has no thread to run");
   if (stack_base == 0 || stack_bytes < 256)
@@ -73,11 +74,9 @@ void KERNEL::bootstrap_secondary(uint32_t thread, void (*entry)(),
 
   THREAD &adopted = m_threads[thread].thread;
   adopted.context = &m_threads[thread].context;
-  adopted.call_stack = {};
-  adopted.current_object = 1; // ROOT_OBJECT (1)
-  adopted.current_kind = (uint32_t)object_kind::PLAIN; // 同上
-  adopted.current_handler_object = m_object_svc_handler_object;
-  adopted.current_handler_entry = m_object_svc_handler;
+  set_thread_ledger(thread, ledger, ledger_capacity, 1,
+                    (uint32_t)object_kind::PLAIN,
+                    m_object_svc_handler_object, m_object_svc_handler);
   // ★このコアでしか走らせない。他コアが拾うと、今この CPU が走らせている文脈を
   //   別コアが同時に走らせることになる (claim の CAS は「READY を取る」ための
   //   ものであって、既に走っているものは守れない)。

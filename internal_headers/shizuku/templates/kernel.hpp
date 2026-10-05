@@ -10,10 +10,10 @@ namespace templates {
 // ===========================================================================
 //  カーネル — 機構だけを持つ層 (docs/03_porting_policy.md D1 / DESIGN §7)
 // ===========================================================================
-//  カーネルが知ること: スレッド / 文脈 / スタック上限 / 呼び出しフレームの push・pop /
+//  カーネルが知ること: スレッド / 文脈 / 特権 call ledger / 呼び出しフレームの push・pop /
 //    実行権
-//  カーネルが知らないこと: オブジェクト、オブジェクト ID、identity、メソッド表、
-//    export、md、svc 番号の意味、そして「誰が偉いか」
+//  カーネルが知らないこと: メソッド表、export、md、svc 番号の意味、そして
+//    オブジェクト間の方針。ID/kind は信頼できる復元用状態としてだけ保持する。
 //
 //  ★★2 つの「svc ハンドラ」は別概念。混ぜないこと:
 //    (1) **カーネルの svc ハンドラ** = svc_dispatch。例外文脈 (Handler モード) で
@@ -81,17 +81,27 @@ public:
   //    SP を追加調整する場合 (ARMv8-M の xPSR bit9 による +4 など) は
   //    ARCH::normalize_frame で作業コピー側の調整を消してから積む。push はその結果を
   //    ARCH::psp_after_return で必ず検算する。
-  //  ★I-5: pop は push 時に記録した値を読み戻す。再計算しない。
+  //  ★識別情報は特権 call ledger に置く。pop は ledger を 1 段落とす。
   struct call_frame_header {
     uintptr_t prev;       // 一つ外側のヘッダのアドレス (0 = 最外)
     uint32_t total_bytes; // 退避域の総バイト数 (8B 境界に丸め済み)
     uint32_t frame_bytes; // 例外フレーム実サイズ
-    uint32_t caller_object; // 呼び出し元オブジェクトID
-    uint32_t caller_kind;   // 呼び出し元の種別 (object_kind)
-    uint32_t caller_handler_object; // 呼び出し元の親ハンドラID
-    uintptr_t caller_handler_entry; // 呼び出し元の親ハンドラエントリ
     CONTEXT saved; // 呼び出し元の文脈まるごと (sp を含む = 元フレームの位置)
   };
+  using call_ledger_entry = typename THREAD::call_ledger_entry;
+  static constexpr uint8_t LEDGER_CALL = 1, LEDGER_DISPATCH = 2;
+  void set_thread_ledger(uint32_t id, call_ledger_entry *memory,
+                         uint32_t capacity, uint32_t object, uint32_t kind,
+                         uint32_t handler_object, uintptr_t handler_entry);
+  uint32_t ledger_size(uint32_t id) const {
+    return m_threads[id].thread.call_stack.depth;
+  }
+  const call_ledger_entry *ledger_entry(uint32_t id, uint32_t from_top) const {
+    const THREAD &t = m_threads[id].thread;
+    return from_top < t.call_stack.depth
+               ? &t.ledger[t.call_stack.depth - 1 - from_top]
+               : nullptr;
+  }
 
   CPU_MANAGER cpu_manager;
   MEMORY_MANAGER memory_manager;
@@ -108,13 +118,15 @@ public:
   // 切り替えるので戻らない)。★最初の 1 本のスタックも貸してもらう — ここだけ
   //   カーネルが自分で malloc すると「スレッドの記憶は誰のものか」が二枚舌になる。
   [[noreturn]] void bootstrap(void (*entry)(), uintptr_t stack_base,
-                              uintptr_t stack_bytes);
+                              uintptr_t stack_bytes, call_ledger_entry *ledger,
+                              uint32_t ledger_capacity);
   // 2 本目以降のコアが自分で呼ぶ。今の実行を **指定されたスレッド** として採用し、
   // entry へ移る。★スレッド 0 を使えないので枠を指定する形になる — 誰をそのコアの
   // 最初の 1 本にするかは方針なので、決めるのはオブジェクトランド。
   [[noreturn]] void bootstrap_secondary(uint32_t thread, void (*entry)(),
                                         uintptr_t stack_base,
-                                        uintptr_t stack_bytes);
+                                        uintptr_t stack_bytes, call_ledger_entry *ledger,
+                                        uint32_t ledger_capacity);
 
   // -------------------------------------------------------------------------
   //  スレッドの生成 — カーネルオブジェクトが**スレッドモードから**呼ぶ C++ API
@@ -147,6 +159,8 @@ public:
     // ★親 handling object の情報 (解決済み binding)
     uint32_t parent_handler_object = 0;
     uintptr_t parent_handler_entry = 0;
+    call_ledger_entry *ledger = nullptr;
+    uint32_t ledger_capacity = 0;
   };
   spawn_result spawn(const spawn_request &request);
   // 走らせずに枠だけ取る。2 本目以降のコアが「今の実行」を採用するために使う
@@ -227,8 +241,8 @@ public:
   }
   void set_thread_object(uint32_t thread, uint32_t obj,
                          object_kind kind = object_kind::PLAIN) {
-    m_threads[thread].thread.current_object = obj;
-    m_threads[thread].thread.current_kind = (uint32_t)kind;
+    m_threads[thread].thread.base_object = obj;
+    m_threads[thread].thread.base_kind = (uint32_t)kind;
   }
   // その枠が今何代目か。★スレッド番号を控える側は、これも一緒に控えて
   //   使う直前に突き合わせること (番号だけでは使い回しに気づけない)。

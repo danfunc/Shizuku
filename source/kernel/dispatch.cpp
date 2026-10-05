@@ -8,9 +8,9 @@
 //  ★経路は**今走っているオブジェクトの種別** (object_kind) だけで決まる (I-1):
 //      PLAIN   → オブジェクトが走っている → 登録済みハンドラをメソッドとして呼ぶ
 //      HANDLER → ハンドラが走っている     → プリミティブを実行
-//    種別は thread.current_kind にあり、遷移させるのはカーネルだけ:
+//    種別は特権 call ledger から読み、遷移させるのはカーネルだけ:
 //    CALL では呼び先の申告 (call_request::callee_kind) を載せ、トランポリンでは
-//    HANDLER を載せ、戻るときは呼び出しフレームのヘッダから読み戻す。
+//    HANDLER を載せ、戻るときは ledger の段を pop する。
 //    オブジェクト側からは書けないので偽装できない。
 //
 //  ★★2026-09-05: ここは長らく「ID 0 = カーネルオブジェクト」の決め打ちで動いて
@@ -70,7 +70,9 @@ bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   // 呼び出し元の生スタック境界。元の例外フレームはこのすぐ下に居る。
   const uintptr_t caller_stack = (uintptr_t)context->sp + frame_bytes;
   const uintptr_t snapshot = caller_stack - total; // 退避域の先頭 (ヘッダの位置)
-  const uintptr_t callee_frame = snapshot - frame_bytes; // 書き換え用フレーム
+  const uintptr_t callee_frame = snapshot - frame_bytes;
+  if (thread.ledger == nullptr || thread.call_stack.depth >= thread.ledger_capacity)
+    return false; // 台帳容量超過は呼び出し側が NO_STACK にする
 
   // スタック下限の手前で止める。ここで false を返せば呼び出し側がエラーを返すので、
   // スタック不足が無音ロックアップにならない (I-9)。
@@ -95,13 +97,7 @@ bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   header->prev = thread.call_stack.top;
   header->total_bytes = total;
   header->frame_bytes = frame_bytes;
-  // ★以下 4 つは pop 時に thread.current_* を**戻り先の文脈として復元する**ためだけに
-  //   退避する。identity の判定 (caller や exit の行き先) には使わない: ヘッダは
-  //   スレッドスタック上にあり、その判定は kobj の影スタックから導く。
-  header->caller_object = thread.current_object; // ★呼び出し元オブジェクトを退避
-  header->caller_kind = thread.current_kind;     // ★その種別も一緒に退避
-  header->caller_handler_object = thread.current_handler_object; // ★親ハンドラ情報も退避
-  header->caller_handler_entry = thread.current_handler_entry;
+  // ★識別情報は非特権から届かない特権 ledger に置く。ここには復帰用文脈だけを残す。
   header->saved = *context; // sp を含めて丸ごと (= 元フレームの位置も記録される)
 
   // ★元の例外フレームは動かさない (I-3)。下へ複製するのは書き換え用の作業コピー。
@@ -141,10 +137,6 @@ bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   // 元の例外フレームは退避域の中に元の位置のまま生きているので、文脈を丸ごと
   // 戻すだけで復帰先が正しく決まる (書き戻しも再配置も不要)。
   const uintptr_t previous = header->prev;
-  thread.current_object = header->caller_object; // ★呼び出し元オブジェクトを復元
-  thread.current_kind = header->caller_kind;     // ★種別も一緒に復元
-  thread.current_handler_object = header->caller_handler_object; // ★親ハンドラも復元
-  thread.current_handler_entry = header->caller_handler_entry;
   *context = header->saved;
   *frame = context->sp;
   thread.call_stack.top = previous;
@@ -170,10 +162,10 @@ kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
 #endif
   if (!call_frame_push(thread, context, frame))
     return kernel_error::NO_STACK;
-  thread.current_object = request.callee_object; // ★呼び先オブジェクトIDへ遷移
-  thread.current_kind = request.callee_kind;     // ★種別もここで切り替わる
-  thread.current_handler_object = request.parent_handler_object;
-  thread.current_handler_entry = request.parent_handler_entry;
+  auto &entry = thread.ledger[thread.call_stack.depth - 1];
+  entry = {request.callee_object, request.parent_handler_object,
+           request.parent_handler_entry, (uint8_t)request.callee_kind,
+           LEDGER_CALL, 0};
   // 戻り口は常にカーネルの 1 本。撃つ svc は同じでも、そこから出たときの**種別**で
   // 「プリミティブとしての巻き戻し」か「メソッドが戻った知らせ」かが決まる
   // (発行側が戻り口を選ぶ必要は無い)。
@@ -194,8 +186,8 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
   // ★「kernel object 本人であるか」の厳格判定 (指摘3, 指摘4)。
   //   単なる HANDLER ではなく、登録済み kernel object (種別 KERNEL_OBJECT かつ
   //   ID が m_object_svc_handler_object) だけが kernel primitive を直接解釈できる。
-  if (thread.current_kind == (uint32_t)object_kind::KERNEL_OBJECT &&
-      thread.current_object == m_object_svc_handler_object) {
+  if (thread.current_kind() == (uint32_t)object_kind::KERNEL_OBJECT &&
+      thread.current_object() == m_object_svc_handler_object) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     shizuku_boot_trace_phase(411);
 #endif
@@ -284,13 +276,13 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
 
   // ここへ来るのは非 kernel object (一般 child や専用 handling object など)。
   // 親ハンドラが未登録なら黙って root へ fallback せず、診断可能な panic とする (指摘2)。
-  if (thread.current_handler_entry == 0) {
+  if (thread.current_handler_entry() == 0) {
     BOARD::panic("unregistered parent handler for object syscall");
   }
 
   // 親ハンドラへの直接ディスパッチ (O(1)、テーブル検索ゼロ、同期例外中の再帰なし)。
-  const uintptr_t target_entry = thread.current_handler_entry;
-  const uint32_t target_object = thread.current_handler_object;
+  const uintptr_t target_entry = thread.current_handler_entry();
+  const uint32_t target_object = thread.current_handler_object();
   const bool to_root = (target_object == m_object_svc_handler_object);
 
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
@@ -305,15 +297,17 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
   shizuku_boot_trace_phase(413);
 #endif
 
-  thread.current_object = target_object;
-  thread.current_kind = to_root ? (uint32_t)object_kind::KERNEL_OBJECT
-                                : (uint32_t)object_kind::HANDLER;
+  auto &entry = thread.ledger[thread.call_stack.depth - 1];
+  entry.object = target_object;
+  entry.kind = to_root ? (uint8_t)object_kind::KERNEL_OBJECT
+                       : (uint8_t)object_kind::HANDLER;
+  entry.via = LEDGER_DISPATCH;
   // 親ハンドラ自身の親ハンドラは root kernel object。root 自身の親は自身。
   // ★制約 (2026-09-12): 専用ハンドラの親ハンドラは常に Root Kernel Object に設定されるため、
   //   現在の実装における専用ハンドラ階層は「Child → Dedicated Handler → Root」の 1 段限定である。
   //   無制限のハンドラ多段ネストはサポートしない (独立監査指摘)。
-  thread.current_handler_object = m_object_svc_handler_object;
-  thread.current_handler_entry = m_object_svc_handler;
+  entry.handler_object = m_object_svc_handler_object;
+  entry.handler_entry = m_object_svc_handler;
 
   uintptr_t args[4];
   for (unsigned index = 0; index < 4; ++index)
@@ -345,8 +339,8 @@ template <> void KERNEL::pendsv_dispatch(KERNEL::CONTEXT *context) {
   }
   // ★借り手がオブジェクトランドのハンドラまたはカーネルオブジェクトの中に居るなら、
   //   共有台帳等の同期保護のため取り上げを見送る (指摘3: execution role)。
-  if (current_thread().current_kind == (uint32_t)object_kind::HANDLER ||
-      current_thread().current_kind == (uint32_t)object_kind::KERNEL_OBJECT) {
+  if (current_thread().current_kind() == (uint32_t)object_kind::HANDLER ||
+      current_thread().current_kind() == (uint32_t)object_kind::KERNEL_OBJECT) {
     grants.frames[grants.depth - 1].remaining = GRANT_RETRY_CYCLES;
     arm_timer();
     return;

@@ -28,6 +28,8 @@ static_assert((uintptr_t)object_api::EXIT_METHOD == (uintptr_t)primitive::RETURN
 template <>
 uintptr_t KERNEL_OBJECT::handle(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 template <> uint32_t KERNEL_OBJECT::claimed_depth() const;
+template <> uintptr_t KERNEL_OBJECT::current_object(uint32_t) const;
+template <> uintptr_t KERNEL_OBJECT::caller_object(uint32_t) const;
 template <> void KERNEL_OBJECT::init();
 template <> uintptr_t KERNEL_OBJECT::handler_entry();
 template <> void KERNEL_OBJECT::reply(object_error, uintptr_t);
@@ -121,7 +123,16 @@ template <> uintptr_t KERNEL_OBJECT::handler_entry() {
 // ★カーネルの簿記に貸す記憶。**静的領域に置く**のが要点で、ここは region の外
 //   (= 特権のみ) なので非特権オブジェクトから届かない。用意するのはこちら
 //   (オブジェクトランド) で、置き場所の条件はカーネルが検査する。
-alignas(8) static uint8_t g_bookkeeping_storage[8192];
+static_assert(sizeof(KERNEL::call_ledger_entry) == 16,
+              "call ledger entry must be 16 bytes on supported targets");
+alignas(8) static uint8_t g_bookkeeping_storage[65536];
+static_assert(KERNEL::thread_record_bytes() * KERNEL_OBJECT::THREAD_COUNT +
+                  sizeof(KERNEL_OBJECT::block) + KERNEL_OBJECT::BLOCK_ALIGN - 1 +
+                  KERNEL_OBJECT::THREAD_COUNT *
+                      (KERNEL_OBJECT::LEDGER_CAPACITY * sizeof(KERNEL::call_ledger_entry) +
+                       sizeof(KERNEL_OBJECT::block) + KERNEL_OBJECT::BLOCK_ALIGN - 1) <=
+              sizeof(g_bookkeeping_storage),
+              "bookkeeping arena must fit thread table and all per-thread ledgers");
 
 template <> void KERNEL_OBJECT::init() {
   for (uintptr_t id = 0; id < OBJECT_COUNT; ++id) {
@@ -134,7 +145,6 @@ template <> void KERNEL_OBJECT::init() {
       m_objects[id].methods[method] = nullptr;
   }
   for (uintptr_t thread = 0; thread < THREAD_COUNT; ++thread) {
-    m_shadow[thread].depth = 0;
     m_kill_pending[thread] = 0;
     m_thread_object[thread] = (uint16_t)ROOT_OBJECT;
     m_wake_at[thread] = 0;
@@ -145,8 +155,10 @@ template <> void KERNEL_OBJECT::init() {
   for (uintptr_t core = 0; core < KERNEL::CORE_COUNT; ++core)
     m_rotor[core] = 0;
   m_table_lock = 0;
-  for (uintptr_t thread = 0; thread < THREAD_COUNT; ++thread)
+  for (uintptr_t thread = 0; thread < THREAD_COUNT; ++thread) {
     m_thread_stack[thread] = 0;
+    m_thread_ledger[thread] = 0;
+  }
 
   // 簿記用 arena: 静的領域 = 非特権から届かない場所。
   arena_init(m_bookkeeping, (uintptr_t)g_bookkeeping_storage,
@@ -199,7 +211,13 @@ template <> KERNEL_OBJECT::lent_stack KERNEL_OBJECT::lend_boot_stack() {
   if (base == 0)
     KERNEL::BOARD::panic("no room for the boot stack");
   m_thread_stack[0] = base; // 記録はするが、スレッド 0 は終わらないので返らない
-  return {base, BOOT_STACK_BYTES};
+  const uintptr_t ledger = arena_allocate(
+      m_bookkeeping, LEDGER_CAPACITY * sizeof(KERNEL::call_ledger_entry), ROOT_OBJECT);
+  if (!ledger)
+    KERNEL::BOARD::panic("no room for boot call ledger");
+  m_thread_ledger[0] = ledger;
+  return {base, BOOT_STACK_BYTES, (KERNEL::call_ledger_entry *)ledger,
+          LEDGER_CAPACITY};
 }
 
 // ---- 2 本目のコア -----------------------------------------------------------
@@ -210,6 +228,7 @@ namespace {
 uintptr_t g_secondary_stack = 0;
 uintptr_t g_secondary_bytes = 0;
 uint32_t g_secondary_thread = 0;
+KERNEL::call_ledger_entry *g_secondary_ledger = nullptr;
 
 // 採用されたあとに走る本体。
 void secondary_idle() {
@@ -221,7 +240,9 @@ void secondary_idle() {
 // スレッドとして採用し、借りたスタックへ移る。
 void secondary_boot() {
   kernel_instance.bootstrap_secondary(g_secondary_thread, secondary_idle,
-                                      g_secondary_stack, g_secondary_bytes);
+                                      g_secondary_stack, g_secondary_bytes,
+                                      g_secondary_ledger,
+                                      KERNEL_OBJECT::LEDGER_CAPACITY);
 }
 } // namespace
 
@@ -232,17 +253,30 @@ template <> bool KERNEL_OBJECT::start_secondary_core() {
   if (reserved.error != kernel_error::OK)
     return false;
   uintptr_t stack;
+  uintptr_t ledger;
   {
     table_guard guard;
     stack = arena_allocate(m_objects_arena, THREAD_STACK_BYTES, ROOT_OBJECT);
-    if (stack != 0)
+    ledger = arena_allocate(
+        m_bookkeeping, LEDGER_CAPACITY * sizeof(KERNEL::call_ledger_entry), ROOT_OBJECT);
+    if (stack != 0 && ledger != 0) {
       m_thread_stack[reserved.thread] = stack;
+      m_thread_ledger[reserved.thread] = ledger;
+    } else {
+      if (stack)
+        arena_release(m_objects_arena, stack);
+      if (ledger)
+        arena_release(m_bookkeeping, ledger);
+      stack = ledger = 0;
+    }
   }
   if (stack == 0) {
+    kernel_instance.terminate(reserved.thread);
     kernel_instance.release(reserved.thread);
     return false;
   }
   g_secondary_thread = reserved.thread;
+  g_secondary_ledger = (KERNEL::call_ledger_entry *)ledger;
   g_secondary_stack = stack;
   g_secondary_bytes = THREAD_STACK_BYTES;
   m_thread_object[reserved.thread] = (uint16_t)ROOT_OBJECT;
@@ -259,22 +293,50 @@ template <> bool KERNEL_OBJECT::start_secondary_core() {
 //   段数は 2 * 呼び出し段数 + 1 になるはず。ここがズレたら台帳とカーネルの
 //   どちらかが壊れているので、カーネルが 1 枚も落とさずに弾く。
 template <> uint32_t KERNEL_OBJECT::claimed_depth() const {
-  return 2u * m_shadow[kernel_instance.current_thread_id()].depth + 1u;
+  const uint32_t thread = kernel_instance.current_thread_id();
+  uint32_t calls = 0;
+  for (uint32_t i = 0; i < kernel_instance.ledger_size(thread); ++i)
+    calls += kernel_instance.ledger_entry(thread, i)->via == KERNEL::LEDGER_CALL;
+  return 2u * calls + 1u;
+}
+
+template <> uintptr_t KERNEL_OBJECT::current_object(uint32_t thread) const {
+  for (uint32_t i = 0; i < kernel_instance.ledger_size(thread); ++i) {
+    const auto *entry = kernel_instance.ledger_entry(thread, i);
+    if (entry->via == KERNEL::LEDGER_CALL)
+      return entry->object;
+  }
+  return m_thread_object[thread];
+}
+
+template <> uintptr_t KERNEL_OBJECT::caller_object(uint32_t thread) const {
+  uint32_t calls = 0;
+  for (uint32_t i = 0; i < kernel_instance.ledger_size(thread); ++i) {
+    const auto *entry = kernel_instance.ledger_entry(thread, i);
+    if (entry->via == KERNEL::LEDGER_CALL && ++calls == 2)
+      return entry->object;
+  }
+  return calls == 1 ? m_thread_object[thread] : (uintptr_t)NO_OBJECT;
 }
 
 template <>
 uint32_t KERNEL_OBJECT::interposed_handler(uint32_t thread) const {
-  const shadow_t &shadow = m_shadow[thread];
-  if (shadow.depth == 0 ||
-      kernel_instance.current_depth() != 2u * shadow.depth + 2u)
+  const auto *root = kernel_instance.ledger_entry(thread, 0);
+  const auto *handler = kernel_instance.ledger_entry(thread, 1);
+  const auto *child_entry = kernel_instance.ledger_entry(thread, 2);
+  if (!root || !handler || !child_entry || root->via != KERNEL::LEDGER_DISPATCH ||
+      root->object != KERNEL_OBJECT_ID || handler->via != KERNEL::LEDGER_DISPATCH ||
+      handler->kind != (uint8_t)object_kind::HANDLER ||
+      handler->object == KERNEL_OBJECT_ID || child_entry->via != KERNEL::LEDGER_CALL)
     return (uint32_t)NO_OBJECT;
-  const uint32_t child = shadow.object[shadow.depth - 1];
-  if (child >= OBJECT_COUNT)
+  const uint32_t child = child_entry->object;
+  const uint32_t handler_id = handler->object;
+  if (child >= OBJECT_COUNT || !m_objects[child].created ||
+      handler_id >= OBJECT_COUNT || !m_objects[handler_id].created ||
+      m_objects[handler_id].kind != object_kind::HANDLER ||
+      m_objects[child].parent_handler_object != handler_id)
     return (uint32_t)NO_OBJECT;
-  const uint32_t handler = m_objects[child].parent_handler_object;
-  if (handler >= OBJECT_COUNT || m_objects[handler].kind != object_kind::HANDLER)
-    return (uint32_t)NO_OBJECT;
-  return handler;
+  return handler_id;
 }
 
 // 巻き戻さずにその場で答える。**エラーを黙って捨てない**ための共通口 (D12)。
@@ -471,8 +533,10 @@ uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
     error = object_error::UNDECLARED_METHOD;
     return 0;
   }
-  shadow_t &shadow = m_shadow[thread];
-  if (shadow.depth >= MAX_DEPTH) {
+  uint32_t call_count = 0;
+  for (uint32_t i = 0; i < kernel_instance.ledger_size(thread); ++i)
+    call_count += kernel_instance.ledger_entry(thread, i)->via == KERNEL::LEDGER_CALL;
+  if (call_count >= MAX_DEPTH) {
     error = object_error::NO_STACK;
     return 0;
   }
@@ -488,15 +552,12 @@ uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
   request.region_limit = object_region_limit(id);
   request.args[0] = argument;
 
-  // 台帳へ先に積む (カーネルが失敗したら戻す)。
-  shadow.object[shadow.depth] = (uint16_t)id;
-  shadow.depth++;
+  // CALL 段はカーネルが push する。失敗時は台帳に段が残らない。
   const auto result =
       ARCH::syscall((uintptr_t)primitive::CALL, (uintptr_t)&request);
   // ★成功した場合、この syscall は呼び先が戻ってから返る。戻ってきた時点で
   //   台帳は exit_method 側が既に戻している。
   if (result.error != (uintptr_t)kernel_error::OK) {
-    shadow.depth--;
     error = result.error == (uintptr_t)kernel_error::NO_STACK
                 ? object_error::NO_STACK
                 : object_error::BAD_OBJECT;
@@ -509,10 +570,9 @@ template <>
 void KERNEL_OBJECT::exit_method(uintptr_t levels, uintptr_t value,
                                 uintptr_t error) {
   const uint32_t thread = kernel_instance.current_thread_id();
-  shadow_t &shadow = m_shadow[thread];
 
   // ★専用ハンドラ (HANDLER) が child の処理を終えて通常 return してきた場合 (指摘 6)
-  //   発行元は影スタックから導く (フレームヘッダの caller_object は信用しない)。
+  //   発行元は特権 ledger から導く (スレッドスタック上の値は信用しない)。
   if (interposed_handler(thread) != (uint32_t)NO_OBJECT) {
     const uint32_t cur_depth = kernel_instance.current_depth();
     const uintptr_t count = 2; // kobj (Frame 2) と dedicated handler (Frame 1) の 2 枚
@@ -534,31 +594,27 @@ void KERNEL_OBJECT::exit_method(uintptr_t levels, uintptr_t value,
     exit_thread();
     return;
   }
-  // 巻き戻しに成功するとここへは戻らないので、台帳は**先に**落としておく。
-  shadow.depth = shadow.depth >= pops ? shadow.depth - (uint32_t)pops : 0;
+  // 成功時の台帳 pop はカーネルが RETURN と同時に行う。
   const auto result =
       ARCH::syscall((uintptr_t)primitive::RETURN, count, value, error, depth);
-  // ★ここへ戻ってきた = 巻き戻しが検算で弾かれた。台帳を元へ戻し、発行元へ
+  // ★ここへ戻ってきた = 巻き戻しが検算で弾かれた。台帳は変化していないので、発行元へ
   //   エラーとして返す (系は落とさない = I-9)。
-  shadow.depth += (uint32_t)pops;
   reply(object_error::UNWIND_REJECTED, (uintptr_t)result.error);
 }
 
 template <>
 void KERNEL_OBJECT::forward_child_exit(uintptr_t value, uintptr_t error) {
   const uint32_t thread = kernel_instance.current_thread_id();
-  shadow_t &shadow = m_shadow[thread];
 
   // 発行元は専用ハンドラ (HANDLER) でなければならない (重大指摘 1, 2)。
-  // ★影スタック先端の子の親ハンドラが、今 SVC を撃っている段として在席していること
+  // ★台帳上の子の親ハンドラが、今 SVC を撃っている段として在席していること
   //   (= なりすまし転送防止) を interposed_handler がまとめて確かめる。
   if (interposed_handler(thread) == (uint32_t)NO_OBJECT) {
     reply(object_error::NOT_PRIVILEGED, 0);
     return;
   }
 
-  // 子オブジェクトの呼び出しを 1 段畳む (shadow stack から落とす)
-  shadow.depth--;
+  // 台帳はカーネルが RETURN で物理フレームと一緒に pop する。
 
   // 物理フレームの巻き戻し:
   // Root (F4) + 専用ハンドラ (F3) + 子オブジェクト (F2) の計 3 フレームをまとめて畳み、
@@ -569,12 +625,10 @@ void KERNEL_OBJECT::forward_child_exit(uintptr_t value, uintptr_t error) {
     const auto result = ARCH::syscall((uintptr_t)primitive::RETURN, count,
                                       value, error, cur_depth);
     // 巻き戻し失敗時 (カーネル検算で弾かれた場合) のみ戻る
-    shadow.depth++;
     reply(object_error::UNWIND_REJECTED, (uintptr_t)result.error);
     return;
   }
 
-  shadow.depth++;
   reply(object_error::UNWIND_REJECTED, 0);
 }
 
@@ -603,8 +657,14 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
   table_lock();
   const uintptr_t stack =
       arena_allocate(m_objects_arena, THREAD_STACK_BYTES, id);
+  const uintptr_t ledger = arena_allocate(
+      m_bookkeeping, LEDGER_CAPACITY * sizeof(KERNEL::call_ledger_entry), id);
   table_unlock();
-  if (stack == 0) {
+  if (stack == 0 || ledger == 0) {
+    table_lock();
+    if (stack) arena_release(m_objects_arena, stack);
+    if (ledger) arena_release(m_bookkeeping, ledger);
+    table_unlock();
     error = object_error::NO_MEMORY;
     return 0;
   }
@@ -621,10 +681,13 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
   request.kind = (uint32_t)object_kind_of(id); // ★種別も同じく渡す
   request.parent_handler_object = m_objects[id].parent_handler_object;
   request.parent_handler_entry = m_objects[id].parent_handler_entry;
+  request.ledger = (KERNEL::call_ledger_entry *)ledger;
+  request.ledger_capacity = LEDGER_CAPACITY;
   const auto spawned = kernel_instance.spawn(request);
   if (spawned.error != kernel_error::OK) {
     table_lock();
     arena_release(m_objects_arena, stack); // 使わなかったので返す
+    arena_release(m_bookkeeping, ledger);
     table_unlock();
     error = object_error::NO_THREAD;
     return 0;
@@ -632,10 +695,10 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
   {
     table_guard guard;
     m_thread_stack[spawned.thread] = stack;
+    m_thread_ledger[spawned.thread] = ledger;
   }
   // 新しいスレッドは「そのオブジェクトとして」走り始める。台帳の底をそう置く。
   m_thread_object[spawned.thread] = (uint16_t)id;
-  m_shadow[spawned.thread].depth = 0;
   m_wake_at[spawned.thread] = 0;
   m_budget[spawned.thread] = DEFAULT_BUDGET_CYCLES;
   return spawned.thread;
@@ -689,7 +752,10 @@ template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
             arena_release(m_objects_arena, m_thread_stack[candidate]);
             m_thread_stack[candidate] = 0;
           }
-          m_shadow[candidate].depth = 0;
+          if (m_thread_ledger[candidate]) {
+            arena_release(m_bookkeeping, m_thread_ledger[candidate]);
+            m_thread_ledger[candidate] = 0;
+          }
           m_thread_object[candidate] = (uint16_t)ROOT_OBJECT;
           m_wake_at[candidate] = 0;
           m_budget[candidate] = DEFAULT_BUDGET_CYCLES;
@@ -719,7 +785,10 @@ template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
       m_thread_stack[candidate] = 0;
       // 台帳も畳む。枠は使い回されるので、前の住人の名残りを残してはいけない
       // (次の住人が他人の identity を継いでしまう)。
-      m_shadow[candidate].depth = 0;
+      if (m_thread_ledger[candidate]) {
+        arena_release(m_bookkeeping, m_thread_ledger[candidate]);
+        m_thread_ledger[candidate] = 0;
+      }
       m_thread_object[candidate] = (uint16_t)ROOT_OBJECT;
       m_wake_at[candidate] = 0;
       m_budget[candidate] = DEFAULT_BUDGET_CYCLES;
@@ -834,7 +903,6 @@ uintptr_t KERNEL_OBJECT::run_for(uintptr_t thread, uintptr_t cycles,
 // 借り手として走っていたなら貸し手へ返す道が残っている。
 template <> void KERNEL_OBJECT::exit_thread() {
   const uint32_t self = kernel_instance.current_thread_id();
-  m_shadow[self].depth = 0;
   // ★★自分のスタックも自分の枠も、ここでは返さない。**今その上で走っている**
   //   ので、返した瞬間に他コアの割り当てや spawn がその領域と枠を掴める
   //   (返してから SWITCH を撃つまでの窓で、自分は解放済みの足場を使い続ける)。

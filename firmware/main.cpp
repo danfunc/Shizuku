@@ -316,7 +316,8 @@ int main() {
                            (uint32_t)(boot.base+boot.bytes));
 #endif
   boot_stage(kLaunchApp);
-  shizuku::kernel_instance.bootstrap(shizuku::app_entry, boot.base, boot.bytes);
+  shizuku::kernel_instance.bootstrap(shizuku::app_entry, boot.base, boot.bytes, boot.ledger,
+                                     boot.ledger_capacity);
 #endif
 #else
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
@@ -381,6 +382,7 @@ int main() {
   // 今の実行をスレッド 0 として採用し、スレッドスタックへ移って app_entry へ。
   // ★最初の 1 本のスタックもオブジェクトランドから借りる (他のスレッドと同じ扱い)。
   const auto boot = shizuku::kernel_object_instance.lend_boot_stack();
-  shizuku::kernel_instance.bootstrap(shizuku::app_entry, boot.base, boot.bytes);
+  shizuku::kernel_instance.bootstrap(shizuku::app_entry, boot.base, boot.bytes, boot.ledger,
+                                     boot.ledger_capacity);
 #endif
 }

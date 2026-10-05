@@ -52,6 +52,23 @@ template <> void KERNEL::set_thread_storage(void *memory, uintptr_t bytes) {
   }
 }
 
+template <> void KERNEL::set_thread_ledger(
+    uint32_t id, KERNEL::call_ledger_entry *memory, uint32_t capacity,
+    uint32_t object, uint32_t kind, uint32_t handler_object,
+    uintptr_t handler_entry) {
+  if (id >= m_thread_count || memory == nullptr || capacity == 0 ||
+      (uintptr_t)memory >= BOARD::unprivileged_floor())
+    BOARD::panic("call ledger must be privileged memory");
+  THREAD &thread = m_threads[id].thread;
+  thread.ledger = memory;
+  thread.ledger_capacity = capacity;
+  thread.call_stack = {};
+  thread.base_object = object;
+  thread.base_kind = kind;
+  thread.base_handler_object = handler_object;
+  thread.base_handler_entry = handler_entry;
+}
+
 // ---- スレッドの生成 (スレッドモードから呼ぶ C++ API。syscall ではない) ------
 template <>
 KERNEL::spawn_result KERNEL::spawn(const KERNEL::spawn_request &request) {
@@ -79,10 +96,11 @@ KERNEL::spawn_result KERNEL::spawn(const KERNEL::spawn_request &request) {
   thread.context = &m_threads[index].context;
   *thread.context = CONTEXT{};
   thread.call_stack = {};
-  thread.current_object = request.object_id; // ★READYを公開する前に確実に設定
-  thread.current_kind = request.kind;        // ★種別も同じく公開前に確定させる
-  thread.current_handler_object = request.parent_handler_object;
-  thread.current_handler_entry = request.parent_handler_entry;
+  if (request.ledger == nullptr || request.ledger_capacity == 0)
+    BOARD::panic("spawn without call ledger");
+  set_thread_ledger(index, request.ledger,
+                    request.ledger_capacity, request.object_id, request.kind,
+                    request.parent_handler_object, request.parent_handler_entry);
   // ★既定は**全コア**。core0 固定を既定にすると「渡す機構が効いている」ことを
   //   確かめられない (決めた通りに動いただけになる)。固定したい相手は明示する。
   thread.affinity = request.affinity == 0
@@ -157,6 +175,9 @@ template <> void KERNEL::release(uint32_t thread) {
   // ★状態を空きへ戻す**前に**世代を進める。逆順にすると、空きを見た他コアが
   //   枠を取ってから世代が動くことになり、新しい住人の世代が一瞬古いままになる。
   m_threads[thread].thread.generation++;
+  m_threads[thread].thread.ledger = nullptr;
+  m_threads[thread].thread.ledger_capacity = 0;
+  m_threads[thread].thread.call_stack = {};
   ARCH::store_release32(&m_threads[thread].thread.state,
                         (uint32_t)THREAD::state_t::UNINITIALIZED);
 }
