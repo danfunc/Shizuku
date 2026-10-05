@@ -62,6 +62,7 @@ public:
   //   余白が痩せ、実機が無言で固まった (原因の特定に実機 6 往復を要した)。
   //   数えるべきものが増えたら、数字ではなく**式**を直すこと。
   static constexpr uint32_t CALL_HEADROOM = 512;
+  static constexpr bool HAS_CYCLE_COUNTER = true;
 
   // armv8m_ctx.S の .equ (CTX_*) と一致させること。下の static_assert が両縛りする。
   struct context_t {

@@ -199,6 +199,10 @@ void report(const char *name, stat_t raw, uint32_t baseline,
 void call_cost() {
   BOARD::diag_printf("[COST] call cost bench start\n");
 
+  if (!ARCH::HAS_CYCLE_COUNTER) {
+    BOARD::diag_printf("[COST] SKIP no DWT cycle counter on this arch\n");
+    return;
+  }
   if (!cycle_counter_enable()) {
     // ★測れないなら測れないと言う。0 を報告して数字があるように見せない。
     BOARD::diag_printf("[COST] FAIL DWT CYCCNT is not counting - no numbers\n");

@@ -31,6 +31,7 @@ public:
   struct exception_frame_t { uint32_t r0,r1,r2,r3,r12,lr,pc,xPSR; };
   static constexpr uint32_t CONTROL_PRIV_PSP=2, CONTROL_UNPRIV_PSP=3;
   static constexpr uint32_t CALL_HEADROOM=512;
+  static constexpr bool HAS_CYCLE_COUNTER=false; // M0+ に DWT CYCCNT は無い
   struct context_t {
     uint32_t r4=0,r5=0,r6=0,r7=0,r8=0,r9=0,r10=0,r11=0;
     exception_frame_t *sp=nullptr;
