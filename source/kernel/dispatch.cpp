@@ -61,6 +61,9 @@ template <> void KERNEL::set_object_handler(uintptr_t entry_pc,
 }
 
 
+#if defined(SHIZUKU_DEEP_DIAG)
+extern "C" { volatile uint32_t shizuku_push_diag[6]; volatile uint32_t shizuku_push_diag_n; }
+#endif
 template <>
 bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                              KERNEL::FRAME **frame) {
@@ -95,8 +98,14 @@ bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                             ARCH::EXC_FRAME_MAX_BYTES +
                             ARCH::FAULT_CONTEXT_BYTES + ARCH::CALL_HEADROOM;
   const uintptr_t limit = ARCH::stack_limit(*context);
-  if (limit != 0 && callee_frame < limit + reserve)
+  if (limit != 0 && callee_frame < limit + reserve) {
+#if defined(SHIZUKU_DEEP_DIAG)
+    shizuku_push_diag[0] = (uint32_t)callee_frame; shizuku_push_diag[1] = (uint32_t)limit;
+    shizuku_push_diag[2] = (uint32_t)reserve; shizuku_push_diag[3] = (uint32_t)sizeof(call_frame_header);
+    shizuku_push_diag[4] = (uint32_t)thread.call_stack.depth; shizuku_push_diag[5] = ++shizuku_push_diag_n;
+#endif
     return false;
+  }
 
   call_frame_header *header = (call_frame_header *)snapshot;
   header->prev = thread.call_stack.top;

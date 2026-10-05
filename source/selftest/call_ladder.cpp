@@ -14,6 +14,9 @@
 #include "shizuku/object_ids.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/selftest.hpp"
+#if defined(SHIZUKU_DEEP_DIAG)
+#include "pico/time.h"
+#endif
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
 extern "C" void shizuku_selftest_progress_mark(uint32_t, uint32_t, uint32_t);
 #define CL_PROG(n) shizuku_selftest_progress_mark((n), 0, 0)
@@ -138,6 +141,12 @@ uintptr_t nest(uintptr_t remaining, uintptr_t, uintptr_t, uintptr_t) {
 
 // ---- 異常系: スタックを掘り切ってもエラーで返ること --------------------------
 uint32_t g_deep_max = 0;
+#if defined(SHIZUKU_DEEP_DIAG)
+}
+extern "C" volatile uint32_t shizuku_push_diag[6];
+extern "C" volatile uint32_t shizuku_push_diag_n;
+namespace {
+#endif
 
 uintptr_t deep(uintptr_t depth, uintptr_t, uintptr_t, uintptr_t) {
   DEEP_TRACE(depth);
@@ -286,6 +295,12 @@ void call_ladder() {
           kernel_instance.current_depth() == 0,
           (unsigned long)kernel_instance.current_depth(), 0);
     CL_PROG(809);
+#if defined(SHIZUKU_DEEP_DIAG)
+    for (int i = 0; i < 6; ++i) { busy_wait_us(200000); BOARD::diag_printf("[DD0] wait %d\n", i); }
+    BOARD::diag_printf("[DD1] err=%lu max=%lu n=%lu\n",(unsigned long)result.error,(unsigned long)g_deep_max,(unsigned long)shizuku_push_diag_n);
+    BOARD::diag_printf("[DD2] callee=%08lx limit=%08lx\n",(unsigned long)shizuku_push_diag[0],(unsigned long)shizuku_push_diag[1]);
+    BOARD::diag_printf("[DD3] reserve=%lu hdr=%lu depth=%lu\n",(unsigned long)shizuku_push_diag[2],(unsigned long)shizuku_push_diag[3],(unsigned long)shizuku_push_diag[4]);
+#endif
     BOARD::diag_printf("[SELFTEST] max nesting before NO_STACK: %lu\n",
                        (unsigned long)g_deep_max);
   }
