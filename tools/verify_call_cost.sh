@@ -1,6 +1,7 @@
 #!/bin/zsh
 set -u
-cd /Users/ishigakiyua/github/Shizuku
+cd "$(dirname "$0")/.."
+TMP_PY="$(mktemp -t readser_verify)"
 echo "########## 1. git status (壊していないことの確認) ##########"
 git status --short
 echo
@@ -8,7 +9,7 @@ echo "########## 2. ビルド ##########"
 bazelisk build //firmware:shizuku_uf2 2>&1 | grep -E "error:|warning:|Build completed|FAILED" | head -20
 echo
 echo "########## 3. 実機のシリアル読み取り (20秒、焼かない) ##########"
-cat > /tmp/readser_verify.py <<'PYEOF'
+cat > "$TMP_PY" <<'PYEOF'
 import os, glob, select, time, threading, sys
 devs = sorted(glob.glob("/dev/cu.usbmodem*"))
 if not devs:
@@ -36,7 +37,7 @@ for d in devs:
         if "COST]" in line or "selftest=" in line:
             print(line)
 PYEOF
-python3 /tmp/readser_verify.py
+python3 "$TMP_PY"; rm -f "$TMP_PY"
 echo
 echo "########## 4. call_cost.cpp の noinline を数える ##########"
 grep -c "__attribute__((noinline))" source/selftest/call_cost.cpp

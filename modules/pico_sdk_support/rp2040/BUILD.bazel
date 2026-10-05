@@ -32,6 +32,9 @@ cc_library(
         ":headers",
         "//:kernel",
         "//configs:config",
+        # ★board → オブジェクトの逆向き依存 (rp2350 と同じ)。diag_printf が行単位で
+        #   排他して CDC 0 へ書くため。
+        "//modules/pico_sdk_support/objects:usb_cdc",
         "@pico-sdk//bazel/config:PICO_TINYUSB_LIB",
         "@pico-sdk//src/rp2_common/hardware_dma",
         "@pico-sdk//src/rp2_common/hardware_exception",

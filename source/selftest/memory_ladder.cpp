@@ -40,6 +40,7 @@ void check(const char *name, bool ok, unsigned long got, unsigned long want) {
     BOARD::diag_printf("[SELFTEST] PASS %s (=%lu)\n", name, got);
   } else {
     ++failed;
+    record_fail(name, got, want);
     BOARD::diag_printf("[SELFTEST] FAIL %s: got %lu want %lu\n", name, got,
                        want);
   }

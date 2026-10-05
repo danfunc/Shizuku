@@ -6,8 +6,9 @@ namespace shizuku {
 namespace templates {
 
 // スレッド = カーネルが知る唯一の実行単位 (DESIGN §5)。
-// ★カーネルはオブジェクトの**台帳**を知らない (D1)。ここにあるのは「今どのオブジェクト
-//   として、どの種別で走っているか」という文脈だけで、誰が何を export しているか・
+// ★実行中の識別状態は特権 call ledger にあり、メソッド表や export 情報は持たない。
+//   「今どのオブジェクトとして、どの種別で走っているか」は ledger / base 状態から導き、
+//   誰が何を export しているか・
 //   誰が誰の親かといった話は全部カーネルオブジェクトの側にある。
 //   ★2026-09-05: identity を文脈として持つこと自体は設計判断であって D1 違反ではない、
 //     と方針を緩めた。緩めていないのは「役を ID で代用しない」という一点。
@@ -37,16 +38,36 @@ template <typename CONTEXT> struct thread {
   uint32_t state = (uint32_t)state_t::UNINITIALIZED;
   CONTEXT *context = nullptr;
   call_stack_t call_stack;
+  struct call_ledger_entry {
+    uint32_t object;
+    uint32_t handler_object;
+    uintptr_t handler_entry;
+    uint8_t kind;
+    uint8_t via;
+    uint16_t pad;
+  };
+  call_ledger_entry *ledger = nullptr;
+  uint32_t ledger_capacity = 0;
+  uint32_t base_object = 0;
+  uint32_t base_kind = (uint32_t)object_kind::PLAIN;
+  uint32_t base_handler_object = 0;
+  uintptr_t base_handler_entry = 0;
+  const call_ledger_entry &ledger_top() const {
+    return ledger[call_stack.depth - 1];
+  }
+  uint32_t current_object() const {
+    return call_stack.depth ? ledger_top().object : base_object;
+  }
+  uint32_t current_kind() const {
+    return call_stack.depth ? ledger_top().kind : base_kind;
+  }
+  uint32_t current_handler_object() const {
+    return call_stack.depth ? ledger_top().handler_object : base_handler_object;
+  }
+  uintptr_t current_handler_entry() const {
+    return call_stack.depth ? ledger_top().handler_entry : base_handler_entry;
+  }
   uint32_t affinity = 0b1; // bit0 = core0 (どのコアで走ってよいか)
-  uint32_t current_object = 0;
-  // ★今走っているオブジェクトの**種別**。ID とは独立に持つ (ID は名前であって
-  //   役ではない)。svc の経路も、取り上げを見送るかどうかも、これだけで決まる。
-  //   遷移させるのはカーネルだけ: CALL で呼び先の申告を載せ、戻るときに
-  //   呼び出しフレームのヘッダから読み戻す。
-  uint32_t current_kind = (uint32_t)object_kind::PLAIN;
-  // ★今走っているオブジェクトの親 handling object の情報 (解決済み binding)
-  uint32_t current_handler_object = 0;
-  uintptr_t current_handler_entry = 0;
   // ★枠が使い回されたことを外から見分けるための番号。release のたびに 1 進む。
   //   スレッド番号だけを控えていると、控えた相手が終わって同じ番号に別の
   //   スレッドが入ったとき、**控えた側は気づけない** (デバッガが止めたつもりの

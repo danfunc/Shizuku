@@ -5,7 +5,14 @@
 //  (Raspberry Pi (Trading) Ltd. / Damien P. George、MIT)。CDC を 2 本に増やし、
 //  リセットインターフェースはそのまま残してある。
 #include "hardware/irq.h"
+#include "hardware/sync.h"
 #include "hardware/timer.h"
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_USB_ALARM_STARTUP_DIAGNOSTIC) && \
+    SHIZUKU_USB_ALARM_STARTUP_DIAGNOSTIC > 0
+#include <cstdio>
+#include "hardware/structs/scb.h"
+#include "pico/platform.h"
+#endif
 #include "pico/bootrom.h"
 #include "pico/stdio/driver.h"
 #include "pico/time.h"
@@ -25,10 +32,19 @@ namespace shizuku {
 namespace objects {
 namespace {
 
-// ★VID/PID は変えない。picotool が reset-via-baud でデバイスを探すときに使うので、
+// ★VID は変えない。picotool が reset-via-baud でデバイスを探すときに使うので、
 //   変えると書き込み手順が壊れる (参照実装が明記している罠)。
+// PID は Pico SDK 本家の使い分け (RP2040=0x000a / それ以外=0x0009) に揃える。
+// picotool (picoboot_connection.c の PID switch) は 0x0009/0x000a のどちらも
+// dr_vidpid_stdio_usb (reset 対象) に分類し、違いは報告するチップ名だけなので
+// reset-via-baud には影響しない。PID 固定のままだと RP2040 実機が
+// "RP2350 device" と誤認表示される (D.. 参照)。
 constexpr uint16_t USBD_VID = 0x2E8A;
+#if defined(SHIZUKU_RP2040)
+constexpr uint16_t USBD_PID = 0x000a;
+#else
 constexpr uint16_t USBD_PID = 0x0009;
+#endif
 
 enum : uint8_t {
   STR_LANGUAGE = 0,
@@ -117,7 +133,24 @@ uint16_t g_string_buffer[32];
 //   低優先度のユーザー IRQ を繰り返しタイマで叩く (pico_stdio_usb と同じ作法)。
 uint8_t g_task_irq;
 
-void usb_task_irq_handler() { tud_task(); }
+// ★診断の CDC FIFO には 2 コアと tud_task (core 0 の IRQ) が同時に触れる。
+//   行単位で排他するハードウェア spinlock。tud_task は取れなければその回を
+//   飛ばし (1ms 後にまた来る)、書き手は待ちを打ち切って行を捨てる (D42)。
+//   どちらも無限に待たないのは、panic で止められたコアが保持したままでも
+//   panic の USB 出力が詰まらないようにするため。
+spin_lock_t *g_diag_lock;
+void usb_task_irq_handler() {
+  const uint32_t state = save_and_disable_interrupts();
+  if (g_diag_lock == nullptr) {
+    tud_task();
+    restore_interrupts(state);
+    return;
+  }
+  spin_lock_unsafe_blocking(g_diag_lock);
+  tud_task();
+  spin_unlock_unsafe(g_diag_lock);
+  restore_interrupts(state);
+}
 
 int64_t usb_task_timer(alarm_id_t, void *) {
   irq_set_pending(g_task_irq);
@@ -126,7 +159,7 @@ int64_t usb_task_timer(alarm_id_t, void *) {
 
 // ---- 診断 (printf) を channel 0 へ結ぶ --------------------------------------
 // ★pico_stdio_usb を使わなくなったので、標準出力の行き先は自分で用意する。
-void diag_out_chars(const char *buffer, int length) {
+void diag_write_unlocked(const char *buffer, int length) {
   for (int index = 0; index < length; ++index) {
     // ★CDC は 1 本ぶんのバッファしか持たない。相手が読んでいないときに詰まると
     //   系が止まるので、**溢れたら捨てる**。診断のために本業を止めない。
@@ -136,6 +169,12 @@ void diag_out_chars(const char *buffer, int length) {
       return;
     tud_cdc_n_write_char(0, buffer[index]);
   }
+}
+void diag_out_chars(const char *buffer, int length) {
+  const uint32_t state = save_and_disable_interrupts();
+  if (g_diag_lock != nullptr)
+    usb_cdc_diag_write_line(buffer, (uint32_t)length);
+  restore_interrupts(state);
 }
 void diag_out_flush() { tud_cdc_n_write_flush(0); }
 int diag_in_chars(char *buffer, int length) {
@@ -157,6 +196,8 @@ stdio_driver_t g_diag_driver = {
 } // namespace
 
 void usb_cdc_init() {
+  if (g_diag_lock == nullptr)
+    g_diag_lock = spin_lock_instance((uint)spin_lock_claim_unused(true));
   pico_get_unique_board_id_string(g_serial, sizeof(g_serial));
   tusb_init();
   g_task_irq = (uint8_t)user_irq_claim_unused(true);
@@ -164,6 +205,66 @@ void usb_cdc_init() {
   irq_set_enabled(g_task_irq, true);
   add_alarm_in_us(1000, usb_task_timer, nullptr, true);
   stdio_set_driver_enabled(&g_diag_driver, true);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_USB_ALARM_STARTUP_DIAGNOSTIC) && \
+    SHIZUKU_USB_ALARM_STARTUP_DIAGNOSTIC > 0
+  // This is an observation from normal context after the existing alarm was
+  // installed and after the diagnostic stdio driver became active. It does
+  // not inspect SDK-private pools[] or claim to identify a later corruption.
+  alarm_pool_t *startup_pool = alarm_pool_get_default();
+  alarm_pool_timer_t *startup_timer = alarm_pool_get_default_timer();
+  const uint startup_alarm = alarm_pool_timer_alarm_num(startup_pool);
+  const uint startup_irq = TIMER_ALARM_IRQ_NUM(
+      (timer_hw_t *)startup_timer, startup_alarm);
+  const irq_handler_t startup_vtable_handler =
+      irq_get_vtable_handler(startup_irq);
+  const irq_handler_t startup_exclusive_handler =
+      irq_get_exclusive_handler(startup_irq);
+  printf("[ALARM_DIAG] startup observation only: core=%lu pool=%08lx "
+         "timer=%08lx pool_core=%lu alarm=%lu irq=%lu enabled=%u "
+         "vtor=%08lx vtable=%08lx exclusive=%08lx task_irq=%u\n",
+         (unsigned long)get_core_num(),
+         (unsigned long)(uintptr_t)startup_pool,
+         (unsigned long)(uintptr_t)startup_timer,
+         (unsigned long)alarm_pool_core_num(startup_pool),
+         (unsigned long)startup_alarm, (unsigned long)startup_irq,
+         (unsigned)irq_is_enabled(startup_irq),
+         (unsigned long)scb_hw->vtor,
+         (unsigned long)(uintptr_t)startup_vtable_handler,
+         (unsigned long)(uintptr_t)startup_exclusive_handler,
+         (unsigned)g_task_irq);
+#endif
+}
+
+// 1 行を割込み禁止 + spinlock の下でまとめて CDC 0 へ書く。\n は \r\n にする。
+void usb_cdc_diag_write_line(const char *line, uint32_t length) {
+  const uint32_t state = save_and_disable_interrupts();
+  if (g_diag_lock != nullptr && spin_try_lock_unsafe(g_diag_lock)) {
+#if PICO_STDIO_ENABLE_CRLF_SUPPORT
+    uint32_t extra_cr = 0;
+    for (uint32_t index = 0; index < length; ++index)
+      if (line[index] == '\n')
+        ++extra_cr;
+    const uint32_t needed = length + extra_cr;
+#else
+    const uint32_t needed = length;
+#endif
+    uint32_t available = tud_cdc_n_write_available(0);
+    if (available < needed) {
+      tud_cdc_n_write_flush(0);
+      available = tud_cdc_n_write_available(0);
+    }
+    if (available >= needed) {
+      for (uint32_t index = 0; index < length; ++index) {
+#if PICO_STDIO_ENABLE_CRLF_SUPPORT
+        if (line[index] == '\n')
+          tud_cdc_n_write(0, "\r", 1);
+#endif
+      }
+      tud_cdc_n_write(0, line, length);
+    }
+    spin_unlock_unsafe(g_diag_lock);
+  }
+  restore_interrupts(state);
 }
 
 // ★panic からしか呼ばない (board.cpp)。USB を生かすのに要る 3 本の IRQ だけ

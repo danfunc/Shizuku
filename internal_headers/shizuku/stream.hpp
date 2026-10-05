@@ -2,6 +2,8 @@
 #define SHIZUKU_STREAM_HPP
 #include <cstdint>
 
+#include "shizuku/freestanding_mem.hpp"
+
 // ===========================================================================
 //  ストリーム — オブジェクト間 / コア間のデータの流れ (DESIGN §13)
 // ===========================================================================
@@ -106,7 +108,7 @@ public:
     const uint32_t rd = __atomic_load_n(&m_desc->rd, __ATOMIC_ACQUIRE);
     if ((m_desc->flags & LOSSLESS) && (wr - rd) >= capacity)
       return false;
-    slot(wr) = record;
+    shizuku_copy_record(&slot(wr), &record);
     // ★中身を置いてから番号を進める。逆にすると、揃う前の場所を読ませてしまう。
     __atomic_store_n(&m_desc->wr, wr + 1, __ATOMIC_RELEASE);
     return true;
@@ -128,7 +130,7 @@ public:
       dropped = fresh - rd;
       rd = fresh;
     }
-    *into = slot(rd);
+    shizuku_copy_record(into, &slot(rd));
     // ★写してから、写した場所がまだ生きていたかを確かめる。写している最中に
     //   一周されていたら、その中身は別物なので落とす (D33 と同じ考え方)。
     const uint32_t after = __atomic_load_n(&m_desc->wr, __ATOMIC_ACQUIRE);

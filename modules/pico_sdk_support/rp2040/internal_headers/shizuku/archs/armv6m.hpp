@@ -31,13 +31,17 @@ public:
   struct exception_frame_t { uint32_t r0,r1,r2,r3,r12,lr,pc,xPSR; };
   static constexpr uint32_t CONTROL_PRIV_PSP=2, CONTROL_UNPRIV_PSP=3;
   static constexpr uint32_t CALL_HEADROOM=512;
+  static constexpr bool HAS_CYCLE_COUNTER=false; // M0+ に DWT CYCCNT は無い
   struct context_t {
     uint32_t r4=0,r5=0,r6=0,r7=0,r8=0,r9=0,r10=0,r11=0;
     exception_frame_t *sp=nullptr;
     uint32_t exc_return=0xFFFFFFFD;
     uint32_t control=CONTROL_PRIV_PSP;
     uint32_t region_base=0, region_limit=0;
+    uint32_t stack_limit_addr=0;
   };
+  static constexpr uint32_t EXC_FRAME_MAX_BYTES=32;
+  static constexpr uint32_t FAULT_CONTEXT_BYTES=sizeof(context_t);
   using method_t=uintptr_t (*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t,uintptr_t);
   static uint32_t exc_frame_bytes(const context_t &) { return 32; }
   static uintptr_t psp_after_return(const context_t &c) {
@@ -120,9 +124,9 @@ public:
   static bool current_priv(){return (control_register()&1u)==0;}
   static void set_priv(context_t &c,bool p){c.control=p?CONTROL_PRIV_PSP:CONTROL_UNPRIV_PSP;}
   static bool set_region_window(context_t &c,uintptr_t b,uintptr_t e){return e==0?(c.region_base=c.region_limit=0,true):grant_set(c,b,e);}
-  // Phase 1 software fallback. Phase 2 will dedicate MPU guard regions per stack.
-  static void stack_limit_set(context_t &,uintptr_t) {/* TODO: PMSAv6 stack guard region */}
-  static uintptr_t stack_limit(const context_t &){return 0;}
+  // ソフトウェア下限のみ。MPU ガード領域は未実装
+  static void stack_limit_set(context_t &c, uintptr_t v){c.stack_limit_addr=(uint32_t)v;}
+  static uintptr_t stack_limit(const context_t &c){return (uintptr_t)c.stack_limit_addr;}
   // RP2040 M0+ has no LDREX/STREX. Reuse the Pico SDK's lock reserved for
   // atomic operations; lock 31 belongs to the claim-free allocator.
   static spin_lock_t *atomic_lock(){return spin_lock_instance(PICO_SPINLOCK_ID_ATOMIC);}
@@ -147,6 +151,7 @@ static_assert(offsetof(armv6m::context_t,sp)==32);
 static_assert(offsetof(armv6m::context_t,exc_return)==36);
 static_assert(offsetof(armv6m::context_t,control)==40);
 static_assert(offsetof(armv6m::context_t,region_base)==44);
+static_assert(offsetof(armv6m::context_t,stack_limit_addr)==52);
 static_assert((uintptr_t)shizuku::primitive::RETURN==2);
 static_assert(shizuku::concepts::arch_requires<armv6m>);
 }

@@ -21,7 +21,37 @@
 
 namespace shizuku {
 namespace selftest {
+constexpr uint32_t FAIL_KEEP = 16;
+struct kept_fail {
+  const char *name;
+  unsigned long got;
+  unsigned long want;
+};
+kept_fail g_fails[FAIL_KEEP];
+volatile uint32_t g_fail_count = 0;
+
+void record_fail(const char *name, unsigned long got, unsigned long want) {
+  const uint32_t index = g_fail_count;
+  if (index >= FAIL_KEEP)
+    return;
+  g_fails[index] = {name, got, want};
+  g_fail_count = index + 1;
+}
+
 namespace {
+
+// 1 回の報告で 2 行ずつ、順繰りに出す (TX バッファを溢れさせない)。
+void replay_fails() {
+  static uint32_t cursor = 0;
+  const uint32_t count = g_fail_count;
+  for (uint32_t n = 0; n < 2 && count != 0; ++n) {
+    const uint32_t i = cursor % count;
+    BOARD::diag_printf("[FAILS] %lu/%lu %s: got %lu want %lu\n",
+                       (unsigned long)(i + 1), (unsigned long)count,
+                       g_fails[i].name, g_fails[i].got, g_fails[i].want);
+    ++cursor;
+  }
+}
 
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
@@ -165,6 +195,7 @@ uintptr_t blink(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
           (unsigned long)cost_call1, (unsigned long)cost_call2,
           (unsigned long)cost_baseline,
           (unsigned long)BOARD::cycles_per_us());
+      replay_fails();
       late_window = 0;
       led_window = 0;
       led_min = ~(uint64_t)0;

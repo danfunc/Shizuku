@@ -16,6 +16,10 @@ namespace selftest {
 extern uint32_t passed;
 extern uint32_t failed;
 
+// FAIL の原文を RAM に保持し、定常ループで再出力する (起動直後の出力は CDC の
+// TX バッファから溢れて欠けるため)。name は静的文字列であること。
+void record_fail(const char *name, unsigned long got, unsigned long want);
+
 // メソッド呼び出しの梯子。結果は BOARD::diag_printf へ出す。
 void call_ladder();
 

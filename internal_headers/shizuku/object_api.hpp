@@ -131,8 +131,8 @@ enum struct object_api : uintptr_t {
   // 専用ハンドラ (HANDLER) が配下の子オブジェクトのメソッド終了 (EXIT_METHOD) を
   // Root Kernel Object へ転送する。
   // a1 = 戻り値, a2 = エラーコード。
-  // 呼び出し元が HANDLER かつ shadow stack の top が子オブジェクトである場合のみ受理され、
-  // Root は shadow stack から子を pop し、Root + Handler + Child の 3 フレームを
+  // 特権 call ledger が専用ハンドラと子オブジェクトの段を示す場合のみ受理され、
+  // Root は Root + Handler + Child の 3 フレームを
   // まとめて畳んで Child の呼び出し元 (Caller) へ復帰する。
   FORWARD_CHILD_EXIT = 27,
 };
