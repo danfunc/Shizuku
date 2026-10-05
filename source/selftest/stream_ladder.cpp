@@ -75,7 +75,8 @@ uintptr_t consumer(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   uint32_t expected = 1;
   uint32_t idle = 0;
   while (expected <= RECORDS && idle < 200000) {
-    item record{};
+    item record;
+    shizuku_zero_record(&record);
     uint32_t lost = 0;
     if (!in.pop(&record, &lost)) {
       g_lost += lost;
