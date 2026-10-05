@@ -24,6 +24,8 @@ public:
     uintptr_t value;
   };
   static constexpr uint32_t CALL_HEADROOM = 0;
+  static constexpr uint32_t EXC_FRAME_MAX_BYTES = sizeof(exception_frame_t);
+  static constexpr uint32_t FAULT_CONTEXT_BYTES = sizeof(context_t);
   static constexpr uint32_t TIMER_MAX_CYCLES = 0xFFFFFFFF;
   static constexpr uint32_t TIMER_MIN_CYCLES = 1;
 

@@ -87,8 +87,13 @@ bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   //   もう 1 枚積めること、なので**その 1 枚ぶんは構造から計算して足す**。
   //   ARCH::CALL_HEADROOM に残るのは「ハンドラ連鎖の C フレーム」の見積もりだけで、
   //   カーネルの幾何が変わってもそちらは動かなくてよい。
-  const uintptr_t reserve =
-      (uintptr_t)sizeof(call_frame_header) + frame_bytes + ARCH::CALL_HEADROOM;
+  //   ★2026-10-05: 上の 1 枚ぶんに加え、呼び先で fault が起きた場合に積まれる
+  //     量も算術で足す。ハードが積む最大の例外フレーム (FPU 拡張 104B) と、fault
+  //     入口の CTX_SAVE が退避する文脈。これが無いと、トランポリンは積めるのに
+  //     その後の fault 入口が PSPLIM を割り、フォールト報告すら出ず lockup した。
+  const uintptr_t reserve = (uintptr_t)sizeof(call_frame_header) + frame_bytes +
+                            ARCH::EXC_FRAME_MAX_BYTES +
+                            ARCH::FAULT_CONTEXT_BYTES + ARCH::CALL_HEADROOM;
   const uintptr_t limit = ARCH::stack_limit(*context);
   if (limit != 0 && callee_frame < limit + reserve)
     return false;

@@ -35,6 +35,10 @@ namespace concepts {
 // - set_priv          : 文脈が次に復帰するときの特権状態を設定する (即時ではない)
 // - stack_limit_set / stack_limit : 文脈のスタック下限。ハード検出 (PSPLIM) が無い
 //                       ISA はソフト検査へ縮退してよいが「下回ったら必ず検出」は守る
+// - EXC_FRAME_MAX_BYTES / FAULT_CONTEXT_BYTES :
+//                       例外 1 回でハードが積む最大量 (FPU 拡張フレーム等) と、
+//                       fault 入口が退避する文脈の大きさ。call_frame_push の余白を
+//                       「実際に積まれる量」から算術で出すために使う
 // - CALL_HEADROOM     : 呼び出しフレームを積むときスタック下限の手前に残す余裕 [byte]。
 //                       呼び先のプロローグが下限を割らないだけの幅を取ること
 // - cas32 / store_release32 / load_acquire32 :
@@ -81,6 +85,8 @@ concept arch_requires =
         { ARCH::cycle_counter_read() } -> std::same_as<uint32_t>;
       };
       { ARCH::CALL_HEADROOM } -> std::convertible_to<uint32_t>;
+      { ARCH::EXC_FRAME_MAX_BYTES } -> std::convertible_to<uint32_t>;
+      { ARCH::FAULT_CONTEXT_BYTES } -> std::convertible_to<uint32_t>;
       { ARCH::cas32(shared_word, value, value) } -> std::same_as<bool>;
       { ARCH::store_release32(shared_word, value) };
       { ARCH::load_acquire32(shared_word) } -> std::same_as<uint32_t>;

@@ -57,8 +57,8 @@ public:
   //   syscall を撃つので、ここが足りないと「戻ることすらできない」状態が作れて
   //   しまう。足りないと PSPLIM の UsageFault が先に出て無言で死ぬ。
   // ★★2026-09-05: 退避域 (ヘッダ + 例外フレーム) のぶんは**ここに書かない**。
-  //   カーネル側が sizeof(call_frame_header) から算術で足す (dispatch.cpp の
-  //   call_frame_push)。ここへ数字で書き写していたせいで、ヘッダに 1 語足しただけで
+  //   カーネル側が sizeof(call_frame_header) と EXC_FRAME_MAX_BYTES /
+  //   FAULT_CONTEXT_BYTES から算術で足す (dispatch.cpp の call_frame_push)。ここへ数字で書き写していたせいで、ヘッダに 1 語足しただけで
   //   余白が痩せ、実機が無言で固まった (原因の特定に実機 6 往復を要した)。
   //   数えるべきものが増えたら、数字ではなく**式**を直すこと。
   static constexpr uint32_t CALL_HEADROOM = 512;
@@ -81,6 +81,11 @@ public:
     uint32_t region_base = 0;  // offset 112
     uint32_t region_limit = 0; // offset 116
   };
+  // 余白の算術に使う、実際に積まれる量。
+  // 例外 1 回でハードウェアが積む最大 (FPU 活性時の拡張フレーム 104B)。
+  static constexpr uint32_t EXC_FRAME_MAX_BYTES = 104;
+  // fault 入口が CTX_SAVE でスレッドスタックへ退避する文脈の大きさ。
+  static constexpr uint32_t FAULT_CONTEXT_BYTES = sizeof(context_t);
   // メソッド ABI (引数 4 本 + r12)。
   using method_t = uintptr_t (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t,
                                  uintptr_t);

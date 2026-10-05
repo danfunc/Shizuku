@@ -40,6 +40,8 @@ public:
     uint32_t region_base=0, region_limit=0;
     uint32_t stack_limit_addr=0;
   };
+  static constexpr uint32_t EXC_FRAME_MAX_BYTES=32;
+  static constexpr uint32_t FAULT_CONTEXT_BYTES=sizeof(context_t);
   using method_t=uintptr_t (*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t,uintptr_t);
   static uint32_t exc_frame_bytes(const context_t &) { return 32; }
   static uintptr_t psp_after_return(const context_t &c) {
