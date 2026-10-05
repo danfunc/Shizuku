@@ -5,7 +5,9 @@
 //  (Raspberry Pi (Trading) Ltd. / Damien P. George、MIT)。CDC を 2 本に増やし、
 //  リセットインターフェースはそのまま残してある。
 #include "hardware/irq.h"
+#include "hardware/sync.h"
 #include "hardware/timer.h"
+#include "hardware/sync.h"
 #include "pico/bootrom.h"
 #include "pico/stdio/driver.h"
 #include "pico/time.h"
@@ -126,7 +128,24 @@ uint16_t g_string_buffer[32];
 //   低優先度のユーザー IRQ を繰り返しタイマで叩く (pico_stdio_usb と同じ作法)。
 uint8_t g_task_irq;
 
-void usb_task_irq_handler() { tud_task(); }
+// ★診断の CDC FIFO には 2 コアと tud_task (core 0 の IRQ) が同時に触れる。
+//   行単位で排他するハードウェア spinlock。tud_task は取れなければその回を
+//   飛ばし (1ms 後にまた来る)、書き手は待ちを打ち切って行を捨てる (D42)。
+//   どちらも無限に待たないのは、panic で止められたコアが保持したままでも
+//   panic の USB 出力が詰まらないようにするため。
+spin_lock_t *g_diag_lock;
+void usb_task_irq_handler() {
+  const uint32_t state = save_and_disable_interrupts();
+  if (g_diag_lock == nullptr) {
+    tud_task();
+    restore_interrupts(state);
+    return;
+  }
+  spin_lock_unsafe_blocking(g_diag_lock);
+  tud_task();
+  spin_unlock_unsafe(g_diag_lock);
+  restore_interrupts(state);
+}
 
 int64_t usb_task_timer(alarm_id_t, void *) {
   irq_set_pending(g_task_irq);
@@ -135,7 +154,7 @@ int64_t usb_task_timer(alarm_id_t, void *) {
 
 // ---- 診断 (printf) を channel 0 へ結ぶ --------------------------------------
 // ★pico_stdio_usb を使わなくなったので、標準出力の行き先は自分で用意する。
-void diag_out_chars(const char *buffer, int length) {
+void diag_write_unlocked(const char *buffer, int length) {
   for (int index = 0; index < length; ++index) {
     // ★CDC は 1 本ぶんのバッファしか持たない。相手が読んでいないときに詰まると
     //   系が止まるので、**溢れたら捨てる**。診断のために本業を止めない。
@@ -145,6 +164,12 @@ void diag_out_chars(const char *buffer, int length) {
       return;
     tud_cdc_n_write_char(0, buffer[index]);
   }
+}
+void diag_out_chars(const char *buffer, int length) {
+  const uint32_t state = save_and_disable_interrupts();
+  if (g_diag_lock != nullptr)
+    usb_cdc_diag_write_line(buffer, (uint32_t)length);
+  restore_interrupts(state);
 }
 void diag_out_flush() { tud_cdc_n_write_flush(0); }
 int diag_in_chars(char *buffer, int length) {
@@ -166,6 +191,8 @@ stdio_driver_t g_diag_driver = {
 } // namespace
 
 void usb_cdc_init() {
+  if (g_diag_lock == nullptr)
+    g_diag_lock = spin_lock_instance((uint)spin_lock_claim_unused(true));
   pico_get_unique_board_id_string(g_serial, sizeof(g_serial));
   tusb_init();
   g_task_irq = (uint8_t)user_irq_claim_unused(true);
@@ -173,6 +200,38 @@ void usb_cdc_init() {
   irq_set_enabled(g_task_irq, true);
   add_alarm_in_us(1000, usb_task_timer, nullptr, true);
   stdio_set_driver_enabled(&g_diag_driver, true);
+}
+
+// 1 行を割込み禁止 + spinlock の下でまとめて CDC 0 へ書く。\n は \r\n にする。
+void usb_cdc_diag_write_line(const char *line, uint32_t length) {
+  const uint32_t state = save_and_disable_interrupts();
+  if (g_diag_lock != nullptr && spin_try_lock_unsafe(g_diag_lock)) {
+#if PICO_STDIO_ENABLE_CRLF_SUPPORT
+    uint32_t extra_cr = 0;
+    for (uint32_t index = 0; index < length; ++index)
+      if (line[index] == '\n')
+        ++extra_cr;
+    const uint32_t needed = length + extra_cr;
+#else
+    const uint32_t needed = length;
+#endif
+    uint32_t available = tud_cdc_n_write_available(0);
+    if (available < needed) {
+      tud_cdc_n_write_flush(0);
+      available = tud_cdc_n_write_available(0);
+    }
+    if (available >= needed) {
+      for (uint32_t index = 0; index < length; ++index) {
+#if PICO_STDIO_ENABLE_CRLF_SUPPORT
+        if (line[index] == '\n')
+          tud_cdc_n_write(0, "\r", 1);
+#endif
+      }
+      tud_cdc_n_write(0, line, length);
+    }
+    spin_unlock_unsafe(g_diag_lock);
+  }
+  restore_interrupts(state);
 }
 
 // ★panic からしか呼ばない (board.cpp)。USB を生かすのに要る 3 本の IRQ だけ

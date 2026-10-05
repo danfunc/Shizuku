@@ -16,6 +16,7 @@
 #include "shizuku/archs/armv6m.hpp"
 #include "shizuku/boards/rp2040_pico_w.hpp"
 #include "shizuku/kernel.hpp"
+#include "shizuku/objects/usb_cdc.hpp"
 #include "tusb.h"
 extern "C" char __end__[];
 extern "C" char __flash_binary_end;
@@ -119,7 +120,17 @@ bool rp2040_pico_w::dma_busy(int ch){return dma_channel_is_busy((uint)ch);}
 void rp2040_pico_w::dma_release(int ch){dma_channel_unclaim((uint)ch);}
 uint32_t rp2040_pico_w::cycles_per_us(){return clock_get_hz(clk_sys)/1000000u;}
 uintptr_t rp2040_pico_w::unprivileged_floor(){return ((uintptr_t)__end__+31u)&~(uintptr_t)31u;}
-void rp2040_pico_w::diag_printf(const char*f,...){va_list a;va_start(a,f);vprintf(f,a);va_end(a);}
+void rp2040_pico_w::diag_printf(const char*f,...){
+  static char lines[2][384];
+  const uint32_t state=save_and_disable_interrupts();
+  char*line=lines[get_core_num()];
+  va_list a;va_start(a,f);
+  int n=vsnprintf(line,sizeof(lines[0]),f,a);
+  va_end(a);
+  if(n>(int)sizeof(lines[0])-1)n=(int)sizeof(lines[0])-1;
+  if(n>0)shizuku::objects::usb_cdc_diag_write_line(line,(uint32_t)n);
+  restore_interrupts(state);
+}
 [[noreturn]] void rp2040_pico_w::panic(const char*m){
   printf("PANIC: %s\n",m);save_and_disable_interrupts();for(;;)__wfi();}
 }
