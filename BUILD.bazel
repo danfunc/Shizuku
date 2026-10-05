@@ -16,6 +16,7 @@ genrule(
         "source/apps/objects.list",
         "source/selftest/objects.list",
         "//modules/pico_sdk_support:objects.list",
+        "//objectland:objects.list",
     ],
     outs = ["generated_object_ids/shizuku/object_ids.hpp"],
     cmd = "python3 $(location //tools:gen_object_ids.py)" +
@@ -23,7 +24,8 @@ genrule(
           " --out $@ --limit 64" +
           " $(location source/apps/objects.list)" +
           " $(location source/selftest/objects.list)" +
-          " $(location //modules/pico_sdk_support:objects.list)",
+          " $(location //modules/pico_sdk_support:objects.list)" +
+          " $(location //objectland:objects.list)",
     tools = ["//tools:gen_object_ids.py"],
 )
 
@@ -94,6 +96,7 @@ cc_library(
         "source/selftest/debug_ladder.cpp",
         "source/selftest/flash_stream.cpp",
         "source/selftest/handler_binding.cpp",
+        "source/selftest/hello_probe.cpp",
         "source/selftest/memory_ladder.cpp",
         "source/selftest/multicore.cpp",
         "source/selftest/stream_ladder.cpp",
@@ -107,5 +110,6 @@ cc_library(
         ":kernel_object",
         "//modules/pico_sdk_support/objects:flash_fs",
         "//modules/pico_sdk_support/objects:peripherals",
+        "//objectland:hello",
     ],
 )

@@ -55,6 +55,10 @@ void multicore_probe();
 // ストリームの梯子: 2 コアで押し引きして、1 個も落とさず順序どおりに届くかを見る。
 void stream_ladder();
 
+// objectland hello オブジェクトの動作確認
+void hello_probe();
+
+
 // 非特権オブジェクトが flash をストリーム越しに読み書きできるか。
 void flash_stream_ladder();
 

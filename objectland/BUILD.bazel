@@ -1,0 +1,70 @@
+# ===========================================================================
+#  Shizuku Objectland — 専用隔離サブターゲット
+# ===========================================================================
+#  pico-sdk の headers / libraries を一切見せない専用 build setting と
+#  パッケージ境界により、将来の言語 (Rust 等) への移行を見据えた完全隔離を保証する。
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["objects.list"])
+
+# 専用 build setting: objectland 隔離モードフラグ
+bool_flag(
+    name = "isolated",
+    build_setting_default = True,
+)
+
+config_setting(
+    name = "is_isolated",
+    flag_values = {":isolated": "True"},
+)
+
+OBJECTLAND_COPTS = [
+    "-ffreestanding",
+    "-fno-builtin",
+    "-nostdlib",
+    "-Wall",
+    "-Wextra",
+]
+
+# 言語非依存 C ABI ヘッダ
+cc_library(
+    name = "shizuku_abi",
+    hdrs = ["include/shizuku_abi.h"],
+    includes = ["include"],
+    copts = OBJECTLAND_COPTS,
+)
+
+# 最小 freestanding runtime (libshizuku)
+cc_library(
+    name = "libshizuku",
+    hdrs = ["libshizuku.hpp"],
+    copts = OBJECTLAND_COPTS,
+    deps = [":shizuku_abi"],
+)
+
+# Hello object library (firmware に静的リンク可能)
+cc_library(
+    name = "hello",
+    srcs = ["hello.cpp"],
+    hdrs = ["hello.hpp"],
+    copts = OBJECTLAND_COPTS,
+    deps = [":libshizuku"],
+)
+
+# Sample freestanding ELF (pico-sdk / libc symbols 非混入の検証用)
+cc_binary(
+    name = "hello_elf",
+    srcs = [
+        "hello.cpp",
+        "hello.hpp",
+    ],
+    copts = OBJECTLAND_COPTS,
+    linkopts = [
+        "-nostdlib",
+        "-Wl,--entry=hello_entry",
+    ],
+    deps = [":libshizuku"],
+)
