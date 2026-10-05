@@ -214,6 +214,9 @@ void flash_write(uint32_t offset, const uint8_t *ram_data, uint32_t bytes,
   shizuku_boot_trace_phase(811);
 #endif
   const uint32_t interrupts = save_and_disable_interrupts();
+  // ★消去・書込み中の ROM ルーチンは XIP 領域や周辺レジスタを特権で触る。MPU が
+  //   有効だとそこで fault するので、割込み禁止・他コア停止の区間だけ止める。
+  ARCH::protection_disable();
   if (erase_first) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     shizuku_boot_trace_phase(812);
@@ -239,6 +242,7 @@ void flash_write(uint32_t offset, const uint8_t *ram_data, uint32_t bytes,
     shizuku_boot_trace_phase(815);
 #endif
   }
+  ARCH::protection_enable();
   restore_interrupts(interrupts);
   KERNEL::BOARD::resume_other_cores();
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
