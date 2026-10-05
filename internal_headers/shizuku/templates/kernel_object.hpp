@@ -143,7 +143,12 @@ public:
   }
   uintptr_t caller_object(uint32_t thread) const {
     const shadow_t &shadow = m_shadow[thread];
-    return shadow.depth == 0 ? NO_OBJECT : shadow.caller[shadow.depth - 1];
+    if (shadow.depth == 0)
+      return NO_OBJECT;
+    // ★発行元は保持せず影スタックの 1 段下から導出する (設定時点が曖昧な値を持たない)。
+    //   影スタックは call_method だけが積むので、振り分けだけの SVC / 親ハンドラは現れない。
+    return shadow.depth == 1 ? m_thread_object[thread]
+                             : shadow.object[shadow.depth - 2];
   }
   // ★専用ハンドラ (HANDLER) 付与用の信頼済み内部フラグ (重大指摘 1)。
   //   公開 flags (object_api.hpp) には置かず、ROOT_OBJECT / KERNEL_OBJECT 本人による
@@ -216,7 +221,6 @@ private:
   //    台帳をこちら側 (非特権から届かない場所) に持つのが偽装できない根拠。
   struct shadow_t {
     uint16_t object[MAX_DEPTH]; // 呼び出しごとの呼び先
-    uint16_t caller[MAX_DEPTH]; // その呼び出しの発行元 (identity)
     uint32_t depth;
   };
 

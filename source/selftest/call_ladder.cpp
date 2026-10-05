@@ -10,6 +10,7 @@
 //  ★使うのはオブジェクトランドの API だけ。カーネルのプリミティブはオブジェクトから
 //    撃てないので、テストも撃たない = 実経路をそのまま検査することになる。
 #include "shizuku/kernel.hpp"
+#include "shizuku/kernel_object.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/selftest.hpp"
@@ -153,8 +154,9 @@ void call_ladder() {
     check("call/1: value", result.value == 42, (unsigned long)result.value, 42);
     check("call/1: callee identity", g_leaf_self == OBJECT_LEAF,
           (unsigned long)g_leaf_self, (unsigned long)OBJECT_LEAF);
-    check("call/1: caller identity", g_leaf_caller == 0,
-          (unsigned long)g_leaf_caller, 0);
+    check("call/1: caller identity", g_leaf_caller == KERNEL_OBJECT::ROOT_OBJECT,
+          (unsigned long)g_leaf_caller,
+          (unsigned long)KERNEL_OBJECT::ROOT_OBJECT);
     check("call/1: depth restored", kernel_instance.current_depth() == 0,
           (unsigned long)kernel_instance.current_depth(), 0);
   }
@@ -213,8 +215,8 @@ void call_ladder() {
     uint32_t identity_bad = 0;
     uint32_t depth_bad = 0;
     for (uint32_t level = 0; level < g_nest_levels; ++level) {
-      // 呼び先は毎層 OBJECT_NEST。呼び出し元は 1 層目だけ根 (0)、以降は自分自身。
-      const uintptr_t expected_caller = level == 0 ? 0 : OBJECT_NEST;
+      // 呼び先は毎層 OBJECT_NEST。呼び出し元は 1 層目だけ根 (ROOT_OBJECT)、以降は自分自身。
+      const uintptr_t expected_caller = level == 0 ? KERNEL_OBJECT::ROOT_OBJECT : OBJECT_NEST;
       if (g_nest_self[level] != OBJECT_NEST ||
           g_nest_caller[level] != expected_caller)
         ++identity_bad;

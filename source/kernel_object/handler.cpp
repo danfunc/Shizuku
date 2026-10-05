@@ -442,7 +442,6 @@ template <>
 uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
                                      uintptr_t argument, object_error &error) {
   const uint32_t thread = kernel_instance.current_thread_id();
-  const uintptr_t caller = current_object(thread);
   if (id >= OBJECT_COUNT || !m_objects[id].created) {
     error = object_error::BAD_OBJECT;
     return 0;
@@ -476,7 +475,6 @@ uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
 
   // 台帳へ先に積む (カーネルが失敗したら戻す)。
   shadow.object[shadow.depth] = (uint16_t)id;
-  shadow.caller[shadow.depth] = (uint16_t)caller;
   shadow.depth++;
   const auto result =
       ARCH::syscall((uintptr_t)primitive::CALL, (uintptr_t)&request);
