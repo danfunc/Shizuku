@@ -25,10 +25,19 @@ namespace shizuku {
 namespace objects {
 namespace {
 
-// ★VID/PID は変えない。picotool が reset-via-baud でデバイスを探すときに使うので、
+// ★VID は変えない。picotool が reset-via-baud でデバイスを探すときに使うので、
 //   変えると書き込み手順が壊れる (参照実装が明記している罠)。
+// PID は Pico SDK 本家の使い分け (RP2040=0x000a / それ以外=0x0009) に揃える。
+// picotool (picoboot_connection.c の PID switch) は 0x0009/0x000a のどちらも
+// stdio_usb (reset 対象) に分類し、違いは報告するチップ名だけなので
+// reset-via-baud には影響しない。PID 固定のままだと RP2040 実機が
+// "RP2350 device" と誤認表示される。
 constexpr uint16_t USBD_VID = 0x2E8A;
+#if defined(SHIZUKU_RP2040)
+constexpr uint16_t USBD_PID = 0x000a;
+#else
 constexpr uint16_t USBD_PID = 0x0009;
+#endif
 
 enum : uint8_t {
   STR_LANGUAGE = 0,
