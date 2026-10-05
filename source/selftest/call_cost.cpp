@@ -202,6 +202,7 @@ void call_cost() {
   if (!cycle_counter_enable()) {
     // ★測れないなら測れないと言う。0 を報告して数字があるように見せない。
     BOARD::diag_printf("[COST] FAIL DWT CYCCNT is not counting - no numbers\n");
+    record_fail("COST DWT CYCCNT is not counting", 0, 1);
     ++failed;
     return;
   }
