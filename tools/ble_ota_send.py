@@ -155,21 +155,19 @@ def is_transfer_error_line(line: str) -> bool:
 def check_done_line(line: str, expected_len: int, expected_crc32: int) -> bool:
     """done 通知行の検証を行う純関数
     成功条件:
-      - 'done:' かつ 'OK' を含む
-      - '<total> bytes' が expected_len と一致
-      - 'crc=<8桁hex>' が expected_crc32 と一致 (小文字hex)
       - 'crc MISMATCH', 'FAILED', 'erase failed' を含まない
+      - 正規表現のトークン境界で 'done: <len> bytes crc=<8桁hex> OK' を抽出し、
+        len が expected_len と数値一致、crc が expected_crc32 と数値一致
+      - OK は単語境界で厳密一致 (OKAY は不可)
     """
     if is_transfer_error_line(line):
         return False
-    if "done:" not in line or "OK" not in line:
+    m = re.search(r"(?<![\w])done:\s+(\d+)\s+bytes\s+crc=([0-9a-fA-F]{8})(?![0-9a-fA-F\w])\s+OK(?![\w])", line)
+    if not m:
         return False
-    if f"{expected_len} bytes" not in line:
-        return False
-    expected_crc_hex = f"{expected_crc32 & 0xFFFFFFFF:08x}"
-    if f"crc={expected_crc_hex}" not in line.lower():
-        return False
-    return True
+    actual_len = int(m.group(1))
+    actual_crc = int(m.group(2), 16)
+    return actual_len == expected_len and actual_crc == (expected_crc32 & 0xFFFFFFFF)
 
 
 def check_nus_response(received_lines: List[str]) -> bool:
@@ -285,7 +283,12 @@ def run_selfcheck() -> bool:
     assert check_done_line("done: 12345 bytes crc=abcdef01 NG", 12345, 0xABCDEF01) is False, "missing OK must return False"
     assert check_done_line("done: crc MISMATCH: expected 0xabcdef01, got 0x11223344", 12345, 0xABCDEF01) is False, "crc MISMATCH must return False"
     assert check_done_line("FAILED: erase failed", 12345, 0xABCDEF01) is False, "erase failed must return False"
-    log("  [PASS] done 行判定検算 (正常系 / CRC不一致 / 長さ不一致 / OK欠落 / crc MISMATCH / エラー通知)")
+    assert check_done_line("done: 112345 bytes crc=abcdef01 OK", 12345, 0xABCDEF01) is False, "prefix length mismatch must return False"
+    assert check_done_line("done: 12345 bytes crc=abcdef010 OK", 12345, 0xABCDEF01) is False, "extra hex digit in crc must return False"
+    assert check_done_line("done: 12345 bytes crc=abcdef01 OKAY", 12345, 0xABCDEF01) is False, "OKAY must not match OK"
+    actual_device_done = "done: 431900 bytes crc=c4c0aab1 OK (staged at 0x200000)"
+    assert check_done_line(actual_device_done, 431900, 0xC4C0AAB1) is True, "actual device done line must return True"
+    log("  [PASS] done 行判定検算 (正常系 / CRC不一致 / 長さ不一致 / OK欠落 / crc MISMATCH / エラー通知 / トークン境界値)")
 
     # 9. nus 応答判定検算
     assert check_nus_response([]) is False, "nus empty response must return False"
