@@ -513,7 +513,8 @@ bool write_sector(uint32_t seq, const uint8_t *data, uint32_t len) {
   if (len > FLASH_SECTOR_SIZE || at + FLASH_SECTOR_SIZE > STAGING_BYTES)
     return false;
 
-  {
+  // 初回書き込みは INIT 段の事前消去で済んでいるため、再送(既に受領済みセクタへの上書き)のみ消去する。
+  if (bm_get(g_ok_bm, seq)) {
     erase_op op{STAGING_OFFSET + at, FLASH_SECTOR_SIZE};
     const uint64_t t0 = BOARD::time_us();
     int res;
@@ -882,10 +883,13 @@ void consume_header_12(const uint8_t *hdr) {
     g_cwin_filled = 0;
     g_chdr_got = 0;
     g_state = state::CSEEK;
-    // ★ここで全域を消さない。消去はチャンクを書く直前へ移した
-    //   (write_sector)。先に全部消すと、実際には送られてこない末尾まで
-    //   消すことになるうえ、再送のたびに「消し済みで未書き込み」のセクタを
-    //   覚える羽目になる。毎回消せばその記憶が要らない。
+    // ★転送中に 38ms の flash 消去を行うと BLE 受信中の CYW43 SPI バスが
+    //   破壊されてウェッジするため、BLE パケットが流れていない INIT 段で全域を事前消去する。
+    if (!ensure_erased(g_total)) {
+      say("erase failed\n");
+      g_state = state::FAILED;
+      return;
+    }
     say("ready (chunked)\n");
     return;
   }
@@ -1055,6 +1059,9 @@ void process_chunked_stream(const uint8_t *p, uint32_t len) {
       // 問い合わせ (seq=QUERY_SEQ, len=0)。★チャンクと同じ枠に載せてあるので、
       //   CSEEK の探索も crc16 の保護もそのまま効く。
       if (hdr_ok && g_cseq == QUERY_SEQ && g_clen == 0) {
+        BOARD::diag_printf("[OTA] QUERY frame received (ok=%lu, bad=%lu)\n",
+                           (unsigned long)g_chunks_ok,
+                           (unsigned long)g_chunks_bad);
         report_missing();
         if (g_state != state::FAILED && g_state != state::DONE)
           g_state = state::CSEEK;

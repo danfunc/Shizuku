@@ -11,3 +11,4 @@ gdb_stub
 gdb_agent
 debuggee
 ota
+ble_uart

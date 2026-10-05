@@ -7,12 +7,21 @@
 #include "shizuku/objects/flash_fs.hpp"
 #if !defined(SHIZUKU_RP2040)
 #include "shizuku/objects/gdb_stub.hpp"
+#if defined(CYW43_WL_GPIO_LED_PIN)
+#include "shizuku/objects/ble_uart.hpp"
+#include "shizuku/objects/ota.hpp"
+#endif
 #endif
 #include "shizuku/objects/usb_cdc.hpp"
 #include "shizuku/objects/peripherals.hpp"
 #include "shizuku/apps/thermal.hpp"
 #include "shizuku/selftest.hpp"
 #include "stdio.h"
+
+#ifndef SHIZUKU_BUILD_ID
+#define SHIZUKU_BUILD_ID "v1"
+#endif
+
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE)
 #include "hardware/watchdog.h"
 #include "hardware/structs/watchdog.h"
@@ -78,12 +87,15 @@ extern "C" bool shizuku_selftest_deep_read(uint32_t *);
 #define APP_PROG(stage) ((void)0)
 #endif
 void shizuku::app_entry() {
+  shizuku::KERNEL::BOARD::diag_printf("[BOOT] build: %s %s %s\n",
+                                      SHIZUKU_BUILD_ID, __DATE__, __TIME__);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   boot_stage(kAppEntry);
 #endif
   // ★スレッドが落ちたときに実行権を渡す先を教えておく。誰に渡すかは方針なので
   //   カーネルは選ばない。ここではブートスレッド (アイドル役) を指定する。
   shizuku::kernel_instance.set_recovery_thread(0);
+
 
   // ボードが提供するペリフェラルオブジェクト (特権を宣言する数少ないオブジェクト)。
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
@@ -188,6 +200,54 @@ void shizuku::app_entry() {
   //   一番分かりやすい確認 (docs/03_porting_policy.md D43)。
   shizuku::objects::start_gdb_stub(blink_thread);
 #endif
+
+#if !defined(SHIZUKU_RP2040) && defined(CYW43_WL_GPIO_LED_PIN)
+  const uintptr_t BLE_UART_OBJ = shizuku::object_id::ble_uart;
+  const uintptr_t OTA_OBJ = shizuku::object_id::ota;
+
+  const uint32_t ble_rc =
+      shizuku::objects::ble_uart::register_ble_uart(BLE_UART_OBJ);
+  if (ble_rc != 0) {
+    shizuku::KERNEL::BOARD::diag_printf("[BOOT] register_ble_uart failed: %lu\n",
+                                        (unsigned long)ble_rc);
+  }
+
+  const uint32_t ota_rc =
+      shizuku::objects::ota::register_ota(OTA_OBJ, 0, BLE_UART_OBJ);
+  if (ota_rc != 0) {
+    shizuku::KERNEL::BOARD::diag_printf("[BOOT] register_ota failed: %lu\n",
+                                        (unsigned long)ota_rc);
+  }
+
+  if (ble_rc == 0 && ota_rc == 0) {
+    // 結線: ble_uart の OTA 受信ストリーム -> ota の入力 (slot 0: BLE)
+    const auto ota_rx = shizuku::KERNEL::ARCH::syscall(
+        (uintptr_t)shizuku::object_api::CALL_METHOD, BLE_UART_OBJ,
+        (uintptr_t)shizuku::objects::ble_uart::method::GET_OTA_STREAM, 0);
+    if (ota_rx.error == 0 && ota_rx.value != 0) {
+      shizuku::KERNEL::ARCH::syscall(
+          (uintptr_t)shizuku::object_api::CALL_METHOD, OTA_OBJ,
+          (uintptr_t)shizuku::objects::ota::method::SET_INPUT_STREAM,
+          ota_rx.value);
+    }
+
+    // 結線: ota の進捗・結果出力ストリーム -> ble_uart の TX 本線
+    const auto ota_tx = shizuku::KERNEL::ARCH::syscall(
+        (uintptr_t)shizuku::object_api::CALL_METHOD, OTA_OBJ,
+        (uintptr_t)shizuku::objects::ota::method::GET_STREAM, 0);
+    if (ota_tx.error == 0 && ota_tx.value != 0) {
+      shizuku::KERNEL::ARCH::syscall(
+          (uintptr_t)shizuku::object_api::CALL_METHOD, BLE_UART_OBJ,
+          (uintptr_t)shizuku::objects::ble_uart::method::SET_TX_STREAM,
+          ota_tx.value);
+    }
+
+    // 起動
+    shizuku::objects::ble_uart::start_ble_uart(BLE_UART_OBJ);
+    shizuku::objects::ota::start_ota(OTA_OBJ);
+  }
+#endif
+
 
   // ★スレッド 0 は以後アイドル役に徹する。誰かが走れるなら渡し、誰も居なければ
   //   空回りするだけ。**ここで自分が仕事をしてはいけない** — アイドルが仕事を
