@@ -153,10 +153,19 @@ void rp2350_pico2::diag_printf(const char *format, ...) {
   //   プロトコルが壊れる (CDC をストリーム化すれば、この旗は消える)。
   if (g_diag_quiet)
     return;
+  // ★1 行をコアごとのバッファに整形してから、行単位で排他して書く。
+  static char lines[2][384];
+  const uint32_t state = save_and_disable_interrupts();
+  char *line = lines[get_core_num()];
   va_list args;
   va_start(args, format);
-  ::vprintf(format, args);
+  int length = ::vsnprintf(line, sizeof(lines[0]), format, args);
   va_end(args);
+  if (length > (int)sizeof(lines[0]) - 1)
+    length = (int)sizeof(lines[0]) - 1;
+  if (length > 0)
+    objects::usb_cdc_diag_write_line(line, (uint32_t)length);
+  restore_interrupts(state);
 }
 
 void rp2350_pico2::panic(const char *message) {

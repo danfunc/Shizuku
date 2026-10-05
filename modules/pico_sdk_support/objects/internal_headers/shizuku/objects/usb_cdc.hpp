@@ -28,6 +28,9 @@ uint32_t usb_cdc_write_available(uint32_t channel);
 bool usb_cdc_connected(uint32_t channel);
 uint32_t usb_cdc_read_available(uint32_t channel);
 
+// 診断 1 行を他コア・tud_task と排他して CDC 0 へ書く (溢れたら捨てる)。
+void usb_cdc_diag_write_line(const char *line, uint32_t length);
+
 // ★panic 用 (board.cpp)。USB (診断出力・picotool のリセット要求) を保つのに
 //   要る IRQ (USBCTRL / tud_task を回す user IRQ / それを起こすタイマ IRQ)
 //   だけを残して、他の全 IRQ (GPIO・DMA・ペリフェラルすべて) を止める。
