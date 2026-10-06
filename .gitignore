@@ -11,3 +11,6 @@
 #   Pico 拡張のボタンの代わりになっている = リポジトリに要る。
 !.vscode/
 !.vscode/*
+
+# ESP-IDF と工具の導入物 (worktree ローカル)
+/.local/
