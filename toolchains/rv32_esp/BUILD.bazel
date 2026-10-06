@@ -32,12 +32,12 @@ filegroup(
 rv32_esp_cc_toolchain_config(
     name = "rv32_esp_config",
     builtin_include_directories = [
-        "%package(@riscv32_esp_elf_gcc//riscv32-esp-elf/include/c++/15.2.0)%",
-        "%package(@riscv32_esp_elf_gcc//riscv32-esp-elf/include/c++/15.2.0/riscv32-esp-elf/rv32imac_zicsr_zifencei_zaamo_zalrsc/ilp32)%",
-        "%package(@riscv32_esp_elf_gcc//riscv32-esp-elf/include/c++/15.2.0/backward)%",
-        "%package(@riscv32_esp_elf_gcc//lib/gcc/riscv32-esp-elf/15.2.0/include)%",
-        "%package(@riscv32_esp_elf_gcc//lib/gcc/riscv32-esp-elf/15.2.0/include-fixed)%",
-        "%package(@riscv32_esp_elf_gcc//riscv32-esp-elf/include)%",
+        "%package(@@+_repo_rules+riscv32_esp_elf_gcc//riscv32-esp-elf/include/c++/15.2.0)%",
+        "%package(@@+_repo_rules+riscv32_esp_elf_gcc//riscv32-esp-elf/include/c++/15.2.0/riscv32-esp-elf/rv32imac_zicsr_zifencei_zaamo_zalrsc/ilp32)%",
+        "%package(@@+_repo_rules+riscv32_esp_elf_gcc//riscv32-esp-elf/include/c++/15.2.0/backward)%",
+        "%package(@@+_repo_rules+riscv32_esp_elf_gcc//lib/gcc/riscv32-esp-elf/15.2.0/include)%",
+        "%package(@@+_repo_rules+riscv32_esp_elf_gcc//lib/gcc/riscv32-esp-elf/15.2.0/include-fixed)%",
+        "%package(@@+_repo_rules+riscv32_esp_elf_gcc//riscv32-esp-elf/include)%",
     ],
 )
 

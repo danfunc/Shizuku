@@ -62,7 +62,7 @@ genrule(
     outs = ["shizuku_esp32c6.bin"],
     cmd = "ARCHIVE=; for f in $(locations //:shizuku_kernel); do case $$f in *libshizuku_kernel.a) ARCHIVE=$$f;; esac; done;" +
           " $(location esp32c6/build.sh) $$ARCHIVE $@ esp-15.2.0_20251204",
-    exec_tools = ["esp32c6/build.sh"],
+    tools = ["esp32c6/build.sh"],
     tags = [
         "local",
         "no-sandbox",

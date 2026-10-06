@@ -55,6 +55,7 @@ def _impl(ctx):
                     "-ffunction-sections",
                     "-fdata-sections",
                     "-fno-common",
+                    "-no-canonical-prefixes",
                 ])],
             ),
             # カーネルは例外・RTTI を使わない (IDF 側の C++ ランタイムに依存しない)。
