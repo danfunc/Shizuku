@@ -1,0 +1,3 @@
+#!/bin/bash
+# riscv32-esp-elf-gcc へ転送するラッパ (Bazel の action は execroot を cwd として走る)。
+exec external/*riscv32_esp_elf_gcc/bin/riscv32-esp-elf-gcc "$@"

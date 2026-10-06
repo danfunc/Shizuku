@@ -22,6 +22,7 @@ string_flag(
         "rp2040_xiao",
         "rp2350_pico2",
         "rp2350_pico2_w",
+        "esp32_c6",
     ],
     visibility = ["//visibility:public"],
 )
@@ -75,6 +76,13 @@ config_setting(
     },
     visibility = ["//visibility:public"],
 )
+config_setting(
+    name = "esp32_c6",
+    flag_values = {
+        ":board": "esp32_c6",
+    },
+    visibility = ["//visibility:public"],
+)
 # ★ボード 5 個を毎回列挙しない。select はチップ (rp2040 / rp2350) と
 #   CYW43 の有無 (W ボード) の 2 軸で書く。ボードを足したらここだけ直す。
 selects.config_setting_group(
@@ -125,6 +133,8 @@ expand_template(
         ":rp2040": config_substitutions("armv6m", "rp2040_pico_w"),
         # Pico 2 / Pico 2 W 共通。CYW43 は W 専用の依存グラフ側にだけ居る。
         ":rp2350": config_substitutions("armv8m", "rp2350_pico2"),
+        # ESP32-C6 (未完成・fail-closed)
+        ":esp32_c6": config_substitutions("rv32_c6", "esp32_c6"),
     }),
     template = "config_template.hpp.in",
 )
@@ -136,6 +146,8 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//:internal_headers",
-        "//modules/pico_sdk_support:headers",
-    ],
+    ] + select({
+        ":esp32_c6": ["//ports/esp32/c6:pmp"],
+        "//conditions:default": ["//modules/pico_sdk_support:headers"],
+    }),
 )

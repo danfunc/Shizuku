@@ -272,7 +272,7 @@ bool g_gdb_held_valid = false;
 // ★容量を大きめに取る: 転送中は BLE から連続で流れ込み、ota 側は flash 書き
 //   込み (1 セクタ消去に数十ms) で待たされるため、ここが詰まると取りこぼす。
 //   取りこぼしは CRC で必ず検出されるが、やり直しは 30 秒単位で高い。
-shizuku::stream::storage<frame_t, 32> g_ota_rx;
+shizuku::stream::storage<frame_t, 64> g_ota_rx;
 uintptr_t g_ota_stream_id = 0;
 // ---- 拡張チャネル #2 (6E403001-...) ----
 shizuku::stream::storage<frame_t, 16> g_ch2_rx;

@@ -80,16 +80,10 @@ cc_library(
     }),
 )
 
-# 旧ラベルの互換 (分割前に //modules/pico_sdk_support:ble_uart / :ota を
+# 旧ラベルの互換 (分割前に //modules/pico_sdk_support:ble_uart を
 # 引いていた側 = XNO 役のリポジトリを壊さないため)。
 alias(
     name = "ble_uart",
     actual = "//modules/pico_sdk_support/objects:ble_uart",
-    visibility = ["//visibility:public"],
-)
-
-alias(
-    name = "ota",
-    actual = "//modules/pico_sdk_support/objects:ota",
     visibility = ["//visibility:public"],
 )
