@@ -60,3 +60,17 @@ build --copt=-Og
 # //:shizuku_uf2 (genrule) で変換する。
 # build --aspects=@pico-sdk//tools:uf2_aspect.bzl%pico_uf2_aspect
 # build --output_groups=+pico_uf2_files
+
+# ---------------------------------------------------------------------------
+# ESP32-C6 (RV32) — compile/link-only マイルストーン。
+#   bazelisk build --config=esp32c6 //firmware:esp32c6
+# ★起動してもカーネルは動かない (arch/board は未実装でリンク専用トラップスタブ)。
+# ★IDF は自動で探さない。事前に IDF_PATH / IDF_TOOLS_PATH を export しておくこと
+#   (欠けていれば //firmware:esp32c6 は理由を出して失敗する)。
+# ---------------------------------------------------------------------------
+build:esp32c6 --platforms=//toolchains/rv32_esp:esp32c6
+build:esp32c6 --//configs:board=esp32_c6
+build:esp32c6 --copt=-DSHIZUKU_C6_SKELETON_PERMITTED=1
+build:esp32c6 --action_env=IDF_PATH
+build:esp32c6 --action_env=IDF_TOOLS_PATH
+build:esp32c6 --action_env=PATH

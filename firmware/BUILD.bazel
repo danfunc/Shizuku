@@ -44,3 +44,33 @@ cc_binary(
         "@pico-sdk//src/rp2_common/pico_stdlib",
     ],
 )
+
+# ---------------------------------------------------------------------------
+# ESP32-C6: Bazel が作る libshizuku_kernel.a を ESP-IDF v6.1 の最終リンクへ渡し、
+# .bin を出す **compile/link-only** のターゲット (idf.py build の薄いラッパ)。
+#   bazelisk build --config=esp32c6 //firmware:esp32c6
+# ★起動してもカーネルは動かない。main/shizuku_boot.c の start_cpu0 は即トラップ
+#   (FreeRTOS スケジューラも始めない)。実機・実行時の動作は未検証。
+# ★IDF のサンドボックス外ツールを使うので no-sandbox。IDF_PATH / IDF_TOOLS_PATH 必須。
+# ---------------------------------------------------------------------------
+genrule(
+    name = "esp32c6",
+    srcs = [
+        "//:shizuku_kernel",
+        ":esp32c6_project",
+    ],
+    outs = ["shizuku_esp32c6.bin"],
+    cmd = "ARCHIVE=; for f in $(locations //:shizuku_kernel); do case $$f in *libshizuku_kernel.a) ARCHIVE=$$f;; esac; done;" +
+          " $(location esp32c6/build.sh) $$ARCHIVE $@ esp-15.2.0_20251204",
+    exec_tools = ["esp32c6/build.sh"],
+    tags = [
+        "local",
+        "no-sandbox",
+    ],
+    target_compatible_with = ["@platforms//cpu:riscv32"],
+)
+
+filegroup(
+    name = "esp32c6_project",
+    srcs = glob(["esp32c6/CMakeLists.txt", "esp32c6/sdkconfig.defaults", "esp32c6/main/*"]),
+)

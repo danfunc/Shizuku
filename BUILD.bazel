@@ -43,16 +43,19 @@ cc_library(
     deps = [":object_ids"],
 )
 
+# カーネル本体のソース。//:kernel と //:shizuku_kernel (ESP32-C6 の .a) で共有する。
+KERNEL_SRCS = [
+    "source/cpu_manager/init.cpp",
+    "source/kernel/dispatch.cpp",
+    "source/kernel/init.cpp",
+    "source/kernel/thread.cpp",
+]
+
 # カーネル = 機構だけの層。★資源を持たない (スレッドの記憶も貸してもらう) ので、
 # 実体としてはライブラリ以外になりようがない。
 cc_library(
     name = "kernel",
-    srcs = [
-        "source/cpu_manager/init.cpp",
-        "source/kernel/dispatch.cpp",
-        "source/kernel/init.cpp",
-        "source/kernel/thread.cpp",
-    ],
+    srcs = KERNEL_SRCS,
     visibility = ["//visibility:public"],
     # ★ポート (//modules/pico_sdk_support) を名指ししない。arch / board は
     #   //configs:config が型として注入する (configs/kit.bzl)。
@@ -107,5 +110,23 @@ cc_library(
         ":kernel_object",
         "//modules/pico_sdk_support/objects:flash_fs",
         "//modules/pico_sdk_support/objects:peripherals",
+    ],
+)
+
+# ESP32-C6 向けの**名前付きカーネルアーカイブ** (libshizuku_kernel.a)。
+# カーネル本体 + freestanding メモリマネージャ + C6 のリンク専用トラップスタブ
+# (ports/esp32/c6/link_stubs.cpp: 呼ばれたら即トラップ。成功を返す no-op は無い)。
+# ★//firmware:esp32c6 が ESP-IDF の最終リンクへ渡す。--config=esp32c6 でだけ解決される。
+cc_library(
+    name = "shizuku_kernel",
+    srcs = KERNEL_SRCS + [
+        "source/memory_manager/freestanding.cpp",
+        "//ports/esp32/c6:link_stubs.cpp",
+    ],
+    target_compatible_with = ["@platforms//cpu:riscv32"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":internal_headers",
+        "//configs:config",
     ],
 )
