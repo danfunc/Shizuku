@@ -21,3 +21,16 @@ register_toolchains(
     "@pico-sdk//bazel/toolchain:linux-aarch64-rp2040",
     "@pico-sdk//bazel/toolchain:linux-aarch64-rp2350",
 )
+
+# OTA は XNO (xno::ota) が持つ。ルートの firmware (= アプリの合成) だけが引く。
+# XNO は逆に @shizuku の公開ターゲットへ依存する (モジュール循環)。ターゲットの
+# 循環は無い (@xno//objects/ota -> @shizuku kernel/ble_uart/flash_layout、
+# @shizuku 側の部品は ota を引かない)。
+# 利用者向けに固定する SHA はまだ無い (XNO 側が未 push) ので、ローカルの
+# ワークツリーを指す。
+bazel_dep(name = "xno", version = "0.1.0", dev_dependency = True)
+
+local_path_override(
+    module_name = "xno",
+    path = "../XNO-ota",
+)

@@ -70,7 +70,7 @@ cc_binary(
     ] + select({
         "//configs:rp2350_pico2_w": [
             "//modules/pico_sdk_support:ble_uart",
-            "//modules/pico_sdk_support:ota",
+            "@xno//objects/ota",
         ],
         "//conditions:default": [],
     }),
