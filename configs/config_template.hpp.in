@@ -11,6 +11,10 @@ ${INCLUDE_HEADERS_INSTRUCTION}
 
 namespace shizuku{
     using ARCH = shizuku::archs::${SHIZUKU_ARCH};
+    namespace stream {
+        template <typename REC>
+        using handle = basic_handle<REC, ::shizuku::ARCH>;
+    }
     using BOARD = shizuku::boards::${SHIZUKU_BOARD};
     using CPU_MANAGER = shizuku::templates::cpu_manager<ARCH,BOARD,${SHIZUKU_CPU_COUNT}>;
     using MEMORY_MANAGER = ${SHIZUKU_MEMORY_MANAGER};

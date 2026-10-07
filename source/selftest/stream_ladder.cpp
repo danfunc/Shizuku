@@ -22,6 +22,13 @@ namespace shizuku {
 namespace selftest {
 namespace {
 
+template <typename HANDLE>
+concept exposes_stream_descriptor = requires(HANDLE handle) { handle.desc(); };
+static_assert(!exposes_stream_descriptor<stream::handle<uint32_t>>,
+              "stream handles must not expose descriptor storage");
+static_assert(sizeof(stream::handle<uint32_t>) == sizeof(uintptr_t),
+              "stream handles contain only a kernel-issued ID");
+
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
@@ -38,8 +45,8 @@ struct item {
 
 // ★容量を小さくしてあるので、producer は必ず一度は満杯に出会う。出会わないと
 //   「押し戻し」の経路が試されない (許可のテストだけでは証拠にならない)。
-stream::storage<item, CAPACITY> g_ring;
 uintptr_t g_stream_id = 0;
+stream::handle<item> g_stream;
 volatile uint32_t g_pushed = 0;
 volatile uint32_t g_popped = 0;
 volatile uint32_t g_out_of_order = 0;
@@ -48,6 +55,8 @@ volatile uint32_t g_full_hits = 0;
 volatile uint32_t g_cores = 0;
 volatile uint32_t g_producer_done = 0;
 volatile uint32_t g_consumer_done = 0;
+volatile uintptr_t g_other_destroy_error = 0;
+volatile uintptr_t g_unseated_push_error = 0;
 
 struct api_result {
   uintptr_t error;
@@ -68,21 +77,26 @@ uintptr_t producer(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 #else
   api(object_api::STREAM_BIND, g_stream_id, (uintptr_t)stream::role::PRODUCER);
 #endif
-  auto out = g_ring.hdl();
+  auto out = g_stream;
   for (uint32_t index = 1; index <= RECORDS; ++index) {
     item record{index, BOARD::core_num()};
     while (!out.push(record)) {
-      ++g_full_hits; // 満杯 = 押し戻された。待つのではなく譲る
+      g_full_hits = g_full_hits + 1; // 満杯 = 押し戻された。待つのではなく譲る
       api(object_api::YIELD);
     }
     g_cores |= 1u << BOARD::core_num();
     g_pushed = index;
   }
   g_producer_done = 1;
+  g_other_destroy_error = api(object_api::STREAM_DESTROY, g_stream_id).error;
   return 0;
 }
 
 uintptr_t consumer(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  item unauthorized{0, 0};
+  uintptr_t push_error = 0;
+  g_stream.push_n(&unauthorized, 1, &push_error);
+  g_unseated_push_error = push_error;
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
   const api_result bound =
       api(object_api::STREAM_BIND, g_stream_id, (uintptr_t)stream::role::CONSUMER);
@@ -90,7 +104,12 @@ uintptr_t consumer(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 #else
   api(object_api::STREAM_BIND, g_stream_id, (uintptr_t)stream::role::CONSUMER);
 #endif
-  auto in = g_ring.hdl();
+  auto in = g_stream;
+  // Force the LOSSLESS full condition before draining. Otherwise a faster
+  // consumer can keep the ring empty and turn this coverage check into a race.
+  for (uint32_t gate = 0; gate < 200000 && g_full_hits == 0 &&
+                          g_producer_done == 0; ++gate)
+    api(object_api::YIELD);
   uint32_t expected = 1;
   uint32_t idle = 0;
   while (expected <= RECORDS && idle < 200000) {
@@ -107,7 +126,7 @@ uintptr_t consumer(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
     g_lost += lost;
     // ★通し番号で突き合わせる。「増えている」ではなく「**次のものが来た**」を見る。
     if (record.sequence != expected)
-      ++g_out_of_order;
+      g_out_of_order = g_out_of_order + 1;
     expected = record.sequence + 1;
     g_cores |= 1u << BOARD::core_num();
     g_popped = record.sequence;
@@ -132,18 +151,55 @@ void check(const char *name, bool ok, unsigned long got, unsigned long want) {
 void stream_ladder() {
   BOARD::diag_printf("[SELFTEST] stream ladder start\n");
   SHIZUKU_PROG(1, 0, 0);
-  g_ring.init(stream::LOSSLESS);
-
-  const api_result created =
-      api(object_api::STREAM_CREATE, (uintptr_t)&g_ring.desc);
+  const api_result created = api(object_api::STREAM_CREATE, sizeof(item),
+                                 CAPACITY, stream::LOSSLESS);
   check("stream: created", created.error == 0, (unsigned long)created.error, 0);
   g_stream_id = created.value;
+  g_stream = stream::handle<item>(g_stream_id);
   // 引き直せること (番号だけで discovery できる = 両端が互いの storage を
   // extern 参照しなくてよい)。
   const api_result opened = api(object_api::STREAM_OPEN, g_stream_id);
-  check("stream: opened by id", opened.value == (uintptr_t)&g_ring.desc,
-        (unsigned long)opened.value, (unsigned long)&g_ring.desc);
-  SHIZUKU_PROG(10, (uint32_t)created.error, (uint32_t)(opened.value == (uintptr_t)&g_ring.desc));
+  check("stream: opened by id", opened.value == g_stream_id,
+        (unsigned long)opened.value, (unsigned long)g_stream_id);
+  SHIZUKU_PROG(10, (uint32_t)created.error, (uint32_t)(opened.value == g_stream_id));
+
+  const auto corrupted_window = stream::bounded_dma_window(
+      8, 8, UINT32_MAX, 0, 4, 13);
+  check("stream: corrupted occupancy clamps DMA room to zero",
+        corrupted_window.count == 0 && corrupted_window.room == 0,
+        corrupted_window.count, 0);
+  const auto oversized_window = stream::bounded_dma_window(
+      8, 16, 8, 0, 0, 0);
+  check("stream: DMA count is capped by source capacity",
+        oversized_window.count == 8, oversized_window.count, 8);
+  const auto overwritten_window = stream::bounded_dma_window(
+      8, 16, 12, 0, 0, 0);
+  check("stream: overwritten source starts at the retained ring range",
+        overwritten_window.source_rd == 4 && overwritten_window.count == 4,
+        overwritten_window.source_rd, 4);
+  const auto wrapped_window = stream::bounded_dma_window(8, 8, 5, 6, 7, 7);
+  check("stream: DMA transfer stays within contiguous ring ranges",
+        wrapped_window.count == 1, wrapped_window.count, 1);
+
+  const api_result overwrite = api(object_api::STREAM_CREATE, sizeof(item),
+                                   4, 0);
+  const auto overwrite_id = overwrite.value;
+  stream::handle<item> overwrite_stream(overwrite_id);
+  api(object_api::STREAM_BIND, overwrite_id,
+      (uintptr_t)stream::role::PRODUCER);
+  api(object_api::STREAM_BIND, overwrite_id,
+      (uintptr_t)stream::role::CONSUMER);
+  for (uint32_t i = 1; i <= 10; ++i) {
+    item record{i, 0};
+    overwrite_stream.push(record);
+  }
+  item newest{};
+  uint32_t dropped = 0;
+  const bool got_newest = overwrite_stream.pop(&newest, &dropped);
+  check("stream: overwrite mode reports lost records",
+        got_newest && dropped == 8 && newest.sequence == 9,
+        dropped, 8);
+  api(object_api::STREAM_DESTROY, overwrite_id);
 
 #if !(defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0)
   api(object_api::CREATE_OBJECT, OBJECT_PRODUCER, (uintptr_t)&producer, 0);
@@ -225,6 +281,42 @@ void stream_ladder() {
   check("stream: the second producer is refused",
         second.error == (uintptr_t)object_error::SEAT_TAKEN,
         (unsigned long)second.error, (unsigned long)object_error::SEAT_TAKEN);
+  check("stream: an unseated object cannot push",
+        g_unseated_push_error == (uintptr_t)object_error::SEAT_TAKEN,
+        (unsigned long)g_unseated_push_error,
+        (unsigned long)object_error::SEAT_TAKEN);
+  check("stream: another object cannot destroy the stream",
+        g_other_destroy_error == (uintptr_t)object_error::NOT_OWNER,
+        (unsigned long)g_other_destroy_error,
+        (unsigned long)object_error::NOT_OWNER);
+  const api_result destroyed = api(object_api::STREAM_DESTROY, g_stream_id);
+  check("stream: owner destroys despite bound seats", destroyed.error == 0,
+        (unsigned long)destroyed.error, 0);
+  const api_result stale = api(object_api::STREAM_OPEN, g_stream_id);
+  check("stream: stale ID is rejected", stale.error == (uintptr_t)object_error::BAD_STREAM,
+        (unsigned long)stale.error, (unsigned long)object_error::BAD_STREAM);
+  item stale_record{0, 0};
+  uintptr_t stale_push_error = 0;
+  g_stream.push_n(&stale_record, 1, &stale_push_error);
+  check("stream: stale push returns BAD_STREAM",
+        stale_push_error == (uintptr_t)object_error::BAD_STREAM,
+        (unsigned long)stale_push_error, (unsigned long)object_error::BAD_STREAM);
+  uint32_t stale_lost = 0;
+  uintptr_t stale_pop_error = 0;
+  g_stream.pop_n(&stale_record, 1, &stale_lost, &stale_pop_error);
+  check("stream: stale pop returns BAD_STREAM",
+        stale_pop_error == (uintptr_t)object_error::BAD_STREAM,
+        (unsigned long)stale_pop_error, (unsigned long)object_error::BAD_STREAM);
+  const api_result stale_bind = api(object_api::STREAM_BIND, g_stream_id,
+                                    (uintptr_t)stream::role::PRODUCER);
+  check("stream: stale bind returns BAD_STREAM",
+        stale_bind.error == (uintptr_t)object_error::BAD_STREAM,
+        (unsigned long)stale_bind.error, (unsigned long)object_error::BAD_STREAM);
+  const api_result stale_connect = api(object_api::STREAM_CONNECT,
+                                       g_stream_id, g_stream_id);
+  check("stream: stale connect returns BAD_STREAM",
+        stale_connect.error == (uintptr_t)object_error::BAD_STREAM,
+        (unsigned long)stale_connect.error, (unsigned long)object_error::BAD_STREAM);
 
   BOARD::diag_printf(
       "[SELFTEST] stream ladder done (cores seen 0x%lx, back-pressure %lu times)\n",

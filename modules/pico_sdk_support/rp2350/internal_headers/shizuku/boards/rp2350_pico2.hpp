@@ -2,6 +2,7 @@
 #define SHIZUKU_BOARDS_RP2350_PICO2_HPP
 #include <cstdint>
 #include "pico/stdlib.h"
+#include "hardware/timer.h"
 #include "shizuku/concepts/board.hpp"
 
 namespace shizuku {
@@ -41,7 +42,18 @@ public:
   static bool dma_busy(int channel);
   static void dma_release(int channel);
   static uint32_t core_num() { return (uint32_t)::get_core_num(); }
-  static uint64_t time_us() { return ::time_us_64(); }
+  [[gnu::always_inline]] static inline uint64_t time_us() {
+    // Same coherent high/low/high read as SDK timer_time_us_64, inline in RAM.
+    auto *timer = PICO_DEFAULT_TIMER_INSTANCE();
+    uint32_t hi = timer->timerawh, lo;
+    do {
+      lo = timer->timerawl;
+      const uint32_t next_hi = timer->timerawh;
+      if (hi == next_hi) break;
+      hi = next_hi;
+    } while (true);
+    return ((uint64_t)hi << 32u) | lo;
+  }
   // ★クロックを知っているのは board (PORT §2.3)。上位は µs でしか話さない。
   static uint32_t cycles_per_us();
   // ★非特権オブジェクトから届く最下位アドレス (= ヒープ先頭)。これより下 (静的領域)

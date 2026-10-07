@@ -16,6 +16,7 @@ static void test_pmp_napot_encoding() {
   bool ok = pmp_codec::encode_napot(0x40800000, 8, pmp_perm::R | pmp_perm::X, entry);
   assert(ok);
   assert(entry.addr == 0x10200000u);
+  assert((entry.cfg & pmp_perm::L) == 0); // Encoding must not implicitly lock hardware.
   assert(entry.cfg == (static_cast<uint8_t>(pmp_mode::NAPOT) << 3 | pmp_perm::R | pmp_perm::X));
   ok = pmp_codec::decode_napot(entry, decoded_base, decoded_size);
   assert(ok);
@@ -109,6 +110,7 @@ static void test_pmp_tor() {
   bool ok = pmp_codec::encode_tor(0x40804000, pmp_perm::R | pmp_perm::X, entry);
   assert(ok);
   assert(entry.addr == 0x10201000u);
+  assert((entry.cfg & pmp_perm::L) == 0);
   assert(entry.cfg == (static_cast<uint8_t>(pmp_mode::TOR) << 3 | pmp_perm::R | pmp_perm::X));
   ok = pmp_codec::decode_tor(entry, decoded_limit);
   assert(ok);

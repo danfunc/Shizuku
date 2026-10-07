@@ -1,10 +1,10 @@
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
-exports_files(["link_stubs.cpp"])
+exports_files(["early_boot.cpp", "link_stubs.cpp", "trap.cpp", "rv32_trap.S", "systimer.hpp"])
 
 cc_library(
     name = "pmp",
-    hdrs = ["pmp.hpp"],
+    hdrs = ["pmp.hpp", "frame_layout.h", "trap_route.hpp", "systimer.hpp"],
     visibility = ["//visibility:public"],
 )
 
@@ -37,6 +37,36 @@ sh_test(
     data = [
         "test_fail_closed.cpp",
         "test_fail_closed_board.cpp",
-        "//:internal_headers",
+        "pmp.hpp",
+        "frame_layout.h",
+        "//:c6_test_headers",
+    ],
+)
+
+cc_test(
+    name = "trap_route_test",
+    srcs = ["test_trap_route.cpp"],
+    copts = ["-std=c++20"],
+    deps = [":pmp", "//:internal_headers"],
+)
+
+cc_test(
+    name = "systimer_test",
+    srcs = ["test_systimer.cpp"],
+    copts = ["-std=c++20"],
+    deps = [":pmp"],
+)
+
+sh_test(
+    name = "trap_static_test",
+    srcs = ["test_trap_static.sh"],
+    data = [
+        "test_trap_static.py",
+        "frame_layout.h",
+        "rv32_trap.S",
+        "trap.cpp",
+        "early_boot.cpp",
+        "//:c6_test_headers",
+        "//firmware:esp32c6/main/early_diag.c",
     ],
 )

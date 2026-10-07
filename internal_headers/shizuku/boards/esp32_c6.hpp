@@ -11,7 +11,7 @@
 //    - 単核 (CORE_COUNT = 1) の定義
 //    - launch_core / park_other_cores 等の他コア操作は欺瞞的 no-op を禁止し、
 //      panic / 未実装として宣言
-//    - 実機ベクタ初期化・SYSTIMER・UART/USB 診断出力は未実装
+//    - M-only vectored mtvec 初期化は実装。SYSTIMER・interrupt matrix は未実装
 //    - SHIZUKU_C6_SKELETON_PERMITTED が定義されていない本番ビルドでは
 //      明示的にコンパイルを拒否する (fail-closed)。
 

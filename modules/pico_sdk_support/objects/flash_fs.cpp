@@ -516,13 +516,12 @@ uintptr_t flash_format_method(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 // ★実体は**オブジェクト arena** から借りる。静的領域に置くと region の外 =
 //   特権のみになり、非特権オブジェクトが push/pop できない。ここが
 //   「非特権からも読み書きできる」ことの土台。
-using write_ring = stream::storage<flash_chunk, 32>;
 
 // 今開いている書き込み。★1 本だけにする — 複数同時に開けるようにすると、
 //   置き場所の先頭をどう分けるかという別の設計が要る (今は要らない)。
 struct write_session {
   bool open;
-  write_ring *ring;
+  uintptr_t stream_id;
   uintptr_t base;    // 焼き先の先頭
   uint32_t reserved; // 確保したバイト数
   uint32_t written;  // 焼き終わったバイト数
@@ -540,33 +539,29 @@ uintptr_t flash_open_read_method(uintptr_t argument, uintptr_t, uintptr_t,
   const int slot = find_entry(request->name);
   if (slot < 0)
     return 0;
-  // ★★環を持たない。**ディスクリプタだけ**を借り、その base をファイルの XIP
-  //   アドレスにする。つまり「ストリームの実体は flash そのもの」。
-  //   ・写す仕事が消える (中継の環が無いので、写す先も無い)
-  //   ・一貫性の心配も消える (書き換わらないものを読んでいるだけ)
-  //   ・pop が進めるのは rd だけで、それはディスクリプタ = RAM 側にある
-  //   ★ディスクリプタは**オブジェクト arena** (非特権が書ける側)、base は XIP
-  //     (非特権が読める側)。この 2 つの置き分けが「非特権が読める」の正体。
-  const uint32_t rec_size = request->rec_size != 0 ? request->rec_size : 1u;
-  const auto memory = api(object_api::MEMORY_ALLOCATE, sizeof(stream::descriptor));
-  if (memory.value == 0)
-    return 0;
-  stream::descriptor *desc = (stream::descriptor *)memory.value;
-  desc->base = (void *)(uintptr_t)g_directory[slot].address;
-  desc->rec_size = rec_size;
-  desc->capacity = g_directory[slot].bytes / rec_size;
-  desc->flags = stream::LOSSLESS;
-  // ★中身は最初から全部そこに在る。wr は「もう全部公開済み」を意味する。
-  desc->wr = desc->capacity;
-  desc->rd = 0;
-  desc->producer = 0; // 生み出したのは媒体であって、走っているオブジェクトではない
-  desc->consumer = stream::NO_OWNER;
-  const auto created = api(object_api::STREAM_CREATE, (uintptr_t)desc);
+  const auto created = api(object_api::STREAM_CREATE, sizeof(stream::extent), 1,
+                           stream::LOSSLESS);
   if (created.error != 0)
     return 0;
+  const auto bound = api(object_api::STREAM_BIND, created.value,
+                         (uintptr_t)stream::role::PRODUCER);
+  if (bound.error != 0) {
+    api(object_api::STREAM_DESTROY, created.value);
+    return 0;
+  }
+  stream::extent file{(uintptr_t)g_directory[slot].address,
+                      g_directory[slot].bytes, 0};
+  uintptr_t push_error = 0;
+  if (stream::handle<stream::extent>(created.value).push_n(&file, 1,
+                                                            &push_error) != 1 ||
+      push_error != 0) {
+    api(object_api::STREAM_DESTROY, created.value);
+    return 0;
+  }
   request->stream = created.value;
   request->address = g_directory[slot].address;
-  request->records = desc->capacity;
+  request->records = 1;
+  request->bytes = g_directory[slot].bytes;
   return created.value;
 }
 
@@ -582,19 +577,19 @@ uintptr_t flash_open_write_method(uintptr_t argument, uintptr_t, uintptr_t,
   const uint32_t base = derive_bump();
   if (base + reserved > REGION_ADDRESS + REGION_BYTES)
     return 0;
-  const auto memory = api(object_api::MEMORY_ALLOCATE, sizeof(write_ring));
-  if (memory.value == 0)
-    return 0;
-  write_ring *ring = (write_ring *)memory.value;
-  ring->init(stream::LOSSLESS);
-  const auto created = api(object_api::STREAM_CREATE, (uintptr_t)&ring->desc);
+  const auto created = api(object_api::STREAM_CREATE, sizeof(flash_chunk), 32,
+                           stream::LOSSLESS);
   if (created.error != 0)
     return 0;
-  api(object_api::STREAM_BIND, created.value,
-      (uintptr_t)stream::role::CONSUMER);
+  const auto bound = api(object_api::STREAM_BIND, created.value,
+                         (uintptr_t)stream::role::CONSUMER);
+  if (bound.error != 0) {
+    api(object_api::STREAM_DESTROY, created.value);
+    return 0;
+  }
 
   g_write.open = true;
-  g_write.ring = ring;
+  g_write.stream_id = created.value;
   g_write.base = base;
   g_write.reserved = reserved;
   g_write.written = 0;
@@ -615,7 +610,7 @@ uintptr_t flash_open_write_method(uintptr_t argument, uintptr_t, uintptr_t,
 void drain_write() {
   if (!g_write.open)
     return;
-  auto in = g_write.ring->hdl();
+  auto in = stream::handle<flash_chunk>(g_write.stream_id);
   flash_chunk chunk{};
   while (in.pop(&chunk)) {
     for (uint32_t index = 0; index < chunk.bytes; ++index) {
@@ -663,7 +658,14 @@ uintptr_t flash_close_write_method(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   name_copy(fresh.name, g_write.name);
   write_entry((uint32_t)slot, fresh);
   g_write.open = false;
+  api(object_api::STREAM_DESTROY, g_write.stream_id);
   return length;
+}
+
+uintptr_t flash_close_read_method(uintptr_t stream_id, uintptr_t, uintptr_t,
+                                  uintptr_t) {
+  const auto destroyed = api(object_api::STREAM_DESTROY, stream_id);
+  return destroyed.error == 0 ? 1 : destroyed.error + 1;
 }
 
 uintptr_t flash_prepare_method(uintptr_t argument, uintptr_t, uintptr_t,
@@ -770,6 +772,8 @@ uintptr_t flash_fs_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
                             (uintptr_t)&flash_open_write_method);
   failures += export_method((uintptr_t)flash_fs_method::CLOSE_WRITE,
                             (uintptr_t)&flash_close_write_method);
+  failures += export_method((uintptr_t)flash_fs_method::CLOSE_READ,
+                            (uintptr_t)&flash_close_read_method);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(704);
 #endif

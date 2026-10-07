@@ -235,12 +235,12 @@ static uint16_t conn_interval = 0;
 static bool cmd_authorized = false;
 
 // ---- RX: Shizuku ストリームとして外へ出す (shell 的な解釈はしない) ----------
-shizuku::stream::storage<frame_t, 8> g_rx;
+shizuku::stream::handle<frame_t> g_rx;
 uintptr_t g_rx_stream_id = 0;
 
 // ---- TX: ble_uart 自身の行 (内部専用、ストリーム登録しない)
 // -------------------
-shizuku::stream::storage<frame_t, 16> g_tx;
+shizuku::stream::handle<frame_t> g_tx;
 
 // ---- TX: ハブ (flight_controller) から流れてくる本線
 // -------------------------- ★実体を持つのは向こう側。こちらは番号で引いて
@@ -272,10 +272,10 @@ bool g_gdb_held_valid = false;
 // ★容量を大きめに取る: 転送中は BLE から連続で流れ込み、ota 側は flash 書き
 //   込み (1 セクタ消去に数十ms) で待たされるため、ここが詰まると取りこぼす。
 //   取りこぼしは CRC で必ず検出されるが、やり直しは 30 秒単位で高い。
-shizuku::stream::storage<frame_t, 64> g_ota_rx;
+shizuku::stream::handle<frame_t> g_ota_rx;
 uintptr_t g_ota_stream_id = 0;
 // ---- 拡張チャネル #2 (6E403001-...) ----
-shizuku::stream::storage<frame_t, 16> g_ch2_rx;
+shizuku::stream::handle<frame_t> g_ch2_rx;
 uintptr_t g_ch2_rx_stream_id = 0;
 uintptr_t g_ch2_tx_in_id = NO_STREAM;
 shizuku::stream::handle<frame_t> g_ch2_tx_in;
@@ -327,7 +327,7 @@ static void tx_push(const uint8_t *data, uint32_t len) {
   frame_t f{};
   f.len = (uint16_t)len;
   memcpy(f.data, data, len);
-  g_tx.hdl().push(f); // LOSSLESS ではない (v16, 満杯なら最古を上書き)
+  g_tx.push(f); // 非 lossless、満杯なら最古を上書き
 }
 
 static void tx_push_line(const char *s) {
@@ -370,7 +370,7 @@ static void process_rx(const uint8_t *data, uint16_t len) {
   memcpy(f.data, data, f.len);
   // ★LOSSLESS を付けていない (push は常に true) — 満杯なら黙って最古を上書き。
   //   producer (この関数) は決して待たない (stream.hpp の設計方針)。
-  g_rx.hdl().push(f);
+  g_rx.push(f);
   BOARD::diag_printf("[BLE_UART] RX %u byte accepted (authorized)\n", len);
 }
 
@@ -486,7 +486,7 @@ static int att_write_callback(hci_con_handle_t connection_handle,
         n = sizeof(f.data);
       f.len = (uint16_t)n;
       memcpy(f.data, buffer + offset, n);
-      g_ota_rx.hdl().push(f);
+      g_ota_rx.push(f);
       offset += n;
     }
     return 0;
@@ -565,7 +565,7 @@ static int att_write_callback(hci_con_handle_t connection_handle,
         n = sizeof(f.data);
       f.len = (uint16_t)n;
       memcpy(f.data, buffer + offset, n);
-      g_ch2_rx.hdl().push(f);
+      g_ch2_rx.push(f);
       offset += n;
     }
     return 0;
@@ -589,7 +589,7 @@ static bool notify_one(const frame_t &f) {
 }
 
 uint32_t tx_pending() {
-  uint32_t n = g_tx.hdl().available();
+  uint32_t n = g_tx.available();
   if (g_tx_in.valid())
     n += g_tx_in.available();
 #if !defined(SHIZUKU_RP2040)
@@ -684,8 +684,8 @@ static void flush_tx() {
     return;
   frame_t f{};
   // 1) 自分の行
-  while (g_tx.hdl().available() != 0) {
-    if (!g_tx.hdl().pop(&f))
+  while (g_tx.available() != 0) {
+    if (!g_tx.pop(&f))
       break;
     // ★クレジット切れ。v1 は pop 済みなのでこのフレームは失われる (旧実装は
     //   peek→成功後 drop で再送を保証していた)。
@@ -1184,8 +1184,7 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   if (g_ch2_tx_in_id != NO_STREAM) {
     const auto opened = api(shizuku::object_api::STREAM_OPEN, g_ch2_tx_in_id);
     if (opened.error == 0 && opened.value != 0) {
-      g_ch2_tx_in = shizuku::stream::handle<frame_t>(
-          (shizuku::stream::descriptor *)opened.value);
+      g_ch2_tx_in = shizuku::stream::handle<frame_t>(opened.value);
       api(shizuku::object_api::STREAM_BIND, g_ch2_tx_in_id,
           (uintptr_t)shizuku::stream::role::CONSUMER);
     }
@@ -1194,8 +1193,7 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   if (g_tx_in_id != NO_STREAM) {
     const auto opened = api(shizuku::object_api::STREAM_OPEN, g_tx_in_id);
     if (opened.error == 0 && opened.value != 0) {
-      g_tx_in = shizuku::stream::handle<frame_t>(
-          (shizuku::stream::descriptor *)opened.value);
+      g_tx_in = shizuku::stream::handle<frame_t>(opened.value);
       api(shizuku::object_api::STREAM_BIND, g_tx_in_id,
           (uintptr_t)shizuku::stream::role::CONSUMER);
     } else {
@@ -1220,10 +1218,8 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
         api(shizuku::object_api::STREAM_OPEN, g_gdb_from_stub_id);
     if (to_stub.error == 0 && to_stub.value != 0 && from_stub.error == 0 &&
         from_stub.value != 0) {
-      g_gdb_to_stub = shizuku::stream::handle<link_chunk>(
-          (shizuku::stream::descriptor *)to_stub.value);
-      g_gdb_from_stub = shizuku::stream::handle<link_chunk>(
-          (shizuku::stream::descriptor *)from_stub.value);
+      g_gdb_to_stub = shizuku::stream::handle<link_chunk>(to_stub.value);
+      g_gdb_from_stub = shizuku::stream::handle<link_chunk>(from_stub.value);
       api(shizuku::object_api::STREAM_BIND, g_gdb_to_stub_id,
           (uintptr_t)shizuku::stream::role::PRODUCER);
       api(shizuku::object_api::STREAM_BIND, g_gdb_from_stub_id,
@@ -1248,6 +1244,7 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 
   uint64_t next_adv_ensure_us = 0;
   uint64_t next_bond_check_us = 0;
+  uint64_t next_tx_pending_check_us = 0;
   uint64_t forget_deadline_us = 0;
   last_conn_activity_us = BOARD::time_us();
   while (true) {
@@ -1539,11 +1536,14 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 #else
     const bool notify_enabled = tx_notify_enabled;
 #endif
-    if (con_handle != HCI_CON_HANDLE_INVALID &&
-        notify_enabled && tx_pending() != 0 &&
-        !can_send_requested) {
-      can_send_requested = true;
-      att_server_request_can_send_now_event(con_handle);
+    const uint64_t pending_check_now = BOARD::time_us();
+    if (con_handle != HCI_CON_HANDLE_INVALID && notify_enabled &&
+        !can_send_requested && pending_check_now >= next_tx_pending_check_us) {
+      next_tx_pending_check_us = pending_check_now + 5000ull;
+      if (tx_pending() != 0) {
+        can_send_requested = true;
+        att_server_request_can_send_now_event(con_handle);
+      }
     }
 
     api(shizuku::object_api::SLEEP_US, 1000);
@@ -1552,9 +1552,6 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 }
 
 uintptr_t ble_uart_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
-  g_rx.init();
-  g_tx.init();
-
   uintptr_t failures =
       api(shizuku::object_api::DECLARE_NAME, (uintptr_t)"ble_uart").error;
   failures +=
@@ -1583,22 +1580,39 @@ uintptr_t ble_uart_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       export_method(method::FORGET_BONDS, (uintptr_t)&method_forget_bonds);
   failures += export_method(method::POLL, (uintptr_t)&poll_loop);
 
-  const auto rx_created =
-      api(shizuku::object_api::STREAM_CREATE, (uintptr_t)&g_rx.desc);
+  const auto rx_created = api(shizuku::object_api::STREAM_CREATE,
+                              sizeof(frame_t), 8, 0);
   failures += rx_created.error;
   g_rx_stream_id = rx_created.value;
+  g_rx = shizuku::stream::handle<frame_t>(g_rx_stream_id);
 
-  g_ota_rx.init();
-  const auto ota_created =
-      api(shizuku::object_api::STREAM_CREATE, (uintptr_t)&g_ota_rx.desc);
+  const auto tx_created = api(shizuku::object_api::STREAM_CREATE,
+                              sizeof(frame_t), 16, 0);
+  failures += tx_created.error;
+  g_tx = shizuku::stream::handle<frame_t>(tx_created.value);
+  api(shizuku::object_api::STREAM_BIND, tx_created.value,
+      (uintptr_t)shizuku::stream::role::PRODUCER);
+  api(shizuku::object_api::STREAM_BIND, tx_created.value,
+      (uintptr_t)shizuku::stream::role::CONSUMER);
+
+  const auto ota_created = api(shizuku::object_api::STREAM_CREATE,
+                               sizeof(frame_t), 32, 0);
   failures += ota_created.error;
   g_ota_stream_id = ota_created.value;
+  g_ota_rx = shizuku::stream::handle<frame_t>(g_ota_stream_id);
 
-  g_ch2_rx.init();
-  const auto ch2_created =
-      api(shizuku::object_api::STREAM_CREATE, (uintptr_t)&g_ch2_rx.desc);
+  const auto ch2_created = api(shizuku::object_api::STREAM_CREATE,
+                               sizeof(frame_t), 16, 0);
   failures += ch2_created.error;
   g_ch2_rx_stream_id = ch2_created.value;
+  g_ch2_rx = shizuku::stream::handle<frame_t>(g_ch2_rx_stream_id);
+
+  api(shizuku::object_api::STREAM_BIND, g_rx_stream_id,
+      (uintptr_t)shizuku::stream::role::PRODUCER);
+  api(shizuku::object_api::STREAM_BIND, g_ota_stream_id,
+      (uintptr_t)shizuku::stream::role::PRODUCER);
+  api(shizuku::object_api::STREAM_BIND, g_ch2_rx_stream_id,
+      (uintptr_t)shizuku::stream::role::PRODUCER);
 
   bt_stack_bringup();
   return failures;

@@ -7,7 +7,7 @@ namespace shizuku {
 // ヒープ側にあると region の穴あけが必要になり、PMSAv8 では実現できない。
 KERNEL kernel_instance;
 
-template <> void KERNEL::init() {
+template <>  void KERNEL::init() {
   // ★スレッド表はここでは作らない。**オブジェクトランドが用意して貸す**ものなので、
   //   set_thread_storage で渡されるまでスレッドは 1 本も存在しない。
   m_threads = nullptr;
@@ -27,7 +27,7 @@ template <> void KERNEL::init() {
     BOARD::panic("memory manager init failed");
 }
 
-template <> void KERNEL::bootstrap(
+template <> SHIZUKU_HOT void KERNEL::bootstrap(
     void (*entry)(), uintptr_t stack_base, uintptr_t stack_bytes,
     KERNEL::call_ledger_entry *ledger, uint32_t ledger_capacity) {
   if (m_threads == nullptr)
@@ -59,7 +59,7 @@ template <> void KERNEL::bootstrap(
 
 // 2 本目以降のコアが自分で呼ぶ。★このコアの例外結線と保護を**自分で**張ってから
 // スレッドモードへ移る (優先度・MPU・SysTick は per-core banked)。
-template <>
+template <> SHIZUKU_HOT
 void KERNEL::bootstrap_secondary(uint32_t thread, void (*entry)(),
                                  uintptr_t stack_base, uintptr_t stack_bytes,
                                  KERNEL::call_ledger_entry *ledger,

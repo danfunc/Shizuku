@@ -53,7 +53,7 @@ from an Apple Silicon macOS terminal when installation is wanted.
 
 ### 3. 現状の観測 (compile/link-only マイルストーン)
 
-観測済みの事実だけを書く。これは起動・実行時の動作の証明ではない。
+観測済みの事実だけを書く。旧 build の記録は履歴であり、source update は build・実機動作の証明ではない。
 
 - **ビルド経路 (Bazel は未達)**:
   - Bazel の主線 (`bazelisk build --config=esp32c6 //firmware:esp32c6`) は **解析・ビルドとも未達**。
@@ -66,18 +66,28 @@ from an Apple Silicon macOS terminal when installation is wanted.
     `kernel_thread.o` / `memory_manager_freestanding.o` の 6 個。
   - IDF v6.1 の `.bin` は、その手動 `.a` を使った手動の `idf.py build` (`firmware/esp32c6/build.sh` 経由を含む) で生成した。
     `build.sh` を Bazel の action から呼んだ実績は無い。
-- **イメージの中身**: `.a` は実オブジェクトを含み、最終 ELF/map は 6 メンバーすべてを取り込む。
-  ただし起動は動かない。強シンボル `start_cpu0` (`firmware/esp32c6/main/shizuku_boot.c`) は `ebreak` するだけで、
-  カーネルを呼ばない。`ports/esp32/c6/link_stubs.cpp` の 26 関数 (arch 13: 行22-36、board 13: 行44-56) は
+- **イメージの中身**: 旧 `.a` は実オブジェクトを含み、旧 ELF/map は archive メンバーを取り込む。
+  現在の source は `start_cpu0` (`firmware/esp32c6/main/shizuku_boot.c`) から C6 archive の pre-init entry を呼び、
+  raw reset reasonとWDT registersをnoinit ringへ記録後、USB Serial/JTAGのTX FIFOへ起動行を書きactive idleするcandidateへ更新した。これは未ビルド・未実機である。
+  `KERNEL::init` は呼ばず、実機の出力・起動は未検証。
+  `ports/esp32/c6/link_stubs.cpp` の既存未実装関数 (arch 13: 行22-36、board 13: 行44-56) は
   すべて呼ばれたら即トラップするリンク専用スタブで、成功を返す no-op は無い。
 - **FreeRTOS**: スケジューラは起動しない (ユーザー確定条件)。この ELF に `vTaskStartScheduler` /
   `esp_startup_start_app` / `start_cpu0_default` のシンボルが無いことを確認した。
   FreeRTOS ライブラリのリンクとスケジューラ起動は区別する。
 - **IDF startup の使い方 (未解決)**: IDF v6.1 の `start_cpu0` 差し替えは private ABI で、
-  `do_core_init` / コンストラクタ / `do_secondary_init` を飛ばす。ヒープ・libc・ウォッチドッグ・PMP の
-  初期化責任の持ち方は決まっておらず、現状は意図的に何も動かさないことで回避しているだけである。
+  `do_core_init` / コンストラクタ / `do_secondary_init` を飛ばす。diagnostic candidateはRWDT状態を停止前後に記録し、旧起動経路どおりRWDTのみ停止する。TIMG/Super-WDTは変更しない。
+  ヒープ・libc・PMP は未初期化で、KERNEL entry 初期化はまだ実装・検証していない。
 
-### 4. 将来の設計目標と未確認事項 (実証していない)
+### 4. Source update: pre-init USB Serial/JTAG marker (未ビルド・未実機)
+
+- `ports/esp32/c6/early_boot.cpp` が `shizuku_c6_early_boot` を定義し、C ABI helperを呼んでUSB Serial/JTAGへmarker送信する。現在はWFIの因果を切り分ける診断candidateとしてwriter結果をRAMに記録し、両結果をactive `nop` loopへ合流させる。SDK LL helperは `firmware/esp32c6/main/usb_console.c` に置く。
+- `start_cpu0` はその archive entry を呼ぶ。`KERNEL::init`, `kernel_instance`, ctor, heap, PMP, trap setup は呼ばず、
+  FreeRTOS scheduler も始めない。
+- `start_cpu0` hookでraw reset reasonとRWDT/MWDT/Super-WDTのraw configをnoinit ringへ保存する。WFI因果切り分けcandidateはwriter結果も記録し、active `nop` loopへ入る。
+  USB routeのclock/PHY/pin設定は変更しない。build / ELF assert / 実機の結果は未取得。
+
+### 5. 将来の設計目標と未確認事項 (実証していない)
 
 以下は設計上の目標・仮説であり、今回の実装では **何も検証していない**。保証や必須の構成として読まないこと。
 

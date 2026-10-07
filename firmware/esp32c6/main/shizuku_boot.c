@@ -8,18 +8,19 @@
 // ★置き換えの代償 (IDF の private ABI、v6.1 固定): start_cpu0_default が行う
 //   do_core_init / グローバルコンストラクタ / do_secondary_init /
 //   esp_startup_start_app (= main タスク生成と vTaskStartScheduler) を**すべて飛ばす**。
-//   ヒープ・libc・ウォッチドッグ・PMP の初期化責任は誰も負っていない。
+//   ヒープ・libc・PMP の初期化責任は誰も負っていない。RTC WDTは従来同様snapshot後に停止し、他WDTには書込み/給餌しない。
 //
-// このイメージは compile/link-only の到達点で、**起動しても何も動かさない**。
-// start_cpu0 は即トラップする (カーネルは動かさない・FreeRTOS スケジューラは始めない)。
-// カーネルの実体は --whole-archive で取り込まれているが、ここからは呼ばない。
-#include <stdint.h>
+// start_cpu0 は C6 kernel archive の pre-init entry を呼ぶ。
+// entry は reset/WDT状態をnoinit RAMへ記録後、M-only stage-2 kernel/thread0 pilotへ進む。
+// ctor / heap / PMP / timer / FreeRTOS は初期化しない。
+#include "early_diag.h"
+
+__attribute__((noreturn)) void shizuku_c6_early_boot(void);
 
 __attribute__((noreturn)) void start_cpu0(void)
 {
-    for (;;) {
-        __builtin_trap();
-    }
+    shizuku_c6_early_diag_begin();
+    shizuku_c6_early_boot();
 }
 
 // app_startup.c の main_task が強参照するので、リンクのために定義する。

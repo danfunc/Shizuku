@@ -76,6 +76,7 @@
 #endif
   bx lr
 .endm
+.section .time_critical.shizuku_svc_entry,"ax",%progbits
 .global shizuku_armv6m_svc_entry
 .type shizuku_armv6m_svc_entry,%function
 shizuku_armv6m_svc_entry:
@@ -92,6 +93,7 @@ shizuku_armv6m_svc_entry:
   SHIZUKU_TRACE_STAGE 430
 #endif
   CTX_RESTORE 1
+.text
 .global shizuku_armv6m_pendsv_entry
 .type shizuku_armv6m_pendsv_entry,%function
 shizuku_armv6m_pendsv_entry:
@@ -158,6 +160,7 @@ shizuku_armv6m_enter_thread_mode:
   msr CONTROL, r0
   isb
   bx r1
+.section .time_critical.shizuku_return_stub,"ax",%progbits
 .global shizuku_armv6m_return_stub
 .type shizuku_armv6m_return_stub,%function
 shizuku_armv6m_return_stub:

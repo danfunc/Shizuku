@@ -1,7 +1,7 @@
-# ESP-IDF v6.1 / ESP32-C6 の **compile/link-only** プロジェクト。
+# ESP-IDF v6.1 / ESP32-C6 の archive-link project。
 # ★Shizuku のカーネルは Bazel が作る libshizuku_kernel.a (SHIZUKU_KERNEL_ARCHIVE) を
-#   取り込むだけ。ここでカーネルは再コンパイルしない。起動してもカーネルは動かない
-#   (main/shizuku_boot.c と ports/esp32/c6/link_stubs.cpp を参照)。
+#   取り込むだけ。ここでカーネルは再コンパイルしない。起動経路は ROM pre-init entry
+#   までで、KERNEL::init / scheduler は呼ばない (main/shizuku_boot.c を参照)。
 cmake_minimum_required(VERSION 3.24)
 
 if(NOT DEFINED SHIZUKU_KERNEL_ARCHIVE OR NOT EXISTS "${SHIZUKU_KERNEL_ARCHIVE}")

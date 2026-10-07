@@ -117,6 +117,7 @@ void rp2350_pico2::init(uint32_t core) {
 //   ★静的データ (.bss/.data) は region の外に落ちる。つまり**非特権オブジェクトは
 //     自分のグローバルに触れない**。これは事故ではなく設計で、オブジェクトの状態は
 //     ヒープ上 (= region1) に置けという圧力になる (§11.2.2)。
+extern "C" char __shizuku_return_stub_start[], __shizuku_return_stub_end[];
 void rp2350_pico2::protection_init() {
   // region0: **ファーム本体の範囲だけ** = 読み+実行のみ。
   // ★★以前は XIP 全域を張っていたので、非特権オブジェクトが flash_fs の
@@ -136,6 +137,10 @@ void rp2350_pico2::protection_init() {
                         1);
   for (uint32_t index = 2; index < 8; ++index)
     ARCH_TYPE::region_disable(index);
+  // The public return stub is executed before RETURN raises privilege.
+  // Expose only its aligned code window, not .data or kernel bookkeeping.
+  ARCH_TYPE::region_set(3, (uintptr_t)__shizuku_return_stub_start,
+      (uintptr_t)__shizuku_return_stub_end, ARCH_TYPE::ACCESS_RO_ALL, false, 0);
   ARCH_TYPE::protection_enable();
 }
 

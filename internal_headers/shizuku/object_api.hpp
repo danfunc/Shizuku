@@ -87,12 +87,9 @@ enum struct object_api : uintptr_t {
   //   (flash 上のリテラルは XIP で常に見えており、非特権からも読める)。
   DECLARE_NAME = 17, // a1 = const char*。自分に名を付ける (付け直しは不可)
   OBJECT_NAME = 18,  // a1 = オブジェクト ID → a1(戻) = const char* (0 = 無名)
-  // ---- ストリーム (制御プレーンだけ。push/pop は svc を通らない) ----
-  // ★ここに居るのは登録・discovery・席の強制だけ。データを運ぶ操作は
-  //   ライブラリ (shizuku/stream.hpp) にある — 単一アドレス空間で push/pop を
-  //   svc 化しても保護は 1bit も増えず、体裁代を払うだけになるため。
-  STREAM_CREATE = 19, // a1 = descriptor* → a1(戻) = 番号 (割り当てられる)
-  STREAM_OPEN = 20,   // a1 = 番号 → a1(戻) = descriptor*
+  // ---- ストリーム (形状・ring・席・data plane は kernel object が所有) ----
+  STREAM_CREATE = 19, // a1 = record size, a2 = capacity, a3 = flags → ID
+  STREAM_OPEN = 20,   // a1 = ID → 成功なら同じ ID
   // a1 = 番号, a2 = role。★席は 1 つずつしか無い (SPSC の強制)。
   //   誰が座るかは発行元から導出するので、他人の席は取れない。
   STREAM_BIND = 21,
@@ -128,6 +125,10 @@ enum struct object_api : uintptr_t {
   //   二度と bind し直せず (3) **詰まった接続を外せない**。層を積む設計では
   //   下の口が死んだときに張り替えられる必要がある。
   STREAM_DISCONNECT = 26,
+  STREAM_DESTROY = 28, // a1 = ID。owner のみ。接続中は拒否
+  STREAM_PUSH_N = 29,  // a1 = ID, a2 = push_request* → value = 件数
+  STREAM_POP_N = 30,   // a1 = ID, a2 = pop_request* → value = 件数
+  STREAM_AVAILABLE = 31, // a1 = ID → value = available (capacity で飽和)
   // 専用ハンドラ (HANDLER) が配下の子オブジェクトのメソッド終了 (EXIT_METHOD) を
   // Root Kernel Object へ転送する。
   // a1 = 戻り値, a2 = エラーコード。
@@ -210,6 +211,7 @@ enum struct object_error : uintptr_t {
   NO_STREAM,     // ストリームの枠が尽きた
   ALREADY_NAMED, // 名は付け直せない (誰かが控えた名が別物を指すようになるため)
   NOT_PRIVILEGED, // GRANT_REGION 等、特権オブジェクトしか撃てない番号を非特権が撃った
+  STREAM_BUSY,    // 接続中のため destroy できない
 };
 
 } // namespace shizuku

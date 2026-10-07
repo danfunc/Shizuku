@@ -9,6 +9,7 @@
 //    「返さない限り処理は原子」という協調の性質は保たれる (§10.2)。期限は
 //    「1 つの暴走が全系を凍らせない」ための安全網。
 #include "shizuku/kernel.hpp"
+#include "shizuku/freestanding_mem.hpp"
 
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
 extern "C" void shizuku_selftest_fault_phase(uint32_t, uint32_t);
@@ -17,27 +18,27 @@ namespace shizuku {
 
 // 実装より前に使う (do_switch が grant_unwind を、grant_unwind が arm_timer を呼ぶ)
 // ので、特殊化の宣言を先に置く。無いと暗黙の実体化が先に起きる。
-template <> void KERNEL::grant_unwind(grant_end);
-template <> void KERNEL::arm_timer();
-template <> void KERNEL::grant_charge();
-template <> bool KERNEL::claim(uint32_t, kernel_error &);
-template <> void KERNEL::set_recovery_thread(uint32_t);
-template <> void KERNEL::set_thread_storage(void *, uintptr_t);
-template <> void KERNEL::release(uint32_t);
-template <> bool KERNEL::terminate_if_idle(uint32_t);
-template <> KERNEL::spawn_result KERNEL::reserve_thread();
-template <> void KERNEL::fault_dispatch(KERNEL::CONTEXT *);
-template <> void KERNEL::debug_dispatch(KERNEL::CONTEXT *);
-template <> void KERNEL::suspend(uint32_t);
-template <> void KERNEL::resume(uint32_t);
-template <> void KERNEL::arm_step(uint32_t);
-template <> void KERNEL::consume_pending_step();
+template <> SHIZUKU_HOT void KERNEL::grant_unwind(grant_end);
+template <> SHIZUKU_HOT void KERNEL::arm_timer();
+template <> SHIZUKU_HOT void KERNEL::grant_charge();
+template <> SHIZUKU_HOT bool KERNEL::claim(uint32_t, kernel_error &);
+template <> SHIZUKU_HOT void KERNEL::set_recovery_thread(uint32_t);
+template <>  void KERNEL::set_thread_storage(void *, uintptr_t);
+template <> SHIZUKU_HOT void KERNEL::release(uint32_t);
+template <> SHIZUKU_HOT bool KERNEL::terminate_if_idle(uint32_t);
+template <> SHIZUKU_HOT KERNEL::spawn_result KERNEL::reserve_thread();
+template <>  void KERNEL::fault_dispatch(KERNEL::CONTEXT *);
+template <>  void KERNEL::debug_dispatch(KERNEL::CONTEXT *);
+template <> SHIZUKU_HOT void KERNEL::suspend(uint32_t);
+template <> SHIZUKU_HOT void KERNEL::resume(uint32_t);
+template <> SHIZUKU_HOT void KERNEL::arm_step(uint32_t);
+template <> SHIZUKU_HOT void KERNEL::consume_pending_step();
 
 // ---- 貸してもらった記憶をスレッド表として据える ----------------------------
 // ★所有はオブジェクトランド、保護はここで検査する。カーネルの簿記が非特権から
 //   届く場所にあると、非特権オブジェクトが他スレッドの文脈を書き換えられてしまう —
 //   「気をつける」では守れないので、組み立ての時点で弾く。
-template <> void KERNEL::set_thread_storage(void *memory, uintptr_t bytes) {
+template <>  void KERNEL::set_thread_storage(void *memory, uintptr_t bytes) {
   const uintptr_t base = (uintptr_t)memory;
   if (base >= BOARD::unprivileged_floor())
     BOARD::panic("thread storage must be out of reach of unprivileged objects");
@@ -52,7 +53,7 @@ template <> void KERNEL::set_thread_storage(void *memory, uintptr_t bytes) {
   }
 }
 
-template <> void KERNEL::set_thread_ledger(
+template <> SHIZUKU_HOT void KERNEL::set_thread_ledger(
     uint32_t id, KERNEL::call_ledger_entry *memory, uint32_t capacity,
     uint32_t object, uint32_t kind, uint32_t handler_object,
     uintptr_t handler_entry) {
@@ -70,7 +71,7 @@ template <> void KERNEL::set_thread_ledger(
 }
 
 // ---- スレッドの生成 (スレッドモードから呼ぶ C++ API。syscall ではない) ------
-template <>
+template <> SHIZUKU_HOT
 KERNEL::spawn_result KERNEL::spawn(const KERNEL::spawn_request &request) {
   if (request.stack_base == 0 || request.stack_bytes < 256)
     return {kernel_error::NO_MEMORY, 0};
@@ -94,7 +95,9 @@ KERNEL::spawn_result KERNEL::spawn(const KERNEL::spawn_request &request) {
 
   THREAD &thread = m_threads[index].thread;
   thread.context = &m_threads[index].context;
-  *thread.context = CONTEXT{};
+  shizuku_zero_record(thread.context);
+  thread.context->exc_return = 0xFFFFFFFDu;
+  thread.context->control = ARCH::CONTROL_PRIV_PSP;
   thread.call_stack = {};
   if (request.ledger == nullptr || request.ledger_capacity == 0)
     BOARD::panic("spawn without call ledger");
@@ -128,7 +131,7 @@ KERNEL::spawn_result KERNEL::spawn(const KERNEL::spawn_request &request) {
 
 // 走らせずに枠だけ取る。★spawn と同じ CAS で取るので、他コアと競っても二重取りに
 //   ならない。採用する側が RUNNING にするまで RESERVED のまま = 誰にも拾われない。
-template <> KERNEL::spawn_result KERNEL::reserve_thread() {
+template <> SHIZUKU_HOT KERNEL::spawn_result KERNEL::reserve_thread() {
   for (uint32_t candidate = 1; candidate < m_thread_count; ++candidate) {
     if (ARCH::cas32(&m_threads[candidate].thread.state,
                     (uint32_t)THREAD::state_t::UNINITIALIZED,
@@ -140,7 +143,7 @@ template <> KERNEL::spawn_result KERNEL::reserve_thread() {
   return {kernel_error::NO_THREAD, 0};
 }
 
-template <> void KERNEL::terminate(uint32_t thread) {
+template <> SHIZUKU_HOT void KERNEL::terminate(uint32_t thread) {
   if (thread >= m_thread_count)
     return;
   ARCH::store_release32(&m_threads[thread].thread.state,
@@ -156,7 +159,7 @@ template <> void KERNEL::terminate(uint32_t thread) {
 //   「どのコアもこの足場を使っていない」と同義。RUNNING (他コアが走行中)、
 //   WAIT_GRANT (貸し手として巻き取り待ち)、SUSPENDED (デバッガが止めている)
 //   のどれからも取らない。
-template <> bool KERNEL::terminate_if_idle(uint32_t thread) {
+template <> SHIZUKU_HOT bool KERNEL::terminate_if_idle(uint32_t thread) {
   if (thread >= m_thread_count || thread == 0)
     return false;
   return ARCH::cas32(&m_threads[thread].thread.state,
@@ -166,7 +169,7 @@ template <> bool KERNEL::terminate_if_idle(uint32_t thread) {
 
 // 枠を返す。記憶そのものを返すのは貸し主 (オブジェクトランド) の仕事で、
 // ここは「もう誰も使っていない」ことにするだけ。
-template <> void KERNEL::release(uint32_t thread) {
+template <> SHIZUKU_HOT void KERNEL::release(uint32_t thread) {
   if (thread >= m_thread_count || thread == 0)
     return;
   if (m_threads[thread].thread.state !=
@@ -184,7 +187,7 @@ template <> void KERNEL::release(uint32_t thread) {
 
 // ---- 実行権の受け渡し -------------------------------------------------------
 // READY → RUNNING を CAS で取る。これが「2 コアが同じ文脈を走らせない」根。
-template <> bool KERNEL::claim(uint32_t thread, kernel_error &error) {
+template <> SHIZUKU_HOT bool KERNEL::claim(uint32_t thread, kernel_error &error) {
   if (thread >= m_thread_count) {
     error = kernel_error::NOT_READY;
     return false;
@@ -201,7 +204,7 @@ template <> bool KERNEL::claim(uint32_t thread, kernel_error &error) {
   return true;
 }
 
-template <> kernel_error KERNEL::do_switch(uint32_t target) {
+template <> SHIZUKU_HOT kernel_error KERNEL::do_switch(uint32_t target) {
   const uint32_t core = BOARD::core_num();
   // ★借り手として走っている最中の switch は「早めに返す」の意味にする。対象は見ない
   //   — 借りた実行権を第三者へ又貸しできてしまうと、貸し手の期限が意味を失う。
@@ -228,7 +231,7 @@ template <> kernel_error KERNEL::do_switch(uint32_t target) {
   return kernel_error::OK;
 }
 
-template <>
+template <> SHIZUKU_HOT
 kernel_error KERNEL::do_grant(uint32_t target, uint32_t cycles) {
   const uint32_t core = BOARD::core_num();
   const uint32_t current = m_current[core];
@@ -264,7 +267,7 @@ kernel_error KERNEL::do_grant(uint32_t target, uint32_t cycles) {
 }
 
 // 貸した実行権を 1 段巻き取る。期限切れ (EXPIRED) と早期復帰 (YIELDED) の共通経路。
-template <> void KERNEL::grant_unwind(grant_end reason) {
+template <> SHIZUKU_HOT void KERNEL::grant_unwind(grant_end reason) {
   const uint32_t core = BOARD::core_num();
   grant_stack &grants = m_grants[core];
   if (grants.depth == 0)
@@ -302,7 +305,7 @@ template <> void KERNEL::grant_unwind(grant_end reason) {
 // 減っている (だから又貸しで延長できない) ので、一番内側だけ引くのでは足りない。
 // ★何度呼んでも壊れない: 引いたあと m_armed を「まだ引いていない残り」に
 //   更新するので、続けて呼べば 2 回目は 0 を引く。
-template <> void KERNEL::grant_charge() {
+template <> SHIZUKU_HOT void KERNEL::grant_charge() {
   const uint32_t core = BOARD::core_num();
   grant_stack &grants = m_grants[core];
   if (grants.depth == 0 || m_armed[core] == 0) {
@@ -325,7 +328,7 @@ template <> void KERNEL::grant_charge() {
 // 一番内側の残量をタイマへ装填する。★換算が要らない — 残量もタイマもクロックで
 // 数えているので、そのまま載る。µs で持っていたときは装填のたびに clk_sys で
 // 割り戻していて、その clk_sys が変わらない保証は無かった。
-template <> void KERNEL::arm_timer() {
+template <> SHIZUKU_HOT void KERNEL::arm_timer() {
   const uint32_t core = BOARD::core_num();
   grant_stack &grants = m_grants[core];
   if (grants.depth == 0) {
@@ -348,7 +351,7 @@ template <> void KERNEL::arm_timer() {
 // タイマ例外 (優先度は syscall より下、切替より上)。ここでは**切替を起票するだけ**で、
 // 実際の切替は最低優先度の遅延例外で起こす — これが 1 コア内の相互排除を無償で
 // 与える規約 (DESIGN §14.5.1)。
-template <> void KERNEL::timer_expired() {
+template <> SHIZUKU_HOT void KERNEL::timer_expired() {
   const uint32_t core = BOARD::core_num();
   grant_stack &grants = m_grants[core];
   if (grants.depth == 0) {
@@ -367,7 +370,7 @@ template <> void KERNEL::timer_expired() {
   }
 }
 
-template <> void KERNEL::set_recovery_thread(uint32_t thread) {
+template <> SHIZUKU_HOT void KERNEL::set_recovery_thread(uint32_t thread) {
   m_recovery_thread = thread;
 }
 
@@ -379,7 +382,7 @@ template <> void KERNEL::set_recovery_thread(uint32_t thread) {
 // そのスレッドだけ止める。★TERMINATED と違って文脈は生きたままなので、
 //   レジスタを見て書き換えてから再開できる。走っているスレッドを止めた場合、
 //   切り替えるのは呼び出し側の仕事 (ここは状態を変えるだけ)。
-template <> void KERNEL::suspend(uint32_t thread) {
+template <> SHIZUKU_HOT void KERNEL::suspend(uint32_t thread) {
   if (thread >= m_thread_count)
     return;
   ARCH::store_release32(&m_threads[thread].thread.state,
@@ -388,7 +391,7 @@ template <> void KERNEL::suspend(uint32_t thread) {
 
 // 止めたスレッドを走れる状態へ戻す。★SUSPENDED のものだけ — 終わったスレッドを
 //   生き返らせない。
-template <> void KERNEL::resume(uint32_t thread) {
+template <> SHIZUKU_HOT void KERNEL::resume(uint32_t thread) {
   if (thread >= m_thread_count)
     return;
   ARCH::cas32(&m_threads[thread].thread.state,
@@ -399,7 +402,7 @@ template <> void KERNEL::resume(uint32_t thread) {
 // ---- 自己ホスト型デバッグの受け口 ------------------------------------------
 // ★フォールトとまったく同じ形にしてある。違うのは「終わらせる」か「止める」かだけ
 //   で、切り替えの経路は共有する (経路を増やさない)。
-template <> void KERNEL::debug_dispatch(KERNEL::CONTEXT *context) {
+template <>  void KERNEL::debug_dispatch(KERNEL::CONTEXT *context) {
   const uint32_t core = BOARD::core_num();
   const uint32_t thread = m_current[core];
   if (thread < m_thread_count && m_threads[thread].thread.is_debug_protected) {
@@ -448,7 +451,7 @@ template <> void KERNEL::debug_dispatch(KERNEL::CONTEXT *context) {
 // ★★1 命令だけ実行させたい対象を予約する。ここでは MON_STEP を立てない
 //   (理由はヘッダのコメント通り)。単に「次にこの文脈へ復帰するときに立てて」
 //   と書き置くだけ。
-template <> void KERNEL::arm_step(uint32_t thread) {
+template <> SHIZUKU_HOT void KERNEL::arm_step(uint32_t thread) {
   ARCH::store_release32(&m_step_target, thread);
 }
 
@@ -457,13 +460,13 @@ template <> void KERNEL::arm_step(uint32_t thread) {
 // 立てる — こうすると「次の 1 命令」が確実に対象自身の命令になる。
 // ★CAS で消費する: 2 コアが同時に別の文脈を復帰させても、この予約を
 //   誤って 2 回消費したり、無関係な文脈へ誤爆したりしない。
-template <> void KERNEL::consume_pending_step() {
+template <> SHIZUKU_HOT void KERNEL::consume_pending_step() {
   const uint32_t thread = m_current[BOARD::core_num()];
   if (ARCH::cas32(&m_step_target, thread, NO_STEP_TARGET))
     ARCH::debug_step(true);
 }
 
-template <> void KERNEL::fault_dispatch(KERNEL::CONTEXT *context) {
+template <>  void KERNEL::fault_dispatch(KERNEL::CONTEXT *context) {
   const uint32_t core = BOARD::core_num();
   const uint32_t thread = m_current[core];
   const uint32_t status = ARCH::fault_status();
