@@ -28,4 +28,16 @@ diag = (root / 'firmware/esp32c6/main/early_diag.c').read_text()
 begin = diag.split('void shizuku_c6_early_diag_begin(void)')[1].split('void shizuku_c6_early_diag_writer_result')[0]
 assert 'shizuku_c6_early_diag_log.magic = SHIZUKU_C6_EARLY_DIAG_ENTRY_MAGIC' not in begin
 assert begin.index('shizuku_c6_early_diag_progress = SHIZUKU_C6_EARLY_DIAG_ENTRY_MAGIC') < begin.index('esp_rom_get_reset_reason')
-print('PASS: frame offsets, full saves/restores, CSR capture, vector slots, mscratch nesting, ring retention source invariants')
+
+trap_src = (root / 'ports/esp32/c6/trap.cpp').read_text()
+assert 'kernel.timer_expired()' in trap_src
+assert 'run_pending_switch()' in trap_src
+assert 'reg_write(c6::SYSTIMER_INT_CLR, c6::TARGET0_INT_BIT)' in trap_src
+assert 'shizuku_c6_timer_diag' in trap_src
+
+boot_src = (root / 'ports/esp32/c6/early_boot.cpp').read_text()
+assert 'shizuku_c6_thread1_diag' in boot_src
+assert 'records[2]' in boot_src
+assert 'thread1' in boot_src
+
+print('PASS: frame offsets, full saves/restores, CSR capture, vector slots, mscratch nesting, ring retention, timer/thread1 invariants')

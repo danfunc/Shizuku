@@ -136,5 +136,6 @@ cc_library(
     deps = [
         ":internal_headers",
         "//configs:config",
+        "//ports/esp32/c6:pmp",
     ],
 )

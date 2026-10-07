@@ -22,6 +22,6 @@ assert vector_disasm.count('<shizuku_c6_trap_entry>') == 32, vector_disasm
 trap = run('objdump', '-d', '--disassemble=shizuku_c6_trap_entry')
 assert 'mret' in trap and 'mscratch' in trap and 'mepc' in trap and 'mstatus' in trap
 assert '<shizuku_c6_trap_dispatch>' in trap
-for name in ['shizuku_c6_thread0_diag', 'shizuku_c6_trap_diag', 'shizuku_c6_irq_depth', 'shizuku_c6_trap_depth']:
+for name in ['shizuku_c6_thread0_diag', 'shizuku_c6_thread1_diag', 'shizuku_c6_timer_diag', 'shizuku_c6_switch_diag', 'shizuku_c6_trap_diag', 'shizuku_c6_irq_depth', 'shizuku_c6_trap_depth']:
     assert name in symbols
 print('PASS: final vector alignment/32 entries, CSR restoration/dispatch, noinit outside BSS, JTAG symbols')

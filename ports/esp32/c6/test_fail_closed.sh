@@ -14,7 +14,7 @@ for spec in arch board; do
     exit 1
   fi
   # A missing include/compiler must not masquerade as a successful gate test.
-  rg -q "$diagnostic" "$scratch/$spec.log"
+  grep -q "$diagnostic" "$scratch/$spec.log"
   clang++ -std=c++20 -DSHIZUKU_C6_SKELETON_PERMITTED=1 -I. -Iinternal_headers \
     -c "$src" -o "$scratch/$spec.o"
 done

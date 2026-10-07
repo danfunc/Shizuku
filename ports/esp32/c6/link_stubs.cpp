@@ -19,10 +19,6 @@ namespace {
 namespace shizuku {
 namespace archs {
 
-void rv32_c6::timer_oneshot(uint32_t) { c6_unimplemented(); }
-void rv32_c6::timer_cancel() { c6_unimplemented(); }
-uint32_t rv32_c6::timer_remaining(bool &) { c6_unimplemented(); }
-void rv32_c6::pend_context_switch() { c6_unimplemented(); }
 uint32_t rv32_c6::debug_reason_take() { c6_unimplemented(); }
 void rv32_c6::debug_step(bool) { c6_unimplemented(); }
 bool rv32_c6::faulted_in_thread_mode(const context_t &) {
@@ -43,8 +39,6 @@ void esp32_c6::diag_mute(bool) { c6_unimplemented(); }
 int esp32_c6::dma_claim() { c6_unimplemented(); }
 bool esp32_c6::dma_busy(int) { c6_unimplemented(); }
 void esp32_c6::dma_release(int) { c6_unimplemented(); }
-uint64_t esp32_c6::time_us() { c6_unimplemented(); }
-uint32_t esp32_c6::cycles_per_us() { c6_unimplemented(); }
 void esp32_c6::diag_printf(const char *, ...) { c6_unimplemented(); }
 
 } // namespace boards

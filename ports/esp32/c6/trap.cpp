@@ -1,5 +1,6 @@
 #include "shizuku/kernel.hpp"
 #include "ports/esp32/c6/trap_route.hpp"
+#include "ports/esp32/c6/systimer.hpp"
 
 using arch = shizuku::ARCH;
 static_assert((sizeof(shizuku::KERNEL::call_frame_header) + C6_FRAME_BYTES) % 16 == 0,
@@ -10,6 +11,9 @@ volatile uint32_t shizuku_c6_irq_depth;
 volatile uint32_t shizuku_c6_trap_depth;
 // status, cause, PC, mtval, ECALL count; JTAG-readable even on fatal traps.
 volatile uint32_t shizuku_c6_trap_diag[5];
+// SYSTIMER IRQ count, max IRQ depth, pend/switch count, last oneshot ticks,
+// last IRQ mcause, mie readback after init, pend_context_switch calls.
+volatile uint32_t shizuku_c6_timer_diag[7];
 void shizuku_c6_vectors();
 void shizuku_c6_return_stub();
 [[noreturn]] void shizuku_c6_first_return(arch::exception_frame_t *);
@@ -17,6 +21,42 @@ extern char _bss_end;
 }
 namespace {
 uint32_t active_mstatus;
+volatile uint32_t pend_flag;
+uint64_t armed_target;
+namespace c6 = shizuku::ports::c6;
+inline void reg_write(uint32_t address, uint32_t value) {
+  *reinterpret_cast<volatile uint32_t *>(address) = value;
+}
+inline uint32_t reg_read(uint32_t address) {
+  return *reinterpret_cast<volatile uint32_t *>(address);
+}
+uint64_t systimer_now() {
+  reg_write(c6::SYSTIMER_UNIT0_OP, c6::UNIT0_OP_UPDATE);
+  while (!(reg_read(c6::SYSTIMER_UNIT0_OP) & c6::UNIT0_OP_VALUE_VALID)) {}
+  const uint32_t high = reg_read(c6::SYSTIMER_UNIT0_VALUE_HI);
+  const uint32_t low = reg_read(c6::SYSTIMER_UNIT0_VALUE_LO);
+  return (static_cast<uint64_t>(high) << 32) | low;
+}
+void systimer_disarm() {
+  reg_write(c6::SYSTIMER_CONF, reg_read(c6::SYSTIMER_CONF) & ~c6::CONF_TARGET0_WORK_EN);
+  reg_write(c6::SYSTIMER_INT_ENA, reg_read(c6::SYSTIMER_INT_ENA) & ~c6::TARGET0_INT_BIT);
+  reg_write(c6::SYSTIMER_INT_CLR, c6::TARGET0_INT_BIT);
+}
+// MIE stays clear here; threads enable it through MPIE on mret.
+void interrupt_init() {
+  reg_write(c6::SYSTIMER_CONF, reg_read(c6::SYSTIMER_CONF) | c6::CONF_CLK_EN | c6::CONF_UNIT0_WORK_EN);
+  systimer_disarm();
+  reg_write(c6::SYSTIMER_TARGET0_CONF, 0);  // one-shot, UNIT0
+  reg_write(c6::INTMTX_SYSTIMER_TARGET0_MAP, c6::TIMER_CPU_INT);
+  reg_write(c6::PLIC_MXINT_TYPE, 0);  // level
+  reg_write(c6::plic_pri_reg(c6::TIMER_CPU_INT), c6::TIMER_PRIORITY);
+  reg_write(c6::PLIC_MXINT_THRESH, c6::PLIC_THRESHOLD);
+  reg_write(c6::PLIC_MXINT_ENABLE, 1u << c6::TIMER_CPU_INT);
+  asm volatile("csrs mie, %0" :: "r"(1u << c6::TIMER_CPU_INT) : "memory");
+  uint32_t mie;
+  asm volatile("csrr %0, mie" : "=r"(mie));
+  shizuku_c6_timer_diag[5] = mie;
+}
 [[noreturn]] void stop(uint32_t status) {
   shizuku_c6_trap_diag[0] = status;
   asm volatile("csrci mstatus, 8\n fence rw,rw" ::: "memory");
@@ -42,9 +82,20 @@ void context_to_frame(arch::context_t &c) {
   COPY(0) COPY(1) COPY(2) COPY(3) COPY(4) COPY(5)
   COPY(6) COPY(7) COPY(8) COPY(9) COPY(10) COPY(11)
 #undef COPY
-  f.mstatus = (f.mstatus & ~C6_MSTATUS_MPP) | (c.privileged ? C6_MSTATUS_MPP : 0);
+  // Threads always resume with interrupts enabled; only the kernel runs with MIE=0.
+  f.mstatus = ((f.mstatus & ~C6_MSTATUS_MPP) | (c.privileged ? C6_MSTATUS_MPP : 0)) | C6_MSTATUS_MPIE;
   // Actual U-mode is not safe before PMP and a trusted U-entry stack exist.
   if (!c.privileged) stop(0xE004);
+}
+}
+namespace {
+// The trapped thread was already saved by the caller; run the deferred switch after it.
+void run_pending_switch() {
+  if (!pend_flag) return;
+  pend_flag = 0;
+  shizuku_c6_timer_diag[2] = shizuku_c6_timer_diag[2] + 1;
+  auto &kernel = shizuku::kernel_instance;
+  kernel.pendsv_dispatch(kernel.current_context());
 }
 }
 extern "C" arch::exception_frame_t *shizuku_c6_trap_dispatch(arch::exception_frame_t *frame) {
@@ -64,12 +115,27 @@ extern "C" arch::exception_frame_t *shizuku_c6_trap_dispatch(arch::exception_fra
     frame_to_context(*frame, *context);
     shizuku_c6_trap_diag[4] = shizuku_c6_trap_diag[4] + 1;
     kernel.svc_dispatch(context);
+    run_pending_switch();
     context = kernel.current_context();
     context_to_frame(*context);
     result = context->sp;
   }, [&] {
-    // No interrupt acknowledgement exists yet. Do not return into an IRQ storm.
-    stop(0xE001);
+    // MIE is clear inside traps, so IRQs cannot nest: depth is exactly 1.
+    if (shizuku_c6_trap_depth != 1 || shizuku_c6_irq_depth != 1) stop(0xE009);
+    if ((frame->mcause & 0x7fffffffu) != c6::TIMER_CPU_INT) stop(0xE001);
+    if ((frame->mstatus & C6_MSTATUS_MPP) != C6_MSTATUS_MPP) stop(0xE004);
+    shizuku_c6_timer_diag[0] = shizuku_c6_timer_diag[0] + 1;
+    if (shizuku_c6_irq_depth > shizuku_c6_timer_diag[1]) shizuku_c6_timer_diag[1] = shizuku_c6_irq_depth;
+    shizuku_c6_timer_diag[4] = frame->mcause;
+    reg_write(c6::SYSTIMER_INT_CLR, c6::TARGET0_INT_BIT);
+    auto &kernel = shizuku::kernel_instance;
+    auto *context = kernel.current_context();
+    frame_to_context(*frame, *context);
+    kernel.timer_expired();
+    run_pending_switch();
+    context = kernel.current_context();
+    context_to_frame(*context);
+    result = context->sp;
   }, [&] {
     // V2 fault recovery requires timer/switch support. Preserve cause and stop.
     stop(0xE002);
@@ -87,6 +153,27 @@ bool rv32_c6::current_priv() {
   return shizuku_c6_trap_depth == 0 ||
     (active_mstatus & C6_MSTATUS_MPP) == C6_MSTATUS_MPP;
 }
+void rv32_c6::timer_oneshot(uint32_t cycles) {
+  systimer_disarm();
+  const uint64_t target = c6::alarm_target(systimer_now(), cycles);
+  armed_target = target;
+  shizuku_c6_timer_diag[3] = cycles;
+  reg_write(c6::SYSTIMER_TARGET0_HI, static_cast<uint32_t>(target >> 32));
+  reg_write(c6::SYSTIMER_TARGET0_LO, static_cast<uint32_t>(target));
+  reg_write(c6::SYSTIMER_COMP0_LOAD, c6::COMP0_LOAD_BIT);
+  reg_write(c6::SYSTIMER_INT_ENA, reg_read(c6::SYSTIMER_INT_ENA) | c6::TARGET0_INT_BIT);
+  reg_write(c6::SYSTIMER_CONF, reg_read(c6::SYSTIMER_CONF) | c6::CONF_TARGET0_WORK_EN);
+}
+void rv32_c6::timer_cancel() { systimer_disarm(); }
+uint32_t rv32_c6::timer_remaining(bool &wrapped) {
+  return c6::remaining_ticks(armed_target, systimer_now(), wrapped);
+}
+void rv32_c6::pend_context_switch() {
+  // Only kernel code inside a trap may pend; the flag is consumed at trap exit.
+  if (shizuku_c6_trap_depth == 0) stop(0xE00A);
+  shizuku_c6_timer_diag[6] = shizuku_c6_timer_diag[6] + 1;
+  pend_flag = 1;
+}
 void rv32_c6::enter_thread_mode(uintptr_t top, uintptr_t limit, void (*entry)()) {
   auto *context = kernel_instance.current_context();
   if (top < limit || top - limit < C6_FRAME_BYTES + CALL_HEADROOM) stop(0xE006);
@@ -99,7 +186,10 @@ namespace shizuku::boards {
 void esp32_c6::init(uint32_t core) {
   if (core != 0) stop(0xE007);
   install_traps();
+  interrupt_init();
 }
+uint64_t esp32_c6::time_us() { return c6::us_from_ticks(systimer_now()); }
+uint32_t esp32_c6::cycles_per_us() { return c6::TICKS_PER_US; }
 uintptr_t esp32_c6::unprivileged_floor() {
   // Stage-2 privileged-only pilot: BSS bookkeeping is below this boundary.
   // This is not a PMP security boundary. U-mode return is refused above.
