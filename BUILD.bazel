@@ -114,13 +114,13 @@ cc_library(
 )
 
 # ESP32-C6 向けの**名前付きカーネルアーカイブ** (libshizuku_kernel.a)。
-# カーネル本体 + freestanding メモリマネージャ + C6 のリンク専用トラップスタブ
-# (ports/esp32/c6/link_stubs.cpp: 呼ばれたら即トラップ。成功を返す no-op は無い)。
+# カーネル本体 + freestanding メモリマネージャ + pre-init ROM 起動表示 + C6 の未実装 trap stub。
 # ★//firmware:esp32c6 が ESP-IDF の最終リンクへ渡す。--config=esp32c6 でだけ解決される。
 cc_library(
     name = "shizuku_kernel",
     srcs = KERNEL_SRCS + [
         "source/memory_manager/freestanding.cpp",
+        "//ports/esp32/c6:early_boot.cpp",
         "//ports/esp32/c6:link_stubs.cpp",
     ],
     target_compatible_with = ["@platforms//cpu:riscv32"],

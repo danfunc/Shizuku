@@ -47,10 +47,10 @@ cc_binary(
 
 # ---------------------------------------------------------------------------
 # ESP32-C6: Bazel が作る libshizuku_kernel.a を ESP-IDF v6.1 の最終リンクへ渡し、
-# .bin を出す **compile/link-only** のターゲット (idf.py build の薄いラッパ)。
+# .bin を出すターゲット (idf.py build の薄いラッパ)。
 #   bazelisk build --config=esp32c6 //firmware:esp32c6
-# ★起動してもカーネルは動かない。main/shizuku_boot.c の start_cpu0 は即トラップ
-#   (FreeRTOS スケジューラも始めない)。実機・実行時の動作は未検証。
+# ★start_cpu0 は archive の pre-init ROM console entry を呼ぶ。KERNEL::init と
+#   FreeRTOS scheduler は実行せず、実機出力・起動は未検証。
 # ★IDF のサンドボックス外ツールを使うので no-sandbox。IDF_PATH / IDF_TOOLS_PATH 必須。
 # ---------------------------------------------------------------------------
 genrule(

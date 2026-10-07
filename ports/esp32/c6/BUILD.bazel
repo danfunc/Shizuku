@@ -1,6 +1,6 @@
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
-exports_files(["link_stubs.cpp"])
+exports_files(["early_boot.cpp", "link_stubs.cpp"])
 
 cc_library(
     name = "pmp",

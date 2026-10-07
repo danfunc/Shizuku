@@ -16,8 +16,14 @@ fail() (
 abspath() (
   python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1"
 )
+command -v python3 >/dev/null 2>&1 || fail "python3 が無く、パスを絶対化できない"
+test -n "${IDF_PATH:-}" || fail "IDF_PATH が未設定 (--action_env=IDF_PATH が要る)"
+test -n "${IDF_TOOLS_PATH:-}" || fail "IDF_TOOLS_PATH が未設定 (--action_env=IDF_TOOLS_PATH が要る)"
 ARCHIVE=$(abspath "$1")
 OUT=$(abspath "$2")
+IDF_PATH=$(abspath "$IDF_PATH")
+IDF_TOOLS_PATH=$(abspath "$IDF_TOOLS_PATH")
+export IDF_PATH IDF_TOOLS_PATH
 WANT_GCC=$3
 SRC=$(cd -P "$(dirname "$0")" && pwd)
 
@@ -25,7 +31,12 @@ test -s "$ARCHIVE" || fail "カーネルのアーカイブが無い/空: $ARCHIV
 test -f "$IDF_PATH/export.sh" || fail "IDF_PATH が ESP-IDF を指していない (--action_env=IDF_PATH が要る)"
 test -d "$IDF_TOOLS_PATH" || fail "IDF_TOOLS_PATH が未設定 (--action_env=IDF_TOOLS_PATH が要る)"
 
-. "$IDF_PATH/export.sh" > /dev/null 2>&1 || fail "ESP-IDF の export.sh が失敗"
+. "$IDF_PATH/export.sh" > /dev/null 2>&1 || fail "ESP-IDF の export.sh が失敗 (IDF_PATH / IDF_TOOLS_PATH / Python 環境を確認)"
+
+command -v python >/dev/null 2>&1 || fail "export.sh 後に python が PATH 上に無い"
+command -v idf.py >/dev/null 2>&1 || fail "export.sh 後に idf.py が PATH 上に無い"
+command -v riscv32-esp-elf-gcc >/dev/null 2>&1 || fail "export.sh 後に riscv32-esp-elf-gcc が PATH 上に無い"
+test -n "${IDF_PYTHON_ENV_PATH:-}" && test -x "$IDF_PYTHON_ENV_PATH/bin/python" || fail "ESP-IDF Python 環境が無い/実行不可"
 
 IDF_VER=$(idf.py --version 2>/dev/null | tail -1)
 case "$IDF_VER" in
