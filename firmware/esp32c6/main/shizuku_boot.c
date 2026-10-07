@@ -11,8 +11,8 @@
 //   ヒープ・libc・PMP の初期化責任は誰も負っていない。RTC WDTは従来同様snapshot後に停止し、他WDTには書込み/給餌しない。
 //
 // start_cpu0 は C6 kernel archive の pre-init entry を呼ぶ。
-// entry は reset/WDT状態をnoinit RAMへ記録し、USB Serial/JTAG出力後にdiagnostic idleする。
-// KERNEL::init / kernel_instance / ctor / heap / PMP / trap / FreeRTOS は未初期化・未起動。
+// entry は reset/WDT状態をnoinit RAMへ記録後、M-only stage-2 kernel/thread0 pilotへ進む。
+// ctor / heap / PMP / timer / FreeRTOS は初期化しない。
 #include "early_diag.h"
 
 __attribute__((noreturn)) void shizuku_c6_early_boot(void);

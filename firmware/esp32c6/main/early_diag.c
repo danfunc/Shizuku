@@ -30,6 +30,7 @@ _Static_assert(offsetof(shizuku_c6_early_diag_record_t, rwdt_config0_after_stop)
 
 // Internal DRAM .noinit is NOLOAD and outside the startup BSS clear range.
 __NOINIT_ATTR volatile shizuku_c6_early_diag_log_t shizuku_c6_early_diag_log;
+__NOINIT_ATTR volatile uint32_t shizuku_c6_early_diag_progress;
 
 static uint32_t s_active_slot;
 static bool s_active_record_valid;
@@ -160,11 +161,12 @@ static void stop_rtc_wdt(void)
 void shizuku_c6_early_diag_begin(void)
 {
     // Commit an entry marker before calling ROM: if the ROM reset-reason helper
-    // stalls or faults, a live sysbus snapshot can distinguish that from never
-    // reaching this hook. initialize_log() replaces it after the ROM call returns.
-    shizuku_c6_early_diag_log.magic = SHIZUKU_C6_EARLY_DIAG_ENTRY_MAGIC;
+    // stalls or faults, a live sysbus snapshot can locate progress. Keep this
+    // separate from ring.magic: overwriting magic discards retained history.
+    shizuku_c6_early_diag_progress = SHIZUKU_C6_EARLY_DIAG_ENTRY_MAGIC;
     __asm__ volatile("fence rw, rw" ::: "memory");
     const uint32_t raw_reset_reason = (uint32_t)esp_rom_get_reset_reason(0);
+    shizuku_c6_early_diag_progress = 2;
 
     if (shizuku_c6_early_diag_log.magic != SHIZUKU_C6_EARLY_DIAG_MAGIC ||
         shizuku_c6_early_diag_log.version != SHIZUKU_C6_EARLY_DIAG_VERSION) {
@@ -189,6 +191,7 @@ void shizuku_c6_early_diag_begin(void)
     // Raw ROM reset reason is captured before USB writes or diagnostic status updates.
     record->raw_reset_reason = raw_reset_reason;
     record->rwdt_config0_after_stop = SHIZUKU_C6_DIAG_UNKNOWN;
+    shizuku_c6_early_diag_progress = 3;
     snapshot_watchdogs(record);
     record->writer_status = SHIZUKU_C6_EARLY_WRITER_PENDING;
     s_active_record_valid = false;
@@ -198,6 +201,8 @@ void shizuku_c6_early_diag_begin(void)
 #endif
     record->checksum = record_checksum(record);
     s_active_record_valid = true;
+    shizuku_c6_early_diag_progress = 4;
+    __asm__ volatile("fence rw,rw" ::: "memory");
 }
 
 void shizuku_c6_early_diag_writer_result(uint32_t result)

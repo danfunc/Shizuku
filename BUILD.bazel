@@ -35,6 +35,12 @@ cc_library(
 )
 
 # ISA 非依存のカーネルヘッダ (CMake の Shizuku_internal_HEADERS に相当)
+filegroup(
+    name = "c6_test_headers",
+    srcs = glob(["internal_headers/**/*.hpp"]),
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "internal_headers",
     hdrs = glob(["internal_headers/**/*.hpp"]),
@@ -122,6 +128,8 @@ cc_library(
         "source/memory_manager/freestanding.cpp",
         "//ports/esp32/c6:early_boot.cpp",
         "//ports/esp32/c6:link_stubs.cpp",
+        "//ports/esp32/c6:trap.cpp",
+        "//ports/esp32/c6:rv32_trap.S",
     ],
     target_compatible_with = ["@platforms//cpu:riscv32"],
     visibility = ["//visibility:public"],

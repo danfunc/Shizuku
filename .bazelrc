@@ -64,7 +64,7 @@ build --copt=-Og
 # ---------------------------------------------------------------------------
 # ESP32-C6 (RV32) — archive pre-init entry を含む build。
 #   bazelisk build --config=esp32c6 //firmware:esp32c6
-# ★start_cpu0 は ROM console entry を呼ぶ。KERNEL::init / scheduler は呼ばず、実機動作は未検証。
+# ★start_cpu0 は diag hook 後 M-only kernel/bootstrap pilot を呼ぶ。timer/PMP と実機到達は未検証。
 # ★IDF は自動で探さない。事前に IDF_PATH / IDF_TOOLS_PATH を export しておくこと
 #   (欠けていれば //firmware:esp32c6 は理由を出して失敗する)。
 # ---------------------------------------------------------------------------

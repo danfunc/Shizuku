@@ -2,6 +2,8 @@
 #define SHIZUKU_ARCHS_RV32_C6_HPP
 
 #include <cstdint>
+#include <cstddef>
+#include "ports/esp32/c6/frame_layout.h"
 #include "shizuku/concepts/arch.hpp"
 #include "ports/esp32/c6/pmp.hpp"
 
@@ -11,13 +13,13 @@
 //  ★現在の到達点:
 //    - RV32IMAC レジスタおよび trap frame / context レイアウトの定義
 //    - PMP 設定 (pmp_codec) の統合
-//    - 実機 M-mode trap entry、SYSTIMER 割込み、U-mode 切替は未実装。
+//    - M-only trap/ECALL と初回 mret を実装。SYSTIMER/PMP/U-mode は未実装。
 //    - ファームウェア組み込み時の欺瞞的 no-op 動作を防ぐため、
 //      SHIZUKU_C6_SKELETON_PERMITTED が定義されていない本番ビルドでは
 //      明示的にコンパイルを拒否する (fail-closed)。
 
 #if !defined(SHIZUKU_C6_SKELETON_PERMITTED)
-#error "ESP32-C6 arch backend is incomplete (trap entry, SYSTIMER, and M-mode PMP ownership are under exploration). Build refused (fail-closed)."
+#error "ESP32-C6 arch backend is incomplete (SYSTIMER, interrupt matrix, and PMP ownership remain incomplete). Build refused (fail-closed)."
 #endif
 
 namespace shizuku {
@@ -25,18 +27,52 @@ namespace archs {
 
 class rv32_c6 {
 public:
-  // RV32 トラップフレーム (caller-saved registers + mepc + mstatus)
-  // a0..a7 (10..17), t0..t6 (5..7, 28..31), ra (1)
+  // Caller registers retain their old offsets. Full register image supports
+  // nested M-mode traps; s0..s11 are mirrored into the V2 context at ECALL.
   struct exception_frame_t {
-    uint32_t ra;
-    uint32_t t0, t1, t2;
+    uint32_t ra, t0, t1, t2;
     uint32_t a0, a1, a2, a3, a4, a5, a6, a7;
-    uint32_t t3, t4, t5, t6;
-    uint32_t mepc;
-    uint32_t mstatus;
+    uint32_t t3, t4, t5, t6, mepc, mstatus, mcause, mtval;
+    uint32_t s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11;
+    uint32_t gp, tp, reserved0, reserved1;
   };
-  static_assert(sizeof(exception_frame_t) == 72,
-                "exception_frame_t must be exactly 72 bytes (18 RV32 words)");
+  static_assert(sizeof(exception_frame_t) == C6_FRAME_BYTES);
+  static_assert(offsetof(exception_frame_t, ra) == C6_F_RA);
+  static_assert(offsetof(exception_frame_t, t0) == C6_F_T0);
+  static_assert(offsetof(exception_frame_t, t1) == C6_F_T1);
+  static_assert(offsetof(exception_frame_t, t2) == C6_F_T2);
+  static_assert(offsetof(exception_frame_t, a0) == C6_F_A0);
+  static_assert(offsetof(exception_frame_t, a1) == C6_F_A1);
+  static_assert(offsetof(exception_frame_t, a2) == C6_F_A2);
+  static_assert(offsetof(exception_frame_t, a3) == C6_F_A3);
+  static_assert(offsetof(exception_frame_t, a4) == C6_F_A4);
+  static_assert(offsetof(exception_frame_t, a5) == C6_F_A5);
+  static_assert(offsetof(exception_frame_t, a6) == C6_F_A6);
+  static_assert(offsetof(exception_frame_t, a7) == C6_F_A7);
+  static_assert(offsetof(exception_frame_t, t3) == C6_F_T3);
+  static_assert(offsetof(exception_frame_t, t4) == C6_F_T4);
+  static_assert(offsetof(exception_frame_t, t5) == C6_F_T5);
+  static_assert(offsetof(exception_frame_t, t6) == C6_F_T6);
+  static_assert(offsetof(exception_frame_t, mepc) == C6_F_MEPC);
+  static_assert(offsetof(exception_frame_t, mstatus) == C6_F_MSTATUS);
+  static_assert(offsetof(exception_frame_t, mcause) == C6_F_MCAUSE);
+  static_assert(offsetof(exception_frame_t, mtval) == C6_F_MTVAL);
+  static_assert(offsetof(exception_frame_t, s0) == C6_F_S0);
+  static_assert(offsetof(exception_frame_t, s1) == C6_F_S1);
+  static_assert(offsetof(exception_frame_t, s2) == C6_F_S2);
+  static_assert(offsetof(exception_frame_t, s3) == C6_F_S3);
+  static_assert(offsetof(exception_frame_t, s4) == C6_F_S4);
+  static_assert(offsetof(exception_frame_t, s5) == C6_F_S5);
+  static_assert(offsetof(exception_frame_t, s6) == C6_F_S6);
+  static_assert(offsetof(exception_frame_t, s7) == C6_F_S7);
+  static_assert(offsetof(exception_frame_t, s8) == C6_F_S8);
+  static_assert(offsetof(exception_frame_t, s9) == C6_F_S9);
+  static_assert(offsetof(exception_frame_t, s10) == C6_F_S10);
+  static_assert(offsetof(exception_frame_t, s11) == C6_F_S11);
+  static_assert(offsetof(exception_frame_t, gp) == C6_F_GP);
+  static_assert(offsetof(exception_frame_t, tp) == C6_F_TP);
+  static_assert(offsetof(exception_frame_t, reserved0) == C6_F_RESERVED0);
+  static_assert(offsetof(exception_frame_t, reserved1) == C6_F_RESERVED1);
 
   // スレッド文脈 (callee-saved registers: sp, s0..s11)
   struct context_t {
@@ -112,14 +148,16 @@ public:
     frame.ra = lr;
   }
 
-  static uintptr_t return_stub(); // 実装は rv32_ctx.S (未作成)
+  static uintptr_t return_stub();
+  // Provisional V3-facing query, single HP hart only. ECALL is not an IRQ.
+  static bool in_interrupt();
 
   static uintptr_t frame_pc(const exception_frame_t &frame) {
     return frame.mepc;
   }
 
-  // M-mode / U-mode の特権状態の判定は現在未実装。
-  // 欺瞞的な常時 true を返さず、未実装呼出しを fail-closed (リンク不能) とする。
+  // M-only pilot: trap 内では保存した MPP、trap 外では M-mode を返す。
+  // U-mode 実復帰は PMP/trusted entry stack の実装まで拒否する。
   static bool current_priv();
 
   static void set_priv(context_t &context, bool privileged) {
@@ -182,13 +220,18 @@ public:
                                    uintptr_t entry_pc, uintptr_t return_pc,
                                    uintptr_t argument) {
     auto *frame = reinterpret_cast<exception_frame_t *>(
-        (stack_top - sizeof(exception_frame_t)) & ~static_cast<uintptr_t>(7));
+        (stack_top & ~static_cast<uintptr_t>(15)) - sizeof(exception_frame_t));
+    *frame = {};
+#if defined(__riscv)
+    // New RV32 contexts retain the kernel's global-pointer/TLS ABI.
+    asm volatile("mv %0, gp\n mv %1, tp" : "=r"(frame->gp), "=r"(frame->tp));
+#endif
     frame->ra = return_pc;
     frame->mepc = entry_pc;
     frame->a0 = argument;
     frame->a1 = frame->a2 = frame->a3 = frame->a4 = 0;
-    // MPP = U-mode (0) または M-mode (3) を準備 (未完成)
-    frame->mstatus = 0;
+    frame->mstatus = context.privileged ? C6_MSTATUS_MPP : 0;
+    // MPIE stays clear until the interrupt matrix and timer are owned.
     context.sp = frame;
   }
 

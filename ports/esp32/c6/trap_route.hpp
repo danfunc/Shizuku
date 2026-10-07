@@ -1,0 +1,31 @@
+#ifndef SHIZUKU_C6_TRAP_ROUTE_HPP
+#define SHIZUKU_C6_TRAP_ROUTE_HPP
+#include <cstdint>
+namespace shizuku::ports::c6 {
+enum class trap_kind { ecall, interrupt, fault };
+constexpr trap_kind classify_trap(uint32_t cause) {
+  if (cause & 0x80000000u) return trap_kind::interrupt;
+  return cause == 8 || cause == 11 ? trap_kind::ecall : trap_kind::fault;
+}
+// Shared production/test routing. Only hardware IRQs contribute to irq_depth.
+// ECALL is always 32 bits, even when the C extension is enabled.
+template<class Frame, class Ecall, class Interrupt, class Fault>
+void route_trap(Frame &frame, volatile uint32_t &irq_depth,
+                Ecall ecall, Interrupt interrupt, Fault fault) {
+  switch (classify_trap(frame.mcause)) {
+  case trap_kind::ecall:
+    frame.mepc += 4;
+    ecall();
+    break;
+  case trap_kind::interrupt:
+    irq_depth = irq_depth + 1;
+    interrupt();
+    irq_depth = irq_depth - 1;
+    break;
+  case trap_kind::fault:
+    fault();
+    break;
+  }
+}
+}
+#endif

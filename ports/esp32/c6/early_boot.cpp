@@ -1,18 +1,36 @@
-// ESP32-C6 の pre-init 起動表示。
-// この段階では KERNEL::init、kernel_instance、C++ ctor、libc、heap、RTOS に触れない。
-#include <stdint.h>
+// Stage-2 privileged bootstrap pilot. No IDF OS shim, heap or serial observer.
+#include "shizuku/kernel.hpp"
 
-extern "C" bool shizuku_c6_usb_console_write_and_flush(const char *text, unsigned length);
-extern "C" void shizuku_c6_early_diag_writer_result(uint32_t result);
-
-extern "C" [[noreturn]] void shizuku_c6_early_boot(void) {
-  static constexpr char marker[] = "[SHIZUKU] boot on esp32c6\n";
-  const bool writer_ok = shizuku_c6_usb_console_write_and_flush(marker, sizeof(marker) - 1);
-  shizuku_c6_early_diag_writer_result(writer_ok ? 1U : 2U);
-
-  // DIAGNOSTIC CANDIDATE: keep the CPU active after either writer result to isolate WFI effects.
-  // This is intentionally a busy loop; it is not the production idle policy.
+extern "C" {
+// entered, ECALL round-trip, live counter, observed error, observed value.
+volatile uint32_t shizuku_c6_thread0_diag[5];
+}
+namespace {
+alignas(16) shizuku::KERNEL::thread_record records[1];
+alignas(16) shizuku::KERNEL::call_ledger_entry ledger[4];
+alignas(16) unsigned char thread0_stack[4096];
+uintptr_t diagnostic_handler(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  return 0xC6000002;
+}
+[[noreturn]] void thread0() {
+  shizuku_c6_thread0_diag[0] = 0xC6000001;
+  auto result = shizuku::ARCH::syscall(0xC6);
+  shizuku_c6_thread0_diag[3] = result.error;
+  shizuku_c6_thread0_diag[4] = result.value;
+  if (result.error == 0 && result.value == 0xC6000002 && !shizuku::ARCH::in_interrupt())
+    shizuku_c6_thread0_diag[1] = 0xC6000002;
   for (;;) {
-    __asm__ volatile("nop" ::: "memory");
+    shizuku_c6_thread0_diag[2] = shizuku_c6_thread0_diag[2] + 1;
+    asm volatile("fence rw,rw" ::: "memory");
   }
+}
+}
+extern "C" [[noreturn]] void shizuku_c6_early_boot() {
+  auto &kernel = shizuku::kernel_instance;
+  kernel.init();
+  kernel.set_thread_storage(records, sizeof(records));
+  kernel.set_object_handler(reinterpret_cast<uintptr_t>(&diagnostic_handler), 1);
+  kernel.bootstrap(thread0, reinterpret_cast<uintptr_t>(thread0_stack),
+                   sizeof(thread0_stack), ledger, 4);
+  __builtin_unreachable();
 }

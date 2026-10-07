@@ -210,6 +210,8 @@ esptool --chip esp32c6 --port /dev/cu.usbmodem1101 --before default-reset --afte
 
 ### A. Serial observerなしのreset原因観測
 
+2026-10-07追記: このrun経路でアプリ到達を観測できない結果が出たため、RUN_EXIT=0だけでnormal boot/アプリ安定を判断しない。`verification-stage2-20261007.md`末尾のcode fingerprintとhalt診断がこの経路の判断を補う。esptool stubがappと同じIRAMアドレスを使うため、PCのaddr2lineだけでは実行imageを同定できない。
+
 fresh build後、各flashの直前に前記MAC gateを実施し、同一`flash_args`のbootloader・partition table・application 3領域の書込み/verify結果を保存する。`write-flash --after no-reset` の後はESPがROM bootloader待機状態なので、これを安定稼働とみなさない。対象アプリを一度だけ起動する。
 
 ```bash
@@ -217,7 +219,7 @@ RUN_STDOUT="$PWD/esptool-run.stdout.log"
 RUN_STDERR="$PWD/esptool-run.stderr.log"
 if esptool --chip esp32c6 --port /dev/cu.usbmodem1101 --before no-reset --after hard-reset run >"$RUN_STDOUT" 2>"$RUN_STDERR"; then RUN_RC=0; else RUN_RC=$?; fi
 T0="$(date '+%Y-%m-%dT%H:%M:%S%z')"
-printf 'RUN_EXIT=%s\nT0_HARD_RESET_COMPLETE=%s\nstdout=%s\nstderr=%s\n' "$RUN_RC" "$T0" "$RUN_STDOUT" "$RUN_STDERR"
+printf 'RUN_EXIT=%s\nT0_RUN_COMMAND_COMPLETE=%s\nstdout=%s\nstderr=%s\n' "$RUN_RC" "$T0" "$RUN_STDOUT" "$RUN_STDERR"
 cat "$RUN_STDOUT"
 cat "$RUN_STDERR" >&2
 if [ "$RUN_RC" -ne 0 ]; then echo "app launch failed; stop with reset cause unknown" >&2; exit "$RUN_RC"; fi

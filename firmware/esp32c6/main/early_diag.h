@@ -50,6 +50,7 @@ typedef struct {
 } shizuku_c6_early_diag_log_t;
 
 extern volatile shizuku_c6_early_diag_log_t shizuku_c6_early_diag_log;
+extern volatile uint32_t shizuku_c6_early_diag_progress;
 
 void shizuku_c6_early_diag_begin(void);
 void shizuku_c6_early_diag_writer_result(uint32_t result);
