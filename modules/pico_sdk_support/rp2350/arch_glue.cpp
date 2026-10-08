@@ -1,3 +1,9 @@
+#if SHIZUKU_KERNEL_SERVICE_PROFILE
+extern "C" void shizuku_service_isr_probe() __attribute__((weak));
+#define SERVICE_ISR_PROBE() do { if(shizuku_service_isr_probe) shizuku_service_isr_probe(); } while(0)
+#else
+#define SERVICE_ISR_PROBE() ((void)0)
+#endif
 // ISA 層 (armv8m_ctx.S) とカーネルの継ぎ目。asm が呼ぶ extern "C" のフックを、
 // 構成で確定したカーネル実体へ転送するだけの薄い層。ここがモジュール側にあるのは、
 // フックの名前が ISA 固有だから (カーネル本体は ISA 非依存に保つ)。
@@ -150,7 +156,7 @@ extern "C" void shizuku_selftest_systick_c(const uint32_t *frame) {
     if (now - since_us > 3000000u) feed = false;
   }
   if (feed) watchdog_update();
-  shizuku::kernel_instance.timer_expired();
+  SERVICE_ISR_PROBE(); shizuku::kernel_instance.timer_expired();
 }
 extern "C" __attribute__((naked)) void shizuku_armv8m_systick_entry() {
   __asm volatile("tst lr, #4\n"
@@ -161,6 +167,6 @@ extern "C" __attribute__((naked)) void shizuku_armv8m_systick_entry() {
 }
 #else
 extern "C" void shizuku_armv8m_systick_entry() {
-  shizuku::kernel_instance.timer_expired();
+  SERVICE_ISR_PROBE(); shizuku::kernel_instance.timer_expired();
 }
 #endif

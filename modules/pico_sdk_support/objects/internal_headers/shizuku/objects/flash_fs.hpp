@@ -55,20 +55,16 @@ enum struct flash_fs_method : uintptr_t {
   // ★メソッド呼び出しは ioctl 相当として残す。開け閉めは制御であって、
   //   1 レコードごとに svc を撃つ話ではない。
   // ★★**非特権オブジェクトから読み書きできる**ことが要点:
-  //   - 読み: 運ぶのは extent (XIP アドレス + 長さ)。XIP は region0 が
-  //     読み出し + 実行を全員に許しているので、**非特権のまま直接読める**。写さない
+  //   - 読み: 運ぶのは extent (XIP アドレス + 長さ)。consumer の access grant は
+  //     MPU/隔離規則に従う。extent 自体は stream ring にコピーする
   //   - 書き: 非特権はフラッシュを焼けない。だから**バイトをストリームへ流し**、
   //     特権側の書き手が汲んで焼く。締切のある側は 33ms を待たされない (D34)
   //   ★ストリームの実体は**オブジェクト arena** (非特権から届く側) に置く。
   //     静的領域に置くと region の外 = 特権のみになり、非特権が push できない。
-  // ★読みのストリームは**実体そのものが XIP**。RAM の環を一切持たない —
-  //   ディスクリプタの base をファイルの XIP アドレスにし、capacity を
-  //   レコード数にするだけで、pop はフラッシュから直に読む。
-  //   中継の環を置くと、そこへ写す仕事と、写した先の一貫性の心配が生まれる。
-  //   **置かなければどちらも要らない**。
   OPEN_READ = 8,   // a0 = flash_open*  → 戻り値 = ストリーム番号
   OPEN_WRITE = 9,  // a0 = flash_open*  → 戻り値 = ストリーム番号 (chunk を流す)
   CLOSE_WRITE = 10, // 書き終わりを告げ、目録に載せる
+  CLOSE_READ = 11, // a0 = stream ID。作成した extent stream を破棄
 };
 
 // 書きのストリームが運ぶ 1 片。★大きさを固定するのは、ストリームが固定長
@@ -82,10 +78,11 @@ struct flash_chunk {
 struct flash_open {
   const char *name;
   uint32_t reserve;  // OPEN_WRITE のとき: 見込みの最大バイト数
-  uint32_t rec_size; // OPEN_READ のとき: 1 レコードの大きさ (0 = 1 バイト)
+  uint32_t rec_size; // 予約。OPEN_READ は extent record を返す
   uintptr_t stream;  // [out] ストリーム番号
   uintptr_t address; // [out] 実体の先頭 (XIP)。読み手が自分で見たいとき用
   uint32_t records;  // [out] 何レコードあるか
+  uint32_t bytes;    // [out] extent の長さ
 };
 
 // 名前は媒体に焼くので長さを固定する (可変長にすると、名前を伸ばすたびに

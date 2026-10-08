@@ -17,6 +17,19 @@ _CONFIG_COMMON = {
 
 def config_substitutions(arch, board):
     """config_template.hpp.in の置換表 (arch / board だけがチップで変わる)。"""
+    if arch == "rv32_c6":
+        return _CONFIG_COMMON | {
+            "${SHIZUKU_CPU_COUNT}": "1",
+            "${SHIZUKU_MEMORY_MANAGER}": "shizuku::memory_managers::freestanding",
+            "${INCLUDE_HEADERS_INSTRUCTION}": "\n".join([
+                "#include <shizuku/archs/%s.hpp>" % arch,
+                "#include <shizuku/boards/%s.hpp>" % board,
+                "#include <shizuku/memory_managers/freestanding.hpp>",
+                "#include <shizuku/app_entry.hpp>",
+            ]),
+            "${SHIZUKU_ARCH}": arch,
+            "${SHIZUKU_BOARD}": board,
+        }
     return _CONFIG_COMMON | {
         "${INCLUDE_HEADERS_INSTRUCTION}": "\n".join([
             "#include <shizuku/archs/%s.hpp>" % arch,

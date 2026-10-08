@@ -21,3 +21,19 @@ register_toolchains(
     "@pico-sdk//bazel/toolchain:linux-aarch64-rp2040",
     "@pico-sdk//bazel/toolchain:linux-aarch64-rp2350",
 )
+
+# ESP32-C6 (RV32) 用ツールチェーン。★ESP-IDF v6.1 の tools.json が指す
+# riscv32-esp-elf esp-15.2.0_20251204 と**同一のアーカイブ** (url / sha256 / size) を
+# 引く。Bazel と IDF のコンパイラが食い違うと同じ .a を別の ABI 前提でリンクして
+# しまうので、バージョンは //toolchains/rv32_esp のテストで突き合わせる。
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "riscv32_esp_elf_gcc",
+    build_file = "//toolchains/rv32_esp:gcc.BUILD",
+    sha256 = "0869d1083532c631808543dd802885f02dbe1bb3bd640be0dee827e82ded768d",
+    strip_prefix = "riscv32-esp-elf",
+    urls = ["https://github.com/espressif/crosstool-NG/releases/download/esp-15.2.0_20251204/riscv32-esp-elf-15.2.0_20251204-aarch64-apple-darwin.tar.xz"],
+)
+
+register_toolchains("//toolchains/rv32_esp:rv32_esp_toolchain")

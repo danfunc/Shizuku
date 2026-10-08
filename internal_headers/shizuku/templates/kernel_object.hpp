@@ -51,6 +51,12 @@ public:
   static constexpr uintptr_t ROOT_OBJECT = 1;      // ブートスレッドが名乗るオブジェクト
   static constexpr uintptr_t NO_OBJECT = OBJECT_COUNT;
 
+  // Trusted driver path. Interrupt-capable privileged code calls this directly;
+  // it checks the kernel-owned producer seat and never enters the object svc.
+  uintptr_t stream_push_kernel(uintptr_t id, const void *records,
+                              uint32_t count);
+  bool stream_bind_kernel(uintptr_t id);
+
   // 表を初期化する (ブート時・スレッドモード。まだ svc は飛んでこない)。
   void init();
   // カーネルに据えるハンドラの入口 (ARCH の ABI シムを通したアドレス)。
@@ -178,7 +184,25 @@ private:
   // ストリームの登録簿。番号は**こちらが割り当てる** (呼ぶ側が選ぶと、
   // オブジェクト番号で 2 回踏んだのと同じ衝突が起きる。D28)。
   static constexpr uintptr_t STREAM_COUNT = 16;
-  stream::descriptor *m_streams[STREAM_COUNT];
+  static constexpr uint32_t STREAM_SLOT_BITS = 4;
+  static constexpr uint32_t STREAM_SLOT_MASK = (1u << STREAM_SLOT_BITS) - 1u;
+  struct stream_entry {
+    uint8_t *base;
+    uintptr_t allocation;
+    uintptr_t owner;
+    uint32_t rec_size;
+    uint32_t capacity;
+    uint32_t flags;
+    volatile uint32_t wr;
+    volatile uint32_t rd;
+    uint32_t producer;
+    uint32_t consumer;
+    uint32_t generation;
+    volatile uint32_t active;
+    volatile uint32_t users;
+    bool retired;
+  };
+  stream_entry m_streams[STREAM_COUNT];
   // 接続 (DMA ポンプ)。★1 本につき DMA チャネルを 1 つ握る。チャネルは
   //   オブジェクトへは渡さない — DMA は MPU を素通りするため。
   static constexpr uintptr_t CONNECTION_COUNT = 4;
@@ -218,9 +242,21 @@ private:
   // ---- ストリームの制御プレーン ------------------------------------------
   // ★持つのは**ディスクリプタを指すだけ**。記憶は生成したオブジェクトのもので、
   //   ここは「誰が producer / consumer か」を強制するためだけに居る。
-  uintptr_t stream_create(uintptr_t desc, object_error &error);
+  uintptr_t stream_create(uintptr_t rec_size, uintptr_t capacity,
+                          uintptr_t flags, object_error &error);
   uintptr_t stream_open(uintptr_t id, object_error &error);
   uintptr_t stream_bind(uintptr_t id, uintptr_t which, object_error &error);
+  uintptr_t stream_destroy(uintptr_t id, object_error &error);
+  uintptr_t stream_push_n(uintptr_t id, uintptr_t request,
+                          object_error &error);
+  uintptr_t stream_pop_n(uintptr_t id, uintptr_t request,
+                         object_error &error);
+  uintptr_t stream_available(uintptr_t id, object_error &error);
+  stream_entry *stream_lookup(uintptr_t id);
+  bool stream_pin(uintptr_t id, stream_entry *&entry);
+  void stream_unpin(stream_entry &entry);
+  bool stream_stack_range(uint32_t thread, uintptr_t address,
+                          uintptr_t bytes) const;
   // ★src の consumer 席と dst の producer 席を **DMA で直結する**。以後 src へ
   //   流れたものは「途中のオブジェクトが pop して push する」段を通らずに dst へ届く。
   //   中継オブジェクトが要らなくなるのが眼目で、そのために DMA を使う。
@@ -231,7 +267,7 @@ private:
   uintptr_t object_name(uintptr_t id, object_error &error);
   uintptr_t spawn_method(uintptr_t id, uintptr_t method, uintptr_t argument,
                          object_error &error);
-  uintptr_t yield_to(uintptr_t target, object_error &error);
+  uintptr_t yield(object_error &error);
   uintptr_t sleep_us(uintptr_t microseconds, object_error &error);
   uintptr_t run_for(uintptr_t thread, uintptr_t cycles, object_error &error);
   void exit_thread();

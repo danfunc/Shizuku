@@ -1,3 +1,9 @@
+#if SHIZUKU_KERNEL_SERVICE_PROFILE
+extern "C" void shizuku_service_isr_probe() __attribute__((weak));
+#define SERVICE_ISR_PROBE() do { if(shizuku_service_isr_probe) shizuku_service_isr_probe(); } while(0)
+#else
+#define SERVICE_ISR_PROBE() ((void)0)
+#endif
 #include "shizuku/archs/armv6m.hpp"
 #include "shizuku/kernel.hpp"
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
@@ -46,9 +52,9 @@ extern "C" void shizuku_armv6m_systick_dispatch_frame(const uint32_t *frame){
     if(now-since_us>3000000u)feed=false;
   }
   if(feed)watchdog_update();
-  shizuku::kernel_instance.timer_expired();
+  SERVICE_ISR_PROBE(); shizuku::kernel_instance.timer_expired();
 }
 #else
-extern "C" void shizuku_armv6m_systick_dispatch(){shizuku::kernel_instance.timer_expired();}
+extern "C" void shizuku_armv6m_systick_dispatch(){SERVICE_ISR_PROBE(); shizuku::kernel_instance.timer_expired();}
 #endif
 extern "C" void shizuku_armv6m_systick_entry();

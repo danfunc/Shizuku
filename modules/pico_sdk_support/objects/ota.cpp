@@ -53,7 +53,7 @@ uintptr_t export_method(method m, uintptr_t entry) {
 }
 
 // 出口: 進捗・結果の行
-stream::storage<frame_t, 8> g_out;
+stream::handle<frame_t> g_out;
 uintptr_t g_out_id = 0;
 
 // 入口: ble_uart の OTA characteristic から来る生バイト
@@ -69,6 +69,7 @@ uintptr_t g_out_id = 0;
 //   ★ストリームは object-to-object の SPSC なので、多対一は「1 本ずつ持って
 //     受け側が両方を汲む」が正しい形 (1 本に 2 人の producer を座らせない)。
 constexpr uint32_t INPUT_COUNT = 2;
+constexpr uint32_t INPUT_BATCH = 4;
 uintptr_t g_in_id[INPUT_COUNT] = {ble_uart::NO_STREAM, ble_uart::NO_STREAM};
 stream::handle<frame_t> g_in[INPUT_COUNT];
 
@@ -83,7 +84,7 @@ void say(const char *text) {
     n = sizeof(f.data);
   f.len = (uint16_t)n;
   memcpy(f.data, text, n);
-  g_out.hdl().push(f);
+  g_out.push(f);
   // ★UART0 は TX/RX が別線 (全二重) なので、host->device のバイナリ受信中
   //   (shizuku_shell の UART ブリッジ) でもこの行の送出は衝突しない。
   //   shizuku_shell が UART0 を初期化済みであることが前提 (起動順で保証)。
@@ -513,7 +514,8 @@ bool write_sector(uint32_t seq, const uint8_t *data, uint32_t len) {
   if (len > FLASH_SECTOR_SIZE || at + FLASH_SECTOR_SIZE > STAGING_BYTES)
     return false;
 
-  {
+  // 初回書き込みは INIT 段の事前消去で済んでいるため、再送(既に受領済みセクタへの上書き)のみ消去する。
+  if (bm_get(g_ok_bm, seq)) {
     erase_op op{STAGING_OFFSET + at, FLASH_SECTOR_SIZE};
     const uint64_t t0 = BOARD::time_us();
     int res;
@@ -882,10 +884,13 @@ void consume_header_12(const uint8_t *hdr) {
     g_cwin_filled = 0;
     g_chdr_got = 0;
     g_state = state::CSEEK;
-    // ★ここで全域を消さない。消去はチャンクを書く直前へ移した
-    //   (write_sector)。先に全部消すと、実際には送られてこない末尾まで
-    //   消すことになるうえ、再送のたびに「消し済みで未書き込み」のセクタを
-    //   覚える羽目になる。毎回消せばその記憶が要らない。
+    // ★転送中に 38ms の flash 消去を行うと BLE 受信中の CYW43 SPI バスが
+    //   破壊されてウェッジするため、BLE パケットが流れていない INIT 段で全域を事前消去する。
+    if (!ensure_erased(g_total)) {
+      say("erase failed\n");
+      g_state = state::FAILED;
+      return;
+    }
     say("ready (chunked)\n");
     return;
   }
@@ -1055,6 +1060,9 @@ void process_chunked_stream(const uint8_t *p, uint32_t len) {
       // 問い合わせ (seq=QUERY_SEQ, len=0)。★チャンクと同じ枠に載せてあるので、
       //   CSEEK の探索も crc16 の保護もそのまま効く。
       if (hdr_ok && g_cseq == QUERY_SEQ && g_clen == 0) {
+        BOARD::diag_printf("[OTA] QUERY frame received (ok=%lu, bad=%lu)\n",
+                           (unsigned long)g_chunks_ok,
+                           (unsigned long)g_chunks_bad);
         report_missing();
         if (g_state != state::FAILED && g_state != state::DONE)
           g_state = state::CSEEK;
@@ -1157,7 +1165,7 @@ uintptr_t wire_input(uintptr_t stream_id, uint32_t slot) {
   g_in_id[slot] = stream_id;
   const auto opened = api(object_api::STREAM_OPEN, stream_id);
   if (opened.error == 0 && opened.value != 0) {
-    g_in[slot] = stream::handle<frame_t>((stream::descriptor *)opened.value);
+    g_in[slot] = stream::handle<frame_t>(opened.value);
     api(object_api::STREAM_BIND, stream_id, (uintptr_t)stream::role::CONSUMER);
   }
   BOARD::diag_printf("[OTA] input slot %lu <- stream %lu\n",
@@ -1217,10 +1225,8 @@ uintptr_t method_get_quiescent(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 
 uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   while (true) {
-    api(object_api::YIELD);
-
-    frame_t f{};
-    uint32_t lost = 0;
+    frame_t batch[INPUT_BATCH];
+    bool did_work = false;
     g_feeding = true;
     // ★★入力を**全部**汲む。どれか 1 本だけを見ると、その経路が黙っている間
     //   もう一方が届かない。転送そのものは 1 本ずつしか来ない前提だが、
@@ -1228,28 +1234,43 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
     //   (受領ビットマップは共通なので、BLE で始めて UART で終わらせることも
     //   原理的には成り立つ)。
     for (uint32_t slot = 0; slot < INPUT_COUNT; ++slot) {
-    if (!g_in[slot].valid())
-      continue;
-    while (g_in[slot].pop(&f, &lost)) {
+      if (!g_in[slot].valid())
+        continue;
+      uint32_t lost = 0;
+      uintptr_t pop_error = 0;
+      const uint32_t count = g_in[slot].pop_n(
+          batch, INPUT_BATCH, &lost, &pop_error);
+      if (pop_error != 0)
+        continue;
       if (lost != 0) {
         say("input overrun — 転送をやり直すこと\n");
         reset_transfer();
         g_state = state::FAILED;
         continue;
       }
-      ++g_writes;
-      g_write_bytes += f.len;
-      feed(f.data, f.len);
-      if (g_state == state::DATA && g_received - g_last_report >= 8 * 1024) {
-        g_last_report = g_received;
-        char line[80];
-        if (snprintf(line, sizeof(line), "%lu / %lu bytes\n",
-                     (unsigned long)g_received, (unsigned long)g_total) > 0)
-          say(line);
+      for (uint32_t i = 0; i < count; ++i) {
+        const frame_t &f = batch[i];
+        did_work = true;
+        ++g_writes;
+        g_write_bytes += f.len;
+        feed(f.data, f.len);
+        if (g_state == state::DATA && g_received - g_last_report >= 8 * 1024) {
+          g_last_report = g_received;
+          char line[80];
+          if (snprintf(line, sizeof(line), "%lu / %lu bytes\n",
+                       (unsigned long)g_received, (unsigned long)g_total) > 0)
+            say(line);
+        }
       }
     }
-    }
     g_feeding = false;
+    // Empty stream polling used to be inline memory reads. With svc-backed pop,
+    // polling both idle inputs in a tight loop burns the CPU and delays CYW43.
+    // Back off only when idle; while draining data, cap each turn and yield.
+    if (did_work)
+      api(object_api::YIELD);
+    else
+      api(object_api::SLEEP_US, 1000);
     const uint64_t idle_limit =
         g_chunked ? CHUNKED_IDLE_TIMEOUT_US : IDLE_TIMEOUT_US;
     if (g_state != state::IDLE && g_state != state::DONE &&
@@ -1311,10 +1332,12 @@ uintptr_t ota_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   failures += export_method(method::RESET, (uintptr_t)&method_reset);
   failures += export_method(method::POLL, (uintptr_t)&poll_loop);
 
-  g_out.init();
-  const auto created = api(object_api::STREAM_CREATE, (uintptr_t)&g_out.desc);
+  const auto created = api(object_api::STREAM_CREATE, sizeof(frame_t), 8, 0);
   failures += created.error;
   g_out_id = created.value;
+  g_out = stream::handle<frame_t>(g_out_id);
+  failures += api(object_api::STREAM_BIND, g_out_id,
+                  (uintptr_t)stream::role::PRODUCER).error;
   return failures;
 }
 

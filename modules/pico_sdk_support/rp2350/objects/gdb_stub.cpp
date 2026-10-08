@@ -75,8 +75,9 @@ constexpr uint32_t GDB_CHANNEL = 1;
 // ★ストリーム転送 (BLE 等)。使わない限り下の 4 関数は今まで通り CDC を叩く
 //   — 動いている経路を分岐 1 つ分しか変えない。
 constexpr uintptr_t NO_LINK = (uintptr_t)-1;
-stream::storage<link_chunk, 8> g_link_in;  // 転送 → stub
-stream::storage<link_chunk, 8> g_link_out; // stub → 転送
+constexpr uint32_t LINK_CAPACITY = 8;
+stream::handle<link_chunk> g_link_in;  // 転送 → stub
+stream::handle<link_chunk> g_link_out; // stub → 転送
 uintptr_t g_link_in_id = NO_LINK;
 uintptr_t g_link_out_id = NO_LINK;
 bool g_link_active = false;
@@ -104,7 +105,7 @@ int read_byte() {
   if (g_link_active) {
     if (g_in_pos >= g_in_chunk.len) {
       link_chunk next{};
-      if (!g_link_in.hdl().pop(&next))
+      if (!g_link_in.pop(&next))
         return -1;
       g_in_chunk = next;
       g_in_pos = 0;
@@ -126,11 +127,12 @@ void flush_out() {
   if (g_out_chunk.len == 0)
     return;
   for (uint32_t spin = 0; spin < 20000; ++spin) {
-    if (g_link_out.hdl().available() < g_link_out.desc.capacity)
+    if (g_link_out.available() < LINK_CAPACITY)
       break;
-    api(object_api::YIELD);
+    api(object_api::SLEEP_US, 1000);
   }
-  g_link_out.hdl().push(g_out_chunk);
+  const link_chunk chunk = g_out_chunk;
+  g_link_out.push(chunk);
   g_out_chunk.len = 0;
 }
 
@@ -228,7 +230,10 @@ int read_byte_waiting() {
     // ★空振りしている間は**譲る**。ここはパケットの途中 (次の 1 バイトが
     //   来るのを待っている所) なので、他に走れるものがあるなら走らせる。
     //   以前は素の空回りで、待っている間ずっと自分の持ち分を焼いていた。
-    api(object_api::YIELD);
+    if (g_link_active)
+      api(object_api::SLEEP_US, 1000);
+    else
+      api(object_api::YIELD);
   }
   return -1;
 }
@@ -1830,7 +1835,10 @@ uintptr_t stub_main(uintptr_t target, uintptr_t, uintptr_t, uintptr_t) {
     if (!receive_packet(first)) {
       // 接続が生きている間は、ブレークポイント停止中に勝手に再開させない。
       // (切断検知は link_connected() が行う)
-      api(object_api::YIELD);
+      if (g_link_active)
+        api(object_api::SLEEP_US, 1000);
+      else
+        api(object_api::YIELD);
       continue;
     }
     idle_rounds = 0;
@@ -1925,24 +1933,30 @@ uint32_t start_gdb_stub(uint32_t external_target) {
 
 gdb_link start_gdb_stub_over_stream(uint32_t external_target) {
   gdb_link link{NO_LINK, NO_LINK, false};
-  g_link_in.init();
-  g_link_out.init();
-  const auto in_created =
-      api(object_api::STREAM_CREATE, (uintptr_t)&g_link_in.desc);
-  const auto out_created =
-      api(object_api::STREAM_CREATE, (uintptr_t)&g_link_out.desc);
+  const auto in_created = api(object_api::STREAM_CREATE, sizeof(link_chunk),
+                              LINK_CAPACITY, 0);
+  const auto out_created = api(object_api::STREAM_CREATE, sizeof(link_chunk),
+                               LINK_CAPACITY, 0);
   if (in_created.error != 0 || out_created.error != 0) {
     BOARD::diag_printf("[GDB] could not create the link streams (%lu/%lu)\n",
                        (unsigned long)in_created.error,
                        (unsigned long)out_created.error);
+    if (in_created.error == 0)
+      api(object_api::STREAM_DESTROY, in_created.value);
+    if (out_created.error == 0)
+      api(object_api::STREAM_DESTROY, out_created.value);
     return link;
   }
   g_link_in_id = in_created.value;
   g_link_out_id = out_created.value;
+  g_link_in = stream::handle<link_chunk>(g_link_in_id);
+  g_link_out = stream::handle<link_chunk>(g_link_out_id);
   // ★ここを立ててから start する — stub_main が席に座るかどうかを見るため。
   g_link_active = true;
   if (start_gdb_stub(external_target) != 0) {
     g_link_active = false;
+    api(object_api::STREAM_DESTROY, g_link_in_id);
+    api(object_api::STREAM_DESTROY, g_link_out_id);
     return link;
   }
   link.to_stub = g_link_in_id;

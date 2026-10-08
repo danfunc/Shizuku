@@ -6,6 +6,7 @@
 #include "shizuku/object_ids.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/selftest.hpp"
+#include "shizuku/kernel_services.hpp"
 
 namespace shizuku {
 namespace selftest {
@@ -60,6 +61,13 @@ api_result call_method(uintptr_t id, uintptr_t method, uintptr_t arg = 0) {
 // 子 A の実装
 uintptr_t child_a_compute(uintptr_t arg, uintptr_t, uintptr_t, uintptr_t) {
   const auto result = ARCH::syscall(CMD_COMPUTE, arg, 0, 0);
+#if defined(__arm__) || defined(__thumb__)
+  const auto service = kernel_services::yield();
+  // Its parent returns 0xEEEE for unknown requests. The internal gate must
+  // reach native scheduling (value 0/1), while the raw request above stays +100.
+  if (service.code != kernel_services::status::ok || service.value > 1)
+    return 0xDEAD;
+#endif
   return result.value;
 }
 

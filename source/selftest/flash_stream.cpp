@@ -55,9 +55,12 @@ uint8_t expected_byte(uint32_t index) { return (uint8_t)(index * 7u + 11u); }
 // ★非特権で走る書き手。触れるのは**引数で渡されたディスクリプタと自分のスタック
 //   だけ**。グローバルにも標準ライブラリにも触らない (触れば落ちる)。
 //   戻り値の下位に CONTROL を載せて、非特権だったことを自分で申告させる。
-uintptr_t unprivileged_writer(uintptr_t descriptor, uintptr_t, uintptr_t,
+uintptr_t unprivileged_writer(uintptr_t stream_id, uintptr_t, uintptr_t,
                               uintptr_t) {
-  stream::handle<objects::flash_chunk> out((stream::descriptor *)descriptor);
+  stream::handle<objects::flash_chunk> out(stream_id);
+  if (api(object_api::STREAM_BIND, stream_id,
+          (uintptr_t)stream::role::PRODUCER).error != 0)
+    return 0xFFFFFFFFu;
   uint32_t sent = 0;
   while (sent < PAYLOAD_BYTES) {
     objects::flash_chunk chunk;
@@ -74,17 +77,20 @@ uintptr_t unprivileged_writer(uintptr_t descriptor, uintptr_t, uintptr_t,
   return ARCH::control_register(); // 自分が非特権だったかを申告する
 }
 
-// ★非特権で走る読み手。**ストリームの実体は flash そのもの** — pop は XIP から
-//   直に 1 レコード読む。中継の環はどこにも無いので、写す仕事も一貫性の心配も無い。
-//   非特権のまま読めるのは、ディスクリプタが arena (書ける側) にあり、
-//   base が XIP (読める側) にあるから。
-uintptr_t unprivileged_reader(uintptr_t descriptor, uintptr_t, uintptr_t,
+// Ring transports one extent record. The consumer reads the addressed XIP bytes
+// under its independently granted MPU region.
+uintptr_t unprivileged_reader(uintptr_t stream_id, uintptr_t, uintptr_t,
                               uintptr_t) {
-  stream::handle<uint8_t> in((stream::descriptor *)descriptor);
+  stream::handle<stream::extent> in(stream_id);
+  if (api(object_api::STREAM_BIND, stream_id,
+          (uintptr_t)stream::role::CONSUMER).error != 0)
+    return 0xFFFFFFFFu;
   uint32_t sum = 0;
-  uint8_t byte = 0;
-  while (in.pop(&byte))
-    sum += byte;
+  stream::extent extent{};
+  if (in.pop(&extent)) {
+    const volatile uint8_t *bytes = (const volatile uint8_t *)extent.address;
+    for (uint32_t i = 0; i < extent.bytes; ++i) sum += bytes[i];
+  }
   // 上位に CONTROL、下位に和。1 語で両方持ち帰るのは、非特権が触れる置き場所が
   // 戻り値しか無いため。
   return (ARCH::control_register() << 24) | (sum & 0x00FFFFFFu);
@@ -92,13 +98,18 @@ uintptr_t unprivileged_reader(uintptr_t descriptor, uintptr_t, uintptr_t,
 
 // ★非特権で走る受け手。**DMA が運んできた**環から汲む。運んだのはカーネル側の
 //   DMA で、途中に中継オブジェクトは 1 つも居ない。
-uintptr_t unprivileged_sink(uintptr_t descriptor, uintptr_t, uintptr_t,
+uintptr_t unprivileged_sink(uintptr_t stream_id, uintptr_t, uintptr_t,
                             uintptr_t) {
-  stream::handle<uint8_t> in((stream::descriptor *)descriptor);
+  stream::handle<stream::extent> in(stream_id);
+  if (api(object_api::STREAM_BIND, stream_id,
+          (uintptr_t)stream::role::CONSUMER).error != 0)
+    return 0xFFFFFFFFu;
   uint32_t sum = 0;
-  uint8_t byte = 0;
-  while (in.pop(&byte))
-    sum += byte;
+  stream::extent extent{};
+  if (in.pop(&extent)) {
+    const volatile uint8_t *bytes = (const volatile uint8_t *)extent.address;
+    for (uint32_t i = 0; i < extent.bytes; ++i) sum += bytes[i];
+  }
   return sum;
 }
 
@@ -165,17 +176,17 @@ void flash_stream_ladder() {
         closed.value == PAYLOAD_BYTES, (unsigned long)closed.value,
         (unsigned long)PAYLOAD_BYTES);
 
-  // ---- 読み: 非特権が XIP から直接読む -------------------------------------
+  // ---- 読み: stream で extent を受け、非特権 consumer が XIP を読む ----------
   flash_open reading{"unpriv.bin", 0, 1, 0, 0, 0};
   const api_result opened_read =
       api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
           (uintptr_t)flash_fs_method::OPEN_READ, (uintptr_t)&reading);
   check("flash stream: opened for reading", opened_read.value != 0,
         (unsigned long)opened_read.value, 1);
-  // ★環を持たないので、レコード数はファイルの大きさそのもの。
-  check("flash stream: the file itself is the stream",
-        reading.records == PAYLOAD_BYTES, (unsigned long)reading.records,
-        (unsigned long)PAYLOAD_BYTES);
+  // Ring contains one extent record; file bytes remain at their XIP address.
+  check("flash stream: one extent describes the file",
+        reading.records == 1 && reading.bytes == PAYLOAD_BYTES,
+        (unsigned long)reading.bytes, (unsigned long)PAYLOAD_BYTES);
   if (opened_read.value == 0)
     return;
   // ★Q8: region0 の外なので、読む本人 (OBJECT_READER) へ明示的に開示する。
@@ -184,7 +195,7 @@ void flash_stream_ladder() {
   //   対象オブジェクトの性質として効く)。
   const api_result granted =
       api(object_api::GRANT_REGION, OBJECT_READER, reading.address,
-          reading.address + reading.records);
+          reading.address + reading.bytes);
   check("flash stream: granted the reader its own extent", granted.value == 1,
         (unsigned long)granted.value, 1);
   const api_result read_desc = api(object_api::STREAM_OPEN, reading.stream);
@@ -200,26 +211,27 @@ void flash_stream_ladder() {
   check("flash stream: the unprivileged reader saw the real bytes",
         (got.value & 0x00FFFFFFu) == (want & 0x00FFFFFFu),
         (unsigned long)(got.value & 0x00FFFFFFu), (unsigned long)want);
+  const api_result closed_read = api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
+                                     (uintptr_t)flash_fs_method::CLOSE_READ,
+                                     reading.stream);
+  check("flash stream: close destroys its owned stream",
+        closed_read.value == 1, (unsigned long)closed_read.value, 1);
 
   // ---- 接続: flash から DMA で直に汲む ------------------------------------
-  // ★これが「中継オブジェクトの pop/push が消える」ことの実証。src は XIP を
-  //   実体とする読みストリームなので、**DMA はフラッシュから直接読んで**受け手の
-  //   環へ書く。CPU は 1 バイトも写していない。
+  // DMA transports the extent record. The sink dereferences the extent under
+  // its own explicitly granted MPU region.
   {
     flash_open again{"unpriv.bin", 0, 1, 0, 0, 0};
     api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
         (uintptr_t)flash_fs_method::OPEN_READ, (uintptr_t)&again);
-    // 受け側の環はオブジェクト arena に置く (非特権が汲める側)。
-    using sink_ring = stream::storage<uint8_t, 128>;
-    const api_result memory = api(object_api::MEMORY_ALLOCATE, sizeof(sink_ring));
-    check("connect: room for the sink", memory.value != 0,
-          (unsigned long)memory.value, 1);
-    if (memory.value == 0)
-      return;
-    sink_ring *sink = (sink_ring *)memory.value;
-    sink->init(stream::LOSSLESS);
     const api_result sink_id = api(object_api::STREAM_CREATE,
-                                   (uintptr_t)&sink->desc);
+                                   sizeof(stream::extent), 1,
+                                   stream::LOSSLESS);
+    check("connect: kernel allocated the sink ring", sink_id.error == 0,
+          (unsigned long)sink_id.error, 0);
+    if (sink_id.error != 0) return;
+    api(object_api::GRANT_REGION, OBJECT_SINK, again.address,
+        again.address + again.bytes);
     const api_result linked =
         api(object_api::STREAM_CONNECT, again.stream, sink_id.value);
     check("connect: the two streams were joined", linked.error == 0,
@@ -232,27 +244,45 @@ void flash_stream_ladder() {
           (unsigned long)intruder.error,
           (unsigned long)object_error::SEAT_TAKEN);
 
+    const api_result busy_destroy =
+        api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
+            (uintptr_t)flash_fs_method::CLOSE_READ, again.stream);
+    check("connect: connected source cannot be destroyed",
+          busy_destroy.value == (uintptr_t)object_error::STREAM_BUSY + 1,
+          (unsigned long)busy_destroy.value,
+          (unsigned long)object_error::STREAM_BUSY + 1);
+
     // ★汲むのは**非特権のオブジェクト**にやらせる。譲るたびにポンプが 1 歩進むので、
     //   「少し汲む → 譲る」を繰り返す。受け手が特権だと、非特権から使えることの
     //   証明にならない。
     uint32_t sum = 0;
     for (uint32_t spin = 0; spin < 20000; ++spin) {
-      const api_result got =
-          api(object_api::CALL_METHOD, OBJECT_SINK, 0, (uintptr_t)&sink->desc);
-      sum += (uint32_t)got.value;
+      const api_result got = api(object_api::CALL_METHOD, OBJECT_SINK, 0,
+                                  sink_id.value);
+      if (got.value != 0) sum = (uint32_t)got.value;
       api(object_api::YIELD); // ポンプに 1 歩進ませる
-      if (sink->desc.rd >= PAYLOAD_BYTES)
+      if (sum != 0)
         break;
     }
-    const uint32_t drained = sink->desc.rd;
+    const uint32_t drained = sum != 0 ? 1 : 0;
     uint32_t want = 0;
     for (uint32_t index = 0; index < PAYLOAD_BYTES; ++index)
       want += expected_byte(index);
-    check("connect: every byte arrived through DMA", drained == PAYLOAD_BYTES,
-          (unsigned long)drained, (unsigned long)PAYLOAD_BYTES);
+    check("connect: extent arrived through DMA", drained == 1,
+          (unsigned long)drained, 1);
     // ★★本命。CPU が 1 バイトも写さずに、flash の中身が受け手の環まで届いた。
     check("connect: the bytes are the ones in flash", sum == want,
           (unsigned long)sum, (unsigned long)want);
+    api(object_api::STREAM_DISCONNECT, linked.value);
+    for (uint32_t spin = 0; spin < 1000; ++spin) api(object_api::YIELD);
+    const api_result source_closed = api(
+        object_api::CALL_METHOD, FLASH_FS_OBJECT,
+        (uintptr_t)flash_fs_method::CLOSE_READ, again.stream);
+    check("connect: source destroy succeeds after disconnect completion",
+          source_closed.value == 1, (unsigned long)source_closed.value, 1);
+    const api_result sink_closed = api(object_api::STREAM_DESTROY, sink_id.value);
+    check("connect: owner destroys disconnected sink",
+          sink_closed.error == 0, (unsigned long)sink_closed.error, 0);
   }
 
   // ---- 拒否: 開示された extent の外を読もうとしたら落ちる (Q8) --------------
@@ -268,7 +298,7 @@ void flash_stream_ladder() {
     flash_open bounded{"unpriv.bin", 0, 1, 0, 0, 0};
     api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
         (uintptr_t)flash_fs_method::OPEN_READ, (uintptr_t)&bounded);
-    const uintptr_t extent_end = bounded.address + bounded.records;
+    const uintptr_t extent_end = bounded.address + bounded.bytes;
     const uintptr_t trespass_address = extent_end + 4096;
     api(object_api::GRANT_REGION, OBJECT_TRESPASSER, bounded.address,
         extent_end);
@@ -313,6 +343,8 @@ void flash_stream_ladder() {
           kernel_instance.faults().count == in_bounds_faults,
           (unsigned long)kernel_instance.faults().count,
           (unsigned long)in_bounds_faults);
+    api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
+        (uintptr_t)flash_fs_method::CLOSE_READ, bounded.stream);
   }
 
   BOARD::diag_printf("[SELFTEST] flash stream ladder done\n");

@@ -2,6 +2,19 @@
 .syntax unified
 .cpu cortex-m0plus
 .thumb
+.macro SERVICE_PROFILE hook
+#if SHIZUKU_KERNEL_SERVICE_PROFILE
+  push {r0-r3}
+  mov r0, r12
+  mov r1, lr
+  push {r0,r1}
+  bl \hook
+  pop {r0,r1}
+  mov r12, r0
+  mov lr, r1
+  pop {r0-r3}
+#endif
+.endm
 .equ CTX_EXC_RETURN, 36
 .equ CTX_CONTROL, 40
 #if defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
@@ -68,6 +81,9 @@
   orrs r2, r1
   msr CONTROL, r2
   isb
+  .if \trace
+  SERVICE_PROFILE shizuku_service_handler_end
+  .endif
   mov lr, r3
 #if defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   .if \trace
@@ -79,6 +95,7 @@
 .global shizuku_armv6m_svc_entry
 .type shizuku_armv6m_svc_entry,%function
 shizuku_armv6m_svc_entry:
+  SERVICE_PROFILE shizuku_service_handler_begin
 #if defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   // Keep the marker independent of the C context lookup under investigation.
   SHIZUKU_TRACE_STAGE 400

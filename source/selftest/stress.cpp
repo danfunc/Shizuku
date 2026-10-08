@@ -18,6 +18,9 @@
 #include "shizuku/object_api.hpp"
 #include "shizuku/objects/peripherals.hpp"
 #include "shizuku/selftest.hpp"
+#if SHIZUKU_KERNEL_SERVICE_PROFILE
+#include "shizuku/service_profile.hpp"
+#endif
 
 namespace shizuku {
 namespace selftest {
@@ -163,6 +166,34 @@ uintptr_t blink(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
     if (led_took < led_min)
       led_min = led_took;
     next += BLINK_PERIOD_US;
+
+#if SHIZUKU_KERNEL_SERVICE_PROFILE
+    static uint32_t v3gw_step = 0;
+    if (v3gw_step == 0 && sweep > 0) {
+      v3gw_step = 1;
+      const auto snap = service_profile::read();
+      BOARD::diag_printf(
+          "[V3GW] cumulative snapshot post-selftest: SVC software max=%lu samples=%lu unit=%s clock_ok=%u\n",
+          (unsigned long)snap.handler_max, (unsigned long)snap.handler_samples,
+          service_profile::cycles() ? "cyc" : "us",
+          service_profile::available() ? 1u : 0u);
+    } else if (v3gw_step == 1) {
+      v3gw_step = 2;
+      const auto snap = service_profile::read();
+      BOARD::diag_printf(
+          "[V3GW] cumulative snapshot post-selftest: PRIMASK envelope max=%lu samples=%lu unit=%s (hooks included)\n",
+          (unsigned long)snap.mask_max, (unsigned long)snap.mask_samples,
+          service_profile::cycles() ? "cyc" : "us");
+    } else if (v3gw_step == 2) {
+      v3gw_step = 3;
+      const auto snap = service_profile::read();
+      BOARD::diag_printf(
+          "[V3GW] cumulative snapshot post-selftest: post-thread SVC max=%lu samples=%lu mask_envelope_max=%lu mask_samples=%lu unit=%s\n",
+          (unsigned long)snap.handler_max, (unsigned long)snap.handler_samples,
+          (unsigned long)snap.mask_max, (unsigned long)snap.mask_samples,
+          service_profile::cycles() ? "cyc" : "us");
+    }
+#endif
 
     if (++periods >= REPORT_PERIODS) {
       // ★「動いている」ではなく「どれだけ外したか」を出す。窓の値と起動来の値を

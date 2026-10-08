@@ -14,6 +14,7 @@
 #include "shizuku/object_ids.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/selftest.hpp"
+#include "shizuku/svc_attributes.hpp"
 
 namespace shizuku {
 namespace selftest {
@@ -32,7 +33,13 @@ constexpr uintptr_t OBJECT_TRESPASSER = object_id::trespasser;
 constexpr uintptr_t METHOD_MAIN = 0;
 
 // 自分の CONTROL を読んで返すだけ。触るのはレジスタと自分のスタックのみ。
-uintptr_t probe(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+uintptr_t probe(uintptr_t selector, uintptr_t, uintptr_t, uintptr_t) {
+  if (selector == 1)
+    return ARCH::syscall((uintptr_t)object_api::GRANT_REGION, UINT32_MAX, 0, 0).error;
+  if (selector == 2)
+    return ARCH::syscall((uintptr_t)object_api::KILL_THREAD, UINT32_MAX).error;
+  if (selector == 3)
+    return ARCH::syscall((uintptr_t)object_api::FORWARD_CHILD_EXIT, 0, 0).error;
   return ARCH::control_register();
 }
 
@@ -90,6 +97,32 @@ void unprivileged_probe() {
   check("unpriv: caller still privileged",
         (ARCH::control_register() & 1u) == 0u,
         (unsigned long)ARCH::control_register(), 0);
+
+  // Compare the actual handler decisions (not just its table) on both origins.
+  for (uintptr_t selector = 1; selector <= 2; ++selector) {
+    const uintptr_t id = selector == 1 ? (uintptr_t)object_api::GRANT_REGION
+                                     : (uintptr_t)object_api::KILL_THREAD;
+    const auto denied = ARCH::syscall((uintptr_t)object_api::CALL_METHOD,
+        OBJECT_UNPRIV_PROBE, METHOD_MAIN, selector);
+    const auto allowed = ARCH::syscall((uintptr_t)object_api::CALL_METHOD,
+        OBJECT_PRIV_PROBE, METHOD_MAIN, selector);
+    check(selector == 1 ? "attributes/handler GRANT deny matches" : "attributes/handler KILL deny matches",
+        !svc_permission_allows(id, false) && denied.error == 0 &&
+        denied.value == (uintptr_t)object_error::NOT_PRIVILEGED, denied.value,
+        (uintptr_t)object_error::NOT_PRIVILEGED);
+    check(selector == 1 ? "attributes/handler GRANT allow reaches target check" : "attributes/handler KILL allow reaches target check",
+        svc_permission_allows(id, true) && allowed.error == 0 &&
+        allowed.value == (uintptr_t)object_error::BAD_OBJECT, allowed.value,
+        (uintptr_t)object_error::BAD_OBJECT);
+  }
+  for (uintptr_t object : {OBJECT_UNPRIV_PROBE, OBJECT_PRIV_PROBE}) {
+    const auto denied = ARCH::syscall((uintptr_t)object_api::CALL_METHOD,
+        object, METHOD_MAIN, 3);
+    check("attributes/handler forwarding rejects missing parent ledger",
+        !svc_permission_allows(27, object == OBJECT_PRIV_PROBE, false, false) &&
+        denied.error == 0 && denied.value == (uintptr_t)object_error::NOT_PRIVILEGED,
+        denied.value, (uintptr_t)object_error::NOT_PRIVILEGED);
+  }
 
   // ---- 拒否のテスト: 触れないはずの場所を触ったら、そのスレッドだけが止まる ----
   {

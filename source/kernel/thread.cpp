@@ -235,6 +235,17 @@ kernel_error KERNEL::do_grant(uint32_t target, uint32_t cycles) {
   if (target == current)
     return kernel_error::OK; // 自分へ貸すのは何もしないのと同じ
   grant_stack &grants = m_grants[core];
+  // FIXME(integrate): 祖先 unwind は設計誤り (未修正で持ち込み)
+  // 祖先への貸付け (A → B → A 等) は、祖先まで返却して grant_end=YIELDED 相当として扱い、
+  // 新たな貸付けフレームを積まない。
+  for (uint32_t index = 0; index < grants.depth; ++index) {
+    if (grants.frames[index].lender == target) {
+      while (m_current[core] != target && grants.depth > 0) {
+        grant_unwind(grant_end::YIELDED);
+      }
+      return kernel_error::OK;
+    }
+  }
   if (grants.depth >= grant_stack::MAX_DEPTH)
     return kernel_error::GRANT_DEPTH;
   // ★外側の残りを読む前に、今の刻みで使ったぶんを引いておく。引かずに読むと

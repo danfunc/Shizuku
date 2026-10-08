@@ -34,6 +34,9 @@
 //    ハンドラがその段数で巻き戻す (D5)。
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_api.hpp"
+#if defined(__arm__) || defined(__thumb__)
+extern "C" char shizuku_v2_service_resume;
+#endif
 
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
 extern "C" void shizuku_boot_trace_phase(uint32_t);
@@ -191,17 +194,48 @@ kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   return kernel_error::OK;
 }
 
+template <typename C>
+static constexpr bool is_context_unprivileged(const C *ctx) {
+  if constexpr (requires { ctx->control; }) {
+    return (ctx->control & 1u) != 0;
+  } else if constexpr (requires { ctx->privileged; }) {
+    return !ctx->privileged;
+  } else {
+    return false;
+  }
+}
+
 template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(410);
 #endif
   THREAD &thread = current_thread();
   FRAME *frame = context->sp;
+  // Only this privileged internal gate bypasses parent routing. The public
+  // objectland raw-SVC path below, including colliding numbers, is unchanged.
+#if defined(__arm__) || defined(__thumb__)
+  const bool service_gate = ARCH::frame_pc(*frame) ==
+      reinterpret_cast<uintptr_t>(&shizuku_v2_service_resume);
+#else
+  constexpr bool service_gate = false;
+#endif
+  if (service_gate) {
+    if (is_context_unprivileged(context)) {
+      ARCH::set_result(*frame, (uintptr_t)object_error::NOT_PRIVILEGED, 0);
+      return;
+    }
+    const auto id = ARCH::arg(*frame, 0);
+    if (id != (uintptr_t)object_api::YIELD && id != (uintptr_t)object_api::RUN_FOR &&
+        id != (uintptr_t)object_api::SLEEP_US) {
+      ARCH::set_result(*frame, (uintptr_t)object_error::UNKNOWN_API, 0);
+      return;
+    }
+  }
 
   // ★「kernel object 本人であるか」の厳格判定 (指摘3, 指摘4)。
   //   単なる HANDLER ではなく、登録済み kernel object (種別 KERNEL_OBJECT かつ
   //   ID が m_object_svc_handler_object) だけが kernel primitive を直接解釈できる。
-  if (thread.current_kind() == (uint32_t)object_kind::KERNEL_OBJECT &&
+  if (!service_gate && thread.current_kind() == (uint32_t)object_kind::KERNEL_OBJECT &&
       thread.current_object() == m_object_svc_handler_object) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     shizuku_boot_trace_phase(411);
@@ -291,13 +325,13 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
 
   // ここへ来るのは非 kernel object (一般 child や専用 handling object など)。
   // 親ハンドラが未登録なら黙って root へ fallback せず、診断可能な panic とする (指摘2)。
-  if (thread.current_handler_entry() == 0) {
+  if (!service_gate && thread.current_handler_entry() == 0) {
     BOARD::panic("unregistered parent handler for object syscall");
   }
 
   // 親ハンドラへの直接ディスパッチ (O(1)、テーブル検索ゼロ、同期例外中の再帰なし)。
-  const uintptr_t target_entry = thread.current_handler_entry();
-  const uint32_t target_object = thread.current_handler_object();
+  const uintptr_t target_entry = service_gate ? m_object_svc_handler : thread.current_handler_entry();
+  const uint32_t target_object = service_gate ? m_object_svc_handler_object : thread.current_handler_object();
   const bool to_root = (target_object == m_object_svc_handler_object);
 
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0

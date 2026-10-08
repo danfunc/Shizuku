@@ -7,6 +7,13 @@
 .fpu fpv5-sp-d16   // .cpu 指定は FPU を含まないため、vstmia/vldmia 用に明示する
 #endif
 .thumb
+.macro SERVICE_PROFILE hook
+#if SHIZUKU_KERNEL_SERVICE_PROFILE
+    push {r0-r3,r12,lr}
+    bl \hook
+    pop {r0-r3,r12,lr}
+#endif
+.endm
 
 // context_t のオフセット。shizuku/archs/armv8m.hpp の static_assert と一致させること。
 //   0..28 : r4-r11
@@ -55,7 +62,7 @@
 // CTX_RESTORE — shizuku_current_context を再取得し (dispatch が別スレッドへ
 // 切替えたかもしれない)、context_t から復元して例外復帰する。
 // ---------------------------------------------------------------------------
-.macro CTX_RESTORE
+.macro CTX_RESTORE svc=0
     // ★GDB stub の 1 命令実行はここで立てる。「次の 1 命令」はこの直後に
     //   復帰する文脈のものと確定しているので、対象を取り違えない
     //   (立てる場所を間違えると「呼び出し側自身が刻まれる」— 実測で踏んだ)。
@@ -102,6 +109,9 @@
 2:
 #endif
 
+    .if \svc
+    SERVICE_PROFILE shizuku_service_handler_end
+    .endif
     mov  lr, r3                   // LR = 復帰対象の EXC_RETURN
     bx   lr                       // 例外復帰
 .endm
@@ -114,9 +124,10 @@
 .align 8
 .type shizuku_armv8m_svc_entry, %function
 shizuku_armv8m_svc_entry:
+    SERVICE_PROFILE shizuku_service_handler_begin
     CTX_SAVE
     bl   shizuku_svc_dispatch     // shizuku_svc_dispatch(context = r0)
-    CTX_RESTORE
+    CTX_RESTORE 1
 
 // ---------------------------------------------------------------------------
 // PendSV 入口 (時限実行権の期限回収 = 最低優先度の遅延切替例外)。退避/復元は

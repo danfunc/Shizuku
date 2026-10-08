@@ -6,6 +6,7 @@
 #include "hardware/sync.h"
 #include "shizuku/concepts/arch.hpp"
 #include "shizuku/kernel_abi.hpp"
+#include "shizuku/service_profile.hpp"
 
 extern "C" {
 void shizuku_armv6m_svc_entry();
@@ -129,10 +130,24 @@ public:
   static uintptr_t stack_limit(const context_t &c){return (uintptr_t)c.stack_limit_addr;}
   // RP2040 M0+ has no LDREX/STREX. Reuse the Pico SDK's lock reserved for
   // atomic operations; lock 31 belongs to the claim-free allocator.
+  [[gnu::always_inline]] static inline uint32_t atomic_profile_begin(){
+#if SHIZUKU_KERNEL_SERVICE_PROFILE
+    return shizuku_service_profile_now();
+#else
+    return 0;
+#endif
+  }
+  [[gnu::always_inline]] static inline void atomic_profile_end(uint32_t start){
+#if SHIZUKU_KERNEL_SERVICE_PROFILE
+    shizuku_service_mask_span(start);
+#else
+    (void)start;
+#endif
+  }
   static spin_lock_t *atomic_lock(){return spin_lock_instance(PICO_SPINLOCK_ID_ATOMIC);}
-  static bool cas32(volatile uint32_t *p,uint32_t expected,uint32_t desired){auto *l=atomic_lock();uint32_t irq=spin_lock_blocking(l);bool ok=*p==expected;if(ok)*p=desired;spin_unlock(l,irq);return ok;}
-  static void store_release32(volatile uint32_t *p,uint32_t v){auto *l=atomic_lock();uint32_t irq=spin_lock_blocking(l);asm volatile("dmb":::"memory");*p=v;asm volatile("dmb":::"memory");spin_unlock(l,irq);}
-  static uint32_t load_acquire32(volatile uint32_t *p){auto *l=atomic_lock();uint32_t irq=spin_lock_blocking(l);asm volatile("dmb":::"memory");uint32_t v=*p;spin_unlock(l,irq);return v;}
+  static bool cas32(volatile uint32_t *p,uint32_t expected,uint32_t desired){uint32_t start=atomic_profile_begin();auto *l=atomic_lock();uint32_t irq=spin_lock_blocking(l);bool ok=*p==expected;if(ok)*p=desired;spin_unlock(l,irq);atomic_profile_end(start);return ok;}
+  static void store_release32(volatile uint32_t *p,uint32_t v){uint32_t start=atomic_profile_begin();auto *l=atomic_lock();uint32_t irq=spin_lock_blocking(l);asm volatile("dmb":::"memory");*p=v;asm volatile("dmb":::"memory");spin_unlock(l,irq);atomic_profile_end(start);}
+  static uint32_t load_acquire32(volatile uint32_t *p){uint32_t start=atomic_profile_begin();auto *l=atomic_lock();uint32_t irq=spin_lock_blocking(l);asm volatile("dmb":::"memory");uint32_t v=*p;spin_unlock(l,irq);atomic_profile_end(start);return v;}
   static constexpr uint32_t DFSR_HALTED=1,DFSR_BKPT=2;
   // M0+ has no DebugMonitor. These API-compatible stubs keep phase-1 builds
   // possible; self-hosted debug is unavailable until a separate design exists.

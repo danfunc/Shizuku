@@ -24,6 +24,8 @@
 #include "shizuku/object_api.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/selftest.hpp"
+#include "shizuku/service_profile.hpp"
+#include "shizuku/kernel_services.hpp"
 
 namespace shizuku {
 namespace selftest {
@@ -250,11 +252,30 @@ template <typename A> void bench() {
 } // namespace
 
 void call_cost() {
+  service_profile::reset();
+#if SHIZUKU_KERNEL_SERVICE_PROFILE
+  BOARD::diag_printf("[V3GW] COST includes compiled hooks; use normal build for untraced comparison\n");
+#endif
   if constexpr (ARCH::HAS_CYCLE_COUNTER) {
     bench<ARCH>();
   } else {
     BOARD::diag_printf("[COST] SKIP no DWT cycle counter on this arch\n");
   }
+#if SHIZUKU_KERNEL_SERVICE_PROFILE
+  // M0+ has no DWT, but still sample the same syscall path using the us timer.
+  if constexpr (!ARCH::HAS_CYCLE_COUNTER)
+    for(unsigned i=0;i<128;++i) ARCH::syscall((uintptr_t)object_api::GET_CURRENT_OBJECT);
+  const auto v=service_profile::read();
+  BOARD::diag_printf("[V3GW] SVC software max=%lu samples=%lu unit=%s clock_ok=%u\n",
+      (unsigned long)v.handler_max,(unsigned long)v.handler_samples,
+      service_profile::cycles()?"cyc":"us",service_profile::available()?1u:0u);
+  const auto irq=shizuku::kernel_services::irq_save();
+  shizuku::kernel_services::irq_restore(irq);
+  const auto m=service_profile::read();
+  BOARD::diag_printf("[V3GW] PRIMASK envelope max=%lu samples=%lu unit=%s (hooks included)\n",
+      (unsigned long)m.mask_max,(unsigned long)m.mask_samples,
+      service_profile::cycles()?"cyc":"us");
+#endif
 }
 
 } // namespace selftest
