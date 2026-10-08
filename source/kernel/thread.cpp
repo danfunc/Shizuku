@@ -303,7 +303,7 @@ template <> void KERNEL::grant_unwind(grant_end reason) {
     ARCH::timer_cancel();
     m_armed[core] = 0;
   } else if (grants.frames[grants.depth - 1].remaining == 0) {
-    ARCH::pend_context_switch();
+    grant_unwind(grant_end::EXPIRED);
   } else {
     arm_timer();
   }

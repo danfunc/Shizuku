@@ -115,20 +115,36 @@ uintptr_t nested_b_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   return 0;
 }
 
-volatile uint32_t g_nested_c_expired = 0;
-volatile uint32_t g_nested_c_elapsed_us = 0;
+// (b-1) 仕様ケース (i): B に余裕を残して C へ一部貸与し、C reclaim 後に B が復帰・記録する
+volatile uint32_t g_nested_b_saw_c_expired = 0;
+volatile uint32_t g_nested_b_saw_c_elapsed_us = 0;
 
-uintptr_t nested_b_clamp_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+uintptr_t nested_b_margin_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   const api_result spawned_c = api(object_api::SPAWN, OBJECT_HOG, METHOD_MAIN, 0);
   if (spawned_c.error == (uintptr_t)object_error::OK) {
-    const uint32_t huge_budget = 50000u * BOARD::cycles_per_us(); // 50ms
+    const uint32_t lend_c_cycles = 2000u * BOARD::cycles_per_us(); // 2ms 貸出
     const uint64_t started_c = BOARD::time_us();
-    const api_result granted_c = api(object_api::RUN_FOR, spawned_c.value, huge_budget);
+    const api_result granted_c = api(object_api::RUN_FOR, spawned_c.value, lend_c_cycles);
     const uint64_t elapsed_c = BOARD::time_us() - started_c;
-    g_nested_c_expired = (granted_c.value == 0) ? 1 : 0;
-    g_nested_c_elapsed_us = (uint32_t)elapsed_c;
+    g_nested_b_saw_c_expired = (granted_c.value == 0) ? 1 : 0;
+    g_nested_b_saw_c_elapsed_us = (uint32_t)elapsed_c;
     g_hog_stop = 1;
-    api(object_api::RUN_FOR, spawned_c.value, 1000u * BOARD::cycles_per_us());
+  }
+  api(object_api::YIELD);
+  return 0;
+}
+
+// (b-2) 仕様ケース (ii): B 残量全部を C へ又貸し (50ms 要求が外側 2ms でクランプ)。
+// C 取り上げと同時に B も残量 0 で巻き取られ、B の事後印は残らず、A の戻り値が EXPIRED (0)。
+volatile uint32_t g_nested_b_clamp_exhaust_ran = 0;
+
+uintptr_t nested_b_clamp_exhaust_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  const api_result spawned_c = api(object_api::SPAWN, OBJECT_HOG, METHOD_MAIN, 0);
+  if (spawned_c.error == (uintptr_t)object_error::OK) {
+    const uint32_t huge_budget = 50000u * BOARD::cycles_per_us(); // 50ms 要求
+    api(object_api::RUN_FOR, spawned_c.value, huge_budget);
+    // B の残量は C と共に 0 になるため、仕様上ここは実行されてはならない
+    g_nested_b_clamp_exhaust_ran = 1;
   }
   return 0;
 }
@@ -421,12 +437,45 @@ void thread_ladder() {
     check("nested A->B->C: C yielded back to B", g_nested_b_saw_c_yield == 1,
           (unsigned long)g_nested_b_saw_c_yield, 1);
 
-    // Part 2: Clamp check. A lends B 2ms. B asks 50ms for C.
-    // C is clamped to B's remaining budget (<= 2ms), so C expires in ~2ms (< 5ms).
+    // Part 2: Margin check (仕様ケース i).
+    // A lends B 10ms. B lends C 2ms.
+    // C runs until budget exhausted (~2ms). B still has remaining margin (~8ms),
+    // so upon C's reclamation, B resumes, records completion, and yields back to A.
     g_hog_stop = 0;
-    g_nested_c_expired = 0;
-    g_nested_c_elapsed_us = 0;
-    api(object_api::CREATE_OBJECT, OBJECT_SLEEPER, (uintptr_t)&nested_b_clamp_worker, OBJECT_REPLACE);
+    g_nested_b_saw_c_expired = 0;
+    g_nested_b_saw_c_elapsed_us = 0;
+    api(object_api::CREATE_OBJECT, OBJECT_SLEEPER, (uintptr_t)&nested_b_margin_worker, OBJECT_REPLACE);
+    const api_result spawned_b_margin =
+        api(object_api::SPAWN, OBJECT_SLEEPER, METHOD_MAIN, 0);
+    check("nested margin: spawn B", spawned_b_margin.error == (uintptr_t)object_error::OK,
+          (unsigned long)spawned_b_margin.error, 0);
+
+    const uint32_t lend_margin_cycles = 10000u * BOARD::cycles_per_us(); // 10ms
+    const uint64_t expected_c_us = 2000u; // 2000us
+    const uint64_t started_margin = BOARD::time_us();
+    const api_result granted_margin =
+        api(object_api::RUN_FOR, spawned_b_margin.value, lend_margin_cycles);
+    const uint64_t elapsed_margin = BOARD::time_us() - started_margin;
+
+    check("nested margin: C reclaimed by budget", g_nested_b_saw_c_expired == 1,
+          (unsigned long)g_nested_b_saw_c_expired, 1);
+    check("nested margin: C elapsed bounded by B lend (~2ms)",
+          g_nested_b_saw_c_elapsed_us >= expected_c_us / 2 && g_nested_b_saw_c_elapsed_us < expected_c_us * 2,
+          (unsigned long)g_nested_b_saw_c_elapsed_us, (unsigned long)expected_c_us);
+    check("nested margin: B returned to A",
+          granted_margin.error == (uintptr_t)object_error::OK && granted_margin.value == 1,
+          (unsigned long)granted_margin.value, 1);
+    check("nested margin: total elapsed within B budget",
+          elapsed_margin >= expected_c_us / 2 && elapsed_margin < 15000u,
+          (unsigned long)elapsed_margin, (unsigned long)expected_c_us);
+
+    // Part 3: Clamp exhaustion check (仕様ケース ii).
+    // A lends B 2ms. B asks 50ms for C, clamped to B's remaining budget (<= 2ms).
+    // When C expires, all levels have budget exhausted. B must be unwound immediately
+    // without running post-grant user code, and A must observe grant_end::EXPIRED (0).
+    g_hog_stop = 0;
+    g_nested_b_clamp_exhaust_ran = 0;
+    api(object_api::CREATE_OBJECT, OBJECT_SLEEPER, (uintptr_t)&nested_b_clamp_exhaust_worker, OBJECT_REPLACE);
     const api_result spawned_b_clamp =
         api(object_api::SPAWN, OBJECT_SLEEPER, METHOD_MAIN, 0);
     check("nested clamp: spawn B clamp", spawned_b_clamp.error == (uintptr_t)object_error::OK,
@@ -439,21 +488,17 @@ void thread_ladder() {
         api(object_api::RUN_FOR, spawned_b_clamp.value, lend_clamp_cycles);
     const uint64_t elapsed_clamp = BOARD::time_us() - started_clamp;
 
-    check("nested clamp: C reclaimed by budget", g_nested_c_expired == 1,
-          (unsigned long)g_nested_c_expired, 1);
-    // C が要求した 50ms ではなく親 B の残予算 (<= expected_b_us = 2000us) にクランプされていること。
-    // 下限: 早期終了ではなくクランプされた親残時間を消費して取り上げられた証拠 (>= expected_b_us / 2)
-    // 上限: 親の貸出量 2000us の桁に収まり、50ms に引きずられていない証拠 (< expected_b_us * 2 = 4000us)
-    check("nested clamp: C elapsed bounded by B budget (clamped to ~2ms, not 50ms)",
-          g_nested_c_elapsed_us >= expected_b_us / 2 && g_nested_c_elapsed_us < expected_b_us * 2,
-          (unsigned long)g_nested_c_elapsed_us, (unsigned long)expected_b_us);
-    // 全体の経過時間も親の貸出予算 (2ms) のオーダに収まること
-    check("nested clamp: total elapsed within B budget",
+    // B の事後印は残らず (残量 0 のため再開されず巻き取られる)
+    check("nested clamp: B left no mark after budget exhaustion", g_nested_b_clamp_exhaust_ran == 0,
+          (unsigned long)g_nested_b_clamp_exhaust_ran, 0);
+    // A の戻り値が EXPIRED (0) であること
+    check("nested clamp: B unwound to A with budget expired",
+          granted_clamp.error == (uintptr_t)object_error::OK && granted_clamp.value == 0,
+          (unsigned long)granted_clamp.value, 0);
+    // 全体の経過時間も B の貸出予算 (~2ms) のオーダに収まること (50ms ではない)
+    check("nested clamp: total elapsed bounded by B budget (~2ms, not 50ms)",
           elapsed_clamp >= expected_b_us / 2 && elapsed_clamp < expected_b_us * 3,
           (unsigned long)elapsed_clamp, (unsigned long)expected_b_us);
-    check("nested clamp: B returned to A",
-          granted_clamp.error == (uintptr_t)object_error::OK && granted_clamp.value == 1,
-          (unsigned long)granted_clamp.value, 1);
   }
 
   // ---- (c) A→B→A および A→B→C→A 祖先返却と保存済み呼出しからの再開 --------
