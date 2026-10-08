@@ -22,9 +22,6 @@
 
 ## 読み順
 
-Kernel-owned stream の今回の設計と移行記録は
-[design/kernel_stream.typ](design/kernel_stream.typ) を参照。
-
 1. [01_current_repo_survey.md](01_current_repo_survey.md) — 現行リポジトリの調査結果 (構成・流儀・**発見済みの不具合一覧**)
 2. [02_reference_survey.md](02_reference_survey.md) — 参照実装 (latest) の調査結果 (何がどこにあり、何が検証済みか)
 3. [03_porting_policy.md](03_porting_policy.md) — 方針: 設計文書の層構造を現リポジトリの流儀へどう写像するか、決定事項と未決事項

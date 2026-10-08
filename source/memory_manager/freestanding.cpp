@@ -7,20 +7,39 @@ extern "C" void free(void *ptr);
 namespace shizuku {
 namespace memory_managers {
 
+// ESP32-C6 専用静的 object arena (128KiB)
+// start_cpu0 置換により IDF libc/heap 初期化をバイパスしているため、
+// 実行時に未初期化の libc malloc() を呼ばず、静的メモリ領域から安全に割り当てる。
+alignas(8) static uint8_t s_c6_kernel_heap[128 * 1024];
+static uintptr_t s_allocated_offset = 0;
+
 templates::result<void *> freestanding::kernel_malloc(uintptr_t size) {
-  void *addr = malloc(size);
-  if (addr != nullptr) {
-    return addr;
+  // size == 0 または単調 arena 残容量超過を先にチェックし、size + 7 の加算オーバーフローを防止
+  if (size == 0 || size > sizeof(s_c6_kernel_heap) - s_allocated_offset) {
+    return {result_code::allocation_failed, "c6 static heap exhausted or invalid size\n"};
   }
-  return {result_code::allocation_failed, "malloc failed\n"};
+  const uintptr_t aligned_size = (size + 7u) & ~static_cast<uintptr_t>(7u);
+  if (aligned_size > sizeof(s_c6_kernel_heap) - s_allocated_offset) {
+    return {result_code::allocation_failed, "c6 static heap exhausted\n"};
+  }
+  void *addr = &s_c6_kernel_heap[s_allocated_offset];
+  s_allocated_offset += aligned_size;
+  return addr;
 }
 
 templates::result<void> freestanding::kernel_free(void *ptr) {
-  free(ptr);
-  return {};
+  if (ptr == nullptr) {
+    return {};
+  }
+  // 単調 bump arena では個別解放をサポートしない。
+  // 無効な解放要求を欺瞞的に成功 (no-op) とせず、明確にエラーを返す。
+  return {result_code::allocation_failed, "individual free not supported on c6 monotonic arena\n"};
 }
 
 templates::result<void> freestanding::init() {
+  // 制約: システム初期化 (boot) 時にのみ呼ぶこと。
+  // 稼働中の呼び出しは既存オブジェクトのポインタを破壊・再利用するため禁止。
+  s_allocated_offset = 0;
   return {};
 }
 

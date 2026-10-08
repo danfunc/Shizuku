@@ -54,6 +54,9 @@ build --strip=never
 # clobber) がレジスタ割付不能になる。CMake の Debug (-Og) と揃える。
 build --copt=-Og
 
+# V3 interface groundwork on V2; software-SVC and explicit PRIMASK envelope maxima.
+build:v3gw --copt=-DSHIZUKU_KERNEL_SERVICE_PROFILE=1
+
 # UF2 生成: 公式の uf2_aspect は picotool をソースビルドするが、Apple Silicon ホスト
 # では pico-sdk 2.2.0 の src/host/hardware_sync が clang builtin (__sev/__wfi/__wfe) と
 # 衝突してビルドできない (2026-08-19 実測)。代わりにローカル picotool を使う
@@ -61,7 +64,16 @@ build --copt=-Og
 # build --aspects=@pico-sdk//tools:uf2_aspect.bzl%pico_uf2_aspect
 # build --output_groups=+pico_uf2_files
 
-# Explicit experiments; keep the default -Og. Last optimization option wins.
-build:opt_o2 --copt=-O2
-build:opt_os --copt=-Os
-build:svc_profile --copt=-DSHIZUKU_SVC_PROFILE=1
+# ---------------------------------------------------------------------------
+# ESP32-C6 (RV32) — archive pre-init entry を含む build。
+#   bazelisk build --config=esp32c6 //firmware:esp32c6
+# ★start_cpu0 は diag hook 後 M-only kernel/bootstrap pilot を呼ぶ。timer/PMP と実機到達は未検証。
+# ★IDF は自動で探さない。事前に IDF_PATH / IDF_TOOLS_PATH を export しておくこと
+#   (欠けていれば //firmware:esp32c6 は理由を出して失敗する)。
+# ---------------------------------------------------------------------------
+build:esp32c6 --platforms=//toolchains/rv32_esp:esp32c6
+build:esp32c6 --//configs:board=esp32_c6
+build:esp32c6 --copt=-DSHIZUKU_C6_SKELETON_PERMITTED=1
+build:esp32c6 --action_env=IDF_PATH
+build:esp32c6 --action_env=IDF_TOOLS_PATH
+build:esp32c6 --action_env=PATH

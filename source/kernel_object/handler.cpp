@@ -1,4 +1,3 @@
-#include "shizuku/svc_profile.hpp"
 // ===========================================================================
 //  カーネルオブジェクト — オブジェクトランドの svc ハンドラ本体
 // ===========================================================================
@@ -10,6 +9,7 @@
 //    「何段戻すか」を載せて撃ち、ここがその段数で巻き戻す (D5)。段数は必ず申告する。
 #include "shizuku/kernel.hpp"
 #include "shizuku/kernel_object.hpp"
+#include "shizuku/svc_attributes.hpp"
 
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
 extern "C" void shizuku_boot_trace_phase(uint32_t);
@@ -26,47 +26,47 @@ static_assert((uintptr_t)object_api::EXIT_METHOD == (uintptr_t)primitive::RETURN
 
 // 実装より前に使う (下の入口が handle を呼ぶ) ので、特殊化の宣言を先に置く。
 // これが無いと暗黙の実体化が先に起きて「実体化後の特殊化」になる。
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::handle(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
-template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::claimed_depth() const;
-template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::current_object(uint32_t) const;
-template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::caller_object(uint32_t) const;
-template <> SHIZUKU_HOT void KERNEL_OBJECT::init();
-template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::handler_entry();
-template <> SHIZUKU_HOT void KERNEL_OBJECT::reply(object_error, uintptr_t);
-template <> SHIZUKU_HOT
+template <> uint32_t KERNEL_OBJECT::claimed_depth() const;
+template <> uintptr_t KERNEL_OBJECT::current_object(uint32_t) const;
+template <> uintptr_t KERNEL_OBJECT::caller_object(uint32_t) const;
+template <> void KERNEL_OBJECT::init();
+template <> uintptr_t KERNEL_OBJECT::handler_entry();
+template <> void KERNEL_OBJECT::reply(object_error, uintptr_t);
+template <>
 uintptr_t KERNEL_OBJECT::create_object(uintptr_t, uintptr_t, uintptr_t,
                                        object_error &);
-template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::object_protection(uintptr_t) const;
-template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::object_affinity(uintptr_t) const;
-template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::object_region_base(uintptr_t) const;
-template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::object_region_limit(uintptr_t) const;
-template <> SHIZUKU_HOT
+template <> uint32_t KERNEL_OBJECT::object_protection(uintptr_t) const;
+template <> uint32_t KERNEL_OBJECT::object_affinity(uintptr_t) const;
+template <> uint32_t KERNEL_OBJECT::object_region_base(uintptr_t) const;
+template <> uint32_t KERNEL_OBJECT::object_region_limit(uintptr_t) const;
+template <>
 uintptr_t KERNEL_OBJECT::grant_region(uintptr_t, uintptr_t, uintptr_t,
                                       object_error &);
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::set_object_affinity(uintptr_t, uintptr_t,
                                              object_error &);
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::export_method(uintptr_t, uintptr_t, object_error &);
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::call_method(uintptr_t, uintptr_t, uintptr_t,
                                      object_error &);
-template <> SHIZUKU_HOT void KERNEL_OBJECT::exit_method(uintptr_t, uintptr_t, uintptr_t);
-template <> SHIZUKU_HOT
+template <> void KERNEL_OBJECT::exit_method(uintptr_t, uintptr_t, uintptr_t);
+template <>
 uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t, uintptr_t, uintptr_t,
                                       object_error &);
-template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::yield_to(uintptr_t, object_error &);
-template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::sleep_us(uintptr_t, object_error &);
-template <> SHIZUKU_HOT
+template <> uintptr_t KERNEL_OBJECT::yield(object_error &);
+template <> uintptr_t KERNEL_OBJECT::sleep_us(uintptr_t, object_error &);
+template <>
 uintptr_t KERNEL_OBJECT::run_for(uintptr_t, uintptr_t, object_error &);
-template <> SHIZUKU_HOT void KERNEL_OBJECT::exit_thread();
-template <> SHIZUKU_HOT
+template <> void KERNEL_OBJECT::exit_thread();
+template <>
 uintptr_t KERNEL_OBJECT::kill_thread(uintptr_t thread, object_error &error);
-template <> SHIZUKU_HOT bool KERNEL_OBJECT::schedule(uint32_t);
-template <> SHIZUKU_HOT void KERNEL_OBJECT::table_lock();
-template <> SHIZUKU_HOT void KERNEL_OBJECT::table_unlock();
-template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::owner_of(uintptr_t, object_error &) const;
+template <> bool KERNEL_OBJECT::schedule(uint32_t);
+template <> void KERNEL_OBJECT::table_lock();
+template <> void KERNEL_OBJECT::table_unlock();
+template <> uintptr_t KERNEL_OBJECT::owner_of(uintptr_t, object_error &) const;
 
 namespace {
 // 錠の取り忘れ・放し忘れを型で防ぐ。この層は早期 return が多いので、手で放す形は
@@ -78,38 +78,38 @@ struct table_guard {
   table_guard &operator=(const table_guard &) = delete;
 };
 } // namespace
-template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::declare_name(uintptr_t, object_error &);
-template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::object_name(uintptr_t, object_error &);
-template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::stream_create(uintptr_t, uintptr_t, uintptr_t, object_error &);
-template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::stream_open(uintptr_t, object_error &);
-template <> SHIZUKU_HOT
+template <> uintptr_t KERNEL_OBJECT::declare_name(uintptr_t, object_error &);
+template <> uintptr_t KERNEL_OBJECT::object_name(uintptr_t, object_error &);
+template <> uintptr_t KERNEL_OBJECT::stream_create(uintptr_t, uintptr_t, uintptr_t, object_error &);
+template <> uintptr_t KERNEL_OBJECT::stream_open(uintptr_t, object_error &);
+template <>
 uintptr_t KERNEL_OBJECT::stream_bind(uintptr_t, uintptr_t, object_error &);
-template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::stream_destroy(uintptr_t, object_error &);
-template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::stream_push_n(uintptr_t, uintptr_t, object_error &);
-template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::stream_pop_n(uintptr_t, uintptr_t, object_error &);
-template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::stream_available(uintptr_t, object_error &);
-template <> SHIZUKU_HOT KERNEL_OBJECT::stream_entry *KERNEL_OBJECT::stream_lookup(uintptr_t);
-template <> SHIZUKU_HOT bool KERNEL_OBJECT::stream_pin(uintptr_t, KERNEL_OBJECT::stream_entry *&);
-template <> SHIZUKU_HOT void KERNEL_OBJECT::stream_unpin(KERNEL_OBJECT::stream_entry &);
-template <> SHIZUKU_HOT bool KERNEL_OBJECT::stream_stack_range(uint32_t, uintptr_t, uintptr_t) const;
-template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::stream_push_kernel(uintptr_t, const void *, uint32_t);
-template <> SHIZUKU_HOT bool KERNEL_OBJECT::stream_bind_kernel(uintptr_t);
-template <> SHIZUKU_HOT
+template <> uintptr_t KERNEL_OBJECT::stream_destroy(uintptr_t, object_error &);
+template <> uintptr_t KERNEL_OBJECT::stream_push_n(uintptr_t, uintptr_t, object_error &);
+template <> uintptr_t KERNEL_OBJECT::stream_pop_n(uintptr_t, uintptr_t, object_error &);
+template <> uintptr_t KERNEL_OBJECT::stream_available(uintptr_t, object_error &);
+template <> KERNEL_OBJECT::stream_entry *KERNEL_OBJECT::stream_lookup(uintptr_t);
+template <> bool KERNEL_OBJECT::stream_pin(uintptr_t, KERNEL_OBJECT::stream_entry *&);
+template <> void KERNEL_OBJECT::stream_unpin(KERNEL_OBJECT::stream_entry &);
+template <> bool KERNEL_OBJECT::stream_stack_range(uint32_t, uintptr_t, uintptr_t) const;
+template <> uintptr_t KERNEL_OBJECT::stream_push_kernel(uintptr_t, const void *, uint32_t);
+template <> bool KERNEL_OBJECT::stream_bind_kernel(uintptr_t);
+template <>
 uintptr_t KERNEL_OBJECT::stream_connect(uintptr_t, uintptr_t, object_error &);
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::stream_disconnect(uintptr_t, object_error &);
-template <> SHIZUKU_HOT void KERNEL_OBJECT::pump_connections();
-template <> SHIZUKU_HOT KERNEL_OBJECT::lent_stack KERNEL_OBJECT::lend_boot_stack();
-template <> SHIZUKU_HOT bool KERNEL_OBJECT::start_secondary_core();
-template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::memory_allocate(uintptr_t, object_error &);
-template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::memory_release(uintptr_t, object_error &);
-template <> SHIZUKU_HOT
+template <> void KERNEL_OBJECT::pump_connections();
+template <> KERNEL_OBJECT::lent_stack KERNEL_OBJECT::lend_boot_stack();
+template <> bool KERNEL_OBJECT::start_secondary_core();
+template <> uintptr_t KERNEL_OBJECT::memory_allocate(uintptr_t, object_error &);
+template <> uintptr_t KERNEL_OBJECT::memory_release(uintptr_t, object_error &);
+template <>
 uintptr_t KERNEL_OBJECT::memory_hand_over(uintptr_t, uintptr_t, object_error &);
-template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::memory_owner(uintptr_t, object_error &);
-template <> SHIZUKU_HOT void KERNEL_OBJECT::arena_init(arena &, uintptr_t, uintptr_t);
-template <> SHIZUKU_HOT
+template <> uintptr_t KERNEL_OBJECT::memory_owner(uintptr_t, object_error &);
+template <> void KERNEL_OBJECT::arena_init(arena &, uintptr_t, uintptr_t);
+template <>
 uintptr_t KERNEL_OBJECT::arena_allocate(arena &, uintptr_t, uintptr_t);
-template <> SHIZUKU_HOT bool KERNEL_OBJECT::arena_release(arena &, uintptr_t);
+template <> bool KERNEL_OBJECT::arena_release(arena &, uintptr_t);
 
 // カーネルが起こすハンドラの入口。**素の C 関数**でよい。
 // ★ネストした呼び出しの情報をレジスタで持ち回らない: 番号は引数スロット (a0) に
@@ -119,18 +119,15 @@ template <> SHIZUKU_HOT bool KERNEL_OBJECT::arena_release(arena &, uintptr_t);
 //   参照実装はこれを callee-saved レジスタで渡し、C の引数へ変換する naked シムを
 //   必要としていた — push 順と引数位置の対応を何度も間違えた箇所なので、構造ごと
 //   無くすのが正しい。
-SHIZUKU_HOT uintptr_t handler_entry_point(uintptr_t a0, uintptr_t a1, uintptr_t a2,
+uintptr_t handler_entry_point(uintptr_t a0, uintptr_t a1, uintptr_t a2,
                               uintptr_t a3) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(419);
 #endif
-  SHIZUKU_PROFILE(6); // trampoline / handler begin
-  const auto result = kernel_object_instance.handle(a0, a1, a2, a3);
-  SHIZUKU_PROFILE(7); // handler end
-  return result;
+  return kernel_object_instance.handle(a0, a1, a2, a3);
 }
 
-template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::handler_entry() {
+template <> uintptr_t KERNEL_OBJECT::handler_entry() {
   return (uintptr_t)&handler_entry_point;
 }
 
@@ -148,7 +145,7 @@ static_assert(KERNEL::thread_record_bytes() * KERNEL_OBJECT::THREAD_COUNT +
               sizeof(g_bookkeeping_storage),
               "bookkeeping arena must fit thread table and all per-thread ledgers");
 
-template <> SHIZUKU_HOT void KERNEL_OBJECT::init() {
+template <> void KERNEL_OBJECT::init() {
   for (uintptr_t id = 0; id < OBJECT_COUNT; ++id) {
     m_objects[id].created = false;
     m_objects[id].flags = 0;
@@ -208,13 +205,13 @@ template <> SHIZUKU_HOT void KERNEL_OBJECT::init() {
   m_objects[ROOT_OBJECT].parent_handler_object = (uint32_t)KERNEL_OBJECT_ID;
   m_objects[ROOT_OBJECT].parent_handler_entry = handler_entry();
   for (uintptr_t index = 0; index < STREAM_COUNT; ++index) {
-    shizuku_zero_record(&m_streams[index]);
+    m_streams[index] = {};
     m_streams[index].generation = 1;
     m_streams[index].producer = stream::NO_OWNER;
     m_streams[index].consumer = stream::NO_OWNER;
   }
   for (uintptr_t index = 0; index < CONNECTION_COUNT; ++index)
-    shizuku_zero_record(&m_connections[index]);
+    m_connections[index] = {};
   m_connection_count = 0;
   m_pump_lock = 0;
 }
@@ -222,7 +219,7 @@ template <> SHIZUKU_HOT void KERNEL_OBJECT::init() {
 // ★スレッド 0 のスタックも他と同じく arena から貸す。ここだけカーネルが自分で
 //   malloc していると「スレッドの記憶は誰のものか」が二枚舌になる。
 //   ブートスレッドは組み立てと自己テストを走らせるので少し厚めに取る。
-template <> SHIZUKU_HOT KERNEL_OBJECT::lent_stack KERNEL_OBJECT::lend_boot_stack() {
+template <> KERNEL_OBJECT::lent_stack KERNEL_OBJECT::lend_boot_stack() {
   constexpr uintptr_t BOOT_STACK_BYTES = 8192;
   const uintptr_t base =
       arena_allocate(m_objects_arena, BOOT_STACK_BYTES, ROOT_OBJECT);
@@ -264,7 +261,7 @@ void secondary_boot() {
 }
 } // namespace
 
-template <> SHIZUKU_HOT bool KERNEL_OBJECT::start_secondary_core() {
+template <> bool KERNEL_OBJECT::start_secondary_core() {
   if (KERNEL::CORE_COUNT < 2)
     return false;
   const auto reserved = kernel_instance.reserve_thread();
@@ -310,7 +307,7 @@ template <> SHIZUKU_HOT bool KERNEL_OBJECT::start_secondary_core() {
 //   (呼び先の枠 + その中の svc を運ぶ枠) なので、ハンドラとして走っている今の
 //   段数は 2 * 呼び出し段数 + 1 になるはず。ここがズレたら台帳とカーネルの
 //   どちらかが壊れているので、カーネルが 1 枚も落とさずに弾く。
-template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::claimed_depth() const {
+template <> uint32_t KERNEL_OBJECT::claimed_depth() const {
   const uint32_t thread = kernel_instance.current_thread_id();
   uint32_t calls = 0;
   for (uint32_t i = 0; i < kernel_instance.ledger_size(thread); ++i)
@@ -318,7 +315,7 @@ template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::claimed_depth() const {
   return 2u * calls + 1u;
 }
 
-template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::current_object(uint32_t thread) const {
+template <> uintptr_t KERNEL_OBJECT::current_object(uint32_t thread) const {
   for (uint32_t i = 0; i < kernel_instance.ledger_size(thread); ++i) {
     const auto *entry = kernel_instance.ledger_entry(thread, i);
     if (entry->via == KERNEL::LEDGER_CALL)
@@ -327,7 +324,7 @@ template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::current_object(uint32_t thread)
   return m_thread_object[thread];
 }
 
-template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::caller_object(uint32_t thread) const {
+template <> uintptr_t KERNEL_OBJECT::caller_object(uint32_t thread) const {
   uint32_t calls = 0;
   for (uint32_t i = 0; i < kernel_instance.ledger_size(thread); ++i) {
     const auto *entry = kernel_instance.ledger_entry(thread, i);
@@ -337,7 +334,7 @@ template <> SHIZUKU_HOT uintptr_t KERNEL_OBJECT::caller_object(uint32_t thread) 
   return calls == 1 ? m_thread_object[thread] : (uintptr_t)NO_OBJECT;
 }
 
-template <> SHIZUKU_HOT
+template <>
 uint32_t KERNEL_OBJECT::interposed_handler(uint32_t thread) const {
   const auto *root = kernel_instance.ledger_entry(thread, 0);
   const auto *handler = kernel_instance.ledger_entry(thread, 1);
@@ -358,13 +355,13 @@ uint32_t KERNEL_OBJECT::interposed_handler(uint32_t thread) const {
 }
 
 // 巻き戻さずにその場で答える。**エラーを黙って捨てない**ための共通口 (D12)。
-template <> SHIZUKU_HOT void KERNEL_OBJECT::reply(object_error error, uintptr_t value) {
+template <> void KERNEL_OBJECT::reply(object_error error, uintptr_t value) {
   ARCH::syscall((uintptr_t)primitive::RETURN, 1, value, (uintptr_t)error,
                 claimed_depth());
   // 成功すれば戻らない。
 }
 
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
                                        uintptr_t flags, object_error &error) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
@@ -382,7 +379,9 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
   // ★専用 handling object の宣言は信頼済み composition 主体 (ROOT / KERNEL_OBJECT) だけが行える (重大指摘 1)。
   //   単なる実行特権 bit (PROTECTION_PRIVILEGED) では絶対に許可しない。
   const bool is_handler = (flags & INTERNAL_FLAG_HANDLER) != 0;
-  if (is_handler && creator != ROOT_OBJECT && creator != KERNEL_OBJECT_ID) {
+  if (!svc_permission_allows((uintptr_t)object_api::CREATE_OBJECT, is_privileged,
+          creator == ROOT_OBJECT || creator == KERNEL_OBJECT_ID, false, flags,
+          INTERNAL_FLAG_HANDLER)) {
     error = object_error::NOT_PRIVILEGED;
     return 0;
   }
@@ -392,10 +391,6 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
   //   だけに許す。名前を付けずにビットだけ立てると、衝突の検出 (下) を
   //   素通りする抜け道が無名のまま残る。
   const bool replace = (flags & OBJECT_REPLACE) != 0;
-  if (replace && !is_privileged) {
-    error = object_error::NOT_PRIVILEGED;
-    return 0;
-  }
   const char *taken_by = nullptr;
   {
     table_guard guard;
@@ -460,14 +455,14 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
 //   直に呼ばない」オブジェクトだけで (静的データもペリフェラルも region の外 =
 //   特権のみになるため。DESIGN §11.2.2)、今それを満たすのは宣言した相手だけ。
 //   arena が入って既定を反転できるようになるまでは、opt-in にしておく。
-template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::object_protection(uintptr_t id) const {
+template <> uint32_t KERNEL_OBJECT::object_protection(uintptr_t id) const {
   return (m_objects[id].flags & OBJECT_UNPRIVILEGED) ? PROTECTION_UNPRIVILEGED
                                                      : PROTECTION_PRIVILEGED;
 }
 
 // ★どこでも走れるのが既定。固定されているのは「機械の都合でそうなっている」
 //   相手だけで、それは宣言してもらう (気をつけて置く、では守れない)。
-template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::object_affinity(uintptr_t id) const {
+template <> uint32_t KERNEL_OBJECT::object_affinity(uintptr_t id) const {
   return (uint32_t)((m_objects[id].flags & OBJECT_AFFINITY_MASK) >>
                     OBJECT_AFFINITY_SHIFT);
 }
@@ -475,7 +470,7 @@ template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::object_affinity(uintptr_t id) co
 // ---- 軸 B (Q8 / DESIGN §11.3) — オブジェクトへ動的に開く読み専用の窓 --------
 // ★生成時の宣言を差し替える。**次の SPAWN から**効く (走っているスレッドの
 //   アフィニティは変えない — 走っている文脈を別コアへ移す手段は無い)。
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::set_object_affinity(uintptr_t id, uintptr_t cores,
                                              object_error &error) {
   if (id >= OBJECT_COUNT || !m_objects[id].created) {
@@ -489,22 +484,23 @@ uintptr_t KERNEL_OBJECT::set_object_affinity(uintptr_t id, uintptr_t cores,
   return 1;
 }
 
-template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::object_region_base(uintptr_t id) const {
+template <> uint32_t KERNEL_OBJECT::object_region_base(uintptr_t id) const {
   return m_objects[id].region_base;
 }
-template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::object_region_limit(uintptr_t id) const {
+template <> uint32_t KERNEL_OBJECT::object_region_limit(uintptr_t id) const {
   return m_objects[id].region_limit;
 }
 
 // ★誰が誰に何を見せるかを決める権限そのものが特権行為。呼び出し元
 //   (現在オブジェクト) が非特権なら、対象がどこであろうと拒否する
 //   (対象を特権にする話ではない — 「開示できる側」の話)。
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::grant_region(uintptr_t target, uintptr_t base,
                                       uintptr_t limit, object_error &error) {
   const uint32_t thread = kernel_instance.current_thread_id();
   const uintptr_t granter = current_object(thread);
-  if (object_protection(granter) != PROTECTION_PRIVILEGED) {
+  if (!svc_permission_allows((uintptr_t)object_api::GRANT_REGION,
+                              object_protection(granter) == PROTECTION_PRIVILEGED)) {
     error = object_error::NOT_PRIVILEGED;
     return 0;
   }
@@ -518,7 +514,7 @@ uintptr_t KERNEL_OBJECT::grant_region(uintptr_t target, uintptr_t base,
   return 1;
 }
 
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::export_method(uintptr_t method, uintptr_t entry,
                                        object_error &error) {
   // ★誰のものとして登録するかは**発行元から導出する** (名乗らせない)。
@@ -533,7 +529,7 @@ uintptr_t KERNEL_OBJECT::export_method(uintptr_t method, uintptr_t entry,
   return self;
 }
 
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
                                      uintptr_t argument, object_error &error) {
   const uint32_t thread = kernel_instance.current_thread_id();
@@ -559,8 +555,7 @@ uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
     return 0;
   }
 
-  call_request request;
-  shizuku_zero_record(&request);
+  call_request request{};
   request.entry_pc = (uintptr_t)entry;
   request.callee_object = (uint32_t)id;                    // ★呼び先オブジェクトID
   request.callee_kind = (uint32_t)object_kind_of(id);      // ★呼び先の種別
@@ -585,7 +580,7 @@ uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
   return result.value;
 }
 
-template <> SHIZUKU_HOT
+template <>
 void KERNEL_OBJECT::exit_method(uintptr_t levels, uintptr_t value,
                                 uintptr_t error) {
   const uint32_t thread = kernel_instance.current_thread_id();
@@ -621,14 +616,15 @@ void KERNEL_OBJECT::exit_method(uintptr_t levels, uintptr_t value,
   reply(object_error::UNWIND_REJECTED, (uintptr_t)result.error);
 }
 
-template <> SHIZUKU_HOT
+template <>
 void KERNEL_OBJECT::forward_child_exit(uintptr_t value, uintptr_t error) {
   const uint32_t thread = kernel_instance.current_thread_id();
 
   // 発行元は専用ハンドラ (HANDLER) でなければならない (重大指摘 1, 2)。
   // ★台帳上の子の親ハンドラが、今 SVC を撃っている段として在席していること
   //   (= なりすまし転送防止) を interposed_handler がまとめて確かめる。
-  if (interposed_handler(thread) == (uint32_t)NO_OBJECT) {
+  if (!svc_permission_allows((uintptr_t)object_api::FORWARD_CHILD_EXIT, false,
+                              false, interposed_handler(thread) != (uint32_t)NO_OBJECT)) {
     reply(object_error::NOT_PRIVILEGED, 0);
     return;
   }
@@ -654,7 +650,7 @@ void KERNEL_OBJECT::forward_child_exit(uintptr_t value, uintptr_t error) {
 // ---- スレッドと実行権の方針 -------------------------------------------------
 // ★カーネルは「渡す機構」しか持たない。誰にいつ渡すか、いつ取り上げるかを決めるのは
 //   ここ (D1 / DESIGN §2 P1「機構はカーネル、方針はオブジェクト」)。
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
                                       uintptr_t argument, object_error &error) {
   if (id >= OBJECT_COUNT || !m_objects[id].created) {
@@ -687,8 +683,7 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
     error = object_error::NO_MEMORY;
     return 0;
   }
-  KERNEL::spawn_request request;
-  shizuku_zero_record(&request);
+  KERNEL::spawn_request request{};
   request.entry_pc = (uintptr_t)entry;
   request.argument = argument;
   request.protection = object_protection(id);
@@ -730,7 +725,7 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
 //     時限あり (既定) → 貸す。自分から返さないスレッドがいても期限で戻る
 //     時限 0          → バトン渡し。返ってこない可能性を承知で渡す相手だけに使う
 // ★回転子から順に見る。自分の直後だけを見ると同じ相手ばかり選ばれて飢餓が出る。
-template <> SHIZUKU_HOT bool KERNEL_OBJECT::schedule(uint32_t self) {
+template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
   using state_t = KERNEL::THREAD::state_t;
   const uint32_t core = KERNEL::BOARD::core_num();
   const uint64_t now = KERNEL::BOARD::time_us();
@@ -843,7 +838,7 @@ template <> SHIZUKU_HOT bool KERNEL_OBJECT::schedule(uint32_t self) {
 
 // 締切まで自分を走らせない。★待っている間は他へ CPU を渡す — 「待つ」ことで
 // 他の仕事が止まるなら、それは待ちではなく占有になってしまう。
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::sleep_us(uintptr_t microseconds, object_error &error) {
   (void)error;
   const uint32_t self = kernel_instance.current_thread_id();
@@ -880,8 +875,9 @@ uintptr_t KERNEL_OBJECT::sleep_us(uintptr_t microseconds, object_error &error) {
   return 0;
 }
 
-template <> SHIZUKU_HOT
-uintptr_t KERNEL_OBJECT::yield_to(uintptr_t target, object_error &error) {
+template <>
+uintptr_t KERNEL_OBJECT::yield(object_error &error) {
+  (void)error;
   const uint32_t self = kernel_instance.current_thread_id();
   // 借り手として走っているなら、譲る先を選ぶ権利は無い — 貸し手へ返すだけ
   // (カーネルの SWITCH が対象を無視してそう振る舞う)。
@@ -889,18 +885,10 @@ uintptr_t KERNEL_OBJECT::yield_to(uintptr_t target, object_error &error) {
     ARCH::syscall((uintptr_t)primitive::SWITCH, 0);
     return 0;
   }
-  if (target != 0) {
-    const auto result = ARCH::syscall((uintptr_t)primitive::SWITCH, target);
-    if (result.error != (uintptr_t)kernel_error::OK) {
-      error = object_error::NOT_RUNNABLE;
-      return 0;
-    }
-    return target;
-  }
   return schedule(self) ? 1 : 0; // 誰も居なければ自分が続ける
 }
 
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::run_for(uintptr_t thread, uintptr_t cycles,
                                  object_error &error) {
   const auto result =
@@ -921,7 +909,7 @@ uintptr_t KERNEL_OBJECT::run_for(uintptr_t thread, uintptr_t cycles,
 // スレッドを終える。**このスレッドはもう走らない**ので、終える前に次の相手へ
 // 実行権を渡す。渡せなければ、この後カーネルが誰も選べないまま戻ることになるので、
 // 借り手として走っていたなら貸し手へ返す道が残っている。
-template <> SHIZUKU_HOT void KERNEL_OBJECT::exit_thread() {
+template <> void KERNEL_OBJECT::exit_thread() {
   const uint32_t self = kernel_instance.current_thread_id();
   // ★★自分のスタックも自分の枠も、ここでは返さない。**今その上で走っている**
   //   ので、返した瞬間に他コアの割り当てや spawn がその領域と枠を掴める
@@ -954,13 +942,14 @@ template <> SHIZUKU_HOT void KERNEL_OBJECT::exit_thread() {
 //   ・選ばないこと    → schedule() が旗を見て飛ばす (状態語に触らない)
 //   ・記憶を返すこと  → READY からの CAS が取れたときだけ (terminate_if_idle)
 //   に分ける。
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::kill_thread(uintptr_t thread, object_error &error) {
   using state_t = KERNEL::THREAD::state_t;
   const uint32_t self = kernel_instance.current_thread_id();
   // 「誰が誰を止めてよいか」は方針。止める権利は特権オブジェクトだけが持つ
   //  (GRANT_REGION と同じ理由 — 権限そのものを配る行為は特権行為)。
-  if (object_protection(current_object(self)) != PROTECTION_PRIVILEGED) {
+  if (!svc_permission_allows((uintptr_t)object_api::KILL_THREAD,
+                              object_protection(current_object(self)) == PROTECTION_PRIVILEGED)) {
     error = object_error::NOT_PRIVILEGED;
     return 0;
   }
@@ -997,7 +986,7 @@ uintptr_t KERNEL_OBJECT::kill_thread(uintptr_t thread, object_error &error) {
 // ★1 コアのときは無償だった相互排除を、2 コアでは明示的に取る (kernel_object.hpp)。
 //   区間は短く、**syscall を含まない**ものだけ。握ったまま実行権を手放すと、
 //   相手のコアが「走っていない持ち主」を待って回り続ける。
-template <> SHIZUKU_HOT void KERNEL_OBJECT::table_lock() {
+template <> void KERNEL_OBJECT::table_lock() {
   while (!ARCH::cas32(&m_table_lock, 0u, 1u)) {
     // 待つ。★ここで yield しない — 錠を待っている相手は必ず走っており
     //   (握ったまま手放さない規律があるので)、待ちは有界。yield すると
@@ -1005,7 +994,7 @@ template <> SHIZUKU_HOT void KERNEL_OBJECT::table_lock() {
   }
 }
 
-template <> SHIZUKU_HOT void KERNEL_OBJECT::table_unlock() {
+template <> void KERNEL_OBJECT::table_unlock() {
   ARCH::store_release32(&m_table_lock, 0u);
 }
 
@@ -1015,7 +1004,7 @@ template <> SHIZUKU_HOT void KERNEL_OBJECT::table_unlock() {
 // ★★保持するだけで**比較しない**。比較 = 文字列処理を入れた瞬間に、オブジェクト
 //   システムが定数時間で抜けられなくなる (D26)。名前で引くのは System Object の
 //   仕事で、起動したら OBJECT_NAME で読み出して自分の索引を作り、引き継ぐ。
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::declare_name(uintptr_t name, object_error &error) {
   const uintptr_t self = current_object(kernel_instance.current_thread_id());
   if (name == 0) {
@@ -1033,7 +1022,7 @@ uintptr_t KERNEL_OBJECT::declare_name(uintptr_t name, object_error &error) {
   return self;
 }
 
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::object_name(uintptr_t id, object_error &error) {
   if (id >= OBJECT_COUNT || !m_objects[id].created) {
     error = object_error::BAD_OBJECT;
@@ -1043,7 +1032,7 @@ uintptr_t KERNEL_OBJECT::object_name(uintptr_t id, object_error &error) {
 }
 
 // ---- Kernel-owned stream table and data plane -------------------------------
-template <> SHIZUKU_HOT KERNEL_OBJECT::stream_entry *KERNEL_OBJECT::stream_lookup(uintptr_t id) {
+template <> KERNEL_OBJECT::stream_entry *KERNEL_OBJECT::stream_lookup(uintptr_t id) {
   if (id > UINT32_MAX) return nullptr;
   const uint32_t slot = (uint32_t)(id & STREAM_SLOT_MASK);
   const uint32_t generation = (uint32_t)(id >> STREAM_SLOT_BITS);
@@ -1054,7 +1043,7 @@ template <> SHIZUKU_HOT KERNEL_OBJECT::stream_entry *KERNEL_OBJECT::stream_looku
                  entry.generation == generation ? &entry : nullptr;
 }
 
-template <> SHIZUKU_HOT bool KERNEL_OBJECT::stream_pin(uintptr_t id, stream_entry *&entry) {
+template <> bool KERNEL_OBJECT::stream_pin(uintptr_t id, stream_entry *&entry) {
   entry = stream_lookup(id);
   if (!entry) return false;
   uint32_t users;
@@ -1074,7 +1063,7 @@ template <> SHIZUKU_HOT bool KERNEL_OBJECT::stream_pin(uintptr_t id, stream_entr
   return true;
 }
 
-template <> SHIZUKU_HOT void KERNEL_OBJECT::stream_unpin(stream_entry &entry) {
+template <> void KERNEL_OBJECT::stream_unpin(stream_entry &entry) {
   uint32_t users;
   do {
     users = ARCH::load_acquire32(&entry.users);
@@ -1082,7 +1071,7 @@ template <> SHIZUKU_HOT void KERNEL_OBJECT::stream_unpin(stream_entry &entry) {
            !ARCH::cas32(&entry.users, users, users - 1));
 }
 
-template <> SHIZUKU_HOT bool KERNEL_OBJECT::stream_stack_range(uint32_t thread,
+template <> bool KERNEL_OBJECT::stream_stack_range(uint32_t thread,
                                                    uintptr_t address,
                                                    uintptr_t bytes) const {
   if (thread >= THREAD_COUNT || m_thread_stack[thread] == 0 || bytes == 0 ||
@@ -1094,7 +1083,7 @@ template <> SHIZUKU_HOT bool KERNEL_OBJECT::stream_stack_range(uint32_t thread,
          address + bytes <= base + size;
 }
 
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::stream_create(uintptr_t rec_size, uintptr_t capacity,
                                        uintptr_t flags, object_error &error) {
   const uintptr_t owner = current_object(kernel_instance.current_thread_id());
@@ -1127,14 +1116,14 @@ uintptr_t KERNEL_OBJECT::stream_create(uintptr_t rec_size, uintptr_t capacity,
   return ((uintptr_t)entry.generation << STREAM_SLOT_BITS) | slot;
 }
 
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::stream_open(uintptr_t id, object_error &error) {
   table_guard guard;
   if (!stream_lookup(id)) { error = object_error::BAD_STREAM; return 0; }
   return id;
 }
 
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::stream_bind(uintptr_t id, uintptr_t which,
                                      object_error &error) {
   if (which > (uintptr_t)stream::role::CONSUMER) {
@@ -1153,7 +1142,7 @@ uintptr_t KERNEL_OBJECT::stream_bind(uintptr_t id, uintptr_t which,
   return self;
 }
 
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::stream_destroy(uintptr_t id, object_error &error) {
   const uintptr_t self = current_object(kernel_instance.current_thread_id());
   stream_entry *entry = nullptr;
@@ -1201,7 +1190,7 @@ uintptr_t KERNEL_OBJECT::stream_destroy(uintptr_t id, object_error &error) {
   return 1;
 }
 
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::stream_push_n(uintptr_t id, uintptr_t request_ptr,
                                        object_error &error) {
   const uint32_t thread = kernel_instance.current_thread_id();
@@ -1237,7 +1226,7 @@ uintptr_t KERNEL_OBJECT::stream_push_n(uintptr_t id, uintptr_t request_ptr,
   return pushed;
 }
 
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::stream_pop_n(uintptr_t id, uintptr_t request_ptr,
                                       object_error &error) {
   const uint32_t thread = kernel_instance.current_thread_id();
@@ -1286,7 +1275,7 @@ uintptr_t KERNEL_OBJECT::stream_pop_n(uintptr_t id, uintptr_t request_ptr,
   return popped;
 }
 
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::stream_available(uintptr_t id, object_error &error) {
   stream_entry *entry = nullptr;
   if (!stream_pin(id, entry)) { error = object_error::BAD_STREAM; return 0; }
@@ -1297,7 +1286,7 @@ uintptr_t KERNEL_OBJECT::stream_available(uintptr_t id, object_error &error) {
   return available;
 }
 
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::stream_push_kernel(uintptr_t id, const void *records,
                                             uint32_t count) {
   stream_entry *entry = nullptr;
@@ -1320,7 +1309,7 @@ uintptr_t KERNEL_OBJECT::stream_push_kernel(uintptr_t id, const void *records,
   return pushed;
 }
 
-template <> SHIZUKU_HOT bool KERNEL_OBJECT::stream_bind_kernel(uintptr_t id) {
+template <> bool KERNEL_OBJECT::stream_bind_kernel(uintptr_t id) {
   table_guard guard;
   stream_entry *entry = stream_lookup(id);
   if (!entry || entry->producer != stream::NO_OWNER) return false;
@@ -1331,7 +1320,7 @@ template <> SHIZUKU_HOT bool KERNEL_OBJECT::stream_bind_kernel(uintptr_t id) {
 // ★src の consumer 席と dst の producer 席を DMA で直結する。
 //   以後 src へ流れたものは、**途中のオブジェクトが pop して push する段を通らずに**
 //   dst へ届く。中継が要らなくなるのが眼目。
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::stream_connect(uintptr_t src, uintptr_t dst,
                                         object_error &error) {
   table_guard guard;
@@ -1387,7 +1376,7 @@ uintptr_t KERNEL_OBJECT::stream_connect(uintptr_t src, uintptr_t dst,
 //   待つと、その待ちがカーネルに入り込む (誰も進められない時間ができる)。
 // ★席を返すのは実際に畳んだ瞬間だけ。印を立てた時点で返すと、まだ DMA が
 //   触っている環へ別の持ち主が bind できてしまう。
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::stream_disconnect(uintptr_t slot, object_error &error) {
   table_guard guard;
   if (slot >= CONNECTION_COUNT) {
@@ -1408,7 +1397,7 @@ uintptr_t KERNEL_OBJECT::stream_disconnect(uintptr_t slot, object_error &error) 
 
 // 接続を 1 歩進める。★schedule() から呼ばれるので、接続が 0 本なら数語読んで即戻る。
 //   両コアが同時に回さないよう、取れなければ**待たずに諦める** (次の周回で回る)。
-template <> SHIZUKU_HOT void KERNEL_OBJECT::pump_connections() {
+template <> void KERNEL_OBJECT::pump_connections() {
   if (ARCH::load_acquire32(&m_connection_count) == 0)
     return;
   if (!ARCH::cas32(&m_pump_lock, 0u, 1u))
@@ -1499,7 +1488,7 @@ template <> SHIZUKU_HOT void KERNEL_OBJECT::pump_connections() {
 // ★参照実装の「オブジェクトごとに 16 語」は簡易な一形態でしかない。ここでは
 //   大きさを指定して借り、**持ち主を付け替えられる**形にする。持ち主が付いていれば
 //   「このオブジェクトが何を持っているか」が言えるので、会計にも解放にも使える。
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::memory_allocate(uintptr_t bytes, object_error &error) {
   const uintptr_t self = current_object(kernel_instance.current_thread_id());
   table_guard guard;
@@ -1509,7 +1498,7 @@ uintptr_t KERNEL_OBJECT::memory_allocate(uintptr_t bytes, object_error &error) {
   return handle;
 }
 
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::memory_release(uintptr_t handle, object_error &error) {
   const uintptr_t self = current_object(kernel_instance.current_thread_id());
   table_guard guard;
@@ -1533,7 +1522,7 @@ uintptr_t KERNEL_OBJECT::memory_release(uintptr_t handle, object_error &error) {
 
 // 持ち主を付け替える = 渡す。**渡した側は以後それを返せない**ので、
 // 「渡したのにまだ自分のもの」という曖昧さが残らない。
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::memory_hand_over(uintptr_t handle, uintptr_t receiver,
                                           object_error &error) {
   const uintptr_t self = current_object(kernel_instance.current_thread_id());
@@ -1558,7 +1547,7 @@ uintptr_t KERNEL_OBJECT::memory_hand_over(uintptr_t handle, uintptr_t receiver,
 }
 
 // 錠を持っている前提の素の実装 (kernel_object.hpp の注記を参照)。
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::owner_of(uintptr_t handle, object_error &error) const {
   if (handle <= m_objects_arena.base ||
       handle >= m_objects_arena.base + m_objects_arena.bytes) {
@@ -1573,13 +1562,13 @@ uintptr_t KERNEL_OBJECT::owner_of(uintptr_t handle, object_error &error) const {
   return header->owner;
 }
 
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::memory_owner(uintptr_t handle, object_error &error) {
   table_guard guard;
   return owner_of(handle, error);
 }
 
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
                                 uintptr_t a3) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
@@ -1619,7 +1608,7 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
     value = spawn_method(a1, a2, a3, error);
     break;
   case object_api::YIELD:
-    value = yield_to(a1, error);
+    value = yield(error);
     break;
   case object_api::RUN_FOR:
     value = run_for(a1, a2, error);

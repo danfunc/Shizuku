@@ -52,19 +52,19 @@ template <typename CONTEXT> struct thread {
   uint32_t base_kind = (uint32_t)object_kind::PLAIN;
   uint32_t base_handler_object = 0;
   uintptr_t base_handler_entry = 0;
-  [[gnu::always_inline]] inline const call_ledger_entry &ledger_top() const {
+  const call_ledger_entry &ledger_top() const {
     return ledger[call_stack.depth - 1];
   }
-  [[gnu::always_inline]] inline uint32_t current_object() const {
+  uint32_t current_object() const {
     return call_stack.depth ? ledger_top().object : base_object;
   }
-  [[gnu::always_inline]] inline uint32_t current_kind() const {
+  uint32_t current_kind() const {
     return call_stack.depth ? ledger_top().kind : base_kind;
   }
-  [[gnu::always_inline]] inline uint32_t current_handler_object() const {
+  uint32_t current_handler_object() const {
     return call_stack.depth ? ledger_top().handler_object : base_handler_object;
   }
-  [[gnu::always_inline]] inline uintptr_t current_handler_entry() const {
+  uintptr_t current_handler_entry() const {
     return call_stack.depth ? ledger_top().handler_entry : base_handler_entry;
   }
   uint32_t affinity = 0b1; // bit0 = core0 (どのコアで走ってよいか)
@@ -77,8 +77,8 @@ template <typename CONTEXT> struct thread {
   // ★sleep の起床時刻やスケジューリングの優先度はここに無い。それは方針なので
   //   カーネルオブジェクトが自分の表で持つ (D1)。
 
-  [[gnu::always_inline]] inline bool is_state(state_t expected) const { return state == (uint32_t)expected; }
-  [[gnu::always_inline]] inline void set_state(state_t next) { state = (uint32_t)next; }
+  bool is_state(state_t expected) const { return state == (uint32_t)expected; }
+  void set_state(state_t next) { state = (uint32_t)next; }
 };
 
 } // namespace templates

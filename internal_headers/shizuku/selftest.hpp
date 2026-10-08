@@ -25,6 +25,8 @@ void call_ladder();
 
 // 親 handler 自動バインディングとルーティングの検証プローブ
 void handler_binding_probe();
+void kernel_services_probe();
+void kernel_services_isr_result();
 
 
 // 呼び出しの費用の実測 (svc 往復 / メソッド呼び出し)。DWT CYCCNT でサイクルを数える。

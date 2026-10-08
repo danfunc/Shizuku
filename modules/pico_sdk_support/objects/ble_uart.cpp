@@ -1596,7 +1596,7 @@ uintptr_t ble_uart_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       (uintptr_t)shizuku::stream::role::CONSUMER);
 
   const auto ota_created = api(shizuku::object_api::STREAM_CREATE,
-                               sizeof(frame_t), 32, 0);
+                               sizeof(frame_t), 64, 0);
   failures += ota_created.error;
   g_ota_stream_id = ota_created.value;
   g_ota_rx = shizuku::stream::handle<frame_t>(g_ota_stream_id);

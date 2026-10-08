@@ -72,7 +72,7 @@ cc_binary(
     ] + select({
         "//configs:rp2350_pico2_w": [
             "//modules/pico_sdk_support:ble_uart",
-            "@xno//objects/ota",
+            "//modules/pico_sdk_support:ota",
         ],
         "//conditions:default": [],
     }),
@@ -107,3 +107,4 @@ filegroup(
     name = "esp32c6_project",
     srcs = glob(["esp32c6/CMakeLists.txt", "esp32c6/sdkconfig.defaults", "esp32c6/main/*"]),
 )
+

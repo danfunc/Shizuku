@@ -105,11 +105,6 @@ uintptr_t consumer(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   api(object_api::STREAM_BIND, g_stream_id, (uintptr_t)stream::role::CONSUMER);
 #endif
   auto in = g_stream;
-  // Force the LOSSLESS full condition before draining. Otherwise a faster
-  // consumer can keep the ring empty and turn this coverage check into a race.
-  for (uint32_t gate = 0; gate < 200000 && g_full_hits == 0 &&
-                          g_producer_done == 0; ++gate)
-    api(object_api::YIELD);
   uint32_t expected = 1;
   uint32_t idle = 0;
   while (expected <= RECORDS && idle < 200000) {

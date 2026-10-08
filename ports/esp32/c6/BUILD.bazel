@@ -1,10 +1,20 @@
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
-exports_files(["early_boot.cpp", "link_stubs.cpp", "trap.cpp", "rv32_trap.S", "systimer.hpp"])
+exports_files(["early_boot.cpp", "link_stubs.cpp", "trap.cpp", "rv32_trap.S", "systimer.hpp", "selftest_record.h", "selftest_adapter.cpp", "selftest_runner.cpp"])
+
+sh_test(
+    name = "selftest_record_test",
+    srcs = ["test_selftest_record.sh"],
+    data = [
+        "selftest_record.h",
+        "selftest_adapter.cpp",
+        "test_selftest_record.cpp",
+    ],
+)
 
 cc_library(
     name = "pmp",
-    hdrs = ["pmp.hpp", "frame_layout.h", "trap_route.hpp", "systimer.hpp"],
+    hdrs = ["pmp.hpp", "frame_layout.h", "trap_route.hpp", "systimer.hpp", "selftest_record.h"],
     visibility = ["//visibility:public"],
 )
 

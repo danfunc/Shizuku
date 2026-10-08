@@ -22,18 +22,9 @@ SHIZUKU_MEM_INLINE void shizuku_memcpy(void *dst, const void *src,
   uint8_t *d = static_cast<uint8_t *>(dst);
   const uint8_t *s = static_cast<const uint8_t *>(src);
   if ((((uintptr_t)d | (uintptr_t)s | bytes) & 3u) == 0) {
-    using alias_word = uint32_t __attribute__((may_alias));
-    alias_word *dw = reinterpret_cast<alias_word *>(d);
-    const alias_word *sw = reinterpret_cast<const alias_word *>(s);
-    size_t i = 0;
-    // Four words per loop: -Og previously paid branch/index overhead per word.
-    // may_alias preserves the byte-copy contract; barriers prevent libc folding.
-    for (; i + 4 <= bytes / 4; i += 4) {
-      const alias_word a = sw[i], b = sw[i + 1], c = sw[i + 2], e = sw[i + 3];
-      dw[i] = a; dw[i + 1] = b; dw[i + 2] = c; dw[i + 3] = e;
-      __asm__ volatile("" ::: "memory");
-    }
-    for (; i < bytes / 4; ++i) {
+    uint32_t *dw = reinterpret_cast<uint32_t *>(d);
+    const uint32_t *sw = reinterpret_cast<const uint32_t *>(s);
+    for (size_t i = 0; i < bytes / 4; ++i) {
       dw[i] = sw[i];
       __asm__ volatile("" ::: "memory");
     }

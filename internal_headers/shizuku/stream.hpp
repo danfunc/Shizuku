@@ -39,7 +39,7 @@ struct dma_window {
   uint32_t room;
   uint32_t source_rd;
 };
-[[gnu::always_inline]] inline constexpr dma_window bounded_dma_window(uint32_t source_capacity,
+constexpr dma_window bounded_dma_window(uint32_t source_capacity,
                                         uint32_t destination_capacity,
                                         uint32_t source_count,
                                         uint32_t source_rd,

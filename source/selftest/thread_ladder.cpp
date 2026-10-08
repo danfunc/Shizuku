@@ -82,6 +82,146 @@ uintptr_t hog(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   return 0;
 }
 
+// ---- 追加 selftest (a)-(d) 用ヘルパ -----------------------------------------
+// (a) 無宛先YIELDをborrowerから実行するとlenderへ戻る
+volatile uint32_t g_yield_borrower_ran = 0;
+uintptr_t yield_borrower(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  g_yield_borrower_ran = 1;
+  api(object_api::YIELD);
+  g_yield_borrower_ran = 2;
+  return 0;
+}
+
+// (b) A→B→C入れ子とC予算がB残量でclamp
+volatile uint32_t g_nested_c_ran = 0;
+volatile uint32_t g_nested_b_saw_c_yield = 0;
+
+uintptr_t nested_c_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  g_nested_c_ran = 1;
+  api(object_api::YIELD); // C yields back to B
+  return 0;
+}
+
+uintptr_t nested_b_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  api(object_api::CREATE_OBJECT, OBJECT_WORKER, (uintptr_t)&nested_c_worker, OBJECT_REPLACE);
+  const api_result spawned_c = api(object_api::SPAWN, OBJECT_WORKER, METHOD_MAIN, 0);
+  if (spawned_c.error == (uintptr_t)object_error::OK) {
+    const api_result granted_c = api(object_api::RUN_FOR, spawned_c.value, 2000u * BOARD::cycles_per_us());
+    if (granted_c.error == (uintptr_t)object_error::OK && granted_c.value == 1) {
+      g_nested_b_saw_c_yield = 1;
+    }
+  }
+  api(object_api::YIELD);
+  return 0;
+}
+
+// (b-1) 仕様ケース (i): B に余裕を残して C へ一部貸与し、C reclaim 後に B が復帰・記録する
+volatile uint32_t g_nested_b_saw_c_expired = 0;
+volatile uint32_t g_nested_b_saw_c_elapsed_us = 0;
+
+uintptr_t nested_b_margin_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  const api_result spawned_c = api(object_api::SPAWN, OBJECT_HOG, METHOD_MAIN, 0);
+  if (spawned_c.error == (uintptr_t)object_error::OK) {
+    const uint32_t lend_c_cycles = 2000u * BOARD::cycles_per_us(); // 2ms 貸出
+    const uint64_t started_c = BOARD::time_us();
+    const api_result granted_c = api(object_api::RUN_FOR, spawned_c.value, lend_c_cycles);
+    const uint64_t elapsed_c = BOARD::time_us() - started_c;
+    g_nested_b_saw_c_expired = (granted_c.value == 0) ? 1 : 0;
+    g_nested_b_saw_c_elapsed_us = (uint32_t)elapsed_c;
+    g_hog_stop = 1;
+  }
+  api(object_api::YIELD);
+  return 0;
+}
+
+// (b-2) 仕様ケース (ii): B 残量全部を C へ又貸し (50ms 要求が外側 2ms でクランプ)。
+// C 取り上げと同時に B も残量 0 で巻き取られ、B の事後印は残らず、A の戻り値が EXPIRED (0)。
+volatile uint32_t g_nested_b_clamp_exhaust_ran = 0;
+
+uintptr_t nested_b_clamp_exhaust_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  const api_result spawned_c = api(object_api::SPAWN, OBJECT_HOG, METHOD_MAIN, 0);
+  if (spawned_c.error == (uintptr_t)object_error::OK) {
+    const uint32_t huge_budget = 50000u * BOARD::cycles_per_us(); // 50ms 要求
+    api(object_api::RUN_FOR, spawned_c.value, huge_budget);
+    // B の残量は C と共に 0 になるため、仕様上ここは実行されてはならない
+    g_nested_b_clamp_exhaust_ran = 1;
+  }
+  return 0;
+}
+
+// (c) A→B→A GRANTでdepth増加なしにAへ戻る
+volatile uint32_t g_ancestor_b_ran = 0;
+volatile uint32_t g_ancestor_b_resumed = 0;
+uintptr_t ancestor_worker(uintptr_t tid_lender, uintptr_t, uintptr_t, uintptr_t) {
+  g_ancestor_b_ran = 1;
+  const uint32_t lend_cycles = 10000u * BOARD::cycles_per_us();
+  const api_result granted =
+      api(object_api::RUN_FOR, tid_lender, lend_cycles);
+  if (granted.error == (uintptr_t)object_error::OK && granted.value == 1) {
+    g_ancestor_b_resumed = 1;
+  }
+  return 0;
+}
+
+// (c-2) 多段 A→B→C→A 祖先返却と保存済み呼出しからの再開 (resume)
+volatile uint32_t g_multi_ancestor_c_ran = 0;
+volatile uint32_t g_multi_ancestor_b_saw_c_return = 0;
+volatile uint32_t g_multi_ancestor_c_resumed = 0;
+volatile uint32_t g_multi_ancestor_b_completed = 0;
+
+uintptr_t multi_ancestor_c_worker(uintptr_t tid_a, uintptr_t, uintptr_t, uintptr_t) {
+  g_multi_ancestor_c_ran = 1;
+  const uint32_t lend_cycles = 10000u * BOARD::cycles_per_us();
+  // C が祖先 A へ GRANT。祖先返却で A へ巻き戻り、C のこの呼出しは中断される
+  const api_result granted_a = api(object_api::RUN_FOR, tid_a, lend_cycles);
+  if (granted_a.error == (uintptr_t)object_error::OK && granted_a.value == 1) {
+    g_multi_ancestor_c_resumed = 1;
+  }
+  api(object_api::YIELD);
+  return 0;
+}
+
+uintptr_t multi_ancestor_b_worker(uintptr_t tid_a, uintptr_t, uintptr_t, uintptr_t) {
+  api(object_api::CREATE_OBJECT, OBJECT_SLEEPER, (uintptr_t)&multi_ancestor_c_worker, OBJECT_REPLACE);
+  const api_result spawned_c = api(object_api::SPAWN, OBJECT_SLEEPER, METHOD_MAIN, tid_a);
+  if (spawned_c.error == (uintptr_t)object_error::OK) {
+    const uint32_t lend_cycles = 10000u * BOARD::cycles_per_us();
+    // B が C に貸出。C が A へ返却すると B も unwind され、B のこの呼出しも中断される
+    const api_result granted_c = api(object_api::RUN_FOR, spawned_c.value, lend_cycles);
+    if (granted_c.error == (uintptr_t)object_error::OK && granted_c.value == 1) {
+      g_multi_ancestor_b_saw_c_return = 1;
+    }
+    // 後続処理: B が C を再貸出して C の saved GRANT 呼出しからの再開を実行
+    const api_result resume_c = api(object_api::RUN_FOR, spawned_c.value, lend_cycles);
+    if (resume_c.error == (uintptr_t)object_error::OK && resume_c.value == 1) {
+      g_multi_ancestor_b_completed = 1;
+    }
+  }
+  api(object_api::YIELD);
+  return 0;
+}
+
+// (d) mutex lock失敗時GRANT(owner)して戻り後CAS再確認しlockが取得できる
+volatile uint32_t g_mutex_word = 0;
+volatile uint32_t g_contender_cas1_failed = 0;
+volatile uint32_t g_contender_recheck_cas_ok = 0;
+uintptr_t mutex_contender(uintptr_t tid_owner, uintptr_t, uintptr_t, uintptr_t) {
+  const uint32_t self = kernel_instance.current_thread_id();
+  const uint32_t my_token = self + 1;
+  if (!ARCH::cas32(&g_mutex_word, 0, my_token)) {
+    g_contender_cas1_failed = 1;
+  }
+  const uint32_t lend_cycles = 10000u * BOARD::cycles_per_us();
+  api(object_api::RUN_FOR, tid_owner, lend_cycles);
+
+  if (ARCH::cas32(&g_mutex_word, 0, my_token)) {
+    g_contender_recheck_cas_ok = 1;
+    ARCH::cas32(&g_mutex_word, my_token, 0);
+  }
+  api(object_api::YIELD);
+  return 0;
+}
+
 } // namespace
 
 void thread_ladder() {
@@ -240,6 +380,275 @@ void thread_ladder() {
     // 断ったのだから相手は走っていない = まだ READY のまま片付けられる。
     api(object_api::RUN_FOR, spawned.value,
         2000u * BOARD::cycles_per_us());
+  }
+
+  // ---- (a) 無宛先YIELDをborrowerから実行するとlenderへ戻る -----------------
+  {
+    g_yield_borrower_ran = 0;
+    api(object_api::CREATE_OBJECT, OBJECT_WORKER,
+        (uintptr_t)&yield_borrower, OBJECT_REPLACE);
+    const api_result spawned =
+        api(object_api::SPAWN, OBJECT_WORKER, METHOD_MAIN, 0);
+    check("yield borrower: spawn", spawned.error == (uintptr_t)object_error::OK,
+          (unsigned long)spawned.error, 0);
+
+    const uint32_t lend_cycles = 10000u * BOARD::cycles_per_us(); // 10ms
+    const uint64_t started = BOARD::time_us();
+    const api_result granted =
+        api(object_api::RUN_FOR, spawned.value, lend_cycles);
+    const uint64_t elapsed = BOARD::time_us() - started;
+
+    check("yield borrower: returned to lender",
+          granted.error == (uintptr_t)object_error::OK && granted.value == 1,
+          (unsigned long)granted.value, 1);
+    check("yield borrower: ran before yield",
+          g_yield_borrower_ran == 1,
+          (unsigned long)g_yield_borrower_ran, 1);
+    check("yield borrower: returned immediately (not expired)",
+          elapsed < 5000,
+          (unsigned long)elapsed, 5000);
+
+    // Borrower cleanup and resume check: 再貸出で YIELD の直後から再開することを確認
+    api(object_api::RUN_FOR, spawned.value, lend_cycles);
+    check("yield borrower: resumed after yield",
+          g_yield_borrower_ran == 2,
+          (unsigned long)g_yield_borrower_ran, 2);
+  }
+
+  // ---- (b) A→B→C入れ子とC予算がB残量でclamp -------------------------------
+  {
+    // Part 1: Nesting A -> B -> C and YIELD unwinds C -> B -> A
+    g_nested_c_ran = 0;
+    g_nested_b_saw_c_yield = 0;
+    api(object_api::CREATE_OBJECT, OBJECT_SLEEPER, (uintptr_t)&nested_b_worker, OBJECT_REPLACE);
+    const api_result spawned_b =
+        api(object_api::SPAWN, OBJECT_SLEEPER, METHOD_MAIN, 0);
+    check("nested A->B->C: spawn B", spawned_b.error == (uintptr_t)object_error::OK,
+          (unsigned long)spawned_b.error, 0);
+
+    const uint32_t lend_cycles = 10000u * BOARD::cycles_per_us();
+    const api_result granted_b =
+        api(object_api::RUN_FOR, spawned_b.value, lend_cycles);
+    check("nested A->B->C: B returned to A",
+          granted_b.error == (uintptr_t)object_error::OK && granted_b.value == 1,
+          (unsigned long)granted_b.value, 1);
+    check("nested A->B->C: C actually ran", g_nested_c_ran == 1,
+          (unsigned long)g_nested_c_ran, 1);
+    check("nested A->B->C: C yielded back to B", g_nested_b_saw_c_yield == 1,
+          (unsigned long)g_nested_b_saw_c_yield, 1);
+
+    // Part 2: Margin check (仕様ケース i).
+    // A lends B 10ms. B lends C 2ms.
+    // C runs until budget exhausted (~2ms). B still has remaining margin (~8ms),
+    // so upon C's reclamation, B resumes, records completion, and yields back to A.
+    g_hog_stop = 0;
+    g_nested_b_saw_c_expired = 0;
+    g_nested_b_saw_c_elapsed_us = 0;
+    api(object_api::CREATE_OBJECT, OBJECT_SLEEPER, (uintptr_t)&nested_b_margin_worker, OBJECT_REPLACE);
+    const api_result spawned_b_margin =
+        api(object_api::SPAWN, OBJECT_SLEEPER, METHOD_MAIN, 0);
+    check("nested margin: spawn B", spawned_b_margin.error == (uintptr_t)object_error::OK,
+          (unsigned long)spawned_b_margin.error, 0);
+
+    const uint32_t lend_margin_cycles = 10000u * BOARD::cycles_per_us(); // 10ms
+    const uint64_t expected_c_us = 2000u; // 2000us
+    const uint64_t started_margin = BOARD::time_us();
+    const api_result granted_margin =
+        api(object_api::RUN_FOR, spawned_b_margin.value, lend_margin_cycles);
+    const uint64_t elapsed_margin = BOARD::time_us() - started_margin;
+
+    check("nested margin: C reclaimed by budget", g_nested_b_saw_c_expired == 1,
+          (unsigned long)g_nested_b_saw_c_expired, 1);
+    check("nested margin: C elapsed bounded by B lend (~2ms)",
+          g_nested_b_saw_c_elapsed_us >= expected_c_us / 2 && g_nested_b_saw_c_elapsed_us < expected_c_us * 2,
+          (unsigned long)g_nested_b_saw_c_elapsed_us, (unsigned long)expected_c_us);
+    check("nested margin: B returned to A",
+          granted_margin.error == (uintptr_t)object_error::OK && granted_margin.value == 1,
+          (unsigned long)granted_margin.value, 1);
+    check("nested margin: total elapsed within B budget",
+          elapsed_margin >= expected_c_us / 2 && elapsed_margin < 15000u,
+          (unsigned long)elapsed_margin, (unsigned long)expected_c_us);
+
+    // Part 3: Clamp exhaustion check (仕様ケース ii).
+    // A lends B 2ms. B asks 50ms for C, clamped to B's remaining budget (<= 2ms).
+    // When C expires, all levels have budget exhausted. B must be unwound immediately
+    // without running post-grant user code, and A must observe grant_end::EXPIRED (0).
+    g_hog_stop = 0;
+    g_nested_b_clamp_exhaust_ran = 0;
+    api(object_api::CREATE_OBJECT, OBJECT_SLEEPER, (uintptr_t)&nested_b_clamp_exhaust_worker, OBJECT_REPLACE);
+    const api_result spawned_b_clamp =
+        api(object_api::SPAWN, OBJECT_SLEEPER, METHOD_MAIN, 0);
+    check("nested clamp: spawn B clamp", spawned_b_clamp.error == (uintptr_t)object_error::OK,
+          (unsigned long)spawned_b_clamp.error, 0);
+
+    const uint32_t lend_clamp_cycles = 2000u * BOARD::cycles_per_us(); // 2ms
+    const uint64_t expected_b_us = lend_clamp_cycles / BOARD::cycles_per_us(); // 2000us
+    const uint64_t started_clamp = BOARD::time_us();
+    const api_result granted_clamp =
+        api(object_api::RUN_FOR, spawned_b_clamp.value, lend_clamp_cycles);
+    const uint64_t elapsed_clamp = BOARD::time_us() - started_clamp;
+
+    // B の事後印は残らず (残量 0 のため再開されず巻き取られる)
+    check("nested clamp: B left no mark after budget exhaustion", g_nested_b_clamp_exhaust_ran == 0,
+          (unsigned long)g_nested_b_clamp_exhaust_ran, 0);
+    // A の戻り値が EXPIRED (0) であること
+    check("nested clamp: B unwound to A with budget expired",
+          granted_clamp.error == (uintptr_t)object_error::OK && granted_clamp.value == 0,
+          (unsigned long)granted_clamp.value, 0);
+    // 全体の経過時間も B の貸出予算 (~2ms) のオーダに収まること (50ms ではない)
+    check("nested clamp: total elapsed bounded by B budget (~2ms, not 50ms)",
+          elapsed_clamp >= expected_b_us / 2 && elapsed_clamp < expected_b_us * 3,
+          (unsigned long)elapsed_clamp, (unsigned long)expected_b_us);
+  }
+
+  // ---- (c) A→B→A および A→B→C→A 祖先返却と保存済み呼出しからの再開 --------
+  {
+    // Part 1: A -> B -> A 祖先返却と depth 未増加の検証
+    g_ancestor_b_ran = 0;
+    g_ancestor_b_resumed = 0;
+    api(object_api::CREATE_OBJECT, OBJECT_WORKER,
+        (uintptr_t)&ancestor_worker, OBJECT_REPLACE);
+    const uint32_t tid_a = kernel_instance.current_thread_id();
+    const api_result spawned_b =
+        api(object_api::SPAWN, OBJECT_WORKER, METHOD_MAIN, tid_a);
+    check("ancestor grant: spawn B", spawned_b.error == (uintptr_t)object_error::OK,
+          (unsigned long)spawned_b.error, 0);
+
+    const uint32_t lend_cycles = 10000u * BOARD::cycles_per_us();
+    const uint64_t started = BOARD::time_us();
+    const api_result granted =
+        api(object_api::RUN_FOR, spawned_b.value, lend_cycles);
+    const uint64_t elapsed = BOARD::time_us() - started;
+
+    check("ancestor grant: B returned to A via ancestor unwind",
+          granted.error == (uintptr_t)object_error::OK && granted.value == 1,
+          (unsigned long)granted.value, 1);
+    check("ancestor grant: B actually ran", g_ancestor_b_ran == 1,
+          (unsigned long)g_ancestor_b_ran, 1);
+    check("ancestor grant: returned immediately", elapsed < 5000,
+          (unsigned long)elapsed, 5000);
+    // 祖先返却はフレームを積まずに unwind するため、A 復帰時の grant depth は 0。
+    // 通常貸付けなら depth 2 (A->B, B->A) となり grant_active() が true になるが、
+    // ここでは depth 0 に巻き戻るため grant_active() が false になる。
+    check("ancestor grant: grant depth not increased (grant_active false)",
+          !kernel_instance.grant_active(),
+          (unsigned long)kernel_instance.grant_active(), 0);
+
+    // Re-grant to B to let it finish
+    api(object_api::RUN_FOR, spawned_b.value, lend_cycles);
+    check("ancestor grant: B resumed after ancestor unwind",
+          g_ancestor_b_resumed == 1,
+          (unsigned long)g_ancestor_b_resumed, 1);
+
+    // Part 2: A -> B -> C -> A 多段祖先返却と B/C 両方の saved call からの再開
+    g_multi_ancestor_c_ran = 0;
+    g_multi_ancestor_b_saw_c_return = 0;
+    g_multi_ancestor_c_resumed = 0;
+    g_multi_ancestor_b_completed = 0;
+
+    api(object_api::CREATE_OBJECT, OBJECT_WORKER,
+        (uintptr_t)&multi_ancestor_b_worker, OBJECT_REPLACE);
+    const api_result spawned_multi_b =
+        api(object_api::SPAWN, OBJECT_WORKER, METHOD_MAIN, tid_a);
+    check("multi ancestor: spawn B", spawned_multi_b.error == (uintptr_t)object_error::OK,
+          (unsigned long)spawned_multi_b.error, 0);
+
+    const api_result granted_multi =
+        api(object_api::RUN_FOR, spawned_multi_b.value, lend_cycles);
+    check("multi ancestor: returned to A via multi-unwind",
+          granted_multi.error == (uintptr_t)object_error::OK && granted_multi.value == 1,
+          (unsigned long)granted_multi.value, 1);
+    check("multi ancestor: C ran before unwind", g_multi_ancestor_c_ran == 1,
+          (unsigned long)g_multi_ancestor_c_ran, 1);
+    // A 復帰時点で、B も C も保存済み呼出しで中断されており後続処理は未実行
+    check("multi ancestor: B post-grant logic not executed yet",
+          g_multi_ancestor_b_saw_c_return == 0,
+          (unsigned long)g_multi_ancestor_b_saw_c_return, 0);
+    check("multi ancestor: C post-grant logic not executed yet",
+          g_multi_ancestor_c_resumed == 0,
+          (unsigned long)g_multi_ancestor_c_resumed, 0);
+    check("multi ancestor: depth unwound to 0",
+          !kernel_instance.grant_active(),
+          (unsigned long)kernel_instance.grant_active(), 0);
+
+    // A が B を再貸出し。B は saved GRANT(C) から再開し、後続処理で C を再貸出し、
+    // C も saved GRANT(A) から再開して双方が正常完了することを確認
+    const api_result resumed_multi_b =
+        api(object_api::RUN_FOR, spawned_multi_b.value, lend_cycles);
+    check("multi ancestor: B returned after resume sequence",
+          resumed_multi_b.error == (uintptr_t)object_error::OK && resumed_multi_b.value == 1,
+          (unsigned long)resumed_multi_b.value, 1);
+    check("multi ancestor: B resumed from saved GRANT(C)",
+          g_multi_ancestor_b_saw_c_return == 1,
+          (unsigned long)g_multi_ancestor_b_saw_c_return, 1);
+    check("multi ancestor: C resumed from saved GRANT(A)",
+          g_multi_ancestor_c_resumed == 1,
+          (unsigned long)g_multi_ancestor_c_resumed, 1);
+    check("multi ancestor: full sequence completed",
+          g_multi_ancestor_b_completed == 1,
+          (unsigned long)g_multi_ancestor_b_completed, 1);
+  }
+
+  // ---- (d) mutex lock失敗時GRANT(owner)して戻り後CAS再確認しlockが取得できる
+  {
+    g_mutex_word = 0;
+    g_contender_cas1_failed = 0;
+    g_contender_recheck_cas_ok = 0;
+    const uint32_t tid_a = kernel_instance.current_thread_id();
+    const uint32_t token_a = tid_a + 1;
+
+    // 1. Owner A acquires lock
+    const bool a_locked = ARCH::cas32(&g_mutex_word, 0, token_a);
+    check("mutex: owner A acquires lock", a_locked && g_mutex_word == token_a,
+          (unsigned long)g_mutex_word, (unsigned long)token_a);
+
+    api(object_api::CREATE_OBJECT, OBJECT_WORKER,
+        (uintptr_t)&mutex_contender, OBJECT_REPLACE);
+    const api_result spawned_b =
+        api(object_api::SPAWN, OBJECT_WORKER, METHOD_MAIN, tid_a);
+    check("mutex: spawn contender B", spawned_b.error == (uintptr_t)object_error::OK,
+          (unsigned long)spawned_b.error, 0);
+
+    const uint32_t lend_cycles = 10000u * BOARD::cycles_per_us();
+    // 2. Lend to Contender B. Contender will fail CAS, then GRANT to owner A (unwinds to A).
+    const api_result granted1 =
+        api(object_api::RUN_FOR, spawned_b.value, lend_cycles);
+    check("mutex: contender returned to owner A via GRANT(owner)",
+          granted1.error == (uintptr_t)object_error::OK && granted1.value == 1,
+          (unsigned long)granted1.value, 1);
+    check("mutex: contender initial CAS failed while held by A",
+          g_contender_cas1_failed == 1,
+          (unsigned long)g_contender_cas1_failed, 1);
+    // 自動待ちキューを作らない協調方式: contender は GRANT(owner) で停止しており、
+    // owner が unlock する前に後続のロック取得処理が走っていないことを検証
+    check("mutex: lock still held by owner after contender returned",
+          g_mutex_word == token_a,
+          (unsigned long)g_mutex_word, (unsigned long)token_a);
+    check("mutex: contender post-grant logic not executed before unlock",
+          g_contender_recheck_cas_ok == 0,
+          (unsigned long)g_contender_recheck_cas_ok, 0);
+
+    // 3. Owner A releases lock
+    const bool a_unlocked = ARCH::cas32(&g_mutex_word, token_a, 0);
+    check("mutex: owner A releases lock", a_unlocked && g_mutex_word == 0,
+          (unsigned long)g_mutex_word, 0);
+
+    // 4. Lend to Contender B again. Contender resumes from saved GRANT call,
+    //    re-checks CAS, acquires and releases lock.
+    const api_result granted2 =
+        api(object_api::RUN_FOR, spawned_b.value, lend_cycles);
+    check("mutex: contender returned after lock acquisition",
+          granted2.error == (uintptr_t)object_error::OK && granted2.value == 1,
+          (unsigned long)granted2.value, 1);
+    check("mutex: contender re-check CAS succeeded after owner unlock",
+          g_contender_recheck_cas_ok == 1,
+          (unsigned long)g_contender_recheck_cas_ok, 1);
+    check("mutex: final mutex is unlocked", g_mutex_word == 0,
+          (unsigned long)g_mutex_word, 0);
+
+    // Restore OBJECT_WORKER and OBJECT_SLEEPER to clean state
+    api(object_api::CREATE_OBJECT, OBJECT_WORKER, (uintptr_t)&worker, OBJECT_REPLACE);
+    api(object_api::CREATE_OBJECT, OBJECT_SLEEPER, (uintptr_t)&sleeper, OBJECT_REPLACE);
   }
 
   BOARD::diag_printf("[SELFTEST] thread ladder done: %lu passed, %lu failed\n",

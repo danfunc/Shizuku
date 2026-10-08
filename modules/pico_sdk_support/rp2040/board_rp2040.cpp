@@ -1,3 +1,4 @@
+#include "shizuku/kernel_services.hpp"
 #include <cstdarg>
 #include <cstdio>
 #include "hardware/clocks.h"
@@ -210,14 +211,14 @@ uint32_t rp2040_pico_w::cycles_per_us(){return clock_get_hz(clk_sys)/1000000u;}
 uintptr_t rp2040_pico_w::unprivileged_floor(){return ((uintptr_t)__end__+31u)&~(uintptr_t)31u;}
 void rp2040_pico_w::diag_printf(const char*f,...){
   static char lines[2][384];
-  const uint32_t state=save_and_disable_interrupts();
+  const auto state=shizuku::kernel_services::irq_save();
   char*line=lines[get_core_num()];
   va_list a;va_start(a,f);
   int n=vsnprintf(line,sizeof(lines[0]),f,a);
   va_end(a);
   if(n>(int)sizeof(lines[0])-1)n=(int)sizeof(lines[0])-1;
   if(n>0)shizuku::objects::usb_cdc_diag_write_line(line,(uint32_t)n);
-  restore_interrupts(state);
+  shizuku::kernel_services::irq_restore(state);
 }
 [[noreturn]] void rp2040_pico_w::panic(const char*m){
   printf("PANIC: %s\n",m);

@@ -1,6 +1,5 @@
 #ifndef SHIZUKU_ARCHS_DUMMY_HPP
 #define SHIZUKU_ARCHS_DUMMY_HPP
-#define SHIZUKU_HOT
 #include <cstdint>
 #include "shizuku/concepts/arch.hpp"
 

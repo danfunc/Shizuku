@@ -2,12 +2,6 @@
 #define SHIZUKU_ARCHS_ARMV8M_HPP
 #include <cstddef>
 #include <cstdint>
-#if defined(SHIZUKU_SVC_FLASH) && SHIZUKU_SVC_FLASH
-#define SHIZUKU_HOT
-#else
-#define SHIZUKU_HOT __attribute__((section(".time_critical.shizuku_hot")))
-#endif
-#include "shizuku/svc_profile.hpp"
 #include "hardware/structs/mpu.h"
 #include "hardware/structs/scb.h"
 #include "hardware/structs/systick.h"
@@ -98,23 +92,23 @@ public:
 
   // ---- 例外フレームの幾何 -------------------------------------------------
   // 基本 32B / FP 拡張 104B。EXC_RETURN bit4 で判別する。
-  [[gnu::always_inline]] static inline uint32_t exc_frame_bytes(const context_t &context) {
+  static uint32_t exc_frame_bytes(const context_t &context) {
     return (context.exc_return & 0x10u) ? 32u : 104u;
   }
   // 例外復帰「後」のスレッド SP。xPSR bit9 (例外エントリ時の 8B 整列パディング) が
   // 立っていると、ハードウェアは復帰時に SP へ +4 余分に足す。ここで吸収しないと
   // 呼び出しフレームの退避域を踏み潰す (I-4。実機で実際に踏んだ落とし穴)。
-  [[gnu::always_inline]] static inline uintptr_t psp_after_return(const context_t &context) {
+  static uintptr_t psp_after_return(const context_t &context) {
     return (uintptr_t)context.sp + exc_frame_bytes(context) +
            ((context.sp->xPSR & (1u << 9)) ? 4u : 0u);
   }
   // カーネルが 8B 境界へ置き直した作業コピーには追加調整を入れさせない。
-  [[gnu::always_inline]] static inline void normalize_frame(exception_frame_t &frame) {
+  static void normalize_frame(exception_frame_t &frame) {
     frame.xPSR &= ~(uint32_t)(1u << 9);
   }
 
   // ---- syscall ABI のスロット (a0..a4 = r0,r1,r2,r3,r12) -------------------
-  [[gnu::always_inline]] static inline uintptr_t arg(const exception_frame_t &frame, unsigned index) {
+  static uintptr_t arg(const exception_frame_t &frame, unsigned index) {
     switch (index) {
     case 0:
       return frame.r0;
@@ -128,31 +122,31 @@ public:
       return frame.r12;
     }
   }
-  [[gnu::always_inline]] static inline void set_args(exception_frame_t &frame, const uintptr_t *args) {
+  static void set_args(exception_frame_t &frame, const uintptr_t *args) {
     frame.r0 = (uint32_t)args[0];
     frame.r1 = (uint32_t)args[1];
     frame.r2 = (uint32_t)args[2];
     frame.r3 = (uint32_t)args[3];
   }
-  [[gnu::always_inline]] static inline void set_result(exception_frame_t &frame, uintptr_t error,
+  static void set_result(exception_frame_t &frame, uintptr_t error,
                          uintptr_t value) {
     frame.r0 = (uint32_t)error;
     frame.r1 = (uint32_t)value;
   }
-  [[gnu::always_inline]] static inline void set_entry(exception_frame_t &frame, uintptr_t pc, uintptr_t lr) {
+  static void set_entry(exception_frame_t &frame, uintptr_t pc, uintptr_t lr) {
     frame.pc = (uint32_t)pc;
     frame.lr = (uint32_t)lr;
   }
   // 戻り口 (1 本だけ)。呼び先が普通に return するとここへ落ち、RETURN を撃つ。
   // ハンドラから出ればプリミティブとして巻き戻し、オブジェクトから出れば経路判定で
   // オブジェクトランドのハンドラへ「戻った」という知らせとして届く。
-  [[gnu::always_inline]] static inline uintptr_t return_stub() {
+  static uintptr_t return_stub() {
     return (uintptr_t)&shizuku_armv8m_return_stub;
   }
   // ---- スレッドの最初の 1 回 -----------------------------------------------
   // 「例外から復帰してきた」ように見せかけた文脈を組み立てる。これで最初の実行も
   // 普通の復帰経路 (CTX_RESTORE) に一本化でき、入口だけ別扱いにならずに済む。
-  [[gnu::always_inline]] static inline void prepare_thread_entry(context_t &context, uintptr_t stack_top,
+  static void prepare_thread_entry(context_t &context, uintptr_t stack_top,
                                    uintptr_t entry_pc, uintptr_t return_pc,
                                    uintptr_t argument) {
     exception_frame_t *frame =
@@ -173,12 +167,12 @@ public:
   // SysTick は per-core banked。24bit なので遠い期限は上位が刻んで継ぎ足す。
   static constexpr uint32_t TIMER_MAX_CYCLES = 0x00FFFFFF;
   static constexpr uint32_t TIMER_MIN_CYCLES = 100; // 装填直後発火を避ける下限
-  [[gnu::always_inline]] static inline void timer_oneshot(uint32_t cycles) {
+  static void timer_oneshot(uint32_t cycles) {
     systick_hw->rvr = cycles;
     systick_hw->cvr = 0;   // 書き込みでカウンタをクリア (rvr から数え直す)
     systick_hw->csr = 0x7; // ENABLE | TICKINT | プロセッサクロック
   }
-  [[gnu::always_inline]] static inline void timer_cancel() { systick_hw->csr = 0; }
+  static void timer_cancel() { systick_hw->csr = 0; }
 
   // ---- ★自己ホスト型デバッグ (DebugMonitor) --------------------------------
   //  halting debug (SWD のプローブ) はコアを丸ごと止めるが、DebugMonitor は
@@ -200,7 +194,7 @@ public:
   static constexpr uint32_t DFSR_BKPT = 1u << 1;
   static constexpr uint32_t DFSR_DWTTRAP = 1u << 2;
 
-  [[gnu::always_inline]] static inline volatile uint32_t &at(uintptr_t address) {
+  static volatile uint32_t &at(uintptr_t address) {
     return *(volatile uint32_t *)address;
   }
 
@@ -212,7 +206,7 @@ public:
 
   // 動いていることを確かめてから true を返す。実装されていない / 元栓が閉まって
   // いると 0 のままで、気づかないと「0 サイクルで呼べた」と報告してしまう。
-  [[gnu::always_inline]] static inline bool cycle_counter_enable() {
+  static bool cycle_counter_enable() {
     at(DEMCR_ADDRESS) = at(DEMCR_ADDRESS) | DEMCR_TRCENA;
     asm volatile("dsb" ::: "memory");
     asm volatile("isb" ::: "memory");
@@ -226,9 +220,9 @@ public:
     return at(DWT_CYCCNT_ADDRESS) != first;
   }
 
-  [[gnu::always_inline]] static inline uint32_t cycle_counter_read() { return at(DWT_CYCCNT_ADDRESS); }
+  static uint32_t cycle_counter_read() { return at(DWT_CYCCNT_ADDRESS); }
 
-  [[gnu::always_inline]] static inline void debug_enable(bool on) {
+  static void debug_enable(bool on) {
     uint32_t demcr = at(DEMCR_ADDRESS);
     // TRCENA は DWT/FPB を動かすのに要る (デバッグ機能全体の元栓)。
     demcr = on ? (demcr | DEMCR_TRCENA | DEMCR_MON_EN)
@@ -238,11 +232,11 @@ public:
   }
   // 有効になったか。★**プローブが繋がっていると MON_EN は立たない**ので、
   //   「立てた」ではなく「立ったか」を読んで確かめる。
-  [[gnu::always_inline]] static inline bool debug_enabled() {
+  static bool debug_enabled() {
     return (at(DEMCR_ADDRESS) & DEMCR_MON_EN) != 0;
   }
   // 次の 1 命令だけ実行して、また DebugMon へ戻ってくるようにする。
-  [[gnu::always_inline]] static inline void debug_step(bool on) {
+  static void debug_step(bool on) {
     uint32_t demcr = at(DEMCR_ADDRESS);
     at(DEMCR_ADDRESS) = on ? (demcr | DEMCR_MON_STEP) : (demcr & ~DEMCR_MON_STEP);
     // ★★書いたら **dsb + isb** で効かせる。入れないと DEMCR への書き込みが後ろへ
@@ -253,27 +247,27 @@ public:
   }
   // なぜ止まったか (DFSR)。★読んだら**書き戻して消す** — 消さないと次の判定に
   //   古い理由が混ざる (フォールトの CFSR で同じ罠を踏んでいる)。
-  [[gnu::always_inline]] static inline uint32_t debug_reason_take() {
+  static uint32_t debug_reason_take() {
     const uint32_t reason = at(DFSR_ADDRESS);
     at(DFSR_ADDRESS) = reason; // 1 を書いたビットが消える
     return reason;
   }
   // ハードウェアブレークポイントの数。★実装依存なので**実行時に読む** (データ
   //   シートの数字を信じない)。FP_CTRL の NUM_CODE は 2 か所に分かれている。
-  [[gnu::always_inline]] static inline uint32_t breakpoint_count() {
+  static uint32_t breakpoint_count() {
     const uint32_t control = at(FP_CTRL_ADDRESS);
     return (((control >> 12) & 0x7u) << 4) | ((control >> 4) & 0xFu);
   }
-  [[gnu::always_inline]] static inline void breakpoint_enable(bool on) {
+  static void breakpoint_enable(bool on) {
     // bit1 (KEY) を一緒に書かないと ENABLE の変更が無視される。
     at(FP_CTRL_ADDRESS) = (on ? 0x3u : 0x2u);
   }
-  [[gnu::always_inline]] static inline void breakpoint_set(uint32_t index, uintptr_t address) {
+  static void breakpoint_set(uint32_t index, uintptr_t address) {
     // FPBv2: [31:1] が比較するアドレス、bit0 が有効。
     at(FP_COMP_ADDRESS + 4u * index) = ((uint32_t)address & ~1u) | 1u;
     __asm__ volatile("dsb\n\tisb" ::: "memory");
   }
-  [[gnu::always_inline]] static inline void breakpoint_clear(uint32_t index) {
+  static void breakpoint_clear(uint32_t index) {
     at(FP_COMP_ADDRESS + 4u * index) = 0;
     // ★breakpoint_set と同じ理由で要る。無いと「解除した」つもりの後も
     //   古い比較器の値がしばらく効いたままになり得る (実測で踏んだ:
@@ -287,7 +281,7 @@ public:
   //   残りをそのまま信じると**使った時間を取りこぼす**。折り返していたら
   //   「刻みは撃ち切った」と見なす (足りなく数えるより多く数えるほうが安全 —
   //   貸した実行権が予定より長く握られる側に倒れない)。
-  [[gnu::always_inline]] static inline uint32_t timer_remaining(bool &wrapped) {
+  static uint32_t timer_remaining(bool &wrapped) {
     const uint32_t csr = systick_hw->csr; // ★読むと COUNTFLAG は落ちる。1 回だけ読む
     wrapped = (csr & (1u << 16)) != 0;
     if (!(csr & 0x1u)) { // 動いていない
@@ -299,7 +293,7 @@ public:
   // ★切替は最低優先度の遅延例外でしか起こさない (DESIGN §14.5.1 の規約)。
   //   これにより「syscall ハンドラの中にいる = そのコアでは切り替わらない」が
   //   取得コストゼロで手に入る。
-  [[gnu::always_inline]] static inline void pend_context_switch() {
+  static void pend_context_switch() {
     scb_hw->icsr = 1u << 28; // PENDSVSET
   }
 
@@ -309,7 +303,7 @@ public:
   //   書いているのはこの点)。base/limit は 32B 粒度で limit は内包。
   static constexpr uint32_t ACCESS_RW_ALL = 0b01; // 特権/非特権とも読み書き
   static constexpr uint32_t ACCESS_RO_ALL = 0b11; // 特権/非特権とも読みだけ
-  [[gnu::always_inline]] static inline void region_set(uint32_t index, uintptr_t base, uintptr_t limit,
+  static void region_set(uint32_t index, uintptr_t base, uintptr_t limit,
                          uint32_t access, bool execute_never,
                          uint32_t attribute) {
     mpu_hw->rnr = index;
@@ -317,12 +311,12 @@ public:
         ((uint32_t)base & ~0x1Fu) | (access << 1) | (execute_never ? 1u : 0u);
     mpu_hw->rlar = ((uint32_t)limit & ~0x1Fu) | (attribute << 1) | 1u;
   }
-  [[gnu::always_inline]] static inline void region_disable(uint32_t index) {
+  static void region_disable(uint32_t index) {
     mpu_hw->rnr = index;
     mpu_hw->rlar = 0;
   }
   // attr0 = 通常メモリ (書き戻し), attr1 = 通常メモリ (キャッシュしない)。
-  [[gnu::always_inline]] static inline void protection_enable() {
+  static void protection_enable() {
     mpu_hw->mair[0] = 0xFFu | (0x44u << 8);
     // ★PRIVDEFENA: region で明示していない場所は「特権だけが触れる」。これが
     //   単一アドレス空間における「カーネル空間」の実体で、MMU が無くても
@@ -330,7 +324,7 @@ public:
     mpu_hw->ctrl = M33_MPU_CTRL_PRIVDEFENA_BITS | M33_MPU_CTRL_ENABLE_BITS;
     asm volatile("dsb\nisb" ::: "memory");
   }
-  [[gnu::always_inline]] static inline void protection_disable() {
+  static void protection_disable() {
     mpu_hw->ctrl = 0;
     asm volatile("dsb\nisb" ::: "memory");
   }
@@ -338,21 +332,21 @@ public:
   // (DESIGN §16 / §11.2.0: 「非特権で動いた」は自己申告なしには言えない)。
   // 落ちたのがスレッドモードか (= そのスレッドを止めれば復帰できるか)。
   // ハンドラモードで落ちたならカーネル自身の破れなので、止めても直らない。
-  [[gnu::always_inline]] static inline bool faulted_in_thread_mode(const context_t &context) {
+  static bool faulted_in_thread_mode(const context_t &context) {
     return (context.exc_return & 0x4u) != 0;
   }
   // 落ちた場所と、触ろうとした先。★診断は「読み出す場所を間違えると静かに嘘を
   //   吐く」ので、引数スロットの流用ではなく専用の口にする (実際 arg(6) は
   //   引数の既定枝に落ちて r12 を返しており、pc が 0 に見えていた)。
-  [[gnu::always_inline]] static inline uintptr_t frame_pc(const exception_frame_t &frame) { return frame.pc; }
-  [[gnu::always_inline]] static inline uintptr_t frame_lr(const exception_frame_t &frame) { return frame.lr; }
-  [[gnu::always_inline]] static inline uintptr_t fault_address() { return *(volatile uint32_t *)0xE000ED34u; }
+  static uintptr_t frame_pc(const exception_frame_t &frame) { return frame.pc; }
+  static uintptr_t frame_lr(const exception_frame_t &frame) { return frame.lr; }
+  static uintptr_t fault_address() { return *(volatile uint32_t *)0xE000ED34u; }
   // どの違反だったか (CFSR)。読んだら書き戻して消す (sticky なので残る)。
-  [[gnu::always_inline]] static inline uint32_t fault_status() { return *(volatile uint32_t *)0xE000ED28u; }
-  [[gnu::always_inline]] static inline void fault_status_clear() {
+  static uint32_t fault_status() { return *(volatile uint32_t *)0xE000ED28u; }
+  static void fault_status_clear() {
     *(volatile uint32_t *)0xE000ED28u = fault_status();
   }
-  [[gnu::always_inline]] static inline uint32_t control_register() {
+  static uint32_t control_register() {
     uint32_t control;
     asm volatile("MRS %0, CONTROL" : "=r"(control));
     return control;
@@ -360,18 +354,18 @@ public:
 
   // ---- 特権とスタック上限 -------------------------------------------------
   // 「今の実行が特権か」の自己申告 (CONTROL.nPRIV を実際に読む)。
-  [[gnu::always_inline]] static inline bool current_priv() {
+  static bool current_priv() {
     uint32_t control;
     asm volatile("MRS %0, CONTROL" : "=r"(control));
     return (control & 1u) == 0;
   }
-  [[gnu::always_inline]] static inline void set_priv(context_t &context, bool privileged) {
+  static void set_priv(context_t &context, bool privileged) {
     context.control = privileged ? CONTROL_PRIV_PSP : CONTROL_UNPRIV_PSP;
   }
   // ★set_priv と同じ形 (Q8 / DESIGN §11.3)。ここでは値を持たせるだけで、
   //   実際に MPU region へ書くのは復帰の直前 (shizuku_restore_region_window)。
   //   limit==0 は「窓なし」。
-  [[gnu::always_inline]] static inline void set_region_window(context_t &context, uintptr_t base,
+  static void set_region_window(context_t &context, uintptr_t base,
                                 uintptr_t limit) {
     context.region_base = (uint32_t)base;
     context.region_limit = (uint32_t)limit;
@@ -379,26 +373,26 @@ public:
   // GRANT_REGION が使う MPU region。0/1 は固定 (board.cpp)、2
   // 以降は空いている。
   static constexpr uint32_t GRANT_REGION_INDEX = 2;
-  [[gnu::always_inline]] static inline void stack_limit_set(context_t &context, uintptr_t limit) {
+  static void stack_limit_set(context_t &context, uintptr_t limit) {
     context.psplim = (uint32_t)limit;
   }
-  [[gnu::always_inline]] static inline uintptr_t stack_limit(const context_t &context) {
+  static uintptr_t stack_limit(const context_t &context) {
     return context.psplim;
   }
 
   // ---- ★ARCH SEAM — マルチコア atomic (DESIGN §14.5.3) --------------------
   // RP2350 (ARMv8-M) は LDREX/STREX (= __atomic 系)。SIO ハードウェアスピンロックは
   // E2 erratum で使えない。RP2040 (ARMv6-M) では逆に LDREX/STREX が無い。
-  [[gnu::always_inline]] static inline bool cas32(volatile uint32_t *address, uint32_t expected,
+  static bool cas32(volatile uint32_t *address, uint32_t expected,
                     uint32_t desired) {
     return __atomic_compare_exchange_n((uint32_t *)address, &expected, desired,
                                        false, __ATOMIC_ACQUIRE,
                                        __ATOMIC_RELAXED);
   }
-  [[gnu::always_inline]] static inline void store_release32(volatile uint32_t *address, uint32_t value) {
+  static void store_release32(volatile uint32_t *address, uint32_t value) {
     __atomic_store_n((uint32_t *)address, value, __ATOMIC_RELEASE);
   }
-  [[gnu::always_inline]] static inline uint32_t load_acquire32(volatile uint32_t *address) {
+  static uint32_t load_acquire32(volatile uint32_t *address) {
     return __atomic_load_n((uint32_t *)address, __ATOMIC_ACQUIRE);
   }
 
@@ -409,7 +403,7 @@ public:
     uintptr_t error;
     uintptr_t value;
   };
-  [[gnu::always_inline]] static inline syscall_result syscall(uintptr_t number, uintptr_t a1 = 0,
+  static inline syscall_result syscall(uintptr_t number, uintptr_t a1 = 0,
                                        uintptr_t a2 = 0, uintptr_t a3 = 0,
                                        uintptr_t a4 = 0) {
     register uintptr_t r0 asm("r0") = number;

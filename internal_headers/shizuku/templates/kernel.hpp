@@ -63,7 +63,7 @@ public:
     return sizeof(thread_record);
   }
   void set_thread_storage(void *memory, uintptr_t bytes);
-  [[gnu::always_inline]] inline uint32_t thread_count() const { return m_thread_count; }
+  uint32_t thread_count() const { return m_thread_count; }
 
   // -------------------------------------------------------------------------
   //  呼び出しフレーム — 退避先は**スレッド自身のスタック** (DESIGN §8)
@@ -93,7 +93,7 @@ public:
   void set_thread_ledger(uint32_t id, call_ledger_entry *memory,
                          uint32_t capacity, uint32_t object, uint32_t kind,
                          uint32_t handler_object, uintptr_t handler_entry);
-  [[gnu::always_inline]] inline uint32_t ledger_size(uint32_t id) const {
+  uint32_t ledger_size(uint32_t id) const {
     return m_threads[id].thread.call_stack.depth;
   }
   const call_ledger_entry *ledger_entry(uint32_t id, uint32_t from_top) const {
@@ -220,40 +220,40 @@ public:
   // 段階でカーネルオブジェクトが教えておく (カーネルは選ばない)。
   void set_recovery_thread(uint32_t thread);
 
-  [[gnu::always_inline]] inline bool thread_debug_protected(uint32_t thread) const {
+  bool thread_debug_protected(uint32_t thread) const {
     return thread < m_thread_count && m_threads[thread].thread.is_debug_protected;
   }
-  [[gnu::always_inline]] inline void set_thread_debug_protected(uint32_t thread, bool is_protected) {
+  void set_thread_debug_protected(uint32_t thread, bool is_protected) {
     if (thread < m_thread_count)
       m_threads[thread].thread.is_debug_protected = is_protected;
   }
 
-  [[gnu::always_inline]] inline uint32_t current_thread_id() const { return m_current[BOARD::core_num()]; }
-  [[gnu::always_inline]] inline THREAD &current_thread() { return m_threads[current_thread_id()].thread; }
-  [[gnu::always_inline]] inline const THREAD &current_thread() const {
+  uint32_t current_thread_id() const { return m_current[BOARD::core_num()]; }
+  THREAD &current_thread() { return m_threads[current_thread_id()].thread; }
+  const THREAD &current_thread() const {
     return m_threads[current_thread_id()].thread;
   }
-  [[gnu::always_inline]] inline uint32_t current_depth() const { return current_thread().call_stack.depth; }
+  uint32_t current_depth() const { return current_thread().call_stack.depth; }
   // スケジューリング方針 (kobj 側) が候補を探すための読み出し。
   // そのスレッドを走らせてよいコアの集合 (方針側が候補を絞るために読む)。
-  [[gnu::always_inline]] inline uint32_t thread_affinity(uint32_t thread) const {
+  uint32_t thread_affinity(uint32_t thread) const {
     return m_threads[thread].thread.affinity;
   }
-  [[gnu::always_inline]] inline void set_thread_object(uint32_t thread, uint32_t obj,
+  void set_thread_object(uint32_t thread, uint32_t obj,
                          object_kind kind = object_kind::PLAIN) {
     m_threads[thread].thread.base_object = obj;
     m_threads[thread].thread.base_kind = (uint32_t)kind;
   }
   // その枠が今何代目か。★スレッド番号を控える側は、これも一緒に控えて
   //   使う直前に突き合わせること (番号だけでは使い回しに気づけない)。
-  [[gnu::always_inline]] inline uint32_t thread_generation(uint32_t thread) const {
+  uint32_t thread_generation(uint32_t thread) const {
     return thread < m_thread_count ? m_threads[thread].thread.generation : 0;
   }
-  [[gnu::always_inline]] inline typename THREAD::state_t thread_state(uint32_t thread) const {
+  typename THREAD::state_t thread_state(uint32_t thread) const {
     return (typename THREAD::state_t)m_threads[thread].thread.state;
   }
   // 今このコアで実行権を借りて走っているか (借り手の yield は貸し手への早期復帰)。
-  [[gnu::always_inline]] inline bool grant_active() const { return m_grants[BOARD::core_num()].depth != 0; }
+  bool grant_active() const { return m_grants[BOARD::core_num()].depth != 0; }
 
   // タイマ例外から呼ばれる (期限の監視。切替そのものは最低優先度の遅延例外で行う)。
   void timer_expired();
@@ -346,7 +346,7 @@ public:
   //   載ったまま更新されない。実際にそれで「事象が起きているのに回数が増えて
   //   いない」という嘘の失敗を出した (間に関数呼び出しがある経路だけ、たまたま
   //   正しく見えていた)。
-  [[gnu::always_inline]] inline uint32_t debug_event_count() const {
+  uint32_t debug_event_count() const {
     return ARCH::load_acquire32((volatile uint32_t *)&m_debug.count);
   }
 

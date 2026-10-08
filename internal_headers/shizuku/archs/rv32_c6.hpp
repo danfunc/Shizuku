@@ -13,13 +13,14 @@
 //  ★現在の到達点:
 //    - RV32IMAC レジスタおよび trap frame / context レイアウトの定義
 //    - PMP 設定 (pmp_codec) の統合
-//    - M-only trap/ECALL と初回 mret を実装。SYSTIMER/PMP/U-mode は未実装。
+//    - M-only trap/ECALL、SYSTIMER oneshot/プリエンプション、初回 mret を実装。
+//    - PMP による U-mode 権限境界保護およびハードウェアデバッグは未実装 (M-only パイロット)。
 //    - ファームウェア組み込み時の欺瞞的 no-op 動作を防ぐため、
 //      SHIZUKU_C6_SKELETON_PERMITTED が定義されていない本番ビルドでは
 //      明示的にコンパイルを拒否する (fail-closed)。
 
 #if !defined(SHIZUKU_C6_SKELETON_PERMITTED)
-#error "ESP32-C6 arch backend is incomplete (SYSTIMER, interrupt matrix, and PMP ownership remain incomplete). Build refused (fail-closed)."
+#error "ESP32-C6 arch backend is incomplete (PMP ownership and U-mode privilege boundary remain incomplete). Build refused (fail-closed)."
 #endif
 
 namespace shizuku {
@@ -235,10 +236,10 @@ public:
     context.sp = frame;
   }
 
-  static void timer_oneshot(uint32_t); // 未完成
-  static void timer_cancel();          // 未完成
-  static uint32_t timer_remaining(bool &wrapped); // 未完成
-  static void pend_context_switch();   // 未完成
+  static void timer_oneshot(uint32_t); // trap.cpp にて実装済み (SYSTIMER)
+  static void timer_cancel();          // trap.cpp にて実装済み (SYSTIMER)
+  static uint32_t timer_remaining(bool &wrapped); // trap.cpp にて実装済み (SYSTIMER)
+  static void pend_context_switch();   // trap.cpp にて実装済み (SYSTIMER)
 
   // ハードウェアデバッグおよびフォールト状態 (未完成)
   static uint32_t debug_reason_take();

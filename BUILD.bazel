@@ -61,7 +61,10 @@ KERNEL_SRCS = [
 # 実体としてはライブラリ以外になりようがない。
 cc_library(
     name = "kernel",
-    srcs = KERNEL_SRCS,
+    srcs = KERNEL_SRCS + [
+        "source/kernel/services.cpp",
+        "source/kernel/service_profile.cpp",
+    ],
     visibility = ["//visibility:public"],
     # ★ポート (//modules/pico_sdk_support) を名指ししない。arch / board は
     #   //configs:config が型として注入する (configs/kit.bzl)。
@@ -71,14 +74,16 @@ cc_library(
     ],
 )
 
+KERNEL_OBJECT_SRCS = [
+    "source/kernel_object/handler.cpp",
+    "source/kernel_object/memory.cpp",
+]
+
 # カーネルオブジェクト = 方針の層。★カーネルとは別のライブラリにする。分けること
 # 自体が D1 (カーネルはオブジェクトを知らない) の検算になる — 依存は一方向しかない。
 cc_library(
     name = "kernel_object",
-    srcs = [
-        "source/kernel_object/handler.cpp",
-        "source/kernel_object/memory.cpp",
-    ],
+    srcs = KERNEL_OBJECT_SRCS,
     visibility = ["//visibility:public"],
     deps = [":kernel"],
 )
@@ -94,12 +99,32 @@ cc_library(
     ],
 )
 
+# C6 M-only で成立可能な selftest の 5 つのサブセット
+C6_SELFTEST_SRCS = [
+    "source/selftest/call_ladder.cpp",
+    "source/selftest/handler_binding.cpp",
+    "source/selftest/memory_ladder.cpp",
+    "source/selftest/stream_ladder.cpp",
+    "source/selftest/thread_ladder.cpp",
+]
+
+cc_library(
+    name = "c6_selftest",
+    srcs = C6_SELFTEST_SRCS,
+    visibility = ["//visibility:public"],
+    deps = [
+        ":internal_headers",
+        ":kernel_object",
+    ],
+)
+
 # 自己テストは「カーネルの一部」ではなく、カーネルを使うオブジェクトの集合。
 cc_library(
     name = "selftest",
     srcs = [
         "source/selftest/call_cost.cpp",
         "source/selftest/call_ladder.cpp",
+        "source/selftest/kernel_services.cpp",
         "source/selftest/debug_ladder.cpp",
         "source/selftest/flash_stream.cpp",
         "source/selftest/handler_binding.cpp",
@@ -124,12 +149,14 @@ cc_library(
 # ★//firmware:esp32c6 が ESP-IDF の最終リンクへ渡す。--config=esp32c6 でだけ解決される。
 cc_library(
     name = "shizuku_kernel",
-    srcs = KERNEL_SRCS + [
+    srcs = KERNEL_SRCS + KERNEL_OBJECT_SRCS + C6_SELFTEST_SRCS + [
         "source/memory_manager/freestanding.cpp",
         "//ports/esp32/c6:early_boot.cpp",
         "//ports/esp32/c6:link_stubs.cpp",
         "//ports/esp32/c6:trap.cpp",
         "//ports/esp32/c6:rv32_trap.S",
+        "//ports/esp32/c6:selftest_adapter.cpp",
+        "//ports/esp32/c6:selftest_runner.cpp",
     ],
     target_compatible_with = ["@platforms//cpu:riscv32"],
     visibility = ["//visibility:public"],

@@ -9,7 +9,7 @@
 #include "shizuku/objects/gdb_stub.hpp"
 #if defined(CYW43_WL_GPIO_LED_PIN)
 #include "shizuku/objects/ble_uart.hpp"
-#include "objects/ota/ota.hpp"
+#include "shizuku/objects/ota.hpp"
 #endif
 #endif
 #include "shizuku/objects/usb_cdc.hpp"
@@ -117,6 +117,7 @@ void shizuku::app_entry() {
   boot_stage(kHandlerBinding);
 #endif
   shizuku::selftest::handler_binding_probe();
+  shizuku::selftest::kernel_services_probe();
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   boot_stage(kCallCost);
 #endif
@@ -125,6 +126,7 @@ void shizuku::app_entry() {
   boot_stage(kThreadLadder);
 #endif
   shizuku::selftest::thread_ladder();
+  shizuku::selftest::kernel_services_isr_result();
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   boot_stage(kMemoryLadder);
 #endif
@@ -213,7 +215,7 @@ void shizuku::app_entry() {
   }
 
   const uint32_t ota_rc =
-      xno::ota::register_ota(OTA_OBJ, 0, BLE_UART_OBJ);
+      shizuku::objects::ota::register_ota(OTA_OBJ, 0, BLE_UART_OBJ);
   if (ota_rc != 0) {
     shizuku::KERNEL::BOARD::diag_printf("[BOOT] register_ota failed: %lu\n",
                                         (unsigned long)ota_rc);
@@ -227,14 +229,14 @@ void shizuku::app_entry() {
     if (ota_rx.error == 0 && ota_rx.value != 0) {
       shizuku::KERNEL::ARCH::syscall(
           (uintptr_t)shizuku::object_api::CALL_METHOD, OTA_OBJ,
-          (uintptr_t)xno::ota::method::SET_INPUT_STREAM,
+          (uintptr_t)shizuku::objects::ota::method::SET_INPUT_STREAM,
           ota_rx.value);
     }
 
     // 結線: ota の進捗・結果出力ストリーム -> ble_uart の TX 本線
     const auto ota_tx = shizuku::KERNEL::ARCH::syscall(
         (uintptr_t)shizuku::object_api::CALL_METHOD, OTA_OBJ,
-        (uintptr_t)xno::ota::method::GET_STREAM, 0);
+        (uintptr_t)shizuku::objects::ota::method::GET_STREAM, 0);
     if (ota_tx.error == 0 && ota_tx.value != 0) {
       shizuku::KERNEL::ARCH::syscall(
           (uintptr_t)shizuku::object_api::CALL_METHOD, BLE_UART_OBJ,
@@ -244,7 +246,7 @@ void shizuku::app_entry() {
 
     // 起動
     shizuku::objects::ble_uart::start_ble_uart(BLE_UART_OBJ);
-    xno::ota::start_ota(OTA_OBJ);
+    shizuku::objects::ota::start_ota(OTA_OBJ);
   }
 #endif
 

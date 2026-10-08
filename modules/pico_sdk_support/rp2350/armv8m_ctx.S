@@ -7,12 +7,10 @@
 .fpu fpv5-sp-d16   // .cpu 指定は FPU を含まないため、vstmia/vldmia 用に明示する
 #endif
 .thumb
-
-.macro PROFILE stage
-#if defined(SHIZUKU_SVC_PROFILE) && SHIZUKU_SVC_PROFILE
+.macro SERVICE_PROFILE hook
+#if SHIZUKU_KERNEL_SERVICE_PROFILE
     push {r0-r3,r12,lr}
-    movs r0, #\stage
-    bl shizuku_svc_profile_mark
+    bl \hook
     pop {r0-r3,r12,lr}
 #endif
 .endm
@@ -64,16 +62,13 @@
 // CTX_RESTORE — shizuku_current_context を再取得し (dispatch が別スレッドへ
 // 切替えたかもしれない)、context_t から復元して例外復帰する。
 // ---------------------------------------------------------------------------
-.macro CTX_RESTORE
+.macro CTX_RESTORE svc=0
     // ★GDB stub の 1 命令実行はここで立てる。「次の 1 命令」はこの直後に
     //   復帰する文脈のものと確定しているので、対象を取り違えない
     //   (立てる場所を間違えると「呼び出し側自身が刻まれる」— 実測で踏んだ)。
     bl   shizuku_arm_pending_step
     // ★Q8 (DESIGN §11.3)。同じ理由で「次に復帰する文脈が確定した今」書く。
-    PROFILE 10
     bl   shizuku_restore_region_window
-    PROFILE 11
-    //
     bl   shizuku_current_context  // r0 = 復帰対象 context (別スレッドかもしれない)
 
     // 整数 callee-saved と PSP を復元
@@ -114,7 +109,9 @@
 2:
 #endif
 
-    PROFILE 12
+    .if \svc
+    SERVICE_PROFILE shizuku_service_handler_end
+    .endif
     mov  lr, r3                   // LR = 復帰対象の EXC_RETURN
     bx   lr                       // 例外復帰
 .endm
@@ -122,23 +119,20 @@
 // ---------------------------------------------------------------------------
 // SVC 入口。CTX_SAVE → shizuku_svc_dispatch(context) → CTX_RESTORE。
 // ---------------------------------------------------------------------------
-.section .time_critical.shizuku_svc_entry,"ax",%progbits
 .thumb_func
 .global shizuku_armv8m_svc_entry
 .align 8
 .type shizuku_armv8m_svc_entry, %function
 shizuku_armv8m_svc_entry:
-    PROFILE 1
+    SERVICE_PROFILE shizuku_service_handler_begin
     CTX_SAVE
-    PROFILE 2
     bl   shizuku_svc_dispatch     // shizuku_svc_dispatch(context = r0)
-    CTX_RESTORE
+    CTX_RESTORE 1
 
 // ---------------------------------------------------------------------------
 // PendSV 入口 (時限実行権の期限回収 = 最低優先度の遅延切替例外)。退避/復元は
 // SVC と完全同型 (遅延 FPU 退避含む)。
 // ---------------------------------------------------------------------------
-.text
 .thumb_func
 .global shizuku_armv8m_pendsv_entry
 .align 2
@@ -156,22 +150,11 @@ shizuku_armv8m_pendsv_entry:
 //   自由に潰すので信用できない。ネストの情報はカーネルが積んだフレームの側にあり、
 //   何段落とすかはこれを受け取ったカーネルオブジェクトが自分の台帳から決める。
 // ---------------------------------------------------------------------------
-.section .time_critical.shizuku_return_stub,"ax",%progbits
-.balign 256
-.global __shizuku_return_stub_start
-__shizuku_return_stub_start:
 .thumb_func
 .global shizuku_armv8m_return_stub
 .align 2
 .type shizuku_armv8m_return_stub, %function
 shizuku_armv8m_return_stub:
-#if defined(SHIZUKU_SVC_PROFILE) && SHIZUKU_SVC_PROFILE
-    mrs r3, CONTROL
-    tst r3, #1
-    bne 3f
-    PROFILE 8
-3:
-#endif
     mov   r2, r0        // a2 = 戻り値
     movs  r1, #1        // a1 = 落とす段数 1
     movs  r3, #0        // a3 = エラーコード 0 (成功)
@@ -179,17 +162,12 @@ shizuku_armv8m_return_stub:
     mov   r12, r3       // a4 = 申告なし (申告はこれを受けるハンドラ側が行う)
     movs  r0, #2        // a0 = RETURN (kernel_abi.hpp と static_assert で両縛り)
     svc   0
-    b shizuku_return_stub_failed
-.ltorg
-.balign 256
-.global __shizuku_return_stub_end
-__shizuku_return_stub_end:
+    b     shizuku_return_stub_failed // 戻ってきた = 巻き戻しが弾かれた
 
 // ---------------------------------------------------------------------------
 // DebugMonitor の入口。フォールトとまったく同じ形にしてある —
 // 「止めて別のスレッドへ切り替えて復帰する」は既にある経路なので、増やさない。
 // ---------------------------------------------------------------------------
-.text
 .thumb_func
 .global shizuku_armv8m_debugmon_entry
 .align 2

@@ -36,6 +36,7 @@ public:
 
   static void diag_mute(bool quiet);
   static int dma_claim();
+  static void dma_copy(int channel, const void *from, void *to, uint32_t bytes);
   static bool dma_busy(int channel);
   static void dma_release(int channel);
 

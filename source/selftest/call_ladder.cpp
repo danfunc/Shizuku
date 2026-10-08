@@ -41,13 +41,6 @@ extern "C" bool shizuku_selftest_deep_read(uint32_t *out) {
 #define DEEP_TRACE(d) ((void)0)
 #endif
 
-#if defined(SHIZUKU_DEEP_TRACE_DISABLE) && SHIZUKU_DEEP_TRACE_DISABLE
-// Keep the optimized deep() prologue intact: __builtin_frame_address(0)
-// itself forces a frame pointer and can hide alignment/stack-sensitive faults.
-#undef DEEP_TRACE
-#define DEEP_TRACE(d) ((void)0)
-#endif
-
 namespace shizuku {
 namespace selftest {
 
@@ -67,21 +60,7 @@ constexpr uintptr_t OBJECT_NAMER = object_id::namer;
 constexpr uintptr_t OBJECT_COUNT_PROBE = object_id::count;
 constexpr uintptr_t METHOD_MAIN = 0;
 
-#if defined(SHIZUKU_CALL_DIAG) && SHIZUKU_CALL_DIAG
-void call_diag_stage(uint32_t stage) {
-  shizuku_selftest_progress_mark(stage, 0, 0);
-  const uint64_t started = BOARD::time_us();
-  while (BOARD::time_us() - started < 10000) { __asm__ volatile("" ::: "memory"); }
-  BOARD::diag_printf("[CALLDBG] stage=%lu\n", (unsigned long)stage);
-}
-#undef CL_PROG
-#define CL_PROG(n) call_diag_stage(n)
-#endif
 void check(const char *name, bool ok, unsigned long got, unsigned long want) {
-#if defined(SHIZUKU_CALL_DIAG) && SHIZUKU_CALL_DIAG
-  const uint64_t started = BOARD::time_us();
-  while (BOARD::time_us() - started < 10000) { __asm__ volatile("" ::: "memory"); }
-#endif
   if (ok) {
     ++passed;
     BOARD::diag_printf("[SELFTEST] PASS %s (=%lu)\n", name, got);

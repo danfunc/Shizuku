@@ -1,4 +1,3 @@
-#include "shizuku/svc_profile.hpp"
 // ===========================================================================
 //  svc の受け口とプリミティブ — カーネルの中核 (DESIGN §6.2 / §7 / §8 / §9)
 // ===========================================================================
@@ -34,8 +33,10 @@
 //    今のネスト数を渡す。オブジェクトは exit API に何段戻すかを載せて撃ち、
 //    ハンドラがその段数で巻き戻す (D5)。
 #include "shizuku/kernel.hpp"
-#include "shizuku/freestanding_mem.hpp"
 #include "shizuku/object_api.hpp"
+#if defined(__arm__) || defined(__thumb__)
+extern "C" char shizuku_v2_service_resume;
+#endif
 
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
 extern "C" void shizuku_boot_trace_phase(uint32_t);
@@ -53,11 +54,11 @@ namespace shizuku {
 
 // ISA 層の例外入口が退避先・復帰先として使う文脈。dispatch が現在スレッドを
 // 差し替えれば、そのまま切替になる (退避後と復帰前の 2 回呼ばれる)。
-template <> SHIZUKU_HOT KERNEL::CONTEXT *KERNEL::current_context() {
+template <> KERNEL::CONTEXT *KERNEL::current_context() {
   return m_threads[m_current[BOARD::core_num()]].thread.context;
 }
 
-template <> SHIZUKU_HOT void KERNEL::set_object_handler(uintptr_t entry_pc,
+template <> void KERNEL::set_object_handler(uintptr_t entry_pc,
                                             uint32_t object_id) {
   m_object_svc_handler = entry_pc;
   m_object_svc_handler_object = object_id;
@@ -67,10 +68,9 @@ template <> SHIZUKU_HOT void KERNEL::set_object_handler(uintptr_t entry_pc,
 #if defined(SHIZUKU_DEEP_DIAG)
 extern "C" { volatile uint32_t shizuku_push_diag[6]; volatile uint32_t shizuku_push_diag_n; }
 #endif
-template <> SHIZUKU_HOT
+template <>
 bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                              KERNEL::FRAME **frame) {
-  SHIZUKU_PROFILE(4); // push begin
   const uint32_t frame_bytes = ARCH::exc_frame_bytes(*context);
   uint32_t total = (uint32_t)sizeof(call_frame_header) + frame_bytes;
   total = (total + 7u) & ~7u; // 8B 境界を保つ
@@ -116,10 +116,10 @@ bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   header->total_bytes = total;
   header->frame_bytes = frame_bytes;
   // ★識別情報は非特権から届かない特権 ledger に置く。ここには復帰用文脈だけを残す。
-  shizuku_memcpy(&header->saved, context, sizeof(*context)); // sp を含めて丸ごと (= 元フレームの位置も記録される)
+  header->saved = *context; // sp を含めて丸ごと (= 元フレームの位置も記録される)
 
   // ★元の例外フレームは動かさない (I-3)。下へ複製するのは書き換え用の作業コピー。
-  shizuku_memcpy((void *)callee_frame, (const void *)context->sp, frame_bytes);
+  __builtin_memcpy((void *)callee_frame, (const void *)context->sp, frame_bytes);
   context->sp = (FRAME *)callee_frame;
   // 作業コピーは 8B 境界に置いてあるので、復帰時の追加調整を消しておく (I-4)。
   ARCH::normalize_frame(*context->sp);
@@ -141,11 +141,10 @@ bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
       thread.current_kind,
       thread.current_handler_object);
 #endif
-  SHIZUKU_PROFILE(5); // push end
   return true;
 }
 
-template <> SHIZUKU_HOT
+template <>
 bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                             KERNEL::FRAME **frame) {
   if (thread.call_stack.top == 0)
@@ -156,14 +155,14 @@ bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   // 元の例外フレームは退避域の中に元の位置のまま生きているので、文脈を丸ごと
   // 戻すだけで復帰先が正しく決まる (書き戻しも再配置も不要)。
   const uintptr_t previous = header->prev;
-  shizuku_memcpy(context, &header->saved, sizeof(*context));
+  *context = header->saved;
   *frame = context->sp;
   thread.call_stack.top = previous;
   thread.call_stack.depth--;
   return true;
 }
 
-template <> SHIZUKU_HOT
+template <>
 kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                              KERNEL::FRAME **frame,
                              const call_request &request) {
@@ -195,18 +194,48 @@ kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   return kernel_error::OK;
 }
 
-template <> SHIZUKU_HOT void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
-  SHIZUKU_PROFILE(3);
+template <typename C>
+static constexpr bool is_context_unprivileged(const C *ctx) {
+  if constexpr (requires { ctx->control; }) {
+    return (ctx->control & 1u) != 0;
+  } else if constexpr (requires { ctx->privileged; }) {
+    return !ctx->privileged;
+  } else {
+    return false;
+  }
+}
+
+template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(410);
 #endif
   THREAD &thread = current_thread();
   FRAME *frame = context->sp;
+  // Only this privileged internal gate bypasses parent routing. The public
+  // objectland raw-SVC path below, including colliding numbers, is unchanged.
+#if defined(__arm__) || defined(__thumb__)
+  const bool service_gate = ARCH::frame_pc(*frame) ==
+      reinterpret_cast<uintptr_t>(&shizuku_v2_service_resume);
+#else
+  constexpr bool service_gate = false;
+#endif
+  if (service_gate) {
+    if (is_context_unprivileged(context)) {
+      ARCH::set_result(*frame, (uintptr_t)object_error::NOT_PRIVILEGED, 0);
+      return;
+    }
+    const auto id = ARCH::arg(*frame, 0);
+    if (id != (uintptr_t)object_api::YIELD && id != (uintptr_t)object_api::RUN_FOR &&
+        id != (uintptr_t)object_api::SLEEP_US) {
+      ARCH::set_result(*frame, (uintptr_t)object_error::UNKNOWN_API, 0);
+      return;
+    }
+  }
 
   // ★「kernel object 本人であるか」の厳格判定 (指摘3, 指摘4)。
   //   単なる HANDLER ではなく、登録済み kernel object (種別 KERNEL_OBJECT かつ
   //   ID が m_object_svc_handler_object) だけが kernel primitive を直接解釈できる。
-  if (thread.current_kind() == (uint32_t)object_kind::KERNEL_OBJECT &&
+  if (!service_gate && thread.current_kind() == (uint32_t)object_kind::KERNEL_OBJECT &&
       thread.current_object() == m_object_svc_handler_object) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     shizuku_boot_trace_phase(411);
@@ -225,8 +254,7 @@ template <> SHIZUKU_HOT void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
         ARCH::set_result(*frame, (uintptr_t)kernel_error::BAD_REQUEST, 0);
         break;
       }
-      call_request request;
-      shizuku_memcpy(&request, pointer, sizeof(request));
+      const call_request request = *pointer;
       const kernel_error error = do_call(thread, context, &frame, request);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
       shizuku_boot_trace_call_leave((uint32_t)context->sp, (uint32_t)frame);
@@ -297,13 +325,13 @@ template <> SHIZUKU_HOT void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
 
   // ここへ来るのは非 kernel object (一般 child や専用 handling object など)。
   // 親ハンドラが未登録なら黙って root へ fallback せず、診断可能な panic とする (指摘2)。
-  if (thread.current_handler_entry() == 0) {
+  if (!service_gate && thread.current_handler_entry() == 0) {
     BOARD::panic("unregistered parent handler for object syscall");
   }
 
   // 親ハンドラへの直接ディスパッチ (O(1)、テーブル検索ゼロ、同期例外中の再帰なし)。
-  const uintptr_t target_entry = thread.current_handler_entry();
-  const uint32_t target_object = thread.current_handler_object();
+  const uintptr_t target_entry = service_gate ? m_object_svc_handler : thread.current_handler_entry();
+  const uint32_t target_object = service_gate ? m_object_svc_handler_object : thread.current_handler_object();
   const bool to_root = (target_object == m_object_svc_handler_object);
 
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
@@ -350,7 +378,7 @@ template <> SHIZUKU_HOT void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
 // 捌けており、syscall の途中でもない (優先度規約が保証する)。
 // ★発火が余分でも壊れないようにガードは自己安定型にしてある — 早期復帰と期限が
 //   競っても「もう貸していない / まだ期限前」なら何もしないで戻るだけ。
-template <> SHIZUKU_HOT void KERNEL::pendsv_dispatch(KERNEL::CONTEXT *context) {
+template <> void KERNEL::pendsv_dispatch(KERNEL::CONTEXT *context) {
   (void)context; // 借り手の文脈退避は例外入口が済ませている
   const uint32_t core = BOARD::core_num();
   grant_stack &grants = m_grants[core];
@@ -388,7 +416,7 @@ volatile uintptr_t shizuku_return_stub_failure_depth;
 volatile uint32_t shizuku_return_stub_failure_count;
 }
 
-extern "C" [[noreturn]] SHIZUKU_HOT void shizuku_return_stub_failed(uintptr_t error,
+extern "C" [[noreturn]] void shizuku_return_stub_failed(uintptr_t error,
                                                         uintptr_t depth) {
   shizuku_return_stub_failure_error = error;
   shizuku_return_stub_failure_depth = depth;

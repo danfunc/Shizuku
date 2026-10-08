@@ -1,9 +1,14 @@
+#if SHIZUKU_KERNEL_SERVICE_PROFILE
+extern "C" void shizuku_service_isr_probe() __attribute__((weak));
+#define SERVICE_ISR_PROBE() do { if(shizuku_service_isr_probe) shizuku_service_isr_probe(); } while(0)
+#else
+#define SERVICE_ISR_PROBE() ((void)0)
+#endif
 // ISA 層 (armv8m_ctx.S) とカーネルの継ぎ目。asm が呼ぶ extern "C" のフックを、
 // 構成で確定したカーネル実体へ転送するだけの薄い層。ここがモジュール側にあるのは、
 // フックの名前が ISA 固有だから (カーネル本体は ISA 非依存に保つ)。
 #include "shizuku/archs/armv8m.hpp"
 #include "shizuku/kernel.hpp"
-#include "shizuku/svc_profile.hpp"
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
 #include "hardware/structs/watchdog.h"
 #include "hardware/watchdog.h"
@@ -11,12 +16,12 @@
 #include "pico/time.h"
 #endif
 
-extern "C" SHIZUKU_HOT shizuku_armv8m_context *shizuku_current_context() {
+extern "C" shizuku_armv8m_context *shizuku_current_context() {
   return reinterpret_cast<shizuku_armv8m_context *>(
       shizuku::kernel_instance.current_context());
 }
 
-extern "C" SHIZUKU_HOT void shizuku_svc_dispatch(shizuku_armv8m_context *context) {
+extern "C" void shizuku_svc_dispatch(shizuku_armv8m_context *context) {
   shizuku::kernel_instance.svc_dispatch(
       reinterpret_cast<shizuku::KERNEL::CONTEXT *>(context));
 }
@@ -39,7 +44,7 @@ extern "C" void shizuku_fault_dispatch(shizuku_armv8m_context *context) {
 // ★CTX_RESTORE の先頭から**あらゆる例外復帰**で呼ばれる (docs/05_handoff.md
 //   の「2 回目以降の continue/stepi が固まる」の直し方)。復帰しようとしている
 //   文脈が GDB stub の予約した相手なら、ここで初めて MON_STEP を立てる。
-extern "C" SHIZUKU_HOT void shizuku_arm_pending_step() {
+extern "C" void shizuku_arm_pending_step() {
   shizuku::kernel_instance.consume_pending_step();
 }
 
@@ -48,24 +53,9 @@ extern "C" SHIZUKU_HOT void shizuku_arm_pending_step() {
 //   書く。set_priv と同じ理由: 値を持たせるだけの側 (do_call/spawn) と
 //   実際にハードウェアへ効かせる側 (ここ) を分けておかないと、対象がまだ
 //   走っていない段階の「呼び出し元の次の命令」に効いてしまう。
-extern "C" SHIZUKU_HOT void shizuku_restore_region_window() {
+extern "C" void shizuku_restore_region_window() {
   using ARCH = shizuku::archs::armv8m;
   const auto *context = shizuku::kernel_instance.current_context();
-  const uint32_t core = shizuku::KERNEL::BOARD::core_num();
-#ifdef SHIZUKU_PROFILE_ACTIVE
-  const bool collect = shizuku::svc_profile_enabled[core];
-  const uint32_t started = collect ? ARCH::cycle_counter_read() : 0;
-#endif
-  uint32_t mmio_writes = 0;
-#if defined(SHIZUKU_MPU_SKIP_SAME) && SHIZUKU_MPU_SKIP_SAME
-  // Experimental: all current runtime writers of region 2 go through this hook.
-  // Any future direct region-2 writer must invalidate this per-core cache.
-  static uint32_t last_base[2], last_limit[2];
-  static bool valid[2];
-  const bool changed = !valid[core] || last_base[core] != context->region_base ||
-                       last_limit[core] != context->region_limit;
-  if (changed) {
-#endif
   if (context->region_limit != 0) {
     // ★PMSAv8 は 32B 粒度: RLAR.LIMIT はその 32B ブロックの**末尾まで丸ごと**
     //   カバーする。下丸めしても「削れる」わけではない (region_set 自身が
@@ -77,27 +67,12 @@ extern "C" SHIZUKU_HOT void shizuku_restore_region_window() {
     //   これは粒度の限界であって、**この extent の直後 32B 未満は道連れで
     //   読めてしまい得る** — 隣接ファイルとの間に十分な余白を置くのは
     //   呼び出し側 (flash_fs のセクタ境界配置) の仕事。
-    mmio_writes = 3;
     const uint32_t limit = (context->region_limit + 31u) & ~31u;
     ARCH::region_set(ARCH::GRANT_REGION_INDEX, context->region_base, limit,
                      ARCH::ACCESS_RO_ALL, false, 0);
   } else {
-    mmio_writes = 2;
     ARCH::region_disable(ARCH::GRANT_REGION_INDEX);
   }
-#if defined(SHIZUKU_MPU_SKIP_SAME) && SHIZUKU_MPU_SKIP_SAME
-    last_base[core] = context->region_base; last_limit[core] = context->region_limit;
-    valid[core] = true;
-  }
-#endif
-#ifdef SHIZUKU_PROFILE_ACTIVE
-  const uint32_t ended = collect ? ARCH::cycle_counter_read() : 0;
-  if (collect) {
-    shizuku::svc_profile_mpu_cycles[core] = shizuku::svc_profile_mpu_cycles[core] + ended - started;
-    shizuku::svc_profile_mpu_updates[core] = shizuku::svc_profile_mpu_updates[core] + (mmio_writes ? 1 : 0);
-    shizuku::svc_profile_mpu_writes[core] = shizuku::svc_profile_mpu_writes[core] + mmio_writes;
-  }
-#endif
 }
 
 // タイマ例外。文脈を触らないので普通の C 関数でよい — ここは期限を見て
@@ -181,7 +156,7 @@ extern "C" void shizuku_selftest_systick_c(const uint32_t *frame) {
     if (now - since_us > 3000000u) feed = false;
   }
   if (feed) watchdog_update();
-  shizuku::kernel_instance.timer_expired();
+  SERVICE_ISR_PROBE(); shizuku::kernel_instance.timer_expired();
 }
 extern "C" __attribute__((naked)) void shizuku_armv8m_systick_entry() {
   __asm volatile("tst lr, #4\n"
@@ -192,33 +167,6 @@ extern "C" __attribute__((naked)) void shizuku_armv8m_systick_entry() {
 }
 #else
 extern "C" void shizuku_armv8m_systick_entry() {
-  shizuku::kernel_instance.timer_expired();
-}
-#endif
-
-#include "shizuku/svc_profile.hpp"
-#ifdef SHIZUKU_PROFILE_ACTIVE
-namespace shizuku {
-volatile svc_profile_event svc_profile_events[2][256];
-volatile uint32_t svc_profile_count[2];
-volatile uint32_t svc_profile_enabled[2];
-volatile uint32_t svc_profile_mpu_cycles[2], svc_profile_mpu_updates[2], svc_profile_mpu_writes[2];
-}
-extern "C" __attribute__((section(".time_critical.svc_profile")))
-void shizuku_svc_profile_mark(uint32_t stage) {
-  const uint32_t core = shizuku::KERNEL::BOARD::core_num();
-  if (!shizuku::svc_profile_enabled[core]) return;
-  uint32_t irq_state;
-  __asm__ volatile("mrs %0, primask; cpsid i" : "=r"(irq_state) :: "memory");
-  const uint32_t cycle = shizuku::KERNEL::ARCH::cycle_counter_read();
-  const uint32_t n = shizuku::svc_profile_count[core];
-  if (n >= 256) {
-    __asm__ volatile("msr primask, %0" :: "r"(irq_state) : "memory");
-    return;
-  }
-  shizuku::svc_profile_events[core][n].stage = stage;
-  shizuku::svc_profile_events[core][n].cycle = cycle;
-  shizuku::svc_profile_count[core] = n + 1;
-  __asm__ volatile("msr primask, %0" :: "r"(irq_state) : "memory");
+  SERVICE_ISR_PROBE(); shizuku::kernel_instance.timer_expired();
 }
 #endif

@@ -267,7 +267,7 @@ private:
   uintptr_t object_name(uintptr_t id, object_error &error);
   uintptr_t spawn_method(uintptr_t id, uintptr_t method, uintptr_t argument,
                          object_error &error);
-  uintptr_t yield_to(uintptr_t target, object_error &error);
+  uintptr_t yield(object_error &error);
   uintptr_t sleep_us(uintptr_t microseconds, object_error &error);
   uintptr_t run_for(uintptr_t thread, uintptr_t cycles, object_error &error);
   void exit_thread();

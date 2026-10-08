@@ -21,10 +21,11 @@
 //    平均には割り込みが混ざる。**割り込みの入らなかった 1 回**が知りたい値なので
 //    最小値を代表にし、平均も併記して「どれだけ揺れたか」が見えるようにする。
 #include "shizuku/kernel.hpp"
-#include "shizuku/svc_profile.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/selftest.hpp"
+#include "shizuku/service_profile.hpp"
+#include "shizuku/kernel_services.hpp"
 
 namespace shizuku {
 namespace selftest {
@@ -56,9 +57,7 @@ struct api_result {
 
 api_result api(object_api number, uintptr_t a1 = 0, uintptr_t a2 = 0,
                uintptr_t a3 = 0) {
-  SHIZUKU_PROFILE(0);
   const auto result = ARCH::syscall((uintptr_t)number, a1, a2, a3);
-  SHIZUKU_PROFILE(9);
   if (result.error & KERNEL_ERROR_MARK)
     return {(uintptr_t)object_error::KERNEL_REFUSED, result.error};
   return {result.error, result.value};
@@ -157,91 +156,6 @@ __attribute__((noinline)) stat_t measure(op_t requested, uint32_t rounds) {
   return {best, (uint32_t)(total / rounds)};
 }
 
-#ifdef SHIZUKU_PROFILE_ACTIVE
-// A separate, instrumented sample: sums of adjacent timestamp intervals by
-// destination stage. Nested calls remain ordered; no single-slot overwrites.
-// Pacing is outside every timed sample. CDC drops whole lines on FIFO full.
-void cost_output_pace() {
-  const uint64_t started = BOARD::time_us();
-  while (BOARD::time_us() - started < 10000) { __asm__ volatile("" ::: "memory"); }
-}
-void profile_report(const char *name, op_t op) {
-  const uint32_t core = BOARD::core_num();
-  uint32_t best[13], count[13]{};
-  uint64_t sum[13]{};
-  for (auto &v : best) v = UINT32_MAX;
-  uint32_t overflow = 0, events_min = UINT32_MAX, events_max = 0;
-  uint32_t mpu_min = UINT32_MAX, updates = 0, writes = 0;
-  uint64_t mpu_sum = 0, trace_sum = 0;
-  uint32_t trace_min = UINT32_MAX, hits[13]{};
-  for (unsigned round = 0; round < 128; ++round) {
-    svc_profile_count[core] = 0;
-    svc_profile_mpu_cycles[core] = svc_profile_mpu_updates[core] = svc_profile_mpu_writes[core] = 0;
-    svc_profile_enabled[core] = 1;
-    __asm__ volatile("" ::: "memory");
-    g_sink = op(g_argument);
-    __asm__ volatile("" ::: "memory");
-    svc_profile_enabled[core] = 0;
-    const uint32_t n = svc_profile_count[core];
-    if (n < events_min) events_min = n;
-    if (n > events_max) events_max = n;
-    const uint32_t mpu = svc_profile_mpu_cycles[core];
-    if (mpu < mpu_min) mpu_min = mpu;
-    mpu_sum += mpu;
-    updates = svc_profile_mpu_updates[core]; writes = svc_profile_mpu_writes[core];
-    if (n == 256) { ++overflow; continue; }
-    for (uint32_t i = 0; i < n; ++i) {
-      const uint32_t stage = svc_profile_events[core][i].stage;
-      if (stage < 13) ++hits[stage];
-    }
-    if (n > 1) {
-      const uint32_t elapsed = svc_profile_events[core][n-1].cycle - svc_profile_events[core][0].cycle;
-      if (elapsed < trace_min) trace_min = elapsed;
-      trace_sum += elapsed;
-    }
-    uint32_t totals[13]{};
-    for (uint32_t i = 1; i < n; ++i) {
-      const uint32_t stage = svc_profile_events[core][i].stage;
-      if (stage < 13)
-        totals[stage] += svc_profile_events[core][i].cycle -
-                         svc_profile_events[core][i-1].cycle;
-    }
-    for (unsigned i = 0; i < 13; ++i) {
-      if (!totals[i]) continue;
-      if (totals[i] < best[i]) best[i] = totals[i];
-      sum[i] += totals[i]; ++count[i];
-    }
-  }
-  const char *labels[] = {"caller_pre", "exception_entry", "context_saved",
-      "dispatch", "push_begin", "push_end", "handler_begin", "handler_end",
-      "return_stub", "caller_resume", "mpu_begin", "mpu_end", "restore_end"};
-  for (unsigned i = 0; i < 13; ++i)
-    if (count[i]) {
-      cost_output_pace();
-      BOARD::diag_printf(
-        "[COST] profile %s to=%s min=%lu mean=%lu cyc samples=%lu overflow=%lu\n",
-        name, labels[i], (unsigned long)best[i],
-        (unsigned long)(sum[i]/count[i]), (unsigned long)count[i],
-        (unsigned long)overflow);
-    }
-  cost_output_pace();
-  BOARD::diag_printf("[COST] coverage %s events_min=%lu events_max=%lu overflow=%lu\n", name,
-      (unsigned long)events_min, (unsigned long)events_max, (unsigned long)overflow);
-  cost_output_pace();
-  BOARD::diag_printf("[COST] hits %s stages0..12=%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu\n", name,
-      (unsigned long)(hits[0]/128), (unsigned long)(hits[1]/128), (unsigned long)(hits[2]/128),
-      (unsigned long)(hits[3]/128), (unsigned long)(hits[4]/128), (unsigned long)(hits[5]/128),
-      (unsigned long)(hits[6]/128), (unsigned long)(hits[7]/128), (unsigned long)(hits[8]/128),
-      (unsigned long)(hits[9]/128), (unsigned long)(hits[10]/128), (unsigned long)(hits[11]/128), (unsigned long)(hits[12]/128));
-  cost_output_pace();
-  BOARD::diag_printf("[COST] trace_total %s min=%lu mean=%lu cyc (enabled hook overhead included)\n", name,
-      (unsigned long)trace_min, (unsigned long)(trace_sum/128));
-  cost_output_pace();
-  BOARD::diag_printf("[COST] mpu_body %s min=%lu mean=%lu cyc updates_last=%lu mmio_writes_last=%lu dsb=0 isb=0\n", name,
-      (unsigned long)mpu_min, (unsigned long)(mpu_sum/128), (unsigned long)updates, (unsigned long)writes);
-}
-#endif
-
 // 引き算した結果を「サイクル / ナノ秒」で 1 行にする。
 void report(const char *name, stat_t raw, uint32_t baseline,
             uint32_t cycles_per_us) {
@@ -249,9 +163,6 @@ void report(const char *name, stat_t raw, uint32_t baseline,
   const uint32_t net_mean = raw.mean > baseline ? raw.mean - baseline : 0;
   // ns = cycle * 1000 / (cycles/µs)。整数のまま計算する (FP を測定路に持ち込まない)。
   const uint32_t ns = cycles_per_us ? (net * 1000u) / cycles_per_us : 0;
-#ifdef SHIZUKU_PROFILE_ACTIVE
-  cost_output_pace();
-#endif
   BOARD::diag_printf(
       "[COST] %-22s min %5lu cyc (%4lu ns)  mean %5lu cyc  [raw min %lu]\n",
       name, (unsigned long)net, (unsigned long)ns, (unsigned long)net_mean,
@@ -335,23 +246,36 @@ template <typename A> void bench() {
                        (unsigned long)checked.error,
                        (unsigned long)checked.value);
   }
-#ifdef SHIZUKU_PROFILE_ACTIVE
-  BOARD::diag_printf("[COST] profile adjacent intervals include hook overhead and IRQs; per-stage minima are not additive\n");
-  profile_report("svc", op_svc);
-  profile_report("call1", op_call);
-  profile_report("call2", op_call2);
-#endif
   BOARD::diag_printf("[COST] call cost bench done\n");
 }
 
 } // namespace
 
 void call_cost() {
+  service_profile::reset();
+#if SHIZUKU_KERNEL_SERVICE_PROFILE
+  BOARD::diag_printf("[V3GW] COST includes compiled hooks; use normal build for untraced comparison\n");
+#endif
   if constexpr (ARCH::HAS_CYCLE_COUNTER) {
     bench<ARCH>();
   } else {
     BOARD::diag_printf("[COST] SKIP no DWT cycle counter on this arch\n");
   }
+#if SHIZUKU_KERNEL_SERVICE_PROFILE
+  // M0+ has no DWT, but still sample the same syscall path using the us timer.
+  if constexpr (!ARCH::HAS_CYCLE_COUNTER)
+    for(unsigned i=0;i<128;++i) ARCH::syscall((uintptr_t)object_api::GET_CURRENT_OBJECT);
+  const auto v=service_profile::read();
+  BOARD::diag_printf("[V3GW] SVC software max=%lu samples=%lu unit=%s clock_ok=%u\n",
+      (unsigned long)v.handler_max,(unsigned long)v.handler_samples,
+      service_profile::cycles()?"cyc":"us",service_profile::available()?1u:0u);
+  const auto irq=shizuku::kernel_services::irq_save();
+  shizuku::kernel_services::irq_restore(irq);
+  const auto m=service_profile::read();
+  BOARD::diag_printf("[V3GW] PRIMASK envelope max=%lu samples=%lu unit=%s (hooks included)\n",
+      (unsigned long)m.mask_max,(unsigned long)m.mask_samples,
+      service_profile::cycles()?"cyc":"us");
+#endif
 }
 
 } // namespace selftest

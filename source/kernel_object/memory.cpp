@@ -35,7 +35,7 @@ static_assert(sizeof(block) % BLOCK_ALIGN == 0, "ヘッダも境界に乗せる"
 
 // ★要求に使う階級は **ceil** で取る。floor だと「その階級には足りないものも
 //   混じる」ので中を歩いて探すことになり、そこで定数時間が崩れる。
-static SHIZUKU_HOT uint32_t class_for_request(uintptr_t bytes) {
+static uint32_t class_for_request(uintptr_t bytes) {
   if (bytes <= 1)
     return 0;
   const uint32_t ceil_log2 =
@@ -45,12 +45,12 @@ static SHIZUKU_HOT uint32_t class_for_request(uintptr_t bytes) {
 
 // 空きを置く階級は **floor**。その階級は「2^c 以上」を保証する側なので、
 // 実際の大きさ以下の階級に置かないと保証が嘘になる。
-static SHIZUKU_HOT uint32_t class_of_block(uintptr_t bytes) {
+static uint32_t class_of_block(uintptr_t bytes) {
   const uint32_t log2 = 31u - (uint32_t)__builtin_clz((uint32_t)bytes);
   return log2 >= FREE_CLASSES ? FREE_CLASSES - 1u : log2;
 }
 
-static SHIZUKU_HOT void free_push(arena &target, block *item) {
+static void free_push(arena &target, block *item) {
   const uint32_t cls = class_of_block(item->bytes);
   item->prev = nullptr;
   item->next = target.free_list[cls];
@@ -60,7 +60,7 @@ static SHIZUKU_HOT void free_push(arena &target, block *item) {
   target.free_map |= (1u << cls);
 }
 
-static SHIZUKU_HOT void free_remove(arena &target, block *item) {
+static void free_remove(arena &target, block *item) {
   const uint32_t cls = class_of_block(item->bytes);
   if (item->prev != nullptr)
     item->prev->next = item->next;
@@ -74,17 +74,17 @@ static SHIZUKU_HOT void free_remove(arena &target, block *item) {
 }
 
 // 物理的に右隣。arena の端なら nullptr。
-static SHIZUKU_HOT block *right_of(arena &target, block *item) {
+static block *right_of(arena &target, block *item) {
   const uintptr_t next = (uintptr_t)item + item->bytes;
   return next >= target.base + target.bytes ? nullptr : (block *)next;
 }
 // 物理的に左隣。境界タグがあるので歩かずに引ける。
-static SHIZUKU_HOT block *left_of(block *item) {
+static block *left_of(block *item) {
   return item->prev_bytes == 0 ? nullptr
                                : (block *)((uintptr_t)item - item->prev_bytes);
 }
 
-template <> SHIZUKU_HOT
+template <>
 void KERNEL_OBJECT::arena_init(arena &target, uintptr_t base, uintptr_t bytes) {
   const uintptr_t aligned = (base + BLOCK_ALIGN - 1) & ~(BLOCK_ALIGN - 1);
   const uintptr_t usable = (bytes - (aligned - base)) & ~(BLOCK_ALIGN - 1);
@@ -110,7 +110,7 @@ void KERNEL_OBJECT::arena_init(arena &target, uintptr_t base, uintptr_t bytes) {
 
 // ★借りた相手 (owner) を必ず記録する。誰のものか分からない記憶は、返させることも
 //   会計に載せることもできない — それは「資源を持つ」と言えない状態。
-template <> SHIZUKU_HOT
+template <>
 uintptr_t KERNEL_OBJECT::arena_allocate(arena &target, uintptr_t bytes,
                                         uintptr_t owner) {
   if (bytes == 0)
@@ -149,7 +149,7 @@ uintptr_t KERNEL_OBJECT::arena_allocate(arena &target, uintptr_t bytes,
 }
 
 // 返す。**隣とだけ**繋げ直す (旧実装のようにリスト全体は歩かない)。
-template <> SHIZUKU_HOT bool KERNEL_OBJECT::arena_release(arena &target, uintptr_t handle) {
+template <> bool KERNEL_OBJECT::arena_release(arena &target, uintptr_t handle) {
   if (handle <= target.base || handle >= target.base + target.bytes)
     return false;
   block *item = (block *)(handle - sizeof(block));
