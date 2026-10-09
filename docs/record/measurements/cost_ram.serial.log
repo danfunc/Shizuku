@@ -1,0 +1,167 @@
+[THERMAL] last 60 s: 600 samples spanning 59900 ms, 30.88..34.62 C (retries 0)
+[STRESS] budget=15000cyc(100us) late win=157us max=2644us led_write=338/424us load=46854/153652/20448 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=10001824
+[COST] direct=9 svc=1840 call1=6012 call2=12537 cyc (harness 15 cyc, clk 150 MHz)
+malloc success
+[PERIPH] gpio ready (object 2)
+[PERIPH] spi ready (object 3)
+[PERIPH] i2c ready (object 4)
+[PERIPH] led: cyw43_arch_init() 開始
+[PERIPH] led: cyw43_arch_init() -> 0
+[PERIPH] led ready (object 5)
+[PERIPH] led talks to cyw43 over gSPI at 37500 kHz (div 2)
+[PERIPH] temperature ready (object 7)
+[FLASHFS] ready (object 6) at 10100000, 1024 KiB, 2 files, 700 KiB free
+[SELFTEST] call ladder start
+[SELFTEST] PASS create object (=0)
+[SELFTEST] PASS call/6 nested: value (=21)
+[SELFTEST] PASS stack exhaustion: depth restored (=0)
+[SELFTEST] PASS child_a SVC routed to parent_a (+100) and exit forwarded (=110)
+[COST] harness baseline = 15 cyc (subtracted below)
+[COST] direct call            min     9 cyc (  60 ns)  mean     9 cyc  [raw min 24]
+[COST] svc round trip         min  2103 cyc (14020 ns)  mean  2112 cyc  [raw min 2118]
+[COST] method call (1 hop)    min  6251 cyc (41673 ns)  mean  6268 cyc  [raw min 6266]
+[COST] profile svc to=exception_entry min=131 mean=131 cyc samples=128 overflow=0
+[COST] profile svc to=context_saved min=260 mean=260 cyc samples=128 overflow=0
+[COST] profile svc to=dispatch min=128 mean=128 cyc samples=128 overflow=0
+[COST] profile call1 to=exception_entry min=1025 mean=1100 cyc samples=128 overflow=0
+[COST] profile call1 to=context_saved min=650 mean=650 cyc samples=128 overflow=0
+[COST] profile call1 to=dispatch min=320 mean=320 cyc samples=128 overflow=0
+[COST] profile call2 to=caller_pre min=103 mean=133 cyc samples=128 overflow=0
+[COST] profile call2 to=exception_entry min=2133 mean=2136 cyc samples=128 overflow=0
+[COST] profile call2 to=context_saved min=1300 mean=1300 cyc samples=128 overflow=0
+[COST] call cost bench done
+[SELFTEST] thread ladder start
+[SELFTEST] PASS spawn: error (=0)
+[SELFTEST] PASS grant: returned (=0)
+[SELFTEST] PASS grant: reclaimed by budget (=0)
+[SELFTEST] PASS grant: within the lent budget (=2040)
+[SELFTEST] PASS sleep: the sleeper woke up later (=1)
+[SELFTEST] PASS overshoot: spawn hog (=0)
+[SELFTEST] overshoot over 200 grants of 200us: mean 21us, worst 32us (200/200 reclaimed by budget)
+[SELFTEST] PASS overshoot: every grant was reclaimed (=200)
+[SELFTEST] PASS overshoot: bounded (=32)
+[SELFTEST] PASS grant: a budget too small to honour is refused (=14)
+[SELFTEST] memory ladder start
+[SELFTEST] alloc+free x2000: clean 63775us, scattered over 24 holes 63741us
+[SELFTEST] PASS memory: holes were actually made (=24)
+[SELFTEST] PASS memory: the cost does not follow the number of holes (=63741)
+[SELFTEST] memory ladder done
+[SELFTEST] unprivileged probe start
+[BOOT] secondary core launched
+[SELFTEST] PASS multicore: workers spawned (=4)
+[SELFTEST] PASS multicore: every worker finished (=4)
+[SELFTEST] PASS multicore: work ran on the second core (=3)
+[SELFTEST] PASS multicore: work ran on the first core too (=3)
+[SELFTEST] multicore probe done (cores seen: 0x3)
+[SELFTEST] stream ladder start
+[SELFTEST] PASS stream: created (=0)
+[SELFTEST] PASS stream: the producer sent every record (=4000)
+[SELFTEST] PASS stream: the consumer received every record (=4000)
+[SELFTEST] PASS stream: nothing was lost (=0)
+[SELFTEST] PASS stream: nothing arrived out of order (=0)
+[SELFTEST] PASS stream: back-pressure actually happened (=70)
+[SELFTEST] PASS stream: owner destroys despite bound seats (=0)
+[FLASHFS] stored 'probe.txt' at 10151000 in 2643 us (erase 0 us x0, program 1687 us x3)
+[FLASHFS] erase 4 KiB at 10152000 (1 sector(s)) took 37586 us = 37586 us per 4 KiB
+[FLASHFS] erase 64 KiB at 10160000 (16 sector(s)) took 84033 us = 5252 us per 4 KiB
+[FLASHFS] read 41 bytes straight from 10151000 -> matches
+[SELFTEST] flash stream ladder start
+[SELFTEST] PASS flash stream: opened for writing (=32)
+[SELFTEST] PASS flash stream: the unprivileged writer ran non-privileged (=15)
+[SELFTEST] PASS flash stream: the whole payload reached flash (=300)
+[SELFTEST] PASS flash stream: opened for reading (=48)
+[SELFTEST] PASS flash stream: one extent describes the file (=300)
+[SELFTEST] PASS connect: kernel allocated the sink ring (=0)
+[SELFTEST] PASS connect: the two streams were joined (=0)
+[SELFTEST] PASS connect: source destroy succeeds after disconnect completion (=1)
+[SELFTEST] PASS connect: owner destroys disconnected sink (=0)
+[SELFTEST] PASS deny: reading past the granted extent faults (=2)
+[SELFTEST] PASS deny: the offending thread was stopped (=1)
+[SELFTEST] flash stream ladder done
+[SELFTEST] PASS debug: the target runs before we arm anything (=59)
+[SELFTEST] PASS debug: the breakpoint was hit (=1)
+[SELFTEST] PASS debug: the stopped thread makes no progress (=62)
+[SELFTEST] PASS debug: the rest of the system kept running (=1)
+[SELFTEST] PASS debug: it resumes where it stopped (=298)
+[SELFTEST] PASS debug: single-stepping produced an event (=2)
+[SELFTEST] PASS debug: the step was reported as a halt, not a breakpoint (=2147483649)
+[SELFTEST] PASS debug: a thread with nowhere to hand over keeps running (=1)
+[SELFTEST] debug ladder done
+[THERMAL] sampling every 100000 us into 3000 slots (300 s of history), thread 1
+Version: 7.95.61 (abcd531 CY) CRC: 4528a809 Date: Wed 2023-01-11 10:29:38 PST Ucode Ver: 1043.2169 FWID 01-7afb0879
+cyw43 loaded ok, mac 88:a2:9e:ed:60:19
+[STRESS] led first write took 540590us (一度きりの立ち上げ)
+[STRESS] blink thread=3, 3 load threads running
+[STRESS] budget=300000cyc(2000us) late win=1742us max=1742us led_write=262/338us load=1178/3898/506 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=150000cyc(1000us) late win=951us max=1742us led_write=262/329us load=2363/7783/1009 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=75000cyc(500us) late win=671us max=1742us led_write=262/316us load=3529/11741/1512 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=30000cyc(200us) late win=251us max=1742us led_write=262/320us load=4696/15737/2030 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=15000cyc(100us) late win=279us max=1742us led_write=264/307us load=5885/19767/2567 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=300000cyc(2000us) late win=1937us max=1937us led_write=262/307us load=7060/23572/3053 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=150000cyc(1000us) late win=926us max=1937us led_write=262/311us load=8223/27432/3551 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=75000cyc(500us) late win=544us max=1937us led_write=262/328us load=9397/31404/4090 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=30000cyc(200us) late win=434us max=1937us led_write=262/313us load=10566/35369/4604 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[THERMAL] last 60 s: 200 samples spanning 19900 ms, 30.41..34.62 C (retries 0)
+[STRESS] budget=15000cyc(100us) late win=260us max=1937us led_write=265/311us load=11740/39332/5121 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=300000cyc(2000us) late win=2106us max=2106us led_write=264/312us load=12903/43191/5613 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=150000cyc(1000us) late win=818us max=2106us led_write=262/312us load=14076/47080/6112 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=75000cyc(500us) late win=458us max=2106us led_write=262/308us load=15248/50988/6634 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=30000cyc(200us) late win=413us max=2106us led_write=262/308us load=16417/54960/7162 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[THERMAL] 34.62 C | 300 samples | late mean 173 us max 882 us (period 100000 us)
+[STRESS] budget=15000cyc(100us) late win=272us max=2106us led_write=264/316us load=17594/58970/7684 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=300000cyc(2000us) late win=2272us max=2272us led_write=261/311us load=18775/62813/8180 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=150000cyc(1000us) late win=898us max=2272us led_write=263/312us load=19928/66695/8672 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=75000cyc(500us) late win=507us max=2272us led_write=262/309us load=21089/70615/9184 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=30000cyc(200us) late win=507us max=2272us led_write=263/309us load=22251/74615/9711 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[THERMAL] last 60 s: 400 samples spanning 39900 ms, 30.41..34.62 C (retries 0)
+[STRESS] budget=15000cyc(100us) late win=235us max=2272us led_write=265/312us load=23398/78632/10242 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=300000cyc(2000us) late win=721us max=2272us led_write=262/311us load=24567/82455/10769 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=150000cyc(1000us) late win=847us max=2272us led_write=261/310us load=25739/86348/11279 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=75000cyc(500us) late win=528us max=2272us led_write=262/320us load=26932/90354/11793 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=30000cyc(200us) late win=253us max=2272us led_write=263/313us load=28094/94318/12308 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=15000cyc(100us) late win=262us max=2272us led_write=263/312us load=29289/98318/12841 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=300000cyc(2000us) late win=2582us max=2582us led_write=263/307us load=30427/102182/13341 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=150000cyc(1000us) late win=939us max=2582us led_write=262/311us load=31596/106042/13842 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=75000cyc(500us) late win=504us max=2582us led_write=261/306us load=32796/110024/14361 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=30000cyc(200us) late win=397us max=2582us led_write=263/311us load=33957/113948/14893 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[THERMAL] 33.69 C | 600 samples | late mean 180 us max 1142 us (period 100000 us)
+[THERMAL] last 60 s: 600 samples spanning 59900 ms, 30.41..34.62 C (retries 0)
+[STRESS] budget=15000cyc(100us) late win=191us max=2582us led_write=263/323us load=35133/117931/15418 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=300000cyc(2000us) late win=1856us max=2582us led_write=262/310us load=36318/121764/15921 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=150000cyc(1000us) late win=983us max=2582us led_write=263/317us load=37491/125723/16422 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=75000cyc(500us) late win=629us max=2582us led_write=262/310us load=38689/129665/16923 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+[STRESS] budget=30000cyc(200us) late win=179us max=2582us led_write=261/317us load=39852/133684/17440 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)

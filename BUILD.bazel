@@ -146,23 +146,25 @@ cc_library(
 
 # ESP32-C6 向けの**名前付きカーネルアーカイブ** (libshizuku_kernel.a)。
 # カーネル本体 + freestanding メモリマネージャ + pre-init ROM 起動表示 + C6 の未実装 trap stub。
-# ★//firmware:esp32c6 が ESP-IDF の最終リンクへ渡す。--config=esp32c6 でだけ解決される。
+# ★//modules/esp_idf_support/firmware:esp32c6 が ESP-IDF の最終リンクへ渡す。--config=esp32c6 でだけ解決される。
 cc_library(
     name = "shizuku_kernel",
     srcs = KERNEL_SRCS + KERNEL_OBJECT_SRCS + C6_SELFTEST_SRCS + [
         "source/memory_manager/freestanding.cpp",
-        "//ports/esp32/c6:early_boot.cpp",
-        "//ports/esp32/c6:link_stubs.cpp",
-        "//ports/esp32/c6:trap.cpp",
-        "//ports/esp32/c6:rv32_trap.S",
-        "//ports/esp32/c6:selftest_adapter.cpp",
-        "//ports/esp32/c6:selftest_runner.cpp",
+        "//modules/esp_idf_support/c6:early_boot.cpp",
+        "//modules/esp_idf_support/c6:link_stubs.cpp",
+        "//chips/esp32_c6:trap.cpp",
+        "//arch/riscv:rv32_trap.S",
+        "//chips/esp32_c6:selftest_adapter.cpp",
+        "//modules/esp_idf_support/c6:selftest_runner.cpp",
     ],
     target_compatible_with = ["@platforms//cpu:riscv32"],
     visibility = ["//visibility:public"],
     deps = [
         ":internal_headers",
         "//configs:config",
-        "//ports/esp32/c6:pmp",
+        "//arch/riscv:pmp",
+        "//chips/esp32_c6:headers",
+        "//modules/esp_idf_support/c6:headers",
     ],
 )

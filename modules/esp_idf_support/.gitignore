@@ -1,0 +1,13 @@
+/build/
+/build-*/
+/.cache/
+sdkconfig
+sdkconfig.*
+!sdkconfig.defaults
+managed_components/
+dependencies.lock
+*.elf
+*.bin
+*.map
+*.o
+

@@ -1,0 +1,37 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "headers",
+    hdrs = ["rp2040_pico_w.hpp"],
+    includes = ["."],
+    target_compatible_with = ["@pico-sdk//bazel/constraint:rp2040"],
+    deps = [
+        "//arch/armv6m:headers",
+        "//:internal_headers",
+        "@pico-sdk//src/rp2_common/hardware_sync",
+        "@pico-sdk//src/rp2_common/pico_stdlib",
+    ],
+)
+
+cc_library(
+    name = "board",
+    srcs = ["board_rp2040.cpp"],
+    alwayslink = True,
+    target_compatible_with = ["@pico-sdk//bazel/constraint:rp2040"],
+    deps = [
+        ":headers",
+        "//arch/armv6m:ctx",
+        "//:kernel",
+        "//configs:config",
+        "//modules/pico_sdk_support/objects:usb_cdc",
+        "@pico-sdk//bazel/config:PICO_TINYUSB_LIB",
+        "@pico-sdk//src/rp2_common/hardware_dma",
+        "@pico-sdk//src/rp2_common/hardware_exception",
+        "@pico-sdk//src/rp2_common/hardware_sync",
+        "@pico-sdk//src/rp2_common/hardware_watchdog",
+        "@pico-sdk//src/rp2_common/pico_multicore",
+        "@pico-sdk//src/rp2_common/pico_stdlib",
+    ],
+)

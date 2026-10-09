@@ -1,0 +1,28 @@
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["main/early_diag.c"])
+
+# ESP32-C6: Bazel が作る libshizuku_kernel.a を ESP-IDF v6.1 の最終リンクへ渡し、
+# .bin を出すターゲット (idf.py build の薄いラッパ)。
+#   bazelisk build --config=esp32c6 //modules/esp_idf_support/firmware:esp32c6
+genrule(
+    name = "esp32c6",
+    srcs = [
+        "//:shizuku_kernel",
+        ":esp32c6_project",
+    ],
+    outs = ["shizuku_esp32c6.bin"],
+    cmd = "ARCHIVE=; for f in $(locations //:shizuku_kernel); do case $$f in *libshizuku_kernel.a) ARCHIVE=$$f;; esac; done;" +
+          " $(location build.sh) $$ARCHIVE $@ esp-15.2.0_20251204",
+    tools = ["build.sh"],
+    tags = [
+        "local",
+        "no-sandbox",
+    ],
+    target_compatible_with = ["@platforms//cpu:riscv32"],
+)
+
+filegroup(
+    name = "esp32c6_project",
+    srcs = glob(["CMakeLists.txt", "sdkconfig.defaults", "main/*"]),
+)

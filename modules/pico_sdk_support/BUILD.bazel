@@ -42,8 +42,8 @@ cc_library(
     deps = [
         "//:internal_headers",
     ] + select({
-        "//configs:rp2040": ["//modules/pico_sdk_support/rp2040:headers"],
-        "//configs:rp2350": ["//modules/pico_sdk_support/rp2350:headers"],
+        "//configs:rp2040": ["//chips/rp2040:headers"],
+        "//configs:rp2350": ["//chips/rp2350:headers"],
     }),
 )
 

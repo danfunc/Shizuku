@@ -1,0 +1,26 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "headers",
+    hdrs = ["armv8m.hpp"],
+    includes = ["."],
+    deps = [
+        "//:internal_headers",
+    ],
+)
+
+cc_library(
+    name = "ctx",
+    srcs = [
+        "arch_glue.cpp",
+        "armv8m_ctx.S",
+    ],
+    alwayslink = True,
+    deps = [
+        ":headers",
+        "//:kernel",
+        "//configs:config",
+    ],
+)
