@@ -91,74 +91,69 @@ uintptr_t gpio_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 //   閉じ込める。呼ぶ側 (合成側やドライバ) はピン番号も配線も知らなくてよい。
 //     pico2   : GPIO 25 (PICO_DEFAULT_LED_PIN)
 //     pico2_w : CYW43 チップの WL_GPIO0 — **GPIO を叩いても光らない**
-static volatile uint32_t g_led_state = 0;
-static volatile uint32_t g_hw_led_state = 0xFFFFFFFFu;
+// 希望状態 (論理値)。書込み・toggle は owner の有無に関係なく必ずここへ記録する。
+// 全アクセスは __atomic 組み込みで行い、ordering は SEQ_CST に揃える。
+static uint32_t g_led_state = 0;
+// owner だけが触る「チップへ最後に反映した値」。__atomic は使わない (owner 専用)。
+static uint32_t g_hw_led_state = 0xFFFFFFFFu;
 // main が返す失敗コード (0 = 成功)。合成側がそのまま印字できるよう意味を持たせる。
 constexpr uintptr_t LED_ARCH_INIT_FAILED = 1000;
 constexpr uintptr_t LED_ABSENT = 1001;
+// owner 未起動の書込みの戻り値。値は記録済みだが、まだチップへ反映されていないことを示す。
+constexpr uintptr_t LED_NO_OWNER = 1002;
 
 #if defined(CYW43_WL_GPIO_LED_PIN)
-void led_sync_hw() {
-  const uint32_t target = g_led_state;
-  if (g_hw_led_state != target) {
-    g_hw_led_state = target;
-    ::cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, target != 0);
-  }
-}
+// ★owner (led_owner_started を呼んだスレッド) が立つまで 0。反映の可否だけに使い、
+//   書込み側は値の記録とこのフラグの読みだけで、チップには一切触れない。
+uint32_t g_led_owner_up = 0;
 #endif
 
 uintptr_t led_write(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
   const led_request *request = (const led_request *)argument;
   if (request == nullptr)
     return 0;
-  g_led_state = request->value != 0 ? 1u : 0u;
+  // ★希望値を記録する (最新値で上書き = coalesce)。CYW43 への反映は owner が行う。
+  __atomic_store_n(&g_led_state, request->value != 0 ? 1u : 0u,
+                   __ATOMIC_SEQ_CST);
 #if defined(CYW43_WL_GPIO_LED_PIN)
-  // Core 0 から呼ばれた場合は即時反映。Core 1 から呼ばれた場合は
-  // ble_uart (Core 0) のポーリングループ (cyw43_arch_poll) が安全に反映する。
-  if (BOARD::core_num() == 0) {
-    led_sync_hw();
-  }
+  if (__atomic_load_n(&g_led_owner_up, __ATOMIC_ACQUIRE) == 0)
+    return LED_NO_OWNER;
 #elif defined(PICO_DEFAULT_LED_PIN)
-  bool pin_value = g_led_state != 0;
+  bool pin_value = __atomic_load_n(&g_led_state, __ATOMIC_SEQ_CST) != 0;
 #if defined(PICO_DEFAULT_LED_PIN_INVERTED) && PICO_DEFAULT_LED_PIN_INVERTED
   pin_value = !pin_value;
 #endif
   ::gpio_put(PICO_DEFAULT_LED_PIN, pin_value);
 #endif
-  return g_led_state;
-}
-
-void led_toggle() {
-  const uint32_t next = g_led_state ^ 1u;
-  g_led_state = next;
-#if defined(CYW43_WL_GPIO_LED_PIN)
-  if (BOARD::core_num() == 0) {
-    led_sync_hw();
-  }
-#elif defined(PICO_DEFAULT_LED_PIN)
-  bool pin_value = next != 0;
-#if defined(PICO_DEFAULT_LED_PIN_INVERTED) && PICO_DEFAULT_LED_PIN_INVERTED
-  pin_value = !pin_value;
-#endif
-  ::gpio_put(PICO_DEFAULT_LED_PIN, pin_value);
-#endif
+  return __atomic_load_n(&g_led_state, __ATOMIC_SEQ_CST);
 }
 
 uintptr_t led_read(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
-  return g_led_state;
+  return __atomic_load_n(&g_led_state, __ATOMIC_SEQ_CST);
 }
 
-uintptr_t led_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
-  // ★自分のハードウェアは自分で立ち上げる。ここが特権を要る場所:
-  //   cyw43_arch_init は PIO/DMA/IRQ を掴んでチップへファームを送り込む。
 #if defined(CYW43_WL_GPIO_LED_PIN)
-  // ★診断: BT を有効にしたビルドでここから戻ってこない事例を追っている
-  //   (2026-08-24)。「入った」「返り値」を必ず外に出す。
-  KERNEL::BOARD::diag_printf("[PERIPH] led: cyw43_arch_init() 開始\n");
+// ★CYW43 の owner (BLE 無しの RP2040 Pico W でだけ起きる)。init → poll → 反映を
+//   このスレッドだけで回す。SPAWN はオブジェクトの affinity (core 0) を引き継ぐ。
+uintptr_t led_poll(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  KERNEL::BOARD::diag_printf("[PERIPH] led: cyw43_arch_init() 開始 (owner)\n");
   const int arch_rc = ::cyw43_arch_init();
   KERNEL::BOARD::diag_printf("[PERIPH] led: cyw43_arch_init() -> %d\n", arch_rc);
   if (arch_rc != 0)
-    return LED_ARCH_INIT_FAILED; // 立ち上げ失敗をそのまま合成側へ返す
+    return LED_ARCH_INIT_FAILED; // owner 未起動のまま。書込みは LED_NO_OWNER で失敗
+  led_owner_started();
+  while (true) {
+    ::cyw43_arch_poll();
+    led_sync_hw();
+  }
+}
+#endif
+
+uintptr_t led_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  // ★CYW43 の init はここではしない。立ち上げは owner スレッド (led_poll か
+  //   ble_uart の poll_loop) だけが行う。ここは口を開けるだけ。
+#if defined(CYW43_WL_GPIO_LED_PIN)
+  // (CYW43 の LED は GPIO を直接触らない。下の export だけ行う)
 #elif defined(PICO_DEFAULT_LED_PIN)
   ::gpio_init(PICO_DEFAULT_LED_PIN);
   ::gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
@@ -173,6 +168,9 @@ uintptr_t led_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   uintptr_t failures = declare_name("led");
   failures += export_method((uintptr_t)led_method::WRITE, (uintptr_t)&led_write);
   failures += export_method((uintptr_t)led_method::READ, (uintptr_t)&led_read);
+#if defined(CYW43_WL_GPIO_LED_PIN)
+  failures += export_method((uintptr_t)led_method::POLL, (uintptr_t)&led_poll);
+#endif
   return failures;
 }
 
@@ -356,6 +354,65 @@ uintptr_t i2c_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 
 } // namespace
 
+// ★led_sync_hw / led_toggle は shizuku::objects の外部リンケージに置く。anonymous
+//   namespace に置くと ble_uart.cpp からは weak の空定義が呼ばれ、poll 側の反映と
+//   OTA の toggle が黙って消える (2026-10-09 確認)。
+#if defined(CYW43_WL_GPIO_LED_PIN)
+// ★owner 自身が init 成功の直後に呼ぶ。チップの既定値は不明なので、反映済みの値を
+//   無効化して、記録済みの最新値 (途中の toggle を含む) を次の sync で必ず書かせる。
+void led_owner_started() {
+  g_hw_led_state = 0xFFFFFFFFu;
+  __atomic_store_n(&g_led_owner_up, 1u, __ATOMIC_RELEASE);
+}
+
+// ★owner 自身が、チップを解体する前に呼ぶ。以後は反映しない。記録は続く (取りこぼさない)。
+void led_owner_stopped() {
+  __atomic_store_n(&g_led_owner_up, 0u, __ATOMIC_RELEASE);
+}
+
+// ★owner スレッド専用。CYW43 の GPIO に触れるのはここだけ。
+void led_sync_hw() {
+  if (__atomic_load_n(&g_led_owner_up, __ATOMIC_ACQUIRE) == 0)
+    return;
+  const uint32_t target = __atomic_load_n(&g_led_state, __ATOMIC_SEQ_CST);
+  if (g_hw_led_state != target) {
+    g_hw_led_state = target;
+    ::cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, target != 0);
+  }
+}
+
+uint32_t start_led_cyw43_actor() {
+  const auto spawned =
+      api(object_api::SPAWN, LED_OBJECT, (uintptr_t)led_method::POLL, 0);
+  if (spawned.error != 0) {
+    KERNEL::BOARD::diag_printf(
+        "[PERIPH] led: CYW43 owner could not start (%lu)\n",
+        (unsigned long)spawned.error);
+    return 1;
+  }
+  api(object_api::SET_BUDGET, spawned.value, 0);
+  return 0;
+}
+#endif
+
+void led_toggle() {
+  // ★parity は owner の有無に関係なく必ず記録する (XOR は原子的で、並行 toggle も落ちない)。
+  //   owner 不在の間の反転は、owner の立ち上げ (led_owner_started) 後の最初の sync で
+  //   最新値として反映される。解体・再初期化の窓で来た toggle も捨てない。
+#if defined(CYW43_WL_GPIO_LED_PIN)
+  __atomic_fetch_xor(&g_led_state, 1u, __ATOMIC_SEQ_CST); // 反映は led_sync_hw
+#elif defined(PICO_DEFAULT_LED_PIN)
+  __atomic_fetch_xor(&g_led_state, 1u, __ATOMIC_SEQ_CST);
+  bool pin_value = __atomic_load_n(&g_led_state, __ATOMIC_SEQ_CST) != 0;
+#if defined(PICO_DEFAULT_LED_PIN_INVERTED) && PICO_DEFAULT_LED_PIN_INVERTED
+  pin_value = !pin_value;
+#endif
+  ::gpio_put(PICO_DEFAULT_LED_PIN, pin_value);
+#else
+  __atomic_fetch_xor(&g_led_state, 1u, __ATOMIC_SEQ_CST);
+#endif
+}
+
 uint32_t register_peripherals() {
   struct entry_t {
     const char *name;
@@ -377,9 +434,16 @@ uint32_t register_peripherals() {
     KERNEL::BOARD::boot_trace_stage(stage); // CREATE_OBJECT 直前
 #endif
     // ペリフェラルを直接叩くので特権を宣言する (上のドライバは非特権のままでよい)。
-    const call_result created =
-        api(object_api::CREATE_OBJECT, entry.object, (uintptr_t)entry.main,
-            OBJECT_PRIVILEGED);
+#if defined(CYW43_WL_GPIO_LED_PIN)
+    // ★LED の owner (CYW43) は core 0 に固定する。SPAWN はオブジェクトの affinity を継ぐ。
+    const uintptr_t flags = entry.object == LED_OBJECT
+                                ? (OBJECT_PRIVILEGED | OBJECT_ON_CORE(0))
+                                : OBJECT_PRIVILEGED;
+#else
+    const uintptr_t flags = OBJECT_PRIVILEGED;
+#endif
+    const call_result created = api(object_api::CREATE_OBJECT, entry.object,
+                                    (uintptr_t)entry.main, flags);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     KERNEL::BOARD::boot_trace_stage(stage + 1u); // CREATE_OBJECT 復帰
     KERNEL::BOARD::boot_trace_stage(stage + 2u); // CALL_METHOD 直前

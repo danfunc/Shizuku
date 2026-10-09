@@ -1,0 +1,11 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# esp32_c5 (board) のヘッダと実装は boards/esp32_c5 へ移した。ここに残るのは
+# arch 側の stub (rv32_c5) とブート・テスト用の部品だけ。
+exports_files([
+    "early_boot.cpp",
+    "link_stubs.cpp",
+    "selftest_runner.cpp",
+])

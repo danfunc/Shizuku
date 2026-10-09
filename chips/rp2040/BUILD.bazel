@@ -1,0 +1,10 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# RP2040 の SoC 定義 (メモリ地図・コア数)。SDK に依存しない (pico-sdk を deps に入れない)。
+cc_library(
+    name = "headers",
+    hdrs = ["chip.hpp"],
+    includes = ["."],
+)

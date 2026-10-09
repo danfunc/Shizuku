@@ -4,13 +4,21 @@ extern "C" void shizuku_service_isr_probe() __attribute__((weak));
 #else
 #define SERVICE_ISR_PROBE() ((void)0)
 #endif
-#include "shizuku/archs/armv6m.hpp"
+#include "arch/armv6m/armv6m.hpp"
+#include "hardware/sync.h"
+#include "chips/rp2040/chip.hpp"
 #include "shizuku/kernel.hpp"
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
 #include "hardware/watchdog.h"
 #include "hardware/structs/watchdog.h"
 #include "pico/time.h"
 #endif
+// atomic 用ロック (arch/armv6m/armv6m.hpp の宣言の実体)。ID は SDK の
+// PICO_SPINLOCK_ID_ATOMIC をそのまま使う (値を写さない)。
+extern "C" uint32_t shizuku_armv6m_atomic_lock(){return spin_lock_blocking(spin_lock_instance(PICO_SPINLOCK_ID_ATOMIC));}
+extern "C" void shizuku_armv6m_atomic_unlock(uint32_t saved_irq){spin_unlock(spin_lock_instance(PICO_SPINLOCK_ID_ATOMIC),saved_irq);}
+// SoC 既定 (chips/rp2040) と SDK の実値が一致することを固定する。SDK 側で上書きされたら止まる。
+static_assert(PICO_SPINLOCK_ID_ATOMIC==shizuku::chips::rp2040::chip::kAtomicSpinlockId,"PICO_SPINLOCK_ID_ATOMIC differs from chips/rp2040 kAtomicSpinlockId");
 extern "C" shizuku_armv6m_context *shizuku_current_context(){
   return reinterpret_cast<shizuku_armv6m_context *>(shizuku::kernel_instance.current_context());
 }
@@ -32,7 +40,7 @@ extern "C" void shizuku_fault_dispatch(shizuku_armv6m_context *c){shizuku::kerne
 #endif
 extern "C" void shizuku_arm_pending_step(){}
 extern "C" void shizuku_restore_region_window(){
-  using A=shizuku::archs::armv6m;const auto*c=shizuku::kernel_instance.current_context();
+  using A=shizuku::archs::armv6m<shizuku::chips::rp2040::chip::kMpuRegionCount,shizuku::chips::rp2040::chip::kNvicPriorityBits>;const auto*c=shizuku::kernel_instance.current_context();
   if(c->region_limit && A::region_try_set(A::GRANT_REGION_INDEX,c->region_base,c->region_limit,A::ACCESS_RO_ALL,true))return;
   A::region_disable(A::GRANT_REGION_INDEX);
 }

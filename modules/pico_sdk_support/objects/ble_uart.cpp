@@ -82,6 +82,8 @@ namespace objects {
 // weak 定義
 __attribute__((weak)) void led_sync_hw() {}
 __attribute__((weak)) void led_toggle() {}
+__attribute__((weak)) void led_owner_started() {}
+__attribute__((weak)) void led_owner_stopped() {}
 #else
 __attribute__((weak)) void led_toggle() {}
 #endif
@@ -1055,14 +1057,9 @@ uintptr_t method_forget_bonds(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 // ---- BT スタック起動 (旧実装の bt_stack_bringup から診断/Stage1/2
 // を落とした版) --
 static void bt_stack_bringup() {
-  // ★cyw43_arch_init() はここで呼ばない。pico2_w では LED オブジェクト
-  //   (peripherals.cpp の led_main) が既に core0 から呼んでチップとファームを
-  //   立ち上げ済み。二重に呼ぶと (PIO/IRQ の再取得・チップへのファーム再送信)
-  //   ハングする実測を踏んだ ("各オブジェクトのprintfを確認せよ" の指摘で
-  //   コードレビューにより発見 — [XNO BOOT] peripherals registered までは
-  //   出るが ble_uart registered が出ない、という無音の切り分けと符合する)。
-  //   register_ble_uart() は register_peripherals() の後に呼ぶこと (この
-  //   前提が崩れると cyw43 未初期化のまま l2cap_init 等に入ってしまう)。
+  // ★この関数は owner スレッド (poll_loop) からだけ呼ぶ。cyw43_arch_init は
+  //   呼び手が poll_loop で済ませている (init は owner 1 本に集める)。ここで
+  //   もう一度 init すると PIO/IRQ の再取得・ファーム再送信でハングする実測あり。
   l2cap_init();
 
   // ★bonding の永続化はここでは**何もしない**。pico-sdk の
@@ -1129,12 +1126,13 @@ static void bt_stack_teardown() {
 }
 
 // コントローラ完全無応答からの最終手段。★およそ 2 秒ブロックする。
-// ★★**この間 yield しない**のが肝。poll スレッドは budget-0 (バトン) なので、
-//   譲らなければ他のスレッドは走らない = 解体中の cyw43 を誰も触らない。
-//   LED (peripherals.cpp) も同じ core0 に居て cyw43 越しに光るので、ここで
-//   譲ると「チップが居ない瞬間に LED が書きに来る」窓ができる。
-//   旧実装はロックでこれを塞いでいたが、こちらはロックが無いぶん
-//   **譲らないことで塞ぐ**。
+// ★この関数は owner スレッド (poll_loop) からだけ呼ぶ。解体・再 init の間、CYW43 に
+//   触れるのはこのスレッドだけ。LED 側の書込みは CYW43 に触れず、希望状態を記録する
+//   だけなので、この窓で LED が chip を叩くことはない (led_owner_stopped で反映を止め、
+//   led_owner_started で最新値を反映し直す)。
+// ★★**この間 yield しない**のが肝。poll スレッドは budget-0 (バトン) で、ここで譲ると
+//   他のスレッドが走り、解体途中の chip 状態を見ることになる。ロックは無いので、
+//   **譲らないことで owner の直列性を保つ**。
 static void bt_full_chip_restart() {
   BOARD::diag_printf("[BLE_UART] full CYW43 chip reset...\n");
   con_handle = HCI_CON_HANDLE_INVALID;
@@ -1149,6 +1147,7 @@ static void bt_full_chip_restart() {
   ci_nego_stage = 0;
   nc_pending_handle = HCI_CON_HANDLE_INVALID;
 
+  led_owner_stopped(); // 解体中は LED を反映しない (owner 自身だけが CYW43 に触れる)
   bt_stack_teardown();
   busy_wait_us(100000); // 電源断を落ち着かせる。★sleep ではない (譲らない)
 #ifdef GEMINI_MODIFY_20260905
@@ -1168,6 +1167,7 @@ static void bt_full_chip_restart() {
     return;
   }
 #endif
+  led_owner_started();
   bt_stack_bringup();
   last_conn_activity_us = BOARD::time_us();
   BOARD::diag_printf("[BLE_UART] chip reset done, waiting for HCI ready\n");
@@ -1241,6 +1241,16 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   shizuku::objects::gdb_link_protect_thread(
       shizuku::kernel_instance.current_thread_id());
 #endif
+
+  // ★CYW43 の唯一の owner はこのスレッド。立ち上げ (init) → LED owner 宣言 →
+  //   BTstack bring-up の順。init に失敗したら何も触らずに終わる (fail-closed:
+  //   BLE は止まり、LED 書込みは LED_NO_OWNER で失敗する)。
+  if (cyw43_arch_init() != 0) {
+    BOARD::diag_printf("[BLE_UART] cyw43_arch_init FAILED at owner start (BLE/LED off)\n");
+    return 1;
+  }
+  led_owner_started();
+  bt_stack_bringup();
 
   uint64_t next_adv_ensure_us = 0;
   uint64_t next_bond_check_us = 0;
@@ -1614,7 +1624,8 @@ uintptr_t ble_uart_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   api(shizuku::object_api::STREAM_BIND, g_ch2_rx_stream_id,
       (uintptr_t)shizuku::stream::role::PRODUCER);
 
-  bt_stack_bringup();
+  // ★BTstack の bring-up と CYW43 の init は poll_loop (owner) で行う。ここでは
+  //   しない (boot スレッドで走らせると owner が 2 つになる)。
   return failures;
 }
 
@@ -1625,9 +1636,9 @@ uint32_t register_ble_uart(uintptr_t object_id) {
   const uintptr_t OBJECT = object_id;
   // ★OBJECT_ON_CORE(0) は「指定しない」のとは違う — 無指定 (affinity=0) は
   //   「どのコアでもよい」を意味し、SPAWN する poll_loop がスケジューラの都合で
-  //   core1 へ乗る余地を残してしまう。LED (peripherals.cpp) が core0 から
-  //   cyw43_arch_init() した以上、cyw43 に触れるスレッドは明示的に core0 へ
-  //   ピン留めしないと安全ではない。
+  //   core1 へ乗る余地を残してしまう。CYW43 の init・poll・解体は poll_loop
+  //   (SPAWN 元) が行うので、そのスレッドの core を決めるのはこの affinity。
+  //   owner を core0 に固定しないと、chip を触るスレッドが core1 へ乗りうる。
   const auto created =
       api(shizuku::object_api::CREATE_OBJECT, OBJECT, (uintptr_t)&ble_uart_main,
           shizuku::OBJECT_PRIVILEGED | shizuku::OBJECT_ON_CORE(0));

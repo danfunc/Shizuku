@@ -10,13 +10,14 @@ ${INCLUDE_HEADERS_INSTRUCTION}
 #include "shizuku/templates/kernel_object.hpp"
 
 namespace shizuku{
-    using ARCH = shizuku::archs::${SHIZUKU_ARCH};
+    using ARCH = ${SHIZUKU_ARCH_TYPE};
+    using CHIP = shizuku::chips::${SHIZUKU_CHIP}::chip;
     namespace stream {
         template <typename REC>
         using handle = basic_handle<REC, ::shizuku::ARCH>;
     }
     using BOARD = shizuku::boards::${SHIZUKU_BOARD};
-    using CPU_MANAGER = shizuku::templates::cpu_manager<ARCH,BOARD,${SHIZUKU_CPU_COUNT}>;
+    using CPU_MANAGER = shizuku::templates::cpu_manager<ARCH,CHIP,BOARD,${SHIZUKU_CPU_COUNT}>;
     using MEMORY_MANAGER = ${SHIZUKU_MEMORY_MANAGER};
     using KERNEL = shizuku::templates::kernel<CPU_MANAGER,MEMORY_MANAGER>;
     using KERNEL_OBJECT = shizuku::templates::kernel_object<KERNEL,${SHIZUKU_OBJECT_COUNT},${SHIZUKU_METHOD_COUNT},${SHIZUKU_CALL_DEPTH},${SHIZUKU_THREAD_COUNT}>;

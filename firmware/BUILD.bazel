@@ -1,7 +1,6 @@
 # 実行ファイルを作るのはここだけ (BUILD.bazel の冒頭を参照)。
 load("@rules_cc//cc:defs.bzl", "cc_binary")
 
-exports_files(["esp32c6/main/early_diag.c"])
 
 # 書き込み: bazelisk run //firmware:flash (ビルドしてから焼く)。
 sh_binary(
@@ -78,33 +77,17 @@ cc_binary(
     }),
 )
 
-# ---------------------------------------------------------------------------
-# ESP32-C6: Bazel が作る libshizuku_kernel.a を ESP-IDF v6.1 の最終リンクへ渡し、
-# .bin を出すターゲット (idf.py build の薄いラッパ)。
-#   bazelisk build --config=esp32c6 //firmware:esp32c6
-# ★start_cpu0 は diag hook 後、M-only stage-2 kernel/bootstrap pilot を呼ぶ。
-#   PMP/timer/FreeRTOS は未起動。実機到達は別途 JTAG で確認する。
-# ★IDF のサンドボックス外ツールを使うので no-sandbox。IDF_PATH / IDF_TOOLS_PATH 必須。
-# ---------------------------------------------------------------------------
-genrule(
+# ESP32-C5: //modules/esp_idf_support/firmware:esp32c5 への alias。
+alias(
+    name = "esp32c5",
+    actual = "//modules/esp_idf_support/firmware:esp32c5",
+    visibility = ["//visibility:public"],
+)
+
+# ESP32-C6: 移動後ターゲット //modules/esp_idf_support/firmware:esp32c6 への互換 alias。
+# 従来のビルドコマンド (bazelisk build --config=esp32c6 //firmware:esp32c6) を維持する。
+alias(
     name = "esp32c6",
-    srcs = [
-        "//:shizuku_kernel",
-        ":esp32c6_project",
-    ],
-    outs = ["shizuku_esp32c6.bin"],
-    cmd = "ARCHIVE=; for f in $(locations //:shizuku_kernel); do case $$f in *libshizuku_kernel.a) ARCHIVE=$$f;; esac; done;" +
-          " $(location esp32c6/build.sh) $$ARCHIVE $@ esp-15.2.0_20251204",
-    tools = ["esp32c6/build.sh"],
-    tags = [
-        "local",
-        "no-sandbox",
-    ],
-    target_compatible_with = ["@platforms//cpu:riscv32"],
+    actual = "//modules/esp_idf_support/firmware:esp32c6",
+    visibility = ["//visibility:public"],
 )
-
-filegroup(
-    name = "esp32c6_project",
-    srcs = glob(["esp32c6/CMakeLists.txt", "esp32c6/sdkconfig.defaults", "esp32c6/main/*"]),
-)
-

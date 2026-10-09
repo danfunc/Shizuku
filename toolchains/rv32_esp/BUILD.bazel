@@ -4,7 +4,7 @@ load(":cc_toolchain_config.bzl", "rv32_esp_cc_toolchain_config")
 package(default_visibility = ["//visibility:public"])
 
 # ESP-IDF v6.1 の tools.json (riscv32-esp-elf) と同じ GCC。IDF 側ラッパ
-# (//firmware/esp32c6:build.sh) とテストが、この文字列で突き合わせる。
+# (modules/esp_idf_support/firmware/build.sh) とテストが、この文字列で突き合わせる。
 GCC_VERSION_STRING = "esp-15.2.0_20251204"
 
 # ESP32-C6 (RV32IMAC, ベアメタル)。ARM の pico-sdk プラットフォームとは別。

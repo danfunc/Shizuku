@@ -314,7 +314,10 @@ void thread_ladder() {
           (unsigned long)elapsed, 5000);
 
     // 眠り終えたら起きること (返したきり忘れられていないか)。
-    for (uint32_t guard = 0; guard < 5000 && g_sleeper_woke == 0; ++guard)
+    // ★待ちは回数ではなく時間で区切る。YIELD 1 回の所要時間は CPU 速度で変わる
+    //   (速いコアでは 5000 回が眠り (50ms) より先に尽きる)。眠りの 20 倍 (1s) まで待つ。
+    for (const uint64_t wake_deadline = BOARD::time_us() + 20u * SLEEPER_SLEEP_US;
+         g_sleeper_woke == 0 && BOARD::time_us() < wake_deadline;)
       api(object_api::YIELD);
     check("sleep: the sleeper woke up later", g_sleeper_woke == 1,
           (unsigned long)g_sleeper_woke, 1);

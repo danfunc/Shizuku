@@ -7,7 +7,8 @@ extern "C" void shizuku_service_isr_probe() __attribute__((weak));
 // ISA 層 (armv8m_ctx.S) とカーネルの継ぎ目。asm が呼ぶ extern "C" のフックを、
 // 構成で確定したカーネル実体へ転送するだけの薄い層。ここがモジュール側にあるのは、
 // フックの名前が ISA 固有だから (カーネル本体は ISA 非依存に保つ)。
-#include "shizuku/archs/armv8m.hpp"
+#include "arch/armv8m/armv8m.hpp"
+#include "chips/rp2350/chip.hpp"
 #include "shizuku/kernel.hpp"
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
 #include "hardware/structs/watchdog.h"
@@ -54,7 +55,7 @@ extern "C" void shizuku_arm_pending_step() {
 //   実際にハードウェアへ効かせる側 (ここ) を分けておかないと、対象がまだ
 //   走っていない段階の「呼び出し元の次の命令」に効いてしまう。
 extern "C" void shizuku_restore_region_window() {
-  using ARCH = shizuku::archs::armv8m;
+  using ARCH = shizuku::archs::armv8m<shizuku::chips::rp2350::chip::kMpuRegionCount,shizuku::chips::rp2350::chip::kNvicPriorityBits>;
   const auto *context = shizuku::kernel_instance.current_context();
   if (context->region_limit != 0) {
     // ★PMSAv8 は 32B 粒度: RLAR.LIMIT はその 32B ブロックの**末尾まで丸ごと**
