@@ -175,7 +175,7 @@ cc_library(
         "//chips/esp32_c6:trap.cpp",
         "//boards/esp32_c6:board_esp32_c6.cpp",
         "//boards/esp32_c6:board_esp32_c6_stubs.cpp",
-        "//chips/esp32_c6:rv32_trap.S",
+        "//chips/esp32_c6:c6_vectors.S",
         "//chips/esp32_c6:selftest_adapter.cpp",
         "//modules/esp_idf_support/c6:selftest_runner.cpp",
     ],

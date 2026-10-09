@@ -13,12 +13,12 @@ static void test_pmp_napot_encoding() {
   // base = 0x40800000 (8B 整列)
   // expected pmpaddr = (0x40800000 >> 2) | 0 = 0x10200000
   // expected cfg = (NAPOT << 3) | (R | X) = (3 << 3) | 5 = 24 | 5 = 29 (0x1D)
-  bool ok = pmp_codec::encode_napot(0x40800000, 8, pmp_perm::R | pmp_perm::X, entry);
+  bool ok = pmp_codec<4>::encode_napot(0x40800000, 8, pmp_perm::R | pmp_perm::X, entry);
   assert(ok);
   assert(entry.addr == 0x10200000u);
   assert((entry.cfg & pmp_perm::L) == 0); // Encoding must not implicitly lock hardware.
   assert(entry.cfg == (static_cast<uint8_t>(pmp_mode::NAPOT) << 3 | pmp_perm::R | pmp_perm::X));
-  ok = pmp_codec::decode_napot(entry, decoded_base, decoded_size);
+  ok = pmp_codec<4>::decode_napot(entry, decoded_base, decoded_size);
   assert(ok);
   assert(decoded_base == 0x40800000u);
   assert(decoded_size == 8u);
@@ -26,10 +26,10 @@ static void test_pmp_napot_encoding() {
   // 2. 16 bytes (k=4, mask=1)
   // base = 0x40800010 (16B 整列)
   // expected pmpaddr = (0x40800010 >> 2) | 1 = 0x10200004 | 1 = 0x10200005
-  ok = pmp_codec::encode_napot(0x40800010, 16, pmp_perm::R | pmp_perm::W, entry);
+  ok = pmp_codec<4>::encode_napot(0x40800010, 16, pmp_perm::R | pmp_perm::W, entry);
   assert(ok);
   assert(entry.addr == 0x10200005u);
-  ok = pmp_codec::decode_napot(entry, decoded_base, decoded_size);
+  ok = pmp_codec<4>::decode_napot(entry, decoded_base, decoded_size);
   assert(ok);
   assert(decoded_base == 0x40800010u);
   assert(decoded_size == 16u);
@@ -38,10 +38,10 @@ static void test_pmp_napot_encoding() {
   // base = 0x40801000
   // base >> 2 = 0x10200400
   // expected pmpaddr = 0x10200400 | 0x1FF = 0x102005FF
-  ok = pmp_codec::encode_napot(0x40801000, 4096, pmp_perm::R | pmp_perm::W | pmp_perm::X, entry);
+  ok = pmp_codec<4>::encode_napot(0x40801000, 4096, pmp_perm::R | pmp_perm::W | pmp_perm::X, entry);
   assert(ok);
   assert(entry.addr == 0x102005FFu);
-  ok = pmp_codec::decode_napot(entry, decoded_base, decoded_size);
+  ok = pmp_codec<4>::decode_napot(entry, decoded_base, decoded_size);
   assert(ok);
   assert(decoded_base == 0x40801000u);
   assert(decoded_size == 4096u);
@@ -50,55 +50,55 @@ static void test_pmp_napot_encoding() {
   // base = 0x40810000
   // base >> 2 = 0x10204000
   // expected pmpaddr = 0x10204000 | 0x1FFF = 0x10205FFFu
-  ok = pmp_codec::encode_napot(0x40810000, 65536, pmp_perm::R | pmp_perm::L, entry);
+  ok = pmp_codec<4>::encode_napot(0x40810000, 65536, pmp_perm::R | pmp_perm::L, entry);
   assert(ok);
   assert(entry.addr == 0x10205FFFu);
   assert((entry.cfg & pmp_perm::L) != 0);
-  ok = pmp_codec::decode_napot(entry, decoded_base, decoded_size);
+  ok = pmp_codec<4>::decode_napot(entry, decoded_base, decoded_size);
   assert(ok);
   assert(decoded_base == 0x40810000u);
   assert(decoded_size == 65536u);
   // 5. 4GB NAPOT (RISC-V NAPOT 最大範囲 (32bit アドレス空間): 0x100000000ULL, base=0, k=32, mask=(2^29 - 1)=0x1FFFFFFF)
   // expected pmpaddr = 0 | 0x1FFFFFFF = 0x1FFFFFFF
   uint64_t decoded_size64 = 0;
-  ok = pmp_codec::encode_napot(0x00000000, 0x100000000ULL, pmp_perm::R | pmp_perm::X, entry);
+  ok = pmp_codec<4>::encode_napot(0x00000000, 0x100000000ULL, pmp_perm::R | pmp_perm::X, entry);
   assert(ok);
   assert(entry.addr == 0x1FFFFFFFu);
-  ok = pmp_codec::decode_napot(entry, decoded_base, decoded_size64);
+  ok = pmp_codec<4>::decode_napot(entry, decoded_base, decoded_size64);
   assert(ok);
   assert(decoded_base == 0x00000000u);
   assert(decoded_size64 == 0x100000000ULL);
 
   // 32-bit decode_napot では 4GB のオーバーフローを検知して安全に false を返す (能力限界)
-  assert(!pmp_codec::decode_napot(entry, decoded_base, decoded_size));
+  assert(!pmp_codec<4>::decode_napot(entry, decoded_base, decoded_size));
 }
 
 static void test_pmp_napot_rejection() {
   pmp_entry entry;
 
   // 1. サイズ < 8 の拒否 (NAPOT は 8B 以上)
-  assert(!pmp_codec::encode_napot(0x40800000, 4, pmp_perm::R, entry));
-  assert(!pmp_codec::encode_napot(0x40800000, 0, pmp_perm::R, entry));
+  assert(!pmp_codec<4>::encode_napot(0x40800000, 4, pmp_perm::R, entry));
+  assert(!pmp_codec<4>::encode_napot(0x40800000, 0, pmp_perm::R, entry));
 
   // 2. 2 のべき乗でないサイズの拒否
-  assert(!pmp_codec::encode_napot(0x40800000, 12, pmp_perm::R, entry));
-  assert(!pmp_codec::encode_napot(0x40800000, 1000, pmp_perm::R, entry));
-  assert(!pmp_codec::encode_napot(0x40800000, 3000, pmp_perm::R, entry));
+  assert(!pmp_codec<4>::encode_napot(0x40800000, 12, pmp_perm::R, entry));
+  assert(!pmp_codec<4>::encode_napot(0x40800000, 1000, pmp_perm::R, entry));
+  assert(!pmp_codec<4>::encode_napot(0x40800000, 3000, pmp_perm::R, entry));
 
   // 3. base アドレスがサイズ整列していない場合の拒否
-  assert(!pmp_codec::encode_napot(0x40800004, 8, pmp_perm::R, entry));
-  assert(!pmp_codec::encode_napot(0x40800008, 16, pmp_perm::R, entry));
-  assert(!pmp_codec::encode_napot(0x40800800, 4096, pmp_perm::R, entry));
+  assert(!pmp_codec<4>::encode_napot(0x40800004, 8, pmp_perm::R, entry));
+  assert(!pmp_codec<4>::encode_napot(0x40800008, 16, pmp_perm::R, entry));
+  assert(!pmp_codec<4>::encode_napot(0x40800800, 4096, pmp_perm::R, entry));
 
   // 4. 不正なパーミッションビットの拒否 (未知ビット)
-  assert(!pmp_codec::encode_napot(0x40800000, 8, 0x10, entry));
-  assert(!pmp_codec::encode_napot(0x40800000, 8, 0x40, entry));
+  assert(!pmp_codec<4>::encode_napot(0x40800000, 8, 0x10, entry));
+  assert(!pmp_codec<4>::encode_napot(0x40800000, 8, 0x40, entry));
 
   // 5. RISC-V PMP 予約済み (reserved) の拒否: W=1 かつ R=0
   // Write-only (W=1, R=0, X=0)
-  assert(!pmp_codec::encode_napot(0x40800000, 8, pmp_perm::W, entry));
+  assert(!pmp_codec<4>::encode_napot(0x40800000, 8, pmp_perm::W, entry));
   // Write-Execute without Read (W=1, R=0, X=1)
-  assert(!pmp_codec::encode_napot(0x40800000, 8, pmp_perm::W | pmp_perm::X, entry));
+  assert(!pmp_codec<4>::encode_napot(0x40800000, 8, pmp_perm::W | pmp_perm::X, entry));
 }
 
 static void test_pmp_tor() {
@@ -107,23 +107,23 @@ static void test_pmp_tor() {
 
   // limit = 0x40804000
   // expected pmpaddr = 0x40804000 >> 2 = 0x10201000
-  bool ok = pmp_codec::encode_tor(0x40804000, pmp_perm::R | pmp_perm::X, entry);
+  bool ok = pmp_codec<4>::encode_tor(0x40804000, pmp_perm::R | pmp_perm::X, entry);
   assert(ok);
   assert(entry.addr == 0x10201000u);
   assert((entry.cfg & pmp_perm::L) == 0);
   assert(entry.cfg == (static_cast<uint8_t>(pmp_mode::TOR) << 3 | pmp_perm::R | pmp_perm::X));
-  ok = pmp_codec::decode_tor(entry, decoded_limit);
+  ok = pmp_codec<4>::decode_tor(entry, decoded_limit);
   assert(ok);
   assert(decoded_limit == 0x40804000u);
 
   // 非 4B 整列の拒否
-  assert(!pmp_codec::encode_tor(0x40804001, pmp_perm::R, entry));
-  assert(!pmp_codec::encode_tor(0x40804002, pmp_perm::R, entry));
-  assert(!pmp_codec::encode_tor(0x40804003, pmp_perm::R, entry));
+  assert(!pmp_codec<4>::encode_tor(0x40804001, pmp_perm::R, entry));
+  assert(!pmp_codec<4>::encode_tor(0x40804002, pmp_perm::R, entry));
+  assert(!pmp_codec<4>::encode_tor(0x40804003, pmp_perm::R, entry));
 
   // TOR における W=1, R=0 (reserved) の拒否
-  assert(!pmp_codec::encode_tor(0x40804000, pmp_perm::W, entry));
-  assert(!pmp_codec::encode_tor(0x40804000, pmp_perm::W | pmp_perm::X, entry));
+  assert(!pmp_codec<4>::encode_tor(0x40804000, pmp_perm::W, entry));
+  assert(!pmp_codec<4>::encode_tor(0x40804000, pmp_perm::W | pmp_perm::X, entry));
 }
 
 static void test_pmpcfg_packing() {
@@ -132,11 +132,82 @@ static void test_pmpcfg_packing() {
   uint8_t c2 = 0x9B;
   uint8_t c3 = 0x00;
 
-  uint32_t packed = pmp_codec::pack_pmpcfg(c0, c1, c2, c3);
-  assert(pmp_codec::unpack_pmpcfg(packed, 0) == c0);
-  assert(pmp_codec::unpack_pmpcfg(packed, 1) == c1);
-  assert(pmp_codec::unpack_pmpcfg(packed, 2) == c2);
-  assert(pmp_codec::unpack_pmpcfg(packed, 3) == c3);
+  uint32_t packed = pmp_codec<4>::pack_pmpcfg(c0, c1, c2, c3);
+  assert(pmp_codec<4>::unpack_pmpcfg(packed, 0) == c0);
+  assert(pmp_codec<4>::unpack_pmpcfg(packed, 1) == c1);
+  assert(pmp_codec<4>::unpack_pmpcfg(packed, 2) == c2);
+  assert(pmp_codec<4>::unpack_pmpcfg(packed, 3) == c3);
+}
+
+// G=128 (C5 の最小 PMP 粒度)。チップの物理エントリ数は未確定のためここでは扱わない。
+static void test_pmp_granule128() {
+  using g128 = pmp_codec<128>;
+  using g4 = pmp_codec<4>;
+  static_assert(g128::GRANULE == 128, "G=128 granule value");
+  static_assert(g128::NAPOT_MIN_BYTES == 128, "G=128 NAPOT minimum is the granule");
+  static_assert(g4::NAPOT_MIN_BYTES == 8, "G=4 NAPOT minimum stays architectural 8B");
+
+  pmp_entry entry;
+  uint32_t decoded_base = 0;
+  uint64_t decoded_size = 0;
+
+  // 1. 最小 NAPOT 128B (k=7, mask=(16-1)=0xF)
+  // base = 0x40800000 (128B 整列)
+  // expected pmpaddr = 0x10200000 | 0xF = 0x1020000F
+  bool ok = g128::encode_napot(0x40800000, 128, pmp_perm::R | pmp_perm::X, entry);
+  assert(ok);
+  assert(entry.addr == 0x1020000Fu);
+  assert(entry.cfg == (static_cast<uint8_t>(pmp_mode::NAPOT) << 3 | pmp_perm::R | pmp_perm::X));
+  ok = g128::decode_napot(entry, decoded_base, decoded_size);
+  assert(ok);
+  assert(decoded_base == 0x40800000u);
+  assert(decoded_size == 128u);
+
+  // 2. 4096B は 128B 粒度でも整列しているので G=4 と同じ pmpaddr になる
+  ok = g128::encode_napot(0x40801000, 4096, pmp_perm::R | pmp_perm::W | pmp_perm::X, entry);
+  assert(ok);
+  assert(entry.addr == 0x102005FFu);
+  ok = g128::decode_napot(entry, decoded_base, decoded_size);
+  assert(ok);
+  assert(decoded_base == 0x40801000u);
+  assert(decoded_size == 4096u);
+
+  // 3. 粒度未満の NAPOT は拒否 (G=4 では 8B, 64B が通る)
+  assert(!g128::encode_napot(0x40800000, 8, pmp_perm::R, entry));
+  assert(!g128::encode_napot(0x40800000, 64, pmp_perm::R, entry));
+  ok = g4::encode_napot(0x40800000, 8, pmp_perm::R, entry);
+  assert(ok);
+  ok = g4::encode_napot(0x40800000, 64, pmp_perm::R, entry);
+  assert(ok);
+
+  // 4. 128B の自然整列を外れた base は拒否 (16B 整列なので G=4 の 16B 例は通らない)
+  assert(!g128::encode_napot(0x40800010, 128, pmp_perm::R, entry));
+  ok = g4::encode_napot(0x40800010, 16, pmp_perm::R, entry);
+  assert(ok);
+
+  // 5. デコード: G=4 で作った 8B エントリは G=128 では表現外として拒否される
+  ok = g4::encode_napot(0x40800000, 8, pmp_perm::R, entry);
+  assert(ok);
+  ok = g4::decode_napot(entry, decoded_base, decoded_size);
+  assert(ok);
+  assert(!g128::decode_napot(entry, decoded_base, decoded_size));
+
+  // 6. TOR の境界: 128B 整列必須 (0x40804000 は 128B 整列, 0x40804040 は 64B 止まり)
+  assert(g128::encode_tor(0x40804000, pmp_perm::R | pmp_perm::X, entry));
+  assert(entry.addr == 0x10201000u);
+  uint32_t decoded_limit = 0;
+  assert(g128::decode_tor(entry, decoded_limit));
+  assert(decoded_limit == 0x40804000u);
+  assert(!g128::encode_tor(0x40804040, pmp_perm::R, entry));
+  assert(!g128::encode_tor(0x40804004, pmp_perm::R, entry));
+  ok = g4::encode_tor(0x40804040, pmp_perm::R, entry);
+  assert(ok);
+  ok = g4::encode_tor(0x40804004, pmp_perm::R, entry);
+  assert(ok);
+
+  // 7. 予約パーミッション (W=1, R=0) は粒度に依らず拒否
+  assert(!g128::encode_napot(0x40800000, 128, pmp_perm::W, entry));
+  assert(!g128::encode_tor(0x40804000, pmp_perm::W, entry));
 }
 
 int main() {
@@ -149,6 +220,8 @@ int main() {
   printf("[TEST]   PMP TOR encoding/decoding passed.\n");
   test_pmpcfg_packing();
   printf("[TEST]   PMP CSR configuration packing passed.\n");
+  test_pmp_granule128();
+  printf("[TEST]   PMP G=128 granule encoding/rejection passed.\n");
   printf("[TEST] All PMP unit tests successfully PASSED!\n");
   return 0;
 }

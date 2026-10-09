@@ -10,7 +10,7 @@ ${INCLUDE_HEADERS_INSTRUCTION}
 #include "shizuku/templates/kernel_object.hpp"
 
 namespace shizuku{
-    using ARCH = shizuku::archs::${SHIZUKU_ARCH};
+    using ARCH = ${SHIZUKU_ARCH_TYPE};
     using CHIP = shizuku::chips::${SHIZUKU_CHIP}::chip;
     namespace stream {
         template <typename REC>

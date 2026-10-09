@@ -33,6 +33,7 @@ def config_substitutions(arch, chip, board):
                 '#include "shizuku/app_entry.hpp"',
             ]),
             "${SHIZUKU_ARCH}": arch,
+            "${SHIZUKU_ARCH_TYPE}": "shizuku::chips::esp32_c6::chip::arch_type",
             "${SHIZUKU_CHIP}": chip,
             "${SHIZUKU_BOARD}": board,
         }
@@ -46,6 +47,7 @@ def config_substitutions(arch, chip, board):
                 '#include "shizuku/app_entry.hpp"',
             ]),
             "${SHIZUKU_ARCH}": arch,
+            "${SHIZUKU_ARCH_TYPE}": "shizuku::archs::armv6m<shizuku::chips::rp2040::chip::kMpuRegionCount, shizuku::chips::rp2040::chip::kNvicPriorityBits>",
             "${SHIZUKU_CHIP}": chip,
             "${SHIZUKU_BOARD}": board,
         }
@@ -58,6 +60,7 @@ def config_substitutions(arch, chip, board):
             '#include "shizuku/app_entry.hpp"',
         ]),
         "${SHIZUKU_ARCH}": arch,
+        "${SHIZUKU_ARCH_TYPE}": "shizuku::archs::armv8m<shizuku::chips::rp2350::chip::kMpuRegionCount, shizuku::chips::rp2350::chip::kNvicPriorityBits>",
         "${SHIZUKU_CHIP}": chip,
         "${SHIZUKU_BOARD}": board,
     }

@@ -127,7 +127,7 @@ void rp2040_pico_w::init(uint32_t core){
   protection_init();
 }
 void rp2040_pico_w::protection_init(){
-  using A=shizuku::archs::armv6m;
+  using A=shizuku::archs::armv6m<SOC::kMpuRegionCount,SOC::kNvicPriorityBits>;
   constexpr uint32_t RAM_EXEC_REGION=3;
   static_assert(RAM_EXEC_REGION>1 && RAM_EXEC_REGION!=A::GRANT_REGION_INDEX && RAM_EXEC_REGION<SOC::kMpuRegionCount);
   const uintptr_t end=((uintptr_t)&__flash_binary_end+31u)&~(uintptr_t)31u;

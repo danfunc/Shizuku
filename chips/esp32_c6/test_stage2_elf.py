@@ -18,10 +18,10 @@ for name, size in [('shizuku_c6_early_diag_log', 376), ('shizuku_c6_early_diag_p
 vector = symbols['shizuku_c6_vectors']
 assert vector % 256 == 0
 vector_disasm = run('objdump', '-d', '--start-address=' + hex(vector), '--stop-address=' + hex(vector + 128))
-assert vector_disasm.count('<shizuku_c6_trap_entry>') == 32, vector_disasm
-trap = run('objdump', '-d', '--disassemble=shizuku_c6_trap_entry')
+assert vector_disasm.count('<shizuku_rv32_trap_entry>') == 32, vector_disasm
+trap = run('objdump', '-d', '--disassemble=shizuku_rv32_trap_entry')
 assert 'mret' in trap and 'mscratch' in trap and 'mepc' in trap and 'mstatus' in trap
-assert '<shizuku_c6_trap_dispatch>' in trap
+assert '<shizuku_rv32_trap_dispatch>' in trap
 for name in ['shizuku_c6_thread0_diag', 'shizuku_c6_thread1_diag', 'shizuku_c6_timer_diag', 'shizuku_c6_switch_diag', 'shizuku_c6_trap_diag', 'shizuku_c6_irq_depth', 'shizuku_c6_trap_depth']:
     assert name in symbols
 print('PASS: final vector alignment/32 entries, CSR restoration/dispatch, noinit outside BSS, JTAG symbols')

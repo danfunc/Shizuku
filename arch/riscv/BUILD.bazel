@@ -4,7 +4,24 @@ package(default_visibility = ["//visibility:public"])
 
 exports_files([
     "pmp.hpp",
+    "rv32.hpp",
+    "rv32_frame.h",
+    "rv32_trap.S",
 ])
+
+cc_library(
+    name = "rv32",
+    hdrs = [
+        "rv32.hpp",
+        "rv32_frame.h",
+        "rv32_trap.S",
+    ],
+    includes = ["."],
+    deps = [
+        ":pmp",
+        "//:arch_headers",
+    ],
+)
 
 cc_library(
     name = "pmp",

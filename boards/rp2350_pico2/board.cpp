@@ -17,9 +17,9 @@
 
 // board は「どの ISA の上に居るか」を知っている層でもある (region を張る機構は
 // arch 側)。ここだけの別名にして、上位のテンプレート引数とは混ぜない。
-using ARCH_TYPE = shizuku::archs::armv8m;
 // SoC の定数 (メモリ地図)。SDK の XIP_BASE / SRAM_END と同じ値 (chips/rp2350/chip.hpp)。
 using SOC_TYPE = shizuku::chips::rp2350::chip;
+using ARCH_TYPE = shizuku::archs::armv8m<SOC_TYPE::kMpuRegionCount, SOC_TYPE::kNvicPriorityBits>;
 // SDK 側の値との一致を固定する (値の出所は SDK マクロのまま、上書きされたら止まる)。
 static_assert(PICO_LOWEST_IRQ_PRIORITY == SOC_TYPE::kPriorityLowest,
               "PICO_LOWEST_IRQ_PRIORITY differs from chips/rp2350 kPriorityLowest");

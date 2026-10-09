@@ -36,7 +36,7 @@ syms_elf=$($NM -C "$ELF")
 raw_elf=$($NM "$ELF")
 start_disasm=$($OBJDUMP -d --disassemble=start_cpu0 "$ELF")
 entry_disasm=$($OBJDUMP -d -C --disassemble=shizuku_c6_early_boot "$ELF")
-trap_disasm=$($OBJDUMP -d --disassemble=shizuku_c6_trap_entry "$ELF")
+trap_disasm=$($OBJDUMP -d --disassemble=shizuku_rv32_trap_entry "$ELF")
 usb_disasm=$($OBJDUMP -d --disassemble=shizuku_c6_usb_console_write_and_flush "$ELF")
 
 # --- A. アーカイブは空でなく、実カーネルのシンボルを含む

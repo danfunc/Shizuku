@@ -1,3 +1,4 @@
+#include <type_traits>
 #include <cassert>
 #include <cstdio>
 #include <initializer_list>
@@ -15,8 +16,19 @@ static_assert(shizuku::concepts::board_requires<board>,
               "esp32_c6 must strictly satisfy concepts::board_requires");
 
 // Shared assembly/C++ frame size.
-static_assert(sizeof(arch::exception_frame_t) == C6_FRAME_BYTES,
+static_assert(sizeof(arch::exception_frame_t) == RV32_FRAME_BYTES,
               "exception_frame_t must be match shared assembly layout");
+
+// Chip selection: ARCH is the chip-selected rv32 specialization (C6: 16 PMP entries, 4B granule,
+// PLIC vector mode). The chip constants must be the ones that reach the template.
+static_assert(std::is_same_v<shizuku::chips::esp32_c6::chip::arch_type,
+                             shizuku::archs::rv32<16, 4, shizuku::chips::esp32_c6::plic_vector_mode>>,
+              "chip::arch_type must be rv32<16,4,plic_vector_mode>");
+static_assert(shizuku::chips::esp32_c6::chip::kPmpEntries == 16 &&
+              shizuku::chips::esp32_c6::chip::kPmpGranuleBytes == 4,
+              "C6 PMP parameters: 16 entries, 4-byte granule");
+static_assert(std::is_same_v<arch::pmp_codec_t, shizuku::ports::riscv::pmp_codec<4>>,
+              "C6 PMP codec must be pmp_codec<4> (current behavior)");
 
 static void test_rv32_c6_frame_abi() {
   arch::exception_frame_t frame{};
@@ -47,8 +59,8 @@ static void test_rv32_c6_frame_abi() {
   // 5. 文脈幾何検証 (psp_after_return が sp + sizeof(exception_frame_t) と一致)
   arch::context_t ctx{};
   ctx.sp = &frame;
-  assert(arch::exc_frame_bytes(ctx) == C6_FRAME_BYTES);
-  assert(arch::psp_after_return(ctx) == reinterpret_cast<uintptr_t>(&frame) + C6_FRAME_BYTES);
+  assert(arch::exc_frame_bytes(ctx) == RV32_FRAME_BYTES);
+  assert(arch::psp_after_return(ctx) == reinterpret_cast<uintptr_t>(&frame) + RV32_FRAME_BYTES);
 
   // 6. 単核 board 整合性
   assert(board::CORE_COUNT == 1u);
@@ -68,8 +80,8 @@ static void test_initial_return() {
     assert(arch::psp_after_return(c) == top);
     assert(c.sp->mepc == 0x40801234 && c.sp->ra == 0x40802340);
     assert(c.sp->a0 == 0x1234);
-    assert(c.sp->mstatus == (privileged ? C6_MSTATUS_MPP : 0));
-    assert((c.sp->mstatus & (8 | C6_MSTATUS_MPIE)) == 0);
+    assert(c.sp->mstatus == (privileged ? RV32_MSTATUS_MPP : 0));
+    assert((c.sp->mstatus & (8 | RV32_MSTATUS_MPIE)) == 0);
     assert(c.sp->t0 == 0 && c.sp->a7 == 0 && c.sp->s11 == 0);
     assert(c.sp->mcause == 0 && c.sp->mtval == 0);
   }

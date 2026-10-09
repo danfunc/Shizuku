@@ -9,12 +9,11 @@ exports_files([
     "chip.hpp",
     "rv32_c6.hpp",
     "trap.cpp",
+    "c6_vectors.S",
     "selftest_adapter.cpp",
     "selftest_record.h",
     "systimer.hpp",
     "trap_api.hpp",
-    "frame_layout.h",
-    "rv32_trap.S",
     "test_c6_concepts.cpp",
     "test_fail_closed.cpp",
     "test_fail_closed.sh",
@@ -35,11 +34,12 @@ cc_library(
         "selftest_record.h",
         "systimer.hpp",
         "trap_api.hpp",
-        "frame_layout.h",
     ],
     includes = ["."],
     deps = [
         "//arch/riscv:pmp",
+        # chip.hpp の arch_type は汎用 RV32 (arch/riscv/rv32.hpp) を使う。
+        "//arch/riscv:rv32",
         # 公開ヘッダが使うのは arch の concept と kernel ABI だけ。objects.list に届く
         # //:internal_headers は使わない。
         "//:arch_headers",

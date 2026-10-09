@@ -38,8 +38,12 @@ void shizuku_pendsv_dispatch(shizuku_armv8m_context *context);
 namespace shizuku {
 namespace archs {
 
-class armv8m {
+// MpuRegionCount: PMSAv8 の region 数 (RP2350 は 8)。
+// PrioBits: NVIC に実装された優先度 bit 数 (RP2350 は 4)。値は chips/ 側が渡す。
+template <unsigned MpuRegionCount, unsigned PrioBits> class armv8m {
 public:
+  static constexpr unsigned MPU_REGION_COUNT = MpuRegionCount;
+  static constexpr unsigned NVIC_PRIORITY_BITS = PrioBits;
   struct exception_frame_t {
     uint32_t r0, r1, r2, r3, r12, lr, pc, xPSR;
   };
@@ -423,25 +427,27 @@ public:
   }
 };
 
+// context_t のレイアウトは region 数・優先度 bit 数に依らないので、RP2350 の実体で代表して検査する。
+using armv8m_rp2350 = armv8m<8, 4>;
 // armv8m_ctx.S の .equ と一致させる (ズレたら文脈が黙って壊れる)。
-static_assert(offsetof(armv8m::context_t, sp) == 32,
+static_assert(offsetof(armv8m_rp2350::context_t, sp) == 32,
               "context_t layout mismatch: sp offset (asm CTX_SP)");
-static_assert(offsetof(armv8m::context_t, exc_return) == 36,
+static_assert(offsetof(armv8m_rp2350::context_t, exc_return) == 36,
               "context_t layout mismatch: exc_return offset (asm CTX_EXC_RETURN)");
-static_assert(offsetof(armv8m::context_t, fp) == 40,
+static_assert(offsetof(armv8m_rp2350::context_t, fp) == 40,
               "context_t layout mismatch: fp offset (asm CTX_FP)");
-static_assert(offsetof(armv8m::context_t, psplim) == 104,
+static_assert(offsetof(armv8m_rp2350::context_t, psplim) == 104,
               "context_t layout mismatch: psplim offset (asm CTX_PSPLIM)");
-static_assert(offsetof(armv8m::context_t, control) == 108,
+static_assert(offsetof(armv8m_rp2350::context_t, control) == 108,
               "context_t layout mismatch: control offset (asm CTX_CONTROL)");
-static_assert(offsetof(armv8m::context_t, region_base) == 112,
+static_assert(offsetof(armv8m_rp2350::context_t, region_base) == 112,
               "context_t layout mismatch: region_base offset");
-static_assert(offsetof(armv8m::context_t, region_limit) == 116,
+static_assert(offsetof(armv8m_rp2350::context_t, region_limit) == 116,
               "context_t layout mismatch: region_limit offset");
 // 戻り口 (armv8m_ctx.S) が即値で埋め込んでいる ABI 定数との一致。
 static_assert((uintptr_t)shizuku::primitive::RETURN == 2,
               "armv8m_ctx.S の return stub が撃つ番号と一致させること");
-static_assert(shizuku::concepts::arch_requires<armv8m>,
+static_assert(shizuku::concepts::arch_requires<armv8m_rp2350>,
               "armv8m does not satisfy the arch concept");
 
 } // namespace archs

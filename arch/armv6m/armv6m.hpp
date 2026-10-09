@@ -30,8 +30,12 @@ shizuku_armv6m_context *shizuku_current_context();
 }
 
 namespace shizuku::archs {
-class armv6m {
+// MpuRegionCount: PMSAv6 の region 数 (RP2040 は 8)。
+// PrioBits: NVIC に実装された優先度 bit 数 (RP2040 は 2)。値は chips/ 側が渡す。
+template <unsigned MpuRegionCount, unsigned PrioBits> class armv6m {
 public:
+  static constexpr unsigned MPU_REGION_COUNT = MpuRegionCount;
+  static constexpr unsigned NVIC_PRIORITY_BITS = PrioBits;
   struct exception_frame_t { uint32_t r0,r1,r2,r3,r12,lr,pc,xPSR; };
   static constexpr uint32_t CONTROL_PRIV_PSP=2, CONTROL_UNPRIV_PSP=3;
   static constexpr uint32_t CALL_HEADROOM=512;
@@ -98,7 +102,7 @@ public:
     return true;
   }
   static bool region_try_set(uint32_t index,uintptr_t base,uintptr_t limit,uint32_t access,bool xn){
-    uint32_t rb,ra;if(index>=8||!region_encode(base,limit,rb,ra,access,xn))return false;
+    uint32_t rb,ra;if(index>=MPU_REGION_COUNT||!region_encode(base,limit,rb,ra,access,xn))return false;
     volatile uint32_t *mpu=(volatile uint32_t *)0xE000ED90u;
     mpu[2]=index;mpu[3]=rb;mpu[4]=ra;__asm volatile("dsb\n\tisb":::"memory");return true;
   }
@@ -164,12 +168,14 @@ public:
   }
   [[noreturn]] static void enter_thread_mode(uintptr_t top,uintptr_t,void(*entry)()){shizuku_armv6m_enter_thread_mode(top,entry);}
 };
-static_assert(offsetof(armv6m::context_t,sp)==32);
-static_assert(offsetof(armv6m::context_t,exc_return)==36);
-static_assert(offsetof(armv6m::context_t,control)==40);
-static_assert(offsetof(armv6m::context_t,region_base)==44);
-static_assert(offsetof(armv6m::context_t,stack_limit_addr)==52);
+// context_t のレイアウトは region 数に依らないので、RP2040 の実体で代表して検査する。
+using armv6m_rp2040 = armv6m<8, 2>;
+static_assert(offsetof(armv6m_rp2040::context_t,sp)==32);
+static_assert(offsetof(armv6m_rp2040::context_t,exc_return)==36);
+static_assert(offsetof(armv6m_rp2040::context_t,control)==40);
+static_assert(offsetof(armv6m_rp2040::context_t,region_base)==44);
+static_assert(offsetof(armv6m_rp2040::context_t,stack_limit_addr)==52);
 static_assert((uintptr_t)shizuku::primitive::RETURN==2);
-static_assert(shizuku::concepts::arch_requires<armv6m>);
+static_assert(shizuku::concepts::arch_requires<armv6m_rp2040>);
 }
 #endif
