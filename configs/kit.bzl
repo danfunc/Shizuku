@@ -21,6 +21,22 @@ def config_substitutions(arch, chip, board):
     ARCH (ISA), CHIP (SoC の定義), BOARD (ボード実装) はそれぞれ別の軸で、
     呼び出し側 (configs/BUILD.bazel) が組み合わせを決める。
     """
+    if arch == "rv32_c5":
+        return _CONFIG_COMMON | {
+            "${SHIZUKU_CPU_COUNT}": "1",
+            "${SHIZUKU_MEMORY_MANAGER}": "shizuku::memory_managers::freestanding",
+            "${INCLUDE_HEADERS_INSTRUCTION}": "\n".join([
+                '#include "chips/esp32_c5/chip.hpp"',
+                '#include "chips/esp32_c5/rv32_c5.hpp"',
+                '#include "boards/esp32_c5/esp32_c5.hpp"',
+                '#include "shizuku/memory_managers/freestanding.hpp"',
+                '#include "shizuku/app_entry.hpp"',
+            ]),
+            "${SHIZUKU_ARCH}": arch,
+            "${SHIZUKU_ARCH_TYPE}": "shizuku::chips::esp32_c5::chip::arch_type",
+            "${SHIZUKU_CHIP}": chip,
+            "${SHIZUKU_BOARD}": board,
+        }
     if arch == "rv32_c6":
         return _CONFIG_COMMON | {
             "${SHIZUKU_CPU_COUNT}": "1",

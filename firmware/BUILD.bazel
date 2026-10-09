@@ -77,6 +77,13 @@ cc_binary(
     }),
 )
 
+# ESP32-C5: //modules/esp_idf_support/firmware:esp32c5 への alias。
+alias(
+    name = "esp32c5",
+    actual = "//modules/esp_idf_support/firmware:esp32c5",
+    visibility = ["//visibility:public"],
+)
+
 # ESP32-C6: 移動後ターゲット //modules/esp_idf_support/firmware:esp32c6 への互換 alias。
 # 従来のビルドコマンド (bazelisk build --config=esp32c6 //firmware:esp32c6) を維持する。
 alias(

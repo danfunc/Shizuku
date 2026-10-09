@@ -15,12 +15,20 @@
 // ctor / heap / PMP / timer / FreeRTOS は初期化しない。
 #include "early_diag.h"
 
-__attribute__((noreturn)) void shizuku_c6_early_boot(void);
+#include "sdkconfig.h"
+
+#if CONFIG_IDF_TARGET_ESP32C5
+#define SHIZUKU_EARLY_BOOT shizuku_c5_early_boot
+#else
+#define SHIZUKU_EARLY_BOOT shizuku_c6_early_boot
+#endif
+
+__attribute__((noreturn)) void SHIZUKU_EARLY_BOOT(void);
 
 __attribute__((noreturn)) void start_cpu0(void)
 {
     shizuku_c6_early_diag_begin();
-    shizuku_c6_early_boot();
+    SHIZUKU_EARLY_BOOT();
 }
 
 // app_startup.c の main_task が強参照するので、リンクのために定義する。

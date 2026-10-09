@@ -25,6 +25,8 @@ IDF_PATH=$(abspath "$IDF_PATH")
 IDF_TOOLS_PATH=$(abspath "$IDF_TOOLS_PATH")
 export IDF_PATH IDF_TOOLS_PATH
 WANT_GCC=$3
+TARGET=${4:-esp32c6}
+case "$TARGET" in esp32c6|esp32c5) ;; *) fail "未対応の IDF target: $TARGET" ;; esac
 SRC=$(cd -P "$(dirname "$0")" && pwd)
 
 test -s "$ARCHIVE" || fail "カーネルのアーカイブが無い/空: $ARCHIVE"
@@ -54,7 +56,7 @@ mkdir -p "$(dirname "$OUT")"
 BUILD_DIR=$(mktemp -d "$OUT.idf.XXXXXX")
 # ★sdkconfig / sdkconfig.old は BUILD_DIR 配下へ出す (SRC は Bazel の入力ツリーなので汚さない)。
 cd "$SRC"
-idf.py -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" -DSHIZUKU_KERNEL_ARCHIVE="$ARCHIVE" set-target esp32c6 > "$BUILD_DIR.set-target.log" 2>&1 || fail "idf.py set-target 失敗 ($BUILD_DIR.set-target.log)"
-idf.py -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" -DSHIZUKU_KERNEL_ARCHIVE="$ARCHIVE" build || fail "idf.py build 失敗"
-cp "$BUILD_DIR/shizuku_esp32c6.bin" "$OUT"
-echo "OK(esp32c6): $IDF_VER / $GCC_BANNER -> $OUT"
+idf.py -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" -DSHIZUKU_KERNEL_ARCHIVE="$ARCHIVE" set-target "$TARGET" > "$BUILD_DIR.set-target.log" 2>&1 || fail "idf.py set-target 失敗 ($BUILD_DIR.set-target.log)"
+idf.py -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" -DSHIZUKU_KERNEL_ARCHIVE="$ARCHIVE" -DIDF_TARGET="$TARGET" build || fail "idf.py build 失敗"
+cp "$BUILD_DIR/shizuku_$TARGET.bin" "$OUT"
+echo "OK($TARGET): $IDF_VER / $GCC_BANNER -> $OUT"

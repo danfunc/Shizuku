@@ -10,8 +10,15 @@ endif()
 if(NOT "$ENV{IDF_PATH}" STREQUAL "" AND NOT EXISTS "$ENV{IDF_PATH}/tools/cmake/project.cmake")
   message(FATAL_ERROR "IDF_PATH が ESP-IDF を指していない: $ENV{IDF_PATH}")
 endif()
-set(SDKCONFIG_DEFAULTS "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults")
-set(IDF_TARGET esp32c6)
+# IDF target は build.sh が -DIDF_TARGET で渡す。未指定は従来どおり esp32c6。
+if(NOT DEFINED IDF_TARGET)
+  set(IDF_TARGET esp32c6)
+endif()
+if(IDF_TARGET STREQUAL "esp32c5")
+  set(SDKCONFIG_DEFAULTS "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults.esp32c5")
+else()
+  set(SDKCONFIG_DEFAULTS "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults")
+endif()
 
 # GNU ld 用の WHOLE_ARCHIVE を定義する (CMake 標準では Apple ホストの GNU ld に無い)。
 foreach(lang C CXX)
@@ -20,7 +27,7 @@ foreach(lang C CXX)
 endforeach()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(shizuku_esp32c6)
+project(shizuku_${IDF_TARGET})
 
 if(NOT "${IDF_VER}" MATCHES "^v6\\.1")
   message(FATAL_ERROR "ESP-IDF v6.1 が必要。検出: '${IDF_VER}'")

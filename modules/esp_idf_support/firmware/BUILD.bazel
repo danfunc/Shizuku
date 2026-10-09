@@ -22,7 +22,26 @@ genrule(
     target_compatible_with = ["@platforms//cpu:riscv32"],
 )
 
+# ESP32-C5: 同じ firmware project を IDF target だけ替えて作る (build.sh の第 4 引数)。
+#   bazelisk build --config=esp32c5 //modules/esp_idf_support/firmware:esp32c5
+genrule(
+    name = "esp32c5",
+    srcs = [
+        "//:shizuku_kernel_c5",
+        ":esp32c6_project",
+    ],
+    outs = ["shizuku_esp32c5.bin"],
+    cmd = "ARCHIVE=; for f in $(locations //:shizuku_kernel_c5); do case $$f in *libshizuku_kernel_c5.a) ARCHIVE=$$f;; esac; done;" +
+          " $(location build.sh) $$ARCHIVE $@ esp-15.2.0_20251204 esp32c5",
+    tools = ["build.sh"],
+    tags = [
+        "local",
+        "no-sandbox",
+    ],
+    target_compatible_with = ["@platforms//cpu:riscv32"],
+)
+
 filegroup(
     name = "esp32c6_project",
-    srcs = glob(["CMakeLists.txt", "sdkconfig.defaults", "main/*"]),
+    srcs = glob(["CMakeLists.txt", "sdkconfig.defaults", "sdkconfig.defaults.esp32c5", "main/*"]),
 )

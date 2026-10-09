@@ -77,3 +77,15 @@ build:esp32c6 --copt=-DSHIZUKU_C6_SKELETON_PERMITTED=1
 build:esp32c6 --action_env=IDF_PATH
 build:esp32c6 --action_env=IDF_TOOLS_PATH
 build:esp32c6 --action_env=PATH
+
+# ---------------------------------------------------------------------------
+# ESP32-C5 (RV32, CLIC) — C6 と同じ rv32_esp ツールチェーン / platform。board だけが違う。
+#   bazelisk build --config=esp32c5 //modules/esp_idf_support/firmware:esp32c5
+# ★IDF は C6 と同じく IDF_PATH / IDF_TOOLS_PATH を事前に export しておくこと。
+# ---------------------------------------------------------------------------
+build:esp32c5 --platforms=//toolchains/rv32_esp:esp32c6
+build:esp32c5 --//configs:board=esp32_c5
+build:esp32c5 --copt=-DSHIZUKU_C5_SKELETON_PERMITTED=1
+build:esp32c5 --action_env=IDF_PATH
+build:esp32c5 --action_env=IDF_TOOLS_PATH
+build:esp32c5 --action_env=PATH
