@@ -244,9 +244,24 @@ void shizuku::app_entry() {
           ota_tx.value);
     }
 
-    // 起動
+    // 起動 (CYW43 の owner = ble_uart の poll スレッド。init もここで行う)
     shizuku::objects::ble_uart::start_ble_uart(BLE_UART_OBJ);
     shizuku::objects::ota::start_ota(OTA_OBJ);
+  } else {
+    // fail-closed: owner が立たないので CYW43 には一切触れない。LED 書込みは
+    // LED_NO_OWNER で失敗し、ここに理由を残す。
+    shizuku::KERNEL::BOARD::diag_printf(
+        "[BOOT] BLE/OTA not started (ble=%lu ota=%lu): CYW43 owner absent, LED disabled\n",
+        (unsigned long)ble_rc, (unsigned long)ota_rc);
+  }
+#endif
+
+#if defined(SHIZUKU_RP2040) && defined(CYW43_WL_GPIO_LED_PIN)
+  // RP2040 Pico W は BLE / OTA を持たない (firmware/BUILD.bazel は rp2350_pico2_w のみ
+  // ble_uart を結ぶ)。CYW43 の owner は LED だけになるので、ここで LED の poll を起こす。
+  if (shizuku::objects::start_led_cyw43_actor() != 0) {
+    shizuku::KERNEL::BOARD::diag_printf(
+        "[BOOT] LED CYW43 owner not started: LED writes will report LED_NO_OWNER\n");
   }
 #endif
 

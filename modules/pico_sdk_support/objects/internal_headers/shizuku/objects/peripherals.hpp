@@ -57,6 +57,7 @@ enum struct led_method : uintptr_t {
   MAIN = 0,
   WRITE = 1, // a0 = led_request*
   READ = 2,  // 戻り値 = 最後に書いた値
+  POLL = 3,  // CYW43 の owner スレッド (pico2_w の BLE 無し構成のみ起こす)
 };
 
 struct led_request {
@@ -114,12 +115,23 @@ struct i2c_transfer {
 //   なり、原因の切り分けが一気に難しくなる (D12)。
 uint32_t register_peripherals();
 
-// Pico 2 W など CYW43 経由の LED において、Core 0
-// のポーリングループから安全に状態を同期する
+// Pico 2 W など CYW43 経由の LED において、CYW43 の owner スレッドだけが呼ぶ
+// (ポーリングループから状態を反映する)。他のスレッドから呼んではいけない。
 void led_sync_hw();
 
-// どのコア・スレッドからでも安全に呼べる LED トグル関数 (Pico 2 / Pico 2 W 両対応)
+// どのコア・スレッドからでも安全に呼べる LED トグル関数 (Pico 2 / Pico 2 W 両対応)。
+// 状態 (parity) は owner の有無に関係なく記録する。CYW43 への反映は owner が行う。
 void led_toggle();
+
+#if defined(CYW43_WL_GPIO_LED_PIN)
+// CYW43 の owner が init に成功した時点で owner 自身が呼ぶ。以後 LED 書込みを受理する。
+void led_owner_started();
+// owner 自身が、チップを解体する前に呼ぶ。以後の書込みは LED_NO_OWNER になる。
+void led_owner_stopped();
+
+// BLE の無い CYW43 構成 (RP2040 Pico W) で LED の owner スレッドを起こす。
+uint32_t start_led_cyw43_actor();
+#endif
 
 } // namespace objects
 } // namespace shizuku
