@@ -147,7 +147,7 @@ cc_library(
     deps = [
         "//:internal_headers",
     ] + select({
-        ":esp32_c6": ["//chips/esp32_c6:headers"],
+        ":esp32_c6": ["//chips/esp32_c6:headers", "//boards/esp32_c6:headers"],
         "//conditions:default": ["//modules/pico_sdk_support:headers"],
     }),
 )

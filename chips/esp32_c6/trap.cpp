@@ -1,6 +1,7 @@
 #include "shizuku/kernel.hpp"
 #include "arch/riscv/trap_route.hpp"
 #include "chips/esp32_c6/systimer.hpp"
+#include "chips/esp32_c6/trap_api.hpp"
 
 using arch = shizuku::ARCH;
 static_assert((sizeof(shizuku::KERNEL::call_frame_header) + C6_FRAME_BYTES) % 16 == 0,
@@ -106,7 +107,7 @@ extern "C" arch::exception_frame_t *shizuku_c6_trap_dispatch(arch::exception_fra
   shizuku_c6_trap_diag[2] = frame->mepc;
   shizuku_c6_trap_diag[3] = frame->mtval;
   auto *result = frame;
-  shizuku::ports::c6::route_trap(*frame, shizuku_c6_irq_depth, [&] {
+  shizuku::ports::riscv::route_trap(*frame, shizuku_c6_irq_depth, [&] {
     // ECALL from inside the kernel must never overwrite the current thread.
     if (shizuku_c6_trap_depth != 1) stop(0xE003);
     if ((frame->mstatus & C6_MSTATUS_MPP) != C6_MSTATUS_MPP) stop(0xE004);
@@ -182,18 +183,11 @@ void rv32_c6::enter_thread_mode(uintptr_t top, uintptr_t limit, void (*entry)())
   shizuku_c6_first_return(context->sp);
 }
 }
-namespace shizuku::boards {
-void esp32_c6::init(uint32_t core) {
-  if (core != 0) stop(0xE007);
-  install_traps();
-  interrupt_init();
-}
-uint64_t esp32_c6::time_us() { return c6::us_from_ticks(systimer_now()); }
-uint32_t esp32_c6::cycles_per_us() { return c6::TICKS_PER_US; }
-uintptr_t esp32_c6::unprivileged_floor() {
-  // Stage-2 privileged-only pilot: BSS bookkeeping is below this boundary.
-  // This is not a PMP security boundary. U-mode return is refused above.
-  return reinterpret_cast<uintptr_t>(&_bss_end);
-}
-[[noreturn]] void esp32_c6::panic(const char *) { stop(0xE008); }
-}
+// board 実装 (boards/esp32_c6) から呼ぶ SoC 側の入口。本体は上の無名 namespace の
+// ままで、名前だけ chips の API として外へ出す (関数本体は変えない)。
+namespace shizuku::chips::esp32_c6 {
+void install_traps() { ::install_traps(); }
+void interrupt_init() { ::interrupt_init(); }
+[[noreturn]] void stop(uint32_t status) { ::stop(status); }
+uint64_t systimer_now() { return ::systimer_now(); }
+} // namespace shizuku::chips::esp32_c6

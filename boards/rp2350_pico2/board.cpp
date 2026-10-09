@@ -9,7 +9,7 @@
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
 #include "arch/armv8m/armv8m.hpp"
-#include "chips/rp2350/rp2350_pico2.hpp"
+#include "boards/rp2350_pico2/rp2350_pico2.hpp"
 #include "shizuku/kernel.hpp"
 #include "shizuku/objects/usb_cdc.hpp"
 #include "tusb.h"

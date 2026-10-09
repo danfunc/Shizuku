@@ -3,9 +3,9 @@
  * selected here; those require an explicit privilege-domain design. */
     .section .text
     .align  2
-    .global shizuku_c6_arch_isa_probe
-    .type   shizuku_c6_arch_isa_probe, @function
-shizuku_c6_arch_isa_probe:
+    .global shizuku_rv32_arch_isa_probe
+    .type   shizuku_rv32_arch_isa_probe, @function
+shizuku_rv32_arch_isa_probe:
     csrr    a0, mstatus
     csrr    a1, pmpcfg0
     csrr    a2, pmpaddr0
@@ -13,4 +13,4 @@ shizuku_c6_arch_isa_probe:
     sc.w    a4, a4, (a3)
     ecall
     ret
-    .size   shizuku_c6_arch_isa_probe, .-shizuku_c6_arch_isa_probe
+    .size   shizuku_rv32_arch_isa_probe, .-shizuku_rv32_arch_isa_probe

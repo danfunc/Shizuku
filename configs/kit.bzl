@@ -23,7 +23,7 @@ def config_substitutions(arch, board):
             "${SHIZUKU_MEMORY_MANAGER}": "shizuku::memory_managers::freestanding",
             "${INCLUDE_HEADERS_INSTRUCTION}": "\n".join([
                 '#include "chips/esp32_c6/rv32_c6.hpp"',
-                '#include "modules/esp_idf_support/c6/esp32_c6.hpp"',
+                '#include "boards/esp32_c6/esp32_c6.hpp"',
                 '#include "shizuku/memory_managers/freestanding.hpp"',
                 '#include "shizuku/app_entry.hpp"',
             ]),
@@ -34,7 +34,7 @@ def config_substitutions(arch, board):
         return _CONFIG_COMMON | {
             "${INCLUDE_HEADERS_INSTRUCTION}": "\n".join([
                 '#include "arch/armv6m/armv6m.hpp"',
-                '#include "chips/rp2040/rp2040_pico_w.hpp"',
+                '#include "boards/rp2040_pico_w/rp2040_pico_w.hpp"',
                 '#include "shizuku/memory_managers/pico_sdk.hpp"',
                 '#include "shizuku/app_entry.hpp"',
             ]),
@@ -44,7 +44,7 @@ def config_substitutions(arch, board):
     return _CONFIG_COMMON | {
         "${INCLUDE_HEADERS_INSTRUCTION}": "\n".join([
             '#include "arch/armv8m/armv8m.hpp"',
-            '#include "chips/rp2350/rp2350_pico2.hpp"',
+            '#include "boards/rp2350_pico2/rp2350_pico2.hpp"',
             '#include "shizuku/memory_managers/pico_sdk.hpp"',
             '#include "shizuku/app_entry.hpp"',
         ]),

@@ -1,15 +1,29 @@
-# RP2040 のポート: ARMv6-M の arch (arch/armv6m) + RP2040 の board (chips/rp2040)。
+# RP2040 のポート: ARMv6-M の arch (arch/armv6m) + RP2040 の board (boards/rp2040_pico_w)。
+# SDK 依存の arch glue (SysTick の診断・watchdog・atomic の spin lock) はここに置く。
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(default_visibility = ["//modules/pico_sdk_support:__subpackages__"])
+
+cc_library(
+    name = "arch_glue",
+    srcs = ["arch_glue_v6m.cpp"],
+    alwayslink = True,
+    target_compatible_with = ["@pico-sdk//bazel/constraint:rp2040"],
+    deps = [
+        "//arch/armv6m:headers",
+        "//:kernel",
+        "//configs:config",
+    ],
+)
 
 cc_library(
     name = "port",
     alwayslink = True,
     target_compatible_with = ["@pico-sdk//bazel/constraint:rp2040"],
     deps = [
+        ":arch_glue",
         "//arch/armv6m:ctx",
-        "//chips/rp2040:board",
-        "//chips/rp2040:headers",
+        "//boards/rp2040_pico_w:board",
+        "//boards/rp2040_pico_w:headers",
     ],
 )

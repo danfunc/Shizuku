@@ -2,18 +2,10 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(default_visibility = ["//visibility:public"])
 
+# esp32_c6 (board) のヘッダと実装は boards/esp32_c6 へ移した。ここに残るのは
+# arch 側の stub (rv32_c6) とブート・テスト用の部品だけ。
 exports_files([
     "early_boot.cpp",
-    "esp32_c6.hpp",
     "link_stubs.cpp",
     "selftest_runner.cpp",
 ])
-
-cc_library(
-    name = "headers",
-    hdrs = ["esp32_c6.hpp"],
-    includes = ["."],
-    deps = [
-        "//:internal_headers",
-    ],
-)

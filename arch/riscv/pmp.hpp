@@ -1,15 +1,15 @@
-#ifndef SHIZUKU_PORTS_ESP32_C6_PMP_HPP
-#define SHIZUKU_PORTS_ESP32_C6_PMP_HPP
+#ifndef SHIZUKU_ARCH_RISCV_PMP_HPP
+#define SHIZUKU_ARCH_RISCV_PMP_HPP
 
 #include <cstddef>
 #include <cstdint>
 
 namespace shizuku {
 namespace ports {
-namespace c6 {
+namespace riscv {
 
-// ESP32-C6 TRM PMP 幾何・エンコード仕様 (TRM cites RISC-V Privileged Architecture v1.10).
-// ESP32-C6 は 16 個の PMP エントリ (pmpcfg0..pmpcfg3, pmpaddr0..pmpaddr15) を持ち、
+// RISC-V PMP (Privileged Architecture v1.10) のエンコード仕様。
+// エントリ数・レジスタ配置はチップ依存なのでここには書かない (chips 側で定める)。
 // M-mode から設定して U-mode オブジェクトのメモリ保護 (R, W, X) を行う。
 //
 // 本モジュールはハードウェアレジスタへの直接アクセスを含まない純粋ロジック層であり、
@@ -45,7 +45,7 @@ public:
   // pmpaddr エンコーディング規則:
   //   size = 2^k のとき、下位 (k - 3) ビットが 1 で、bit (k - 3) が 0 となる。
   //   pmpaddr = (base >> 2) | ((size >> 3) - 1)
-  //   ESP32-C6 TRM / RISC-V Privileged spec v1.10: 最小 NAPOT は 8B、最大は 4GB。
+  //   RISC-V Privileged spec v1.10: 最小 NAPOT は 8B、最大は 4GB (32bit アドレス空間)。
   static constexpr bool encode_napot(uint32_t base, uint64_t size, uint8_t perm,
                                      pmp_entry &out) noexcept {
     if (size < 8 || size > 0x100000000ULL) {
@@ -159,8 +159,8 @@ public:
   }
 };
 
-} // namespace c6
+} // namespace riscv
 } // namespace ports
 } // namespace shizuku
 
-#endif // SHIZUKU_PORTS_ESP32_C6_PMP_HPP
+#endif // SHIZUKU_ARCH_RISCV_PMP_HPP

@@ -3,7 +3,7 @@
 #include <initializer_list>
 #define SHIZUKU_C6_SKELETON_PERMITTED 1
 #include "chips/esp32_c6/rv32_c6.hpp"
-#include "modules/esp_idf_support/c6/esp32_c6.hpp"
+#include "boards/esp32_c6/esp32_c6.hpp"
 
 using arch = shizuku::archs::rv32_c6;
 using board = shizuku::boards::esp32_c6;

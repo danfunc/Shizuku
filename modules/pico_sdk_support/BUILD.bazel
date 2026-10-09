@@ -42,8 +42,8 @@ cc_library(
     deps = [
         "//:internal_headers",
     ] + select({
-        "//configs:rp2040": ["//chips/rp2040:headers"],
-        "//configs:rp2350": ["//chips/rp2350:headers"],
+        "//configs:rp2040": ["//boards/rp2040_pico_w:headers"],
+        "//configs:rp2350": ["//boards/rp2350_pico2:headers"],
     }),
 )
 

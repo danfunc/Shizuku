@@ -4,7 +4,7 @@
 #define SHIZUKU_C6_SKELETON_PERMITTED 1
 #include "chips/esp32_c6/rv32_c6.hpp"
 #include "arch/riscv/trap_route.hpp"
-using namespace shizuku::ports::c6;
+using namespace shizuku::ports::riscv;
 using frame_t = shizuku::archs::rv32_c6::exception_frame_t;
 int main() {
   volatile uint32_t depth = 0;

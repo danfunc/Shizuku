@@ -8,6 +8,9 @@ exports_files([
     "selftest_adapter.cpp",
     "selftest_record.h",
     "systimer.hpp",
+    "trap_api.hpp",
+    "frame_layout.h",
+    "rv32_trap.S",
 ])
 
 cc_library(
@@ -16,6 +19,8 @@ cc_library(
         "rv32_c6.hpp",
         "selftest_record.h",
         "systimer.hpp",
+        "trap_api.hpp",
+        "frame_layout.h",
     ],
     includes = ["."],
     deps = [
@@ -50,7 +55,7 @@ cc_test(
     includes = ["."],
     deps = [
         ":headers",
-        "//modules/esp_idf_support/c6:headers",
+        "//boards/esp32_c6:headers",
         "//:internal_headers",
     ],
 )
@@ -62,10 +67,10 @@ sh_test(
         "rv32_c6.hpp",
         "test_fail_closed.cpp",
         "test_fail_closed_board.cpp",
-        "//arch/riscv:frame_layout.h",
+        "frame_layout.h",
         "//arch/riscv:pmp.hpp",
         "//:c6_test_headers",
-        "//modules/esp_idf_support/c6:esp32_c6.hpp",
+        "//boards/esp32_c6:esp32_c6.hpp",
     ],
 )
 
@@ -86,10 +91,25 @@ sh_test(
         "rv32_c6.hpp",
         "test_trap_static.py",
         "trap.cpp",
-        "//arch/riscv:frame_layout.h",
-        "//arch/riscv:rv32_trap.S",
+        "trap_api.hpp",
+        "frame_layout.h",
+        "rv32_trap.S",
         "//modules/esp_idf_support/c6:early_boot.cpp",
+        "//boards/esp32_c6:board_esp32_c6.cpp",
         "//modules/esp_idf_support/firmware:main/early_diag.c",
         "//:c6_test_headers",
+    ],
+)
+
+# trap_route は arch/riscv/trap_route.hpp の純粋な経路判定。テストは C6 の型 (rv32_c6) を
+# 使うので chips 側に置く (arch -> chips の逆依存を作らない)。
+cc_test(
+    name = "trap_route_test",
+    srcs = ["test_trap_route.cpp"],
+    copts = ["-std=c++20"],
+    deps = [
+        ":headers",
+        "//arch/riscv:pmp",
+        "//:internal_headers",
     ],
 )

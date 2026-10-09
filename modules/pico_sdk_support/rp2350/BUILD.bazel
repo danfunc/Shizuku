@@ -1,16 +1,30 @@
-# RP2350 のポート: ARMv8-M の arch (arch/armv8m) + RP2350 の board (chips/rp2350)。
+# RP2350 のポート: ARMv8-M の arch (arch/armv8m) + RP2350 の board (boards/rp2350_pico2)。
+# SDK 依存の arch glue (SysTick の診断・watchdog・フォールト) はここに置く。
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(default_visibility = ["//modules/pico_sdk_support:__subpackages__"])
+
+cc_library(
+    name = "arch_glue",
+    srcs = ["arch_glue.cpp"],
+    alwayslink = True,
+    target_compatible_with = ["@pico-sdk//bazel/constraint:rp2350"],
+    deps = [
+        "//arch/armv8m:headers",
+        "//:kernel",
+        "//configs:config",
+    ],
+)
 
 cc_library(
     name = "port",
     alwayslink = True,
     target_compatible_with = ["@pico-sdk//bazel/constraint:rp2350"],
     deps = [
+        ":arch_glue",
         "//arch/armv8m:ctx",
-        "//chips/rp2350:board",
-        "//chips/rp2350:headers",
+        "//boards/rp2350_pico2:board",
+        "//boards/rp2350_pico2:headers",
     ],
 )
 
@@ -24,7 +38,7 @@ cc_library(
     target_compatible_with = ["@pico-sdk//bazel/constraint:rp2350"],
     visibility = ["//visibility:public"],
     deps = [
-        "//chips/rp2350:headers",
+        "//boards/rp2350_pico2:headers",
         "//:internal_headers",
         "//:kernel",
         "//:kernel_object",

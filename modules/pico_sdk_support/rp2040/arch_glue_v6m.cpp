@@ -5,12 +5,17 @@ extern "C" void shizuku_service_isr_probe() __attribute__((weak));
 #define SERVICE_ISR_PROBE() ((void)0)
 #endif
 #include "arch/armv6m/armv6m.hpp"
+#include "hardware/sync.h"
 #include "shizuku/kernel.hpp"
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
 #include "hardware/watchdog.h"
 #include "hardware/structs/watchdog.h"
 #include "pico/time.h"
 #endif
+// atomic 用ロック (arch/armv6m/armv6m.hpp の宣言の実体)。ID は SDK の
+// PICO_SPINLOCK_ID_ATOMIC をそのまま使う (値を写さない)。
+extern "C" uint32_t shizuku_armv6m_atomic_lock(){return spin_lock_blocking(spin_lock_instance(PICO_SPINLOCK_ID_ATOMIC));}
+extern "C" void shizuku_armv6m_atomic_unlock(uint32_t saved_irq){spin_unlock(spin_lock_instance(PICO_SPINLOCK_ID_ATOMIC),saved_irq);}
 extern "C" shizuku_armv6m_context *shizuku_current_context(){
   return reinterpret_cast<shizuku_armv6m_context *>(shizuku::kernel_instance.current_context());
 }

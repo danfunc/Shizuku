@@ -49,6 +49,25 @@ cc_library(
     deps = [":object_ids"],
 )
 
+# arch (ISA 層) が実際に include する kernel ヘッダだけ。internal_headers と違い
+# :object_ids (objects.list = modules/pico_sdk_support の入力) に依存しない。
+# 閉包は arch/armv6m/armv6m.hpp と arch/armv8m/armv8m.hpp から静的に確認済み。
+filegroup(
+    name = "arch_internal_header_files",
+    srcs = [
+        "internal_headers/shizuku/concepts/arch.hpp",
+        "internal_headers/shizuku/kernel_abi.hpp",
+        "internal_headers/shizuku/service_profile.hpp",
+    ],
+)
+
+cc_library(
+    name = "arch_headers",
+    hdrs = [":arch_internal_header_files"],
+    includes = ["internal_headers"],
+    visibility = ["//visibility:public"],
+)
+
 # カーネル本体のソース。//:kernel と //:shizuku_kernel (ESP32-C6 の .a) で共有する。
 KERNEL_SRCS = [
     "source/cpu_manager/init.cpp",
@@ -154,7 +173,9 @@ cc_library(
         "//modules/esp_idf_support/c6:early_boot.cpp",
         "//modules/esp_idf_support/c6:link_stubs.cpp",
         "//chips/esp32_c6:trap.cpp",
-        "//arch/riscv:rv32_trap.S",
+        "//boards/esp32_c6:board_esp32_c6.cpp",
+        "//boards/esp32_c6:board_esp32_c6_stubs.cpp",
+        "//chips/esp32_c6:rv32_trap.S",
         "//chips/esp32_c6:selftest_adapter.cpp",
         "//modules/esp_idf_support/c6:selftest_runner.cpp",
     ],
@@ -165,6 +186,6 @@ cc_library(
         "//configs:config",
         "//arch/riscv:pmp",
         "//chips/esp32_c6:headers",
-        "//modules/esp_idf_support/c6:headers",
+        "//boards/esp32_c6:headers",
     ],
 )

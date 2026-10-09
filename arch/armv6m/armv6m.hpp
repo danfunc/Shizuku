@@ -2,13 +2,16 @@
 #define SHIZUKU_ARCHS_ARMV6M_HPP
 #include <cstddef>
 #include <cstdint>
-#include "hardware/structs/systick.h"
-#include "hardware/sync.h"
+#include "arch/ppb.hpp"
 #include "shizuku/concepts/arch.hpp"
 #include "shizuku/kernel_abi.hpp"
 #include "shizuku/service_profile.hpp"
 
 extern "C" {
+// atomic 用のロック。実体は modules/pico_sdk_support/rp2040 (SDK の spin lock)。
+// 戻り値は割込み状態で、解放時にそのまま渡す。
+uint32_t shizuku_armv6m_atomic_lock();
+void shizuku_armv6m_atomic_unlock(uint32_t saved_irq);
 void shizuku_armv6m_svc_entry();
 void shizuku_armv6m_pendsv_entry();
 void shizuku_armv6m_systick_entry();
@@ -61,9 +64,9 @@ public:
     f->r0=arg;f->r1=f->r2=f->r3=f->r12=0;f->lr=ret;f->pc=pc;f->xPSR=1u<<24;c.sp=f;c.exc_return=0xFFFFFFFD;
   }
   static constexpr uint32_t TIMER_MAX_CYCLES=0x00FFFFFF,TIMER_MIN_CYCLES=100;
-  static void timer_oneshot(uint32_t n){systick_hw->rvr=n;systick_hw->cvr=0;systick_hw->csr=7;}
-  static void timer_cancel(){systick_hw->csr=0;}
-  static uint32_t timer_remaining(bool &wrapped){uint32_t csr=systick_hw->csr;wrapped=(csr&(1u<<16))!=0;if(!(csr&1)){wrapped=false;return 0;}return systick_hw->cvr&0x00FFFFFFu;}
+  static void timer_oneshot(uint32_t n){ppb::systick->rvr=n;ppb::systick->cvr=0;ppb::systick->csr=7;}
+  static void timer_cancel(){ppb::systick->csr=0;}
+  static uint32_t timer_remaining(bool &wrapped){uint32_t csr=ppb::systick->csr;wrapped=(csr&(1u<<16))!=0;if(!(csr&1)){wrapped=false;return 0;}return ppb::systick->cvr&0x00FFFFFFu;}
   static void pend_context_switch(){*(volatile uint32_t *)0xE000ED04u=1u<<28;}
 
   // RP2040 PMSAv6: up to 8 MPU regions; each region is aligned 2^n (n>=8).
@@ -144,10 +147,9 @@ public:
     (void)start;
 #endif
   }
-  static spin_lock_t *atomic_lock(){return spin_lock_instance(PICO_SPINLOCK_ID_ATOMIC);}
-  static bool cas32(volatile uint32_t *p,uint32_t expected,uint32_t desired){uint32_t start=atomic_profile_begin();auto *l=atomic_lock();uint32_t irq=spin_lock_blocking(l);bool ok=*p==expected;if(ok)*p=desired;spin_unlock(l,irq);atomic_profile_end(start);return ok;}
-  static void store_release32(volatile uint32_t *p,uint32_t v){uint32_t start=atomic_profile_begin();auto *l=atomic_lock();uint32_t irq=spin_lock_blocking(l);asm volatile("dmb":::"memory");*p=v;asm volatile("dmb":::"memory");spin_unlock(l,irq);atomic_profile_end(start);}
-  static uint32_t load_acquire32(volatile uint32_t *p){uint32_t start=atomic_profile_begin();auto *l=atomic_lock();uint32_t irq=spin_lock_blocking(l);asm volatile("dmb":::"memory");uint32_t v=*p;spin_unlock(l,irq);atomic_profile_end(start);return v;}
+  static bool cas32(volatile uint32_t *p,uint32_t expected,uint32_t desired){uint32_t start=atomic_profile_begin();uint32_t irq=shizuku_armv6m_atomic_lock();bool ok=*p==expected;if(ok)*p=desired;shizuku_armv6m_atomic_unlock(irq);atomic_profile_end(start);return ok;}
+  static void store_release32(volatile uint32_t *p,uint32_t v){uint32_t start=atomic_profile_begin();uint32_t irq=shizuku_armv6m_atomic_lock();asm volatile("dmb":::"memory");*p=v;asm volatile("dmb":::"memory");shizuku_armv6m_atomic_unlock(irq);atomic_profile_end(start);}
+  static uint32_t load_acquire32(volatile uint32_t *p){uint32_t start=atomic_profile_begin();uint32_t irq=shizuku_armv6m_atomic_lock();asm volatile("dmb":::"memory");uint32_t v=*p;shizuku_armv6m_atomic_unlock(irq);atomic_profile_end(start);return v;}
   static constexpr uint32_t DFSR_HALTED=1,DFSR_BKPT=2;
   // M0+ has no DebugMonitor. These API-compatible stubs keep phase-1 builds
   // possible; self-hosted debug is unavailable until a separate design exists.

@@ -2,9 +2,7 @@
 #define SHIZUKU_ARCHS_ARMV8M_HPP
 #include <cstddef>
 #include <cstdint>
-#include "hardware/structs/mpu.h"
-#include "hardware/structs/scb.h"
-#include "hardware/structs/systick.h"
+#include "arch/ppb.hpp"
 #include "shizuku/concepts/arch.hpp"
 #include "shizuku/kernel_abi.hpp"
 
@@ -30,7 +28,7 @@ void shizuku_armv8m_debugmon_entry();
 [[noreturn]] void shizuku_armv8m_enter_thread_mode(uintptr_t stack_top,
                                                    uintptr_t stack_limit,
                                                    void (*entry)());
-// asm から呼ばれるフック。実体は modules/pico_sdk_support/arch_glue.cpp。
+// asm から呼ばれるフック。実体は modules/pico_sdk_support/rp2350/arch_glue.cpp。
 struct shizuku_armv8m_context;
 shizuku_armv8m_context *shizuku_current_context();
 void shizuku_svc_dispatch(shizuku_armv8m_context *context);
@@ -168,11 +166,11 @@ public:
   static constexpr uint32_t TIMER_MAX_CYCLES = 0x00FFFFFF;
   static constexpr uint32_t TIMER_MIN_CYCLES = 100; // 装填直後発火を避ける下限
   static void timer_oneshot(uint32_t cycles) {
-    systick_hw->rvr = cycles;
-    systick_hw->cvr = 0;   // 書き込みでカウンタをクリア (rvr から数え直す)
-    systick_hw->csr = 0x7; // ENABLE | TICKINT | プロセッサクロック
+    ppb::systick->rvr = cycles;
+    ppb::systick->cvr = 0;   // 書き込みでカウンタをクリア (rvr から数え直す)
+    ppb::systick->csr = 0x7; // ENABLE | TICKINT | プロセッサクロック
   }
-  static void timer_cancel() { systick_hw->csr = 0; }
+  static void timer_cancel() { ppb::systick->csr = 0; }
 
   // ---- ★自己ホスト型デバッグ (DebugMonitor) --------------------------------
   //  halting debug (SWD のプローブ) はコアを丸ごと止めるが、DebugMonitor は
@@ -282,19 +280,19 @@ public:
   //   「刻みは撃ち切った」と見なす (足りなく数えるより多く数えるほうが安全 —
   //   貸した実行権が予定より長く握られる側に倒れない)。
   static uint32_t timer_remaining(bool &wrapped) {
-    const uint32_t csr = systick_hw->csr; // ★読むと COUNTFLAG は落ちる。1 回だけ読む
+    const uint32_t csr = ppb::systick->csr; // ★読むと COUNTFLAG は落ちる。1 回だけ読む
     wrapped = (csr & (1u << 16)) != 0;
     if (!(csr & 0x1u)) { // 動いていない
       wrapped = false;
       return 0;
     }
-    return systick_hw->cvr & 0x00FFFFFFu;
+    return ppb::systick->cvr & 0x00FFFFFFu;
   }
   // ★切替は最低優先度の遅延例外でしか起こさない (DESIGN §14.5.1 の規約)。
   //   これにより「syscall ハンドラの中にいる = そのコアでは切り替わらない」が
   //   取得コストゼロで手に入る。
   static void pend_context_switch() {
-    scb_hw->icsr = 1u << 28; // PENDSVSET
+    *ppb::scb_icsr = 1u << 28; // PENDSVSET
   }
 
   // ---- メモリ保護 (機構だけ。どこに何を張るかは board の知識) ----------------
@@ -306,26 +304,26 @@ public:
   static void region_set(uint32_t index, uintptr_t base, uintptr_t limit,
                          uint32_t access, bool execute_never,
                          uint32_t attribute) {
-    mpu_hw->rnr = index;
-    mpu_hw->rbar =
+    ppb::mpu->rnr = index;
+    ppb::mpu->rbar =
         ((uint32_t)base & ~0x1Fu) | (access << 1) | (execute_never ? 1u : 0u);
-    mpu_hw->rlar = ((uint32_t)limit & ~0x1Fu) | (attribute << 1) | 1u;
+    ppb::mpu->rlar = ((uint32_t)limit & ~0x1Fu) | (attribute << 1) | 1u;
   }
   static void region_disable(uint32_t index) {
-    mpu_hw->rnr = index;
-    mpu_hw->rlar = 0;
+    ppb::mpu->rnr = index;
+    ppb::mpu->rlar = 0;
   }
   // attr0 = 通常メモリ (書き戻し), attr1 = 通常メモリ (キャッシュしない)。
   static void protection_enable() {
-    mpu_hw->mair[0] = 0xFFu | (0x44u << 8);
+    *ppb::mpu_mair0 = 0xFFu | (0x44u << 8);
     // ★PRIVDEFENA: region で明示していない場所は「特権だけが触れる」。これが
     //   単一アドレス空間における「カーネル空間」の実体で、MMU が無くても
     //   非特権から見えない領域を作れる (DESIGN §11.1)。
-    mpu_hw->ctrl = M33_MPU_CTRL_PRIVDEFENA_BITS | M33_MPU_CTRL_ENABLE_BITS;
+    ppb::mpu->ctrl = ppb::MPU_CTRL_PRIVDEFENA | ppb::MPU_CTRL_ENABLE;
     asm volatile("dsb\nisb" ::: "memory");
   }
   static void protection_disable() {
-    mpu_hw->ctrl = 0;
+    ppb::mpu->ctrl = 0;
     asm volatile("dsb\nisb" ::: "memory");
   }
   // 今の実行の CONTROL をそのまま返す。**状態は対象自身に申告させる** ための口

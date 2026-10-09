@@ -1,0 +1,10 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# ARM の PPB レジスタ番地 (SysTick / SCB.ICSR / MPU)。SDK に依存しない。
+cc_library(
+    name = "ppb",
+    hdrs = ["ppb.hpp"],
+    includes = ["."],
+)

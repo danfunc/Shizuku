@@ -3,7 +3,7 @@
 
 #include <cstdint>
 #include <cstddef>
-#include "arch/riscv/frame_layout.h"
+#include "chips/esp32_c6/frame_layout.h"
 #include "shizuku/concepts/arch.hpp"
 #include "arch/riscv/pmp.hpp"
 
@@ -12,7 +12,7 @@
 // ===========================================================================
 //  ★現在の到達点:
 //    - RV32IMAC レジスタおよび trap frame / context レイアウトの定義
-//    - PMP 設定 (pmp_codec) の統合
+//    - PMP 設定 (pmp_codec) の統合 (ESP32-C6 TRM: PMP エントリは 16 個 pmpcfg0..3 / pmpaddr0..15)
 //    - M-only trap/ECALL、SYSTIMER oneshot/プリエンプション、初回 mret を実装。
 //    - PMP による U-mode 権限境界保護およびハードウェアデバッグは未実装 (M-only パイロット)。
 //    - ファームウェア組み込み時の欺瞞的 no-op 動作を防ぐため、

@@ -2,7 +2,7 @@
 #include <cstdio>
 #include "arch/riscv/pmp.hpp"
 
-using namespace shizuku::ports::c6;
+using namespace shizuku::ports::riscv;
 
 static void test_pmp_napot_encoding() {
   pmp_entry entry;
@@ -58,7 +58,7 @@ static void test_pmp_napot_encoding() {
   assert(ok);
   assert(decoded_base == 0x40810000u);
   assert(decoded_size == 65536u);
-  // 5. 4GB NAPOT (ESP32-C6 TRM 最大範囲: 0x100000000ULL, base=0, k=32, mask=(2^29 - 1)=0x1FFFFFFF)
+  // 5. 4GB NAPOT (RISC-V NAPOT 最大範囲 (32bit アドレス空間): 0x100000000ULL, base=0, k=32, mask=(2^29 - 1)=0x1FFFFFFF)
   // expected pmpaddr = 0 | 0x1FFFFFFF = 0x1FFFFFFF
   uint64_t decoded_size64 = 0;
   ok = pmp_codec::encode_napot(0x00000000, 0x100000000ULL, pmp_perm::R | pmp_perm::X, entry);

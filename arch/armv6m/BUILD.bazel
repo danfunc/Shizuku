@@ -7,20 +7,15 @@ cc_library(
     hdrs = ["armv6m.hpp"],
     includes = ["."],
     deps = [
-        "//:internal_headers",
+        "//arch:ppb",
+        "//:arch_headers",
     ],
 )
 
+# 文脈退避・復帰・戻り口の asm のみ。C++ のフック (systick / svc / fault など) の実体は
+# modules/pico_sdk_support/rp2040 にある (SDK 依存をここに置かない)。
 cc_library(
     name = "ctx",
-    srcs = [
-        "arch_glue_v6m.cpp",
-        "armv6m_ctx.S",
-    ],
+    srcs = ["armv6m_ctx.S"],
     alwayslink = True,
-    deps = [
-        ":headers",
-        "//:kernel",
-        "//configs:config",
-    ],
 )

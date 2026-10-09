@@ -1,4 +1,4 @@
-#include "arch/riscv/frame_layout.h"
+#include "chips/esp32_c6/frame_layout.h"
 // C6 uses 256-byte-aligned vectored mtvec with 4-byte slots (IDF vectors_intc.S).
 .section .iram1,"ax",@progbits
 .balign 256

@@ -1,7 +1,7 @@
-#ifndef SHIZUKU_C6_TRAP_ROUTE_HPP
-#define SHIZUKU_C6_TRAP_ROUTE_HPP
+#ifndef SHIZUKU_ARCH_RISCV_TRAP_ROUTE_HPP
+#define SHIZUKU_ARCH_RISCV_TRAP_ROUTE_HPP
 #include <cstdint>
-namespace shizuku::ports::c6 {
+namespace shizuku::ports::riscv {
 enum class trap_kind { ecall, interrupt, fault };
 constexpr trap_kind classify_trap(uint32_t cause) {
   if (cause & 0x80000000u) return trap_kind::interrupt;

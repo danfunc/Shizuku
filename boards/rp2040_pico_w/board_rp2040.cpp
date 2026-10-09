@@ -15,7 +15,7 @@
 #include "pico/platform.h"
 #include "pico/stdlib.h"
 #include "arch/armv6m/armv6m.hpp"
-#include "chips/rp2040/rp2040_pico_w.hpp"
+#include "boards/rp2040_pico_w/rp2040_pico_w.hpp"
 #include "shizuku/kernel.hpp"
 #include "shizuku/objects/usb_cdc.hpp"
 #include "tusb.h"

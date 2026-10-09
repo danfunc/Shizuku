@@ -3,8 +3,8 @@
 import re
 from pathlib import Path
 root = Path(__file__).absolute().parents[2]
-layout = (root / 'arch/riscv/frame_layout.h').read_text()
-asm = (root / 'arch/riscv/rv32_trap.S').read_text()
+layout = (root / 'chips/esp32_c6/frame_layout.h').read_text()
+asm = (root / 'chips/esp32_c6/rv32_trap.S').read_text()
 header = (root / 'chips/esp32_c6/rv32_c6.hpp').read_text()
 offsets = dict((k, int(v)) for k, v in re.findall(r'#define C6_F_(\w+) (\d+)', layout))
 assert sorted(offsets.values()) == list(range(0, 144, 4))
@@ -30,6 +30,12 @@ assert 'shizuku_c6_early_diag_log.magic = SHIZUKU_C6_EARLY_DIAG_ENTRY_MAGIC' not
 assert begin.index('shizuku_c6_early_diag_progress = SHIZUKU_C6_EARLY_DIAG_ENTRY_MAGIC') < begin.index('esp_rom_get_reset_reason')
 
 trap_src = (root / 'chips/esp32_c6/trap.cpp').read_text()
+board_src = (root / 'boards/esp32_c6/board_esp32_c6.cpp').read_text()
+api_src = (root / 'chips/esp32_c6/trap_api.hpp').read_text()
+assert 'void esp32_c6::init(uint32_t core)' in board_src
+assert 'install_traps();' in board_src and 'interrupt_init();' in board_src
+assert 'void esp32_c6::init' not in trap_src  # board 実装は chips に残さない
+assert 'void install_traps();' in api_src and '[[noreturn]] void stop(uint32_t status);' in api_src
 assert 'kernel.timer_expired()' in trap_src
 assert 'run_pending_switch()' in trap_src
 assert 'reg_write(c6::SYSTIMER_INT_CLR, c6::TARGET0_INT_BIT)' in trap_src
