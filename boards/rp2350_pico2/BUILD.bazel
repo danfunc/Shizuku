@@ -9,9 +9,8 @@ cc_library(
     target_compatible_with = ["@pico-sdk//bazel/constraint:rp2350"],
     deps = [
         "//arch/armv8m:headers",
+        "//chips/rp2350:headers",
         "//:internal_headers",
-        "@pico-sdk//src/rp2_common/hardware_sync",
-        "@pico-sdk//src/rp2_common/pico_stdlib",
     ],
 )
 

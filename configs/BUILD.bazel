@@ -130,11 +130,11 @@ expand_template(
     substitutions = select({
         # 型名は歴史的経緯で rp2040_pico_w だが、Pico / Pico W / XIAO 共通の
         # バックエンド (LED の選び方は peripherals.cpp と SDK のボードマクロ側)。
-        ":rp2040": config_substitutions("armv6m", "rp2040_pico_w"),
+        ":rp2040": config_substitutions("armv6m", "rp2040", "rp2040_pico_w"),
         # Pico 2 / Pico 2 W 共通。CYW43 は W 専用の依存グラフ側にだけ居る。
-        ":rp2350": config_substitutions("armv8m", "rp2350_pico2"),
+        ":rp2350": config_substitutions("armv8m", "rp2350", "rp2350_pico2"),
         # ESP32-C6 (未完成・fail-closed)
-        ":esp32_c6": config_substitutions("rv32_c6", "esp32_c6"),
+        ":esp32_c6": config_substitutions("rv32_c6", "esp32_c6", "esp32_c6"),
     }),
     template = "config_template.hpp.in",
 )
@@ -148,6 +148,8 @@ cc_library(
         "//:internal_headers",
     ] + select({
         ":esp32_c6": ["//chips/esp32_c6:headers", "//boards/esp32_c6:headers"],
+        ":rp2040": ["//chips/rp2040:headers", "//modules/pico_sdk_support:headers"],
+        ":rp2350": ["//chips/rp2350:headers", "//modules/pico_sdk_support:headers"],
         "//conditions:default": ["//modules/pico_sdk_support:headers"],
     }),
 )

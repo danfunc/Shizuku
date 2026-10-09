@@ -13,6 +13,8 @@ cc_library(
         "//arch/armv8m:headers",
         "//:kernel",
         "//configs:config",
+        "@pico-sdk//src/rp2_common/hardware_watchdog",
+        "@pico-sdk//src/rp2_common/pico_stdlib",
     ],
 )
 

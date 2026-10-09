@@ -10,6 +10,7 @@
 #include "pico/stdlib.h"
 #include "arch/armv8m/armv8m.hpp"
 #include "boards/rp2350_pico2/rp2350_pico2.hpp"
+#include "chips/rp2350/chip.hpp"
 #include "shizuku/kernel.hpp"
 #include "shizuku/objects/usb_cdc.hpp"
 #include "tusb.h"
@@ -17,6 +18,11 @@
 // board は「どの ISA の上に居るか」を知っている層でもある (region を張る機構は
 // arch 側)。ここだけの別名にして、上位のテンプレート引数とは混ぜない。
 using ARCH_TYPE = shizuku::archs::armv8m;
+// SoC の定数 (メモリ地図)。SDK の XIP_BASE / SRAM_END と同じ値 (chips/rp2350/chip.hpp)。
+using SOC_TYPE = shizuku::chips::rp2350::chip;
+// SDK 側の値との一致を固定する (値の出所は SDK マクロのまま、上書きされたら止まる)。
+static_assert(PICO_LOWEST_IRQ_PRIORITY == SOC_TYPE::kPriorityLowest,
+              "PICO_LOWEST_IRQ_PRIORITY differs from chips/rp2350 kPriorityLowest");
 
 // ★GDB が同じ CDC を使っている間は診断を黙らせる (board.cpp の diag_printf)。
 //   CDC をストリーム化すれば、この旗ごと要らなくなる。
@@ -85,9 +91,9 @@ void rp2350_pico2::init(uint32_t core) {
   // ★この順序が 1 コア内の相互排除を無償で与える (DESIGN §14.5.1)。
   //   syscall 最優先 → その中ではタイマにも切替にも割り込まれない。
   //   切替は最低優先度なので、ハンドラを抜けるまで走らない。
-  exception_set_priority(SVCALL_EXCEPTION, 0x00);
-  exception_set_priority(SYSTICK_EXCEPTION, 0x40);
-  exception_set_priority(PENDSV_EXCEPTION, PICO_LOWEST_IRQ_PRIORITY);
+  exception_set_priority(SVCALL_EXCEPTION, SOC_TYPE::kPrioritySvc);
+  exception_set_priority(SYSTICK_EXCEPTION, SOC_TYPE::kPrioritySysTick);
+  exception_set_priority(PENDSV_EXCEPTION, SOC_TYPE::kPriorityLowest);
   protection_init(); // region は per-core banked なので各コアで張る
 
   // ---- 落ちたときに必ず声が出るようにする -------------------------------
@@ -95,16 +101,16 @@ void rp2350_pico2::init(uint32_t core) {
   //   走れなければ、書いた文字はデバイスの中に留まったまま出て行かない。
   //   そこで USB を上げ (0x20)、フォールト例外はそれより下 (0x80) に置く。
   //   こうすると報告中も USB が動けるので、**落ちた事実と場所が必ず外へ出る**。
-  irq_set_priority(USBCTRL_IRQ, 0x20);
+  irq_set_priority(USBCTRL_IRQ, SOC_TYPE::kPriorityUsbCtrl);
   // 落ちたときに自分で回せるよう、USB の割り込みハンドラを控えておく。
   g_usb_irq_poll = (void (*)())irq_get_exclusive_handler(USBCTRL_IRQ);
   // ★DebugMon はフォールトより**下**に置く。デバッグ中に落ちたら、デバッグより
   //   先に落ちたことを報告できないと原因が分からなくなる。
   //   優先度はシステムハンドラ優先度レジスタ (SHPR) の 12 番目。
-  ((volatile uint8_t *)(uintptr_t)0xE000ED18u)[12 - 4] = 0xA0;
-  exception_set_priority(MEMMANAGE_EXCEPTION, 0x80);
-  exception_set_priority(BUSFAULT_EXCEPTION, 0x80);
-  exception_set_priority(USAGEFAULT_EXCEPTION, 0x80);
+  ((volatile uint8_t *)(uintptr_t)0xE000ED18u)[12 - 4] = SOC_TYPE::kPriorityDebugMon;
+  exception_set_priority(MEMMANAGE_EXCEPTION, SOC_TYPE::kPriorityFault);
+  exception_set_priority(BUSFAULT_EXCEPTION, SOC_TYPE::kPriorityFault);
+  exception_set_priority(USAGEFAULT_EXCEPTION, SOC_TYPE::kPriorityFault);
   // 設定可能なフォールトを有効化する (無効のままだと全部 HardFault へ落ちて
   // 優先度 -1 になり、上の工夫が効かなくなる)。SHCSR の該当ビット。
   scb_hw->shcsr |= (1u << 16) | (1u << 17) | (1u << 18); // MEM/BUS/USG FAULTENA
@@ -128,14 +134,14 @@ void rp2350_pico2::protection_init() {
   //   GRANT_REGION (§11.3 / Q8) で対象オブジェクトへ動的に開く。
   const uintptr_t code_end =
       ((uintptr_t)&__flash_binary_end + 31u) & ~(uintptr_t)31;
-  ARCH_TYPE::region_set(0, XIP_BASE, code_end, ARCH_TYPE::ACCESS_RO_ALL,
+  ARCH_TYPE::region_set(0, SOC_TYPE::kXipBase, code_end, ARCH_TYPE::ACCESS_RO_ALL,
                         false, 0);
   // region1: ヒープ先頭〜SRAM 終端 = 読み書き可・実行不可。スレッドスタックは
   // ここに住むので、スタック上のデータを実行する事故が止まる。
   const uintptr_t heap = ((uintptr_t)__end__ + 31u) & ~(uintptr_t)31;
-  ARCH_TYPE::region_set(1, heap, SRAM_END - 32u, ARCH_TYPE::ACCESS_RW_ALL, true,
+  ARCH_TYPE::region_set(1, heap, SOC_TYPE::kSramRegionEnd, ARCH_TYPE::ACCESS_RW_ALL, true,
                         1);
-  for (uint32_t index = 2; index < 8; ++index)
+  for (uint32_t index = 2; index < SOC_TYPE::kMpuRegionCount; ++index)
     ARCH_TYPE::region_disable(index);
   ARCH_TYPE::protection_enable();
 }
@@ -157,7 +163,7 @@ void rp2350_pico2::diag_printf(const char *format, ...) {
   // ★1 行をコアごとのバッファに整形してから、行単位で排他して書く。
   static char lines[2][384];
   const auto state = shizuku::kernel_services::irq_save();
-  char *line = lines[get_core_num()];
+  char *line = lines[shizuku::chips::rp2350::chip::core_id()];
   va_list args;
   va_start(args, format);
   int length = ::vsnprintf(line, sizeof(lines[0]), format, args);
@@ -236,7 +242,7 @@ extern "C" [[noreturn]] void shizuku_panic_dump(const char *fmt, ...) {
   void *entry_sp;
   asm volatile("mov %0, sp" : "=r"(entry_sp));
 
-  const uint32_t core = ::get_core_num();
+  const uint32_t core = shizuku::chips::rp2350::chip::core_id();
   // ★kernel_instance がまだ組み立てられていない起動の最初期でも呼ばれ得る。
   //   current_thread_id() は配列参照をしない (m_current[core] を読むだけ) ので、
   //   その段階で呼んでも安全。
@@ -262,7 +268,7 @@ extern "C" [[noreturn]] void shizuku_panic_dump(const char *fmt, ...) {
   rp2350_pico2::diag_printf(
       "[PANIC] possible return addresses (stack scan, addr2line these):\n");
   panic_diag_drain();
-  const uintptr_t code_start = XIP_BASE;
+  const uintptr_t code_start = shizuku::chips::rp2350::chip::kXipBase;
   const uintptr_t code_end = (uintptr_t)&__flash_binary_end;
   const uint32_t *scan = (const uint32_t *)((uintptr_t)entry_sp & ~(uintptr_t)3);
   constexpr uint32_t SCAN_WORDS = 256; // 1KiB ぶん (スレッドスタックは 4KiB)。
@@ -349,7 +355,7 @@ static volatile uint32_t g_park_lock = 0;
 void rp2350_pico2::park_other_cores() {
   if (g_park_depth++ != 0)
     return; // 既に止めてある (入れ子)
-  const uint32_t other = ::get_core_num() == 0 ? 1u : 0u;
+  const uint32_t other = shizuku::chips::rp2350::chip::core_id() == 0 ? 1u : 0u;
   if (!::multicore_lockout_victim_is_initialized(other))
     return; // 相手はまだ居ない = 止めるものが無い
   while (!ARCH_TYPE::cas32(&g_park_lock, 0u, 1u)) {
@@ -386,6 +392,8 @@ void rp2350_pico2::dma_copy(int channel, const void *from, void *to,
 }
 
 int rp2350_pico2::dma_claim() { return ::dma_claim_unused_channel(false); }
+
+uint64_t rp2350_pico2::time_us() { return ::time_us_64(); }
 
 // ★掴んだチャネルを返す。接続を畳めるようにするために要る (無いとチャネルが
 //   漏れ、詰まった接続を外す手段も無くなる)。呼ぶ側が「もう転送中でない」

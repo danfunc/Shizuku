@@ -16,5 +16,6 @@ cc_library(
     includes = ["."],
     deps = [
         "//:internal_headers",
+        "//chips/esp32_c6:headers",
     ],
 )

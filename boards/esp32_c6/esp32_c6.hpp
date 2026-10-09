@@ -2,6 +2,7 @@
 #define SHIZUKU_BOARDS_ESP32_C6_HPP
 
 #include <cstdint>
+#include "chips/esp32_c6/chip.hpp"
 #include "shizuku/concepts/board.hpp"
 
 // ===========================================================================
@@ -24,7 +25,7 @@ namespace boards {
 
 class esp32_c6 {
 public:
-  static constexpr uint32_t CORE_COUNT = 1;
+  static constexpr uint32_t CORE_COUNT = shizuku::chips::esp32_c6::chip::kCoreCount;
 
   static void init(uint32_t core);
 

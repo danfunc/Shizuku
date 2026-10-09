@@ -1,8 +1,12 @@
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(default_visibility = ["//visibility:public"])
 
+# ★chips の依存閉包は ESP-IDF / pico-sdk / modules/* を含めない (arch と SoC 定義だけ)。
+#   テストの target は tests/esp32_c6 にある。ここはソースを公開するだけ
+#   (runfiles の repo 相対パス chips/esp32_c6/... は変わらない)。
 exports_files([
+    "chip.hpp",
     "rv32_c6.hpp",
     "trap.cpp",
     "selftest_adapter.cpp",
@@ -11,11 +15,22 @@ exports_files([
     "trap_api.hpp",
     "frame_layout.h",
     "rv32_trap.S",
+    "test_c6_concepts.cpp",
+    "test_fail_closed.cpp",
+    "test_fail_closed.sh",
+    "test_fail_closed_board.cpp",
+    "test_selftest_record.cpp",
+    "test_selftest_record.sh",
+    "test_systimer.cpp",
+    "test_trap_route.cpp",
+    "test_trap_static.py",
+    "test_trap_static.sh",
 ])
 
 cc_library(
     name = "headers",
     hdrs = [
+        "chip.hpp",
         "rv32_c6.hpp",
         "selftest_record.h",
         "systimer.hpp",
@@ -25,7 +40,9 @@ cc_library(
     includes = ["."],
     deps = [
         "//arch/riscv:pmp",
-        "//:internal_headers",
+        # 公開ヘッダが使うのは arch の concept と kernel ABI だけ。objects.list に届く
+        # //:internal_headers は使わない。
+        "//:arch_headers",
     ],
 )
 
@@ -35,81 +52,5 @@ cc_library(
     includes = ["."],
     deps = [
         "//arch/riscv:pmp",
-    ],
-)
-
-sh_test(
-    name = "selftest_record_test",
-    srcs = ["test_selftest_record.sh"],
-    data = [
-        "selftest_adapter.cpp",
-        "selftest_record.h",
-        "test_selftest_record.cpp",
-    ],
-)
-
-cc_test(
-    name = "c6_concepts_test",
-    srcs = ["test_c6_concepts.cpp"],
-    copts = ["-std=c++20"],
-    includes = ["."],
-    deps = [
-        ":headers",
-        "//boards/esp32_c6:headers",
-        "//:internal_headers",
-    ],
-)
-
-sh_test(
-    name = "fail_closed_test",
-    srcs = ["test_fail_closed.sh"],
-    data = [
-        "rv32_c6.hpp",
-        "test_fail_closed.cpp",
-        "test_fail_closed_board.cpp",
-        "frame_layout.h",
-        "//arch/riscv:pmp.hpp",
-        "//:c6_test_headers",
-        "//boards/esp32_c6:esp32_c6.hpp",
-    ],
-)
-
-cc_test(
-    name = "systimer_test",
-    srcs = ["test_systimer.cpp"],
-    copts = ["-std=c++20"],
-    deps = [
-        ":systimer",
-        "//arch/riscv:pmp",
-    ],
-)
-
-sh_test(
-    name = "trap_static_test",
-    srcs = ["test_trap_static.sh"],
-    data = [
-        "rv32_c6.hpp",
-        "test_trap_static.py",
-        "trap.cpp",
-        "trap_api.hpp",
-        "frame_layout.h",
-        "rv32_trap.S",
-        "//modules/esp_idf_support/c6:early_boot.cpp",
-        "//boards/esp32_c6:board_esp32_c6.cpp",
-        "//modules/esp_idf_support/firmware:main/early_diag.c",
-        "//:c6_test_headers",
-    ],
-)
-
-# trap_route は arch/riscv/trap_route.hpp の純粋な経路判定。テストは C6 の型 (rv32_c6) を
-# 使うので chips 側に置く (arch -> chips の逆依存を作らない)。
-cc_test(
-    name = "trap_route_test",
-    srcs = ["test_trap_route.cpp"],
-    copts = ["-std=c++20"],
-    deps = [
-        ":headers",
-        "//arch/riscv:pmp",
-        "//:internal_headers",
     ],
 )

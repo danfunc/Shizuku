@@ -16,6 +16,7 @@
 #include "pico/stdlib.h"
 #include "arch/armv6m/armv6m.hpp"
 #include "boards/rp2040_pico_w/rp2040_pico_w.hpp"
+#include "chips/rp2040/chip.hpp"
 #include "shizuku/kernel.hpp"
 #include "shizuku/objects/usb_cdc.hpp"
 #include "tusb.h"
@@ -105,6 +106,8 @@ extern "C" bool shizuku_selftest_fault_read(uint32_t *out) {
   return true;
 }
 #endif
+// SoC の定義 (メモリ地図・優先度・MPU 数)。値は chips/rp2040/chip.hpp が持つ。
+using SOC = shizuku::chips::rp2040::chip;
 namespace shizuku::boards {
 void rp2040_pico_w::init(uint32_t core){
   if(core==0){
@@ -114,32 +117,32 @@ void rp2040_pico_w::init(uint32_t core){
     exception_set_exclusive_handler(HARDFAULT_EXCEPTION,shizuku_armv6m_fault_entry);
   }
   multicore_lockout_victim_init();
-  // RP2040 implements two configurable priority bits: four levels only.
-  // Preserve syscall > SysTick > PendSV. USB is below SysTick; HardFault has
-  // fixed priority -1 on ARMv6-M and cannot be placed below USB.
-  exception_set_priority(SVCALL_EXCEPTION,0x00);
-  exception_set_priority(SYSTICK_EXCEPTION,0x40);
-  exception_set_priority(PENDSV_EXCEPTION,0xC0);
-  irq_set_priority(USBCTRL_IRQ,0x80);
+  // 優先度の値と bit 数 (RP2040 は 2 bit = 4 段) は chips/rp2040/chip.hpp。
+  // 順序は syscall > SysTick > USB > PendSV。HardFault は ARMv6-M で固定優先度 -1
+  // なので USB より下には置けない。
+  exception_set_priority(SVCALL_EXCEPTION,SOC::kPrioritySvc);
+  exception_set_priority(SYSTICK_EXCEPTION,SOC::kPrioritySysTick);
+  exception_set_priority(PENDSV_EXCEPTION,SOC::kPriorityPendSv);
+  irq_set_priority(USBCTRL_IRQ,SOC::kPriorityUsbCtrl);
   protection_init();
 }
 void rp2040_pico_w::protection_init(){
   using A=shizuku::archs::armv6m;
   constexpr uint32_t RAM_EXEC_REGION=3;
-  static_assert(RAM_EXEC_REGION>1 && RAM_EXEC_REGION!=A::GRANT_REGION_INDEX && RAM_EXEC_REGION<8);
+  static_assert(RAM_EXEC_REGION>1 && RAM_EXEC_REGION!=A::GRANT_REGION_INDEX && RAM_EXEC_REGION<SOC::kMpuRegionCount);
   const uintptr_t end=((uintptr_t)&__flash_binary_end+31u)&~(uintptr_t)31u;
   // PMSAv6 rounds out to a power-of-two region. Any surrounding flash can
   // become readable/executable; the exact excess depends on linked image size.
-  if(!A::region_try_set(0,0x10000000u,end,A::ACCESS_RO_ALL,false))
+  if(!A::region_try_set(0,SOC::kXipBase,end,A::ACCESS_RO_ALL,false))
     panic("RP2040 code range cannot be represented by PMSAv6 MPU");
   const uintptr_t heap=((uintptr_t)__end__+31u)&~(uintptr_t)31u;
   // Likewise SRAM padding around the region is included; stack guard work is Phase 2.
-  if(!A::region_try_set(1,heap,0x20041FE0u,A::ACCESS_RW_ALL,true))
+  if(!A::region_try_set(1,heap,SOC::kSramRegionEnd,A::ACCESS_RW_ALL,true))
     panic("RP2040 heap range cannot be represented by PMSAv6 MPU");
-  for(uint32_t i=2;i<8;i++)A::region_disable(i);
+  for(uint32_t i=2;i<SOC::kMpuRegionCount;i++)A::region_disable(i);
   const uintptr_t data_start=(uintptr_t)__data_start__;
   const uintptr_t data_end=(uintptr_t)__data_end__;
-  if(data_start<0x20000000u || data_end<=data_start || data_end>0x20040000u)
+  if(data_start<SOC::kSramBase || data_end<=data_start || data_end>SOC::kSramStripedEnd)
     panic("RP2040 RAM code bounds are invalid");
   uint32_t ram_rbar,ram_rasr;
   if(!A::region_encode(data_start,data_end,ram_rbar,ram_rasr,A::ACCESS_RW_ALL,false))
@@ -178,7 +181,7 @@ static bool g_parked = false;
 
 void rp2040_pico_w::launch_core(void(*entry)()){multicore_launch_core1(entry);}
 void rp2040_pico_w::park_other_cores(){
-  const uint32_t other = get_core_num() == 0 ? 1u : 0u;
+  const uint32_t other = shizuku::chips::rp2040::chip::core_id() == 0 ? 1u : 0u;
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
   shizuku_selftest_progress_mark(720, other, multicore_lockout_victim_is_initialized(other));
 #endif
@@ -208,11 +211,12 @@ void rp2040_pico_w::dma_copy(int ch,const void*src,void*dst,uint32_t n){
 bool rp2040_pico_w::dma_busy(int ch){return dma_channel_is_busy((uint)ch);}
 void rp2040_pico_w::dma_release(int ch){dma_channel_unclaim((uint)ch);}
 uint32_t rp2040_pico_w::cycles_per_us(){return clock_get_hz(clk_sys)/1000000u;}
+uint64_t rp2040_pico_w::time_us(){return time_us_64();}
 uintptr_t rp2040_pico_w::unprivileged_floor(){return ((uintptr_t)__end__+31u)&~(uintptr_t)31u;}
 void rp2040_pico_w::diag_printf(const char*f,...){
   static char lines[2][384];
   const auto state=shizuku::kernel_services::irq_save();
-  char*line=lines[get_core_num()];
+  char*line=lines[shizuku::chips::rp2040::chip::core_id()];
   va_list a;va_start(a,f);
   int n=vsnprintf(line,sizeof(lines[0]),f,a);
   va_end(a);

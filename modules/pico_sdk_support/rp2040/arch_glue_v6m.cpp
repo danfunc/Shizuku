@@ -6,6 +6,7 @@ extern "C" void shizuku_service_isr_probe() __attribute__((weak));
 #endif
 #include "arch/armv6m/armv6m.hpp"
 #include "hardware/sync.h"
+#include "chips/rp2040/chip.hpp"
 #include "shizuku/kernel.hpp"
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
 #include "hardware/watchdog.h"
@@ -16,6 +17,8 @@ extern "C" void shizuku_service_isr_probe() __attribute__((weak));
 // PICO_SPINLOCK_ID_ATOMIC をそのまま使う (値を写さない)。
 extern "C" uint32_t shizuku_armv6m_atomic_lock(){return spin_lock_blocking(spin_lock_instance(PICO_SPINLOCK_ID_ATOMIC));}
 extern "C" void shizuku_armv6m_atomic_unlock(uint32_t saved_irq){spin_unlock(spin_lock_instance(PICO_SPINLOCK_ID_ATOMIC),saved_irq);}
+// SoC 既定 (chips/rp2040) と SDK の実値が一致することを固定する。SDK 側で上書きされたら止まる。
+static_assert(PICO_SPINLOCK_ID_ATOMIC==shizuku::chips::rp2040::chip::kAtomicSpinlockId,"PICO_SPINLOCK_ID_ATOMIC differs from chips/rp2040 kAtomicSpinlockId");
 extern "C" shizuku_armv6m_context *shizuku_current_context(){
   return reinterpret_cast<shizuku_armv6m_context *>(shizuku::kernel_instance.current_context());
 }
