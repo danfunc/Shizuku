@@ -1,0 +1,13 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "freertos_compat_core",
+    srcs = ["compat.cpp", "freertos_api.cpp", "shizuku_port.cpp"],
+    hdrs = glob(["compat.hpp", "shizuku_port.hpp", "include/freertos/*.h"]) + ["//:internal_headers/shizuku/object_api.hpp"],
+    includes = [".", "include"],
+    copts = ["-std=c++20", "-Wall", "-Wextra"],
+)
+
+exports_files(["compat_test.cpp", "compat_header_c_test.c"])
