@@ -88,7 +88,7 @@ uintptr_t child_b_compute(uintptr_t arg, uintptr_t, uintptr_t, uintptr_t) {
 
 // 親ハンドラ A のエントリポイント
 uintptr_t handler_a_entry(uintptr_t a0, uintptr_t a1, uintptr_t a2,
-                          uintptr_t a3) {
+                          uintptr_t a3, uintptr_t unwind_floor) {
   if (a0 == CMD_SETUP) {
     // 親ハンドラ A 自身が子 A を生成する (親から自動導出: 重大指摘 1, 3)
     const auto res = api(object_api::CREATE_OBJECT, OBJ_CHILD_A,
@@ -112,9 +112,9 @@ uintptr_t handler_a_entry(uintptr_t a0, uintptr_t a1, uintptr_t a2,
     return a1 + 100;
   }
   if (a0 == (uintptr_t)primitive::RETURN) {
-    if (a1 == 1 && a2 != 0x55) {
-      // 子 A のメソッド正常終了 (EXIT_METHOD)。Root へ転送 (重大指摘 2)
-      api(object_api::FORWARD_CHILD_EXIT, a2, a3);
+    if (a1 == unwind_floor && a2 != 0x55) {
+      // The return stub's marker has become the absolute caller depth.
+      api(object_api::FORWARD_CHILD_EXIT, unwind_floor, a2, a3);
       return 0;
     }
     // 子 A が primitive::RETURN を直接撃ってきた場合 (a2 == 0x55)
@@ -136,7 +136,7 @@ uintptr_t handler_a_entry(uintptr_t a0, uintptr_t a1, uintptr_t a2,
 
 // 親ハンドラ B のエントリポイント
 uintptr_t handler_b_entry(uintptr_t a0, uintptr_t a1, uintptr_t a2,
-                          uintptr_t a3) {
+                          uintptr_t a3, uintptr_t unwind_floor) {
   if (a0 == CMD_SETUP) {
     const auto res = api(object_api::CREATE_OBJECT, OBJ_CHILD_B,
                          (uintptr_t)&child_b_compute, 0);
@@ -146,8 +146,8 @@ uintptr_t handler_b_entry(uintptr_t a0, uintptr_t a1, uintptr_t a2,
     return a1 + 200;
   }
   if (a0 == (uintptr_t)primitive::RETURN) {
-    if (a1 == 1) {
-      api(object_api::FORWARD_CHILD_EXIT, a2, a3);
+    if (a1 == unwind_floor) {
+      api(object_api::FORWARD_CHILD_EXIT, unwind_floor, a2, a3);
       return 0;
     }
     return 0xFFFF;

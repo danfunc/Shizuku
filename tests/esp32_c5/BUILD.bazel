@@ -15,6 +15,15 @@ sh_test(
     ],
 )
 
+sh_test(
+    name = "armv6m_return_stub_test",
+    srcs = ["test_armv6m_return_stub.sh"],
+    data = [
+        "//arch/armv6m:armv6m_ctx.S",
+        "//arch/armv8m:armv8m_ctx.S",
+    ],
+)
+
 cc_test(
     name = "c5_concepts_test",
     srcs = ["//chips/esp32_c5:test_c5_concepts.cpp"],
@@ -33,5 +42,15 @@ cc_test(
     deps = [
         "//arch/riscv:pmp",
         "//chips/esp32_c5:systimer",
+    ],
+)
+
+cc_test(
+    name = "unwind_depth_test",
+    srcs = ["test_unwind_depth.cpp"],
+    copts = ["-std=c++20"],
+    deps = [
+        "//:internal_headers",
+        "//arch/armv6m:headers",
     ],
 )

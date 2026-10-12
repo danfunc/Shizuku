@@ -178,7 +178,7 @@ V2 において、最も単純な同期システムコールである `GET_CURRE
 
 ==== [時点 6] kobj のハンドラ実行と return (`handler.cpp:121–127, 1606–1608, 1693–1694`)
 - *モード / 特権*: Thread mode、特権
-- `handler_entry_point(5, 0, 0, 0)` が `kernel_object_instance.handle(5, 0, 0, 0)` を呼び出す。
+- `handler_entry_point(5, 0, 0, 0, unwind_floor)` が `kernel_object_instance.handle(5, 0, 0, 0, unwind_floor)` を呼び出す。第5引数は ledger から得た戻り境界である。
 - `case object_api::GET_CURRENT_OBJECT:` により `value = current_object(...)` を取得。
 - `return value;` (通常の C return)。
 - `handler_entry_point` のエピローグで `bx lr`。`LR` に仕込まれていた `shizuku_armv8m_return_stub` へジャンプする！

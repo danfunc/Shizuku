@@ -6,6 +6,9 @@
 #include "shizuku/stream.hpp"
 
 namespace shizuku {
+namespace selftest {
+struct compat_probe_access;
+}
 namespace templates {
 
 // ===========================================================================
@@ -19,10 +22,10 @@ namespace templates {
 //    ここへ渡すだけなので、経路の決定も番号の解釈も全部こちら側にある。
 //
 //  ★カーネルのプリミティブを撃てるのはここだけ。オブジェクトは撃てないので:
-//    (a) カーネルはこのハンドラを起こすとき**今のネスト数**を渡す (第 8 引数)
-//    (b) オブジェクトは exit API に**何段戻すか**を載せて撃つ
-//    (c) ここがその段数で RETURN する。段数は必ず申告し、カーネルが実際の深さと
-//        突き合わせる (§9.3 の両側チェック)
+//    (a) カーネルは dispatch 先の C 関数へ第 5 引数として unwind floor を渡す
+//    (b) exit API は戻り先の絶対深さ d を受け取る
+//    (c) ここが count = current_depth - d を RETURN へ渡し、カーネルが
+//        d >= unwind floor と count の整合を検査する
 //
 //  ★identity 台帳はカーネルに貸す特権メモリに置く。オブジェクト側は読み出し API
 //    から状態を導き、スタック上の申告値を信頼しない。
@@ -65,9 +68,9 @@ public:
   // ---- ハンドラ本体 -------------------------------------------------------
   // 引数は発行元が撃った syscall の a0..a3 そのもの (a0 = 番号)。戻り値は発行元へ
   // 返る値 (エラーは reply で返す)。
-  // ★ネストの情報はレジスタで受け取らない。今のネスト数はカーネルが積んだフレームの
-  //   段数として読め、こちらは自分の台帳から独立に数えた値を申告して突き合わせる。
-  uintptr_t handle(uintptr_t number, uintptr_t a1, uintptr_t a2, uintptr_t a3);
+  // a0..a3 = syscall number + 3 API args, a4 = caller's unwind floor.
+  uintptr_t handle(uintptr_t number, uintptr_t a1, uintptr_t a2, uintptr_t a3,
+                   uintptr_t unwind_floor);
 
   // -------------------------------------------------------------------------
   //  共有台帳の相互排除 (2 コア用)
@@ -158,6 +161,10 @@ public:
   }
 
 private:
+  // The compatibility probe inspects a suspended thread's private ledger
+  // shape without exposing that inspection through the object API.
+  friend struct ::shizuku::selftest::compat_probe_access;
+
   struct object_t {
     bool created;
     // ★名前はここではなく別配列に置く。object_t は呼び出し経路 (created / flags /
@@ -298,16 +305,15 @@ private:
                           object_error &error);
   uintptr_t call_method(uintptr_t id, uintptr_t method, uintptr_t argument,
                         object_error &error);
-  void exit_method(uintptr_t levels, uintptr_t value, uintptr_t error);
+  void exit_method(uintptr_t target_depth, uintptr_t value, uintptr_t error);
   // 専用ハンドラ (HANDLER) からの子オブジェクトのメソッド終了転送 (重大指摘 2)
-  void forward_child_exit(uintptr_t value, uintptr_t error);
+  void forward_child_exit(uintptr_t target_depth, uintptr_t value,
+                          uintptr_t error);
   // 巻き戻さずにその場で答える (エラー返却)。
   void reply(object_error error, uintptr_t value);
-  // 巻き戻しで申告する「今のネスト数」を**自分の台帳から**計算する (§9.3)。
-  uint32_t claimed_depth() const;
-  // 今の SVC を発行したのが、特権台帳に明示された専用ハンドラ段かどうか。
-  // CALL/DISPATCH の並びと child の parent_handler_object を照合する。
-  uint32_t interposed_handler(uint32_t thread) const;
+  // 戻り先の絶対深さへ巻き戻す。失敗時は kernel_error を返す。
+  uintptr_t return_to_depth(uint32_t target_depth, uintptr_t value,
+                            uintptr_t error);
 
   void arena_init(arena &target, uintptr_t base, uintptr_t bytes);
   uintptr_t arena_allocate(arena &target, uintptr_t bytes, uintptr_t owner);

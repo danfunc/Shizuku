@@ -121,6 +121,7 @@ cc_library(
 # C6 M-only で成立可能な selftest の 5 つのサブセット
 C6_SELFTEST_SRCS = [
     "source/selftest/call_ladder.cpp",
+    "source/selftest/compat_premise_probe.cpp",
     "source/selftest/handler_binding.cpp",
     "source/selftest/memory_ladder.cpp",
     "source/selftest/stream_ladder.cpp",

@@ -49,6 +49,7 @@ public:
     uint32_t stack_limit_addr=0;
   };
   static constexpr uint32_t EXC_FRAME_MAX_BYTES=32;
+  static constexpr uint32_t HANDLER_STACK_ARG_BYTES=8;
   static constexpr uint32_t FAULT_CONTEXT_BYTES=sizeof(context_t);
   using method_t=uintptr_t (*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t,uintptr_t);
   static uint32_t exc_frame_bytes(const context_t &) { return 32; }
@@ -60,6 +61,10 @@ public:
     switch(n){case 0:return f.r0;case 1:return f.r1;case 2:return f.r2;case 3:return f.r3;default:return f.r12;}
   }
   static void set_args(exception_frame_t &f,const uintptr_t *a){f.r0=a[0];f.r1=a[1];f.r2=a[2];f.r3=a[3];}
+  static void set_handler_args(exception_frame_t &f,const uintptr_t *a,
+                               uintptr_t stack_arg_address){
+    set_args(f,a);*reinterpret_cast<uint32_t *>(stack_arg_address)=(uint32_t)a[4];
+  }
   static void set_result(exception_frame_t &f,uintptr_t e,uintptr_t v){f.r0=e;f.r1=v;}
   static void set_entry(exception_frame_t &f,uintptr_t pc,uintptr_t lr){f.pc=pc;f.lr=lr;}
   static uintptr_t return_stub(){return (uintptr_t)&shizuku_armv6m_return_stub;}
@@ -170,11 +175,15 @@ public:
 };
 // context_t のレイアウトは region 数に依らないので、RP2040 の実体で代表して検査する。
 using armv6m_rp2040 = armv6m<8, 2>;
+// These offsets describe the 32-bit RP2040 ABI; host argument-placement tests
+// use a 64-bit uintptr_t and validate set_handler_args separately.
+#if UINTPTR_MAX == UINT32_MAX
 static_assert(offsetof(armv6m_rp2040::context_t,sp)==32);
 static_assert(offsetof(armv6m_rp2040::context_t,exc_return)==36);
 static_assert(offsetof(armv6m_rp2040::context_t,control)==40);
 static_assert(offsetof(armv6m_rp2040::context_t,region_base)==44);
 static_assert(offsetof(armv6m_rp2040::context_t,stack_limit_addr)==52);
+#endif
 static_assert((uintptr_t)shizuku::primitive::RETURN==2);
 static_assert(shizuku::concepts::arch_requires<armv6m_rp2040>);
 }

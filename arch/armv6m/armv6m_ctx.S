@@ -179,9 +179,12 @@ shizuku_armv6m_enter_thread_mode:
 .type shizuku_armv6m_return_stub,%function
 shizuku_armv6m_return_stub:
   mov r2, r0
-  movs r1, #1
-  movs r3, #0
+  movs r1, #1 // legacy one-pop notification
+  movs r3, #0xA5
+  lsls r3, r3, #8
+  adds r3, #0x5A
   mov r12, r3
+  movs r3, #0 // keep the RETURN error argument clear; marker lives in r12
   movs r0, #2
   svc 0
 1: b 1b

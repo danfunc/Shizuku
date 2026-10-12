@@ -22,7 +22,8 @@ constexpr uintptr_t GRANT_TICKS = 160000;  // 10 ms of 16 MHz SYSTIMER ticks
 // Routing調停ハンドラ:
 // 0xC6 マーカーに対しては段2の diagnostic_handler として動作 (command=1 で GRANT プリミティブ発行、それ以外は 0xC6000002 返却)。
 // それ以外のすべての SVC は KERNEL_OBJECT ハンドラへルーティングして selftest 等の通常オブジェクト API を実行。
-uintptr_t c6_combined_handler(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
+uintptr_t c6_combined_handler(uintptr_t a0, uintptr_t a1, uintptr_t a2,
+                              uintptr_t a3, uintptr_t unwind_floor) {
   if (a0 == 0xC6) {
     if (a1 == 1) {
       // Runs as the kernel object, so GRANT is interpreted as a primitive.
@@ -31,7 +32,7 @@ uintptr_t c6_combined_handler(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_
     }
     return 0xC6000002;
   }
-  return shizuku::kernel_object_instance.handle(a0, a1, a2, a3);
+  return shizuku::kernel_object_instance.handle(a0, a1, a2, a3, unwind_floor);
 }
 
 [[noreturn]] void thread1() {
