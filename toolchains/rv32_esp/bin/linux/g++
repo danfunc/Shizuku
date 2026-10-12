@@ -1,0 +1,2 @@
+#!/bin/bash
+exec external/*riscv32_esp_elf_gcc_linux/bin/riscv32-esp-elf-g++ "$@"

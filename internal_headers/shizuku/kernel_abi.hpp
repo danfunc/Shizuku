@@ -8,8 +8,8 @@
 //  syscall の形: a0 = 番号, a1..a4 = 引数 / 戻り a0 = エラー (0 = 成功), a1 = 値。
 //
 //  ★経路は番号で決めない (I-1)。決めるのは**今走っているオブジェクトの種別**だけ:
-//      PLAIN   → オブジェクトが走っている → 登録済みハンドラへのトランポリン
-//      HANDLER → ハンドラが走っている     → プリミティブを実行
+//      PLAIN / HANDLER → 登録済み親ハンドラへの dispatch
+//      登録済み KOBJ → KOBJ 本人が primitive を解釈
 //    ★段数のパリティでは決めない (2026-09-05)。パリティは「ハンドラ =
 //      カーネルオブジェクト」を仮定しており、**一般オブジェクトがハンドラを務める
 //      構成 (マルチ ABI) で崩れる**。ID でも決めない — ID で決め打つと kobj を
@@ -17,19 +17,17 @@
 //    種別を書けるのはカーネルだけ (遷移のたびに呼び出しフレームへ退避し、
 //    戻るときに読み戻す) なので、オブジェクト側からの偽装もできない。
 //
-//  ★カーネルオブジェクト以外は巻き戻し (RETURN) を撃てない。だから:
-//    (a) カーネルはハンドラを起こすとき**今のネスト数を渡す** (ARCH の活性化情報)
-//    (b) オブジェクトは exit API に**何段戻すか**を載せて撃つ
-//    (c) ハンドラがその段数で RETURN する。段数は必ず申告し、カーネルが実際の深さと
-//        突き合わせる (§9.3 の両側チェック)
+//  ★RETURN を解釈できるのは登録済み KOBJ だけ。dispatch 先 C 関数の第 5 引数は
+//    その呼出し鎖が戻ってよい最低深さ (unwind floor)。RETURN の a4 は絶対戻り先 d、
+//    a1 は count = 現在深さ - d。カーネルは floor <= d < 現在深さと差分を検査する。
 namespace shizuku {
 
 // カーネルのプリミティブ番号。**ハンドラの枠の中からしか実行されない**。
 enum struct primitive : uintptr_t {
   // a1 = call_request*。呼び出し元フレームを退避し、呼び先へ制御を移す。
   CALL = 1,
-  // a1 = 落とす段数, a2 = 戻り値, a3 = エラーコード, a4 = ネスト数の申告。
-  // 申告が実際の深さと違えば 1 枚も落とさずエラー。
+  // a1 = 落とす段数, a2 = 戻り値, a3 = エラーコード, a4 = 絶対戻り先深さ d。
+  // d が unwind floor 未満、現在深さ以上、または count と不整合なら何も pop しない。
   RETURN = 2,
   // a1 = 対象スレッド ID。実行権のバトンパス (期限なしの移譲)。
   // ★貸している最中 (GRANT の借り手として走っている) にこれを撃つと、対象は
@@ -42,6 +40,10 @@ enum struct primitive : uintptr_t {
   // ★期限は外側の期限でクランプされる (I-7)。借りた以上は又貸しできない。
   GRANT = 4,
 };
+
+// RETURN stubs mark their trap so KOBJ can translate the single-pop
+// notification into the absolute depth immediately below its own dispatch frame.
+constexpr uintptr_t RETURN_STUB_MARKER = 0xA55Au;
 
 // ===========================================================================
 //  オブジェクトの種別 (2026-09-05 に復活させた)
@@ -92,11 +94,10 @@ struct call_request {
   uint32_t parent_handler_object = 0;
   uintptr_t parent_handler_entry = 0;
 };
-// ★戻り口はカーネルが自分の戻り口 1 本を載せる (発行側は指定しない)。その戻り口は
-//   常に RETURN(段数=1, 値, 0, 申告) を撃つが、**同じ svc が誰から出たかで意味が
-//   変わる**: ハンドラから出ればプリミティブとして巻き戻し、オブジェクトから出れば
-//   経路判定でハンドラへ届き「メソッドが戻った」という知らせになる。
-//   何段畳むかを決めるのは受けたハンドラ (D5)。
+// ★戻り口はカーネルが自分の戻り口 1 本を載せる (発行側は指定しない)。return stub は
+//   RETURN_STUB_MARKER を a4 に載せる。PLAIN / HANDLER から出た場合、dispatch が a1 を
+//   ledger の unwind floor に置換してオブジェクトランドへ通知する。KOBJ から出た場合は
+//   自分の dispatch 1段を caller へ戻す。複数段 exit は明示 d と count を使う。
 
 // ★カーネルの答えがオブジェクトへ直接返るとき (ハンドラへ届ける途中で失敗した等) は
 //   この印を付ける。**番号空間が違うものを素通しすると、受け取った側が自分の語彙で
@@ -118,8 +119,8 @@ enum struct kernel_error : uintptr_t {
   OK = 0,
   BAD_REQUEST,    // entry_pc が 0
   NO_STACK,       // 呼び出しフレームを積むスタックが足りない (panic しない)
-  DEPTH_MISMATCH, // 申告したネスト数が実際と違う (1 枚も落としていない)
-  BAD_COUNT,      // 落とす段数が 0、または現在の深さを超えている (同上)
+  DEPTH_MISMATCH, // 戻り先 d が unwind floor 未満か現在深さ以上 (1 枚も落としていない)
+  BAD_COUNT,      // count が 0、過大、または current_depth - d と不整合 (同上)
   NOT_READY,      // 対象スレッドが READY でない / claim 競り負け
   BAD_AFFINITY,   // 対象スレッドがこのコアで走ることを許されていない
   NO_THREAD,      // スレッド枠が尽きた
@@ -131,6 +132,29 @@ enum struct kernel_error : uintptr_t {
   //   ときに黙って多めに貸すより、断って呼び出し元に判断させるほうが正しい。
   GRANT_TOO_SMALL,
 };
+
+// Shared by the trap path and host tests. A valid unwind removes exactly the
+// frames above target_depth and never crosses the actor's ledger-authored floor.
+constexpr kernel_error validate_return_depth(uint32_t depth, uint32_t floor,
+                                             uint32_t target_depth,
+                                             uintptr_t count) {
+  if (target_depth < floor || target_depth >= depth)
+    return kernel_error::DEPTH_MISMATCH;
+  if (count == 0 || count != depth - target_depth)
+    return kernel_error::BAD_COUNT;
+  return kernel_error::OK;
+}
+
+struct return_stub_request {
+  uint32_t target_depth;
+  uintptr_t count;
+};
+
+// A KOBJ C return stub returns only its current dispatch frame. Multi-frame
+// exits use the explicit object API target depth and are validated separately.
+constexpr return_stub_request resolve_return_stub(uint32_t depth) {
+  return {depth ? depth - 1 : 0, depth ? 1u : 0u};
+}
 
 } // namespace shizuku
 #endif // SHIZUKU_KERNEL_ABI_HPP

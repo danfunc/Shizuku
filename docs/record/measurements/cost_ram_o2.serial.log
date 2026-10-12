@@ -1,0 +1,16 @@
+[THERMAL] last 60 s: 600 samples spanning 59900 ms, 30.88..34.62 C (retries 0)
+[STRESS] budget=15000cyc(100us) late win=216us max=2582us led_write=263/317us load=46930/157502/20504 err=0 | selftest=140 passed/0 failed control unpriv=15 priv=14 | stopped_threads=2 last_pc=1000181c
+[COST] direct=9 svc=2103 call1=6251 call2=12599 cyc (harness 15 cyc, clk 150 MHz)
+malloc success
+[PERIPH] gpio ready (object 2)
+[PERIPH] spi ready (object 3)
+[PERIPH] i2c ready (object 4)
+[PERIPH] led: cyw43_arch_init() 開始
+[PERIPH] led: cyw43_arch_init() -> 0
+[PERIPH] led ready (object 5)
+[PERIPH] led talks to cyw43 over gSPI at 37500 kHz (div 2)
+[PERIPH] temperature ready (object 7)
+[SELFTEST] call ladder start
+[SELFTEST] PASS create object (=0)
+[SELFTEST] PASS create object (=0)
+[SELFTEST] PASS call/6 nested: value (=21)

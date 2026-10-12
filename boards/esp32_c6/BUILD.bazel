@@ -1,0 +1,21 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# ESP32-C6 の board 実装。カーネルのリンクに入る部品は trap.cpp と同じく
+# //:shizuku_kernel の srcs から直接引く (archive の順序に依存させないため)。
+exports_files([
+    "esp32_c6.hpp",
+    "board_esp32_c6.cpp",
+    "board_esp32_c6_stubs.cpp",
+])
+
+cc_library(
+    name = "headers",
+    hdrs = ["esp32_c6.hpp"],
+    includes = ["."],
+    deps = [
+        "//:internal_headers",
+        "//chips/esp32_c6:headers",
+    ],
+)

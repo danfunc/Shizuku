@@ -1,0 +1,56 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# ★chips の依存閉包は ESP-IDF / pico-sdk / modules/* を含めない (arch と SoC 定義だけ)。
+#   テストの target は tests/esp32_c6 にある。ここはソースを公開するだけ
+#   (runfiles の repo 相対パス chips/esp32_c6/... は変わらない)。
+exports_files([
+    "chip.hpp",
+    "rv32_c6.hpp",
+    "trap.cpp",
+    "c6_vectors.S",
+    "selftest_adapter.cpp",
+    "selftest_record.h",
+    "systimer.hpp",
+    "trap_api.hpp",
+    "test_c6_concepts.cpp",
+    "test_fail_closed.cpp",
+    "test_fail_closed.sh",
+    "test_fail_closed_board.cpp",
+    "test_selftest_record.cpp",
+    "test_selftest_record.sh",
+    "test_systimer.cpp",
+    "test_trap_route.cpp",
+    "test_trap_static.py",
+    "test_trap_static.sh",
+])
+
+cc_library(
+    name = "headers",
+    hdrs = [
+        "chip.hpp",
+        "rv32_c6.hpp",
+        "selftest_record.h",
+        "systimer.hpp",
+        "trap_api.hpp",
+    ],
+    includes = ["."],
+    deps = [
+        "//arch/riscv:pmp",
+        # chip.hpp の arch_type は汎用 RV32 (arch/riscv/rv32.hpp) を使う。
+        "//arch/riscv:rv32",
+        # 公開ヘッダが使うのは arch の concept と kernel ABI だけ。objects.list に届く
+        # //:internal_headers は使わない。
+        "//:arch_headers",
+    ],
+)
+
+cc_library(
+    name = "systimer",
+    hdrs = ["systimer.hpp"],
+    includes = ["."],
+    deps = [
+        "//arch/riscv:pmp",
+    ],
+)

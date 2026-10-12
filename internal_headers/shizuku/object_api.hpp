@@ -18,14 +18,13 @@ enum struct object_api : uintptr_t {
   // ★最初のメソッドは生成側 (合成する側) が与える。オブジェクト自身はまだ一度も
   //   走っていないので自分では登録できない — 「方針は合成側」の最初の現れ。
   CREATE_OBJECT = 1,
-  // メソッドから戻る。a1 = 畳む呼び出し段数 (1 = 自分だけ), a2 = 戻り値,
-  // a3 = エラーコード。
+  // メソッドから戻る。a1 = 絶対戻り先深さ d, a2 = 戻り値, a3 = エラーコード。
   // ★★この番号は**カーネルの RETURN と同じ値**にしてある。カーネルが呼び先の lr へ
   //   載せる戻り口は常に RETURN を撃つが、同じ svc が誰から出たかで意味が変わる:
   //   ハンドラから出れば巻き戻しプリミティブ、オブジェクトから出れば経路判定で
-  //   ここへ届き「メソッドが戻った」という知らせになる。だから戻り口は 1 本でよく、
-  //   呼び出しごとに戻り口を指定する必要も無い。
-  //   何フレーム落とすかは受けたこちらが決める (1 段 = トランポリン枠 + 呼び先枠)。
+  //   ここへ届き「メソッドが戻った」という知らせになる。非KOBJ return stub の専用
+  //   marker は dispatch が a1 を呼出し元の unwind floor に変換する。通常 API 呼出しは
+  //   a1 の d を保持し、何フレーム落とすかは KOBJ が current_depth - d で計算する。
   EXIT_METHOD = 2,
   // 自分のメソッドを公開する。a1 = メソッド番号, a2 = 入口。
   // 誰のものとして登録するかは**発行元から導出**する (名乗らせない)。
@@ -129,12 +128,9 @@ enum struct object_api : uintptr_t {
   STREAM_PUSH_N = 29,  // a1 = ID, a2 = push_request* → value = 件数
   STREAM_POP_N = 30,   // a1 = ID, a2 = pop_request* → value = 件数
   STREAM_AVAILABLE = 31, // a1 = ID → value = available (capacity で飽和)
-  // 専用ハンドラ (HANDLER) が配下の子オブジェクトのメソッド終了 (EXIT_METHOD) を
-  // Root Kernel Object へ転送する。
-  // a1 = 戻り値, a2 = エラーコード。
-  // 特権 call ledger が専用ハンドラと子オブジェクトの段を示す場合のみ受理され、
-  // Root は Root + Handler + Child の 3 フレームを
-  // まとめて畳んで Child の呼び出し元 (Caller) へ復帰する。
+  // 専用ハンドラ (HANDLER) が配下の子オブジェクトの終了を Root KOBJ へ転送する。
+  // a1 = 絶対戻り先深さ d, a2 = 戻り値, a3 = エラーコード。
+  // Root は d を検証し、現在深さとの差分だけ RETURN する。
   FORWARD_CHILD_EXIT = 27,
 };
 

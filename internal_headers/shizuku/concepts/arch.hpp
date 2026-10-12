@@ -27,9 +27,9 @@ namespace concepts {
 //                       syscall ABI のスロット (a0..a4 / 戻り a0,a1 / 入口 pc,lr) への
 //                       アクセス。番号と引数の載せ場所を ISA 側に閉じ込める
 // - return_stub       : 呼び先が普通に return したときの戻り口アドレス (系に 1 本)。
-//                       RETURN(段数=1, 値, 0, 申告) を撃つ。ハンドラから出れば
-//                       プリミティブ、オブジェクトから出れば経路判定でハンドラへ
-//                       届く — 同じコードで両方を賄う
+//                       RETURN_STUB_MARKER 付きの RETURN を撃つ。KOBJから出れば
+//                       自分のdispatch 1段を戻し、他のactorから出ればfloor通知として
+//                       親handlerへ届く — 同じコードで両方を賄う
 // - current_priv      : 「今の実行が特権か」の自己申告。自己テスト必須項目
 //                       (DESIGN §16「状態の主張は対象自身に申告させる」) の実装点
 // - set_priv          : 文脈が次に復帰するときの特権状態を設定する (即時ではない)
@@ -72,6 +72,8 @@ concept arch_requires =
       { ARCH::normalize_frame(frame) };
       { ARCH::arg(const_frame, index) } -> std::same_as<uintptr_t>;
       { ARCH::set_args(frame, args) };
+      { ARCH::HANDLER_STACK_ARG_BYTES } -> std::convertible_to<uint32_t>;
+      { ARCH::set_handler_args(frame, args, address) };
       { ARCH::set_result(frame, address, address) };
       { ARCH::set_entry(frame, address, address) };
       { ARCH::return_stub() } -> std::same_as<uintptr_t>;

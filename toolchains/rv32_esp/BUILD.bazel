@@ -4,7 +4,7 @@ load(":cc_toolchain_config.bzl", "rv32_esp_cc_toolchain_config")
 package(default_visibility = ["//visibility:public"])
 
 # ESP-IDF v6.1 の tools.json (riscv32-esp-elf) と同じ GCC。IDF 側ラッパ
-# (//firmware/esp32c6:build.sh) とテストが、この文字列で突き合わせる。
+# (modules/esp_idf_support/firmware/build.sh) とテストが、この文字列で突き合わせる。
 GCC_VERSION_STRING = "esp-15.2.0_20251204"
 
 # ESP32-C6 (RV32IMAC, ベアメタル)。ARM の pico-sdk プラットフォームとは別。
@@ -21,11 +21,25 @@ filegroup(
     srcs = glob(["bin/*"]),
 )
 
+# Linux wrapper binaries resolve to the Linux archive; macOS wrappers stay unchanged.
+filegroup(
+    name = "linux_wrappers",
+    srcs = glob(["bin/linux/*"]),
+)
+
 filegroup(
     name = "all_files",
     srcs = [
         ":wrappers",
         "@riscv32_esp_elf_gcc//:all_files",
+    ],
+)
+
+filegroup(
+    name = "linux_all_files",
+    srcs = [
+        ":linux_wrappers",
+        "@riscv32_esp_elf_gcc_linux//:all_files",
     ],
 )
 
@@ -38,6 +52,19 @@ rv32_esp_cc_toolchain_config(
         "%package(@@+_repo_rules+riscv32_esp_elf_gcc//lib/gcc/riscv32-esp-elf/15.2.0/include)%",
         "%package(@@+_repo_rules+riscv32_esp_elf_gcc//lib/gcc/riscv32-esp-elf/15.2.0/include-fixed)%",
         "%package(@@+_repo_rules+riscv32_esp_elf_gcc//riscv32-esp-elf/include)%",
+    ],
+)
+
+rv32_esp_cc_toolchain_config(
+    name = "rv32_esp_linux_config",
+    tool_path_prefix = "bin/linux",
+    builtin_include_directories = [
+        "%package(@@+_repo_rules+riscv32_esp_elf_gcc_linux//riscv32-esp-elf/include/c++/15.2.0)%",
+        "%package(@@+_repo_rules+riscv32_esp_elf_gcc_linux//riscv32-esp-elf/include/c++/15.2.0/riscv32-esp-elf/rv32imac_zicsr_zifencei_zaamo_zalrsc/ilp32)%",
+        "%package(@@+_repo_rules+riscv32_esp_elf_gcc_linux//riscv32-esp-elf/include/c++/15.2.0/backward)%",
+        "%package(@@+_repo_rules+riscv32_esp_elf_gcc_linux//lib/gcc/riscv32-esp-elf/15.2.0/include)%",
+        "%package(@@+_repo_rules+riscv32_esp_elf_gcc_linux//lib/gcc/riscv32-esp-elf/15.2.0/include-fixed)%",
+        "%package(@@+_repo_rules+riscv32_esp_elf_gcc_linux//riscv32-esp-elf/include)%",
     ],
 )
 
@@ -56,6 +83,21 @@ cc_toolchain(
     toolchain_identifier = "rv32_esp_elf",
 )
 
+cc_toolchain(
+    name = "rv32_esp_linux_cc_toolchain",
+    all_files = ":linux_all_files",
+    ar_files = ":linux_all_files",
+    as_files = ":linux_all_files",
+    compiler_files = ":linux_all_files",
+    dwp_files = ":linux_all_files",
+    linker_files = ":linux_all_files",
+    objcopy_files = ":linux_all_files",
+    strip_files = ":linux_all_files",
+    supports_param_files = 0,
+    toolchain_config = ":rv32_esp_linux_config",
+    toolchain_identifier = "rv32_esp_elf_linux",
+)
+
 # 実行側は Apple Silicon macOS (アーカイブが aarch64-apple-darwin のため)。
 toolchain(
     name = "rv32_esp_toolchain",
@@ -68,5 +110,20 @@ toolchain(
         "@platforms//os:none",
     ],
     toolchain = ":rv32_esp_cc_toolchain",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+)
+
+# 実行側は Linux x86_64 (rbuild worker)。GCC archive は macOS 版と同じ release/tag。
+toolchain(
+    name = "rv32_esp_linux_toolchain",
+    exec_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    target_compatible_with = [
+        "@platforms//cpu:riscv32",
+        "@platforms//os:none",
+    ],
+    toolchain = ":rv32_esp_linux_cc_toolchain",
     toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
 )

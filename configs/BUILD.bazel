@@ -23,7 +23,19 @@ string_flag(
         "rp2350_pico2",
         "rp2350_pico2_w",
         "esp32_c6",
+        "esp32_c5",
     ],
+    visibility = ["//visibility:public"],
+)
+string_flag(
+    name = "bootsel_support",
+    build_setting_default = "disabled",
+    values = ["disabled", "enabled"],
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "bootsel_enabled",
+    flag_values = {":bootsel_support": "enabled"},
     visibility = ["//visibility:public"],
 )
 int_flag(
@@ -73,6 +85,13 @@ config_setting(
     flag_values = {
         ":board": "rp2350_pico2_w",
         "@pico-sdk//bazel/config:PICO_BOARD": "pico2_w",
+    },
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "esp32_c5",
+    flag_values = {
+        ":board": "esp32_c5",
     },
     visibility = ["//visibility:public"],
 )
@@ -130,11 +149,13 @@ expand_template(
     substitutions = select({
         # 型名は歴史的経緯で rp2040_pico_w だが、Pico / Pico W / XIAO 共通の
         # バックエンド (LED の選び方は peripherals.cpp と SDK のボードマクロ側)。
-        ":rp2040": config_substitutions("armv6m", "rp2040_pico_w"),
+        ":rp2040": config_substitutions("armv6m", "rp2040", "rp2040_pico_w"),
         # Pico 2 / Pico 2 W 共通。CYW43 は W 専用の依存グラフ側にだけ居る。
-        ":rp2350": config_substitutions("armv8m", "rp2350_pico2"),
+        ":rp2350": config_substitutions("armv8m", "rp2350", "rp2350_pico2"),
         # ESP32-C6 (未完成・fail-closed)
-        ":esp32_c6": config_substitutions("rv32_c6", "esp32_c6"),
+        ":esp32_c6": config_substitutions("rv32_c6", "esp32_c6", "esp32_c6"),
+        # ESP32-C5 (未完成・fail-closed)
+        ":esp32_c5": config_substitutions("rv32_c5", "esp32_c5", "esp32_c5"),
     }),
     template = "config_template.hpp.in",
 )
@@ -147,7 +168,10 @@ cc_library(
     deps = [
         "//:internal_headers",
     ] + select({
-        ":esp32_c6": ["//ports/esp32/c6:pmp"],
+        ":esp32_c6": ["//chips/esp32_c6:headers", "//boards/esp32_c6:headers"],
+        ":esp32_c5": ["//chips/esp32_c5:headers", "//boards/esp32_c5:headers"],
+        ":rp2040": ["//chips/rp2040:headers", "//modules/pico_sdk_support:headers"],
+        ":rp2350": ["//chips/rp2350:headers", "//modules/pico_sdk_support:headers"],
         "//conditions:default": ["//modules/pico_sdk_support:headers"],
     }),
 )

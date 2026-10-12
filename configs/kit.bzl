@@ -15,28 +15,68 @@ _CONFIG_COMMON = {
     "${SHIZUKU_MEMORY_MANAGER}": "shizuku::memory_managers::pico_sdk",
 }
 
-def config_substitutions(arch, board):
-    """config_template.hpp.in の置換表 (arch / board だけがチップで変わる)。"""
+def config_substitutions(arch, chip, board):
+    """config_template.hpp.in の置換表。ARCH / CHIP / BOARD の 3 軸を注入する。
+
+    ARCH (ISA), CHIP (SoC の定義), BOARD (ボード実装) はそれぞれ別の軸で、
+    呼び出し側 (configs/BUILD.bazel) が組み合わせを決める。
+    """
+    if arch == "rv32_c5":
+        return _CONFIG_COMMON | {
+            "${SHIZUKU_CPU_COUNT}": "1",
+            "${SHIZUKU_MEMORY_MANAGER}": "shizuku::memory_managers::freestanding",
+            "${INCLUDE_HEADERS_INSTRUCTION}": "\n".join([
+                '#include "chips/esp32_c5/chip.hpp"',
+                '#include "chips/esp32_c5/rv32_c5.hpp"',
+                '#include "boards/esp32_c5/esp32_c5.hpp"',
+                '#include "shizuku/memory_managers/freestanding.hpp"',
+                '#include "shizuku/app_entry.hpp"',
+            ]),
+            "${SHIZUKU_ARCH}": arch,
+            "${SHIZUKU_ARCH_TYPE}": "shizuku::chips::esp32_c5::chip::arch_type",
+            "${SHIZUKU_CHIP}": chip,
+            "${SHIZUKU_BOARD}": board,
+        }
     if arch == "rv32_c6":
         return _CONFIG_COMMON | {
             "${SHIZUKU_CPU_COUNT}": "1",
             "${SHIZUKU_MEMORY_MANAGER}": "shizuku::memory_managers::freestanding",
             "${INCLUDE_HEADERS_INSTRUCTION}": "\n".join([
-                "#include <shizuku/archs/%s.hpp>" % arch,
-                "#include <shizuku/boards/%s.hpp>" % board,
-                "#include <shizuku/memory_managers/freestanding.hpp>",
-                "#include <shizuku/app_entry.hpp>",
+                '#include "chips/esp32_c6/chip.hpp"',
+                '#include "chips/esp32_c6/rv32_c6.hpp"',
+                '#include "boards/esp32_c6/esp32_c6.hpp"',
+                '#include "shizuku/memory_managers/freestanding.hpp"',
+                '#include "shizuku/app_entry.hpp"',
             ]),
             "${SHIZUKU_ARCH}": arch,
+            "${SHIZUKU_ARCH_TYPE}": "shizuku::chips::esp32_c6::chip::arch_type",
+            "${SHIZUKU_CHIP}": chip,
+            "${SHIZUKU_BOARD}": board,
+        }
+    if arch == "armv6m":
+        return _CONFIG_COMMON | {
+            "${INCLUDE_HEADERS_INSTRUCTION}": "\n".join([
+                '#include "arch/armv6m/armv6m.hpp"',
+                '#include "chips/rp2040/chip.hpp"',
+                '#include "boards/rp2040_pico_w/rp2040_pico_w.hpp"',
+                '#include "shizuku/memory_managers/pico_sdk.hpp"',
+                '#include "shizuku/app_entry.hpp"',
+            ]),
+            "${SHIZUKU_ARCH}": arch,
+            "${SHIZUKU_ARCH_TYPE}": "shizuku::archs::armv6m<shizuku::chips::rp2040::chip::kMpuRegionCount, shizuku::chips::rp2040::chip::kNvicPriorityBits>",
+            "${SHIZUKU_CHIP}": chip,
             "${SHIZUKU_BOARD}": board,
         }
     return _CONFIG_COMMON | {
         "${INCLUDE_HEADERS_INSTRUCTION}": "\n".join([
-            "#include <shizuku/archs/%s.hpp>" % arch,
-            "#include <shizuku/boards/%s.hpp>" % board,
-            "#include <shizuku/memory_managers/pico_sdk.hpp>",
-            "#include <shizuku/app_entry.hpp>",
+            '#include "arch/armv8m/armv8m.hpp"',
+            '#include "chips/rp2350/chip.hpp"',
+            '#include "boards/rp2350_pico2/rp2350_pico2.hpp"',
+            '#include "shizuku/memory_managers/pico_sdk.hpp"',
+            '#include "shizuku/app_entry.hpp"',
         ]),
         "${SHIZUKU_ARCH}": arch,
+        "${SHIZUKU_ARCH_TYPE}": "shizuku::archs::armv8m<shizuku::chips::rp2350::chip::kMpuRegionCount, shizuku::chips::rp2350::chip::kNvicPriorityBits>",
+        "${SHIZUKU_CHIP}": chip,
         "${SHIZUKU_BOARD}": board,
     }

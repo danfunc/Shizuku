@@ -108,7 +108,18 @@ cc_library(
         "@pico-sdk//src/rp2_common/hardware_i2c",
         "@pico-sdk//src/rp2_common/hardware_spi",
         "@pico-sdk//src/rp2_common/pico_stdlib",
-    ] + _CYW43_ARCH,
+    ] + select({
+        "//configs:bootsel_enabled": [
+            "@pico-sdk//src/rp2_common/hardware_sync",
+            "@pico-sdk//src/rp2_common:hardware_regs",
+            "@pico-sdk//src/rp2_common:hardware_structs",
+        ],
+        "//conditions:default": [],
+    }) + _CYW43_ARCH,
+    local_defines = select({
+        "//configs:bootsel_enabled": ["SHIZUKU_ENABLE_BOOTSEL=1"],
+        "//conditions:default": [],
+    }),
 )
 
 # ---- BLE (W ボードのみ) -------------------------------------------------------

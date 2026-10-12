@@ -1,0 +1,21 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "headers",
+    hdrs = ["armv6m.hpp"],
+    includes = ["."],
+    deps = [
+        "//arch:ppb",
+        "//:arch_headers",
+    ],
+)
+
+# 文脈退避・復帰・戻り口の asm のみ。C++ のフック (systick / svc / fault など) の実体は
+# modules/pico_sdk_support/rp2040 にある (SDK 依存をここに置かない)。
+cc_library(
+    name = "ctx",
+    srcs = ["armv6m_ctx.S"],
+    alwayslink = True,
+)

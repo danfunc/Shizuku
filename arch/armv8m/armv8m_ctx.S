@@ -1,0 +1,229 @@
+// ARMv8-M (Cortex-M33) の文脈退避・復帰。参照実装 (latest_ver_from_flight_robocon
+// svc_asm_handler.S) の実機検証済みコードを移植したもの。シンボル名だけ
+// shizuku_* に付け替えてある。
+.syntax unified
+.cpu cortex-m33
+#if defined(__ARM_FP)
+.fpu fpv5-sp-d16   // .cpu 指定は FPU を含まないため、vstmia/vldmia 用に明示する
+#endif
+.thumb
+.macro SERVICE_PROFILE hook
+#if SHIZUKU_KERNEL_SERVICE_PROFILE
+    push {r0-r3,r12,lr}
+    bl \hook
+    pop {r0-r3,r12,lr}
+#endif
+.endm
+
+// context_t のオフセット。shizuku/archs/armv8m.hpp の static_assert と一致させること。
+//   0..28 : r4-r11
+//   32    : sp (PSP)
+//   36    : exc_return (キャッシュした EXC_RETURN)
+//   40    : fp[16] (S16-S31 退避域)
+.equ CTX_EXC_RETURN, 36
+.equ CTX_FP,         40
+.equ CTX_PSPLIM,     104  // armv8m.hpp context_t::psplim と一致
+.equ CTX_CONTROL,    108  // armv8m.hpp context_t::control と一致
+
+// ---------------------------------------------------------------------------
+// CTX_SAVE — 現在スレッドの context_t へ {r4-r11, PSP, EXC_RETURN, 遅延 S16-S31}
+// を退避する。入口条件: lr = EXC_RETURN (例外入口直後)。出口: r0 = context 先頭。
+// ---------------------------------------------------------------------------
+.macro CTX_SAVE
+    push {lr}                     // EXC_RETURN を退避 (直後の bl で lr が壊れる)
+    bl   shizuku_current_context  // r0 = 現在スレッドの context 先頭
+
+    // 整数 callee-saved と PSP を退避
+    stmia r0!,{r4-r7}             // ctx[0..3] = r4-r7 ; r0 += 16
+    mov  r1,r8
+    mov  r2,r9
+    mov  r3,r10
+    mov  r4,r11
+    mrs  r5,PSP
+    stmia r0!,{r1-r5}             // ctx[4..8] = r8,r9,r10,r11,PSP ; r0 = base+36
+    add  r0, #-36                 // r0 を context 先頭へ巻き戻す
+
+    pop  {r1}                     // r1 = 退避しておいた EXC_RETURN
+    str  r1,[r0, #CTX_EXC_RETURN] // ctx->exc_return = EXC_RETURN
+
+#if defined(__ARM_FP)
+    // EXC_RETURN bit4 == 0 なら拡張(FP)フレーム。S16-S31 を退避する。
+    // (この vstmia 自体が FP 命令なので、遅延スタッキングされていた呼び出し元
+    //  フレームの push を完了させる。)
+    tst.w r1, #0x10
+    bne  1f                       // bit4=1 → FP 無し。退避スキップ
+    add.w r1, r0, #CTX_FP         // r1 = &ctx->fp[0]
+    vstmia r1!, {s16-s31}
+1:
+#endif
+.endm
+
+// ---------------------------------------------------------------------------
+// CTX_RESTORE — shizuku_current_context を再取得し (dispatch が別スレッドへ
+// 切替えたかもしれない)、context_t から復元して例外復帰する。
+// ---------------------------------------------------------------------------
+.macro CTX_RESTORE svc=0
+    // ★GDB stub の 1 命令実行はここで立てる。「次の 1 命令」はこの直後に
+    //   復帰する文脈のものと確定しているので、対象を取り違えない
+    //   (立てる場所を間違えると「呼び出し側自身が刻まれる」— 実測で踏んだ)。
+    bl   shizuku_arm_pending_step
+    // ★Q8 (DESIGN §11.3)。同じ理由で「次に復帰する文脈が確定した今」書く。
+    bl   shizuku_restore_region_window
+    bl   shizuku_current_context  // r0 = 復帰対象 context (別スレッドかもしれない)
+
+    // 整数 callee-saved と PSP を復元
+    ldmia r0!,{r4-r7}             // r4-r7 ; r0 += 16
+    ldmia r0!,{r1-r3}             // r8,r9,r10 ; r0 += 12
+    mov  r8,r1
+    mov  r9,r2
+    mov  r10,r3
+    ldmia r0!,{r1-r2}             // r11,PSP ; r0 = base+36
+    mov  r11,r1
+    msr  PSP,r2
+
+    ldr  r3,[r0]                  // r3 = ctx->exc_return (r0 は base+36)
+
+    // スタック上限を復元 (スレッドごと不変なので restore のみ。PSP がここを下回ると
+    // UsageFault→HardFault でスタックオーバーフローを即検出)。
+    ldr  r1,[r0, #(CTX_PSPLIM - CTX_EXC_RETURN)]
+    msr  PSPLIM, r1
+
+    // CONTROL.nPRIV を復元。bit0(nPRIV) だけを ctx->control の値へ差し替える
+    // read-modify-write — MRS で読んだ「現在の」CONTROL を土台にすることで、
+    // bit1(SPSEL, 常に1で不変) と bit2(FPCA, ハードウェアが遅延 FPU 文脈で管理) を
+    // 絶対に壊さない。r0/r3 (context 先頭+36 / exc_return) は温存必須。
+    ldr  r1,[r0, #(CTX_CONTROL - CTX_EXC_RETURN)]
+    mrs  r2, CONTROL
+    bic  r2, r2, #1
+    and  r1, r1, #1
+    orr  r2, r2, r1
+    msr  CONTROL, r2
+    isb
+
+#if defined(__ARM_FP)
+    // 復帰対象が拡張(FP)フレームなら S16-S31 を復元する。
+    tst.w r3, #0x10
+    bne  2f                       // bit4=1 → FP 無し。復元スキップ
+    add  r0, #4                   // r0 = base+40 = &ctx->fp[0]
+    vldmia r0!, {s16-s31}
+2:
+#endif
+
+    .if \svc
+    SERVICE_PROFILE shizuku_service_handler_end
+    .endif
+    mov  lr, r3                   // LR = 復帰対象の EXC_RETURN
+    bx   lr                       // 例外復帰
+.endm
+
+// ---------------------------------------------------------------------------
+// SVC 入口。CTX_SAVE → shizuku_svc_dispatch(context) → CTX_RESTORE。
+// ---------------------------------------------------------------------------
+.thumb_func
+.global shizuku_armv8m_svc_entry
+.align 8
+.type shizuku_armv8m_svc_entry, %function
+shizuku_armv8m_svc_entry:
+    SERVICE_PROFILE shizuku_service_handler_begin
+    CTX_SAVE
+    bl   shizuku_svc_dispatch     // shizuku_svc_dispatch(context = r0)
+    CTX_RESTORE 1
+
+// ---------------------------------------------------------------------------
+// PendSV 入口 (時限実行権の期限回収 = 最低優先度の遅延切替例外)。退避/復元は
+// SVC と完全同型 (遅延 FPU 退避含む)。
+// ---------------------------------------------------------------------------
+.thumb_func
+.global shizuku_armv8m_pendsv_entry
+.align 2
+.type shizuku_armv8m_pendsv_entry, %function
+shizuku_armv8m_pendsv_entry:
+    CTX_SAVE
+    bl   shizuku_pendsv_dispatch  // shizuku_pendsv_dispatch(context = r0)
+    CTX_RESTORE
+
+// ---------------------------------------------------------------------------
+// 戻り口 — ハンドラが普通に return するとここへ落ちる (カーネルが lr に載せる)。
+// 自分の枠を 1 枚ぶん巻き戻す。
+//   r0 = 呼び先の戻り値 (C の return 値がそのまま乗っている)
+// ★ここでは callee-saved を信用しない。a4 の marker は syscall frame に退避され、
+//   dispatch が ledger の unwind floor へ置き換える。
+// ---------------------------------------------------------------------------
+.thumb_func
+.global shizuku_armv8m_return_stub
+.align 2
+.type shizuku_armv8m_return_stub, %function
+shizuku_armv8m_return_stub:
+    mov   r2, r0        // a2 = 戻り値
+    movs  r1, #1        // legacy one-pop notification
+    movs  r3, #0        // a3 = エラーコード 0 (成功)
+    movs  r3, #0xA5
+    lsls  r3, r3, #8
+    adds  r3, #0x5A
+    mov   r12, r3       // RETURN_STUB_MARKER
+    movs  r3, #0        // keep the RETURN error argument clear; marker lives in r12
+    movs  r0, #2        // a0 = RETURN (kernel_abi.hpp と static_assert で両縛り)
+    svc   0
+    b     shizuku_return_stub_failed // 戻ってきた = 巻き戻しが弾かれた
+
+// ---------------------------------------------------------------------------
+// DebugMonitor の入口。フォールトとまったく同じ形にしてある —
+// 「止めて別のスレッドへ切り替えて復帰する」は既にある経路なので、増やさない。
+// ---------------------------------------------------------------------------
+.thumb_func
+.global shizuku_armv8m_debugmon_entry
+.align 2
+.type shizuku_armv8m_debugmon_entry, %function
+shizuku_armv8m_debugmon_entry:
+    CTX_SAVE
+    bl   shizuku_debug_dispatch
+    CTX_RESTORE
+
+// ---------------------------------------------------------------------------
+// ブート時にスレッドスタック (PSP) へ移り、entry を呼ぶ。
+//   r0 = スタック先頭 (高位), r1 = スタック下限, r2 = entry
+// SP を差し替える処理をコンパイラに任せると、切替後に SP 相対の局所変数へ触って
+// 壊れ得る。ここは全部 asm で書いて確定させる。entry が万一 return しても、
+// blx の lr がすぐ下の無限ループを指すので暴走しない。
+// ---------------------------------------------------------------------------
+.thumb_func
+.global shizuku_armv8m_enter_thread_mode
+.align 2
+.type shizuku_armv8m_enter_thread_mode, %function
+shizuku_armv8m_enter_thread_mode:
+    msr  PSPLIM, r1
+    msr  PSP, r0
+    movs r3, #2         // CONTROL: SPSEL=1 (スレッドは PSP), nPRIV=0 (特権)
+    msr  CONTROL, r3
+    isb
+    blx  r2
+1:  b    1b
+
+// ---------------------------------------------------------------------------
+// フォールト入口。**普通の例外と同じ退避/復帰経路に乗せる**のが肝で、これにより
+// 「落ちたスレッドを止めて別のスレッドへ切り替えて復帰する」が特別扱い無しにできる。
+// 落ちた文脈も一度は退避する (捨てる予定でも、経路を分けない方が壊れにくい)。
+// ---------------------------------------------------------------------------
+.thumb_func
+.global shizuku_armv8m_fault_entry
+.align 2
+.type shizuku_armv8m_fault_entry, %function
+shizuku_armv8m_fault_entry:
+#if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+    // 診断専用: CTX_SAVE (PSP へ積む) より前に、fault の素性だけを MSP 上の C で記録する。
+    push {r0-r3, r12, lr}
+    mov  r0, lr
+    mrs  r1, psp
+    bl   shizuku_selftest_fault_pre
+    pop  {r0-r3, r12, lr}
+#endif
+    CTX_SAVE
+    bl   shizuku_fault_dispatch   // 報告 + 停止 + 切替 (現在文脈を差し替える)
+    CTX_RESTORE
+
+// ---------------------------------------------------------------------------
+// ブート時にスレッドスタック (PSP) へ移り、entry を呼ぶ。
+//   r0 = スタック先頭 (高位), r1 = スタック下限, r2 = entry
+// SP を差し替える処理をコンパイラに任せると、切替後に SP 相対の局所変数へ触って
+// 壊れ得る。ここは全部 asm で書いて確定させる。entry が万一 return しても、
+// blx の lr がすぐ下の無限ループを指すので暴走しない。

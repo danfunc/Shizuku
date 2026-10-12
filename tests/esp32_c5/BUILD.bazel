@@ -1,0 +1,56 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+# ESP32-C5 のホストテスト。C6 (tests/esp32_c6) と同じく chips の依存閉包を汚さないため
+# target はここに置く。ソースは chips/esp32_c5 にあり、runfiles の repo 相対パスは変えない。
+
+package(default_visibility = ["//visibility:public"])
+
+sh_test(
+    name = "selftest_record_test",
+    srcs = ["//chips/esp32_c5:test_selftest_record.sh"],
+    data = [
+        "//chips/esp32_c5:selftest_adapter.cpp",
+        "//chips/esp32_c5:selftest_record.h",
+        "//chips/esp32_c5:test_selftest_record.cpp",
+    ],
+)
+
+sh_test(
+    name = "armv6m_return_stub_test",
+    srcs = ["test_armv6m_return_stub.sh"],
+    data = [
+        "//arch/armv6m:armv6m_ctx.S",
+        "//arch/armv8m:armv8m_ctx.S",
+    ],
+)
+
+cc_test(
+    name = "c5_concepts_test",
+    srcs = ["//chips/esp32_c5:test_c5_concepts.cpp"],
+    copts = ["-std=c++20"],
+    deps = [
+        "//boards/esp32_c5:headers",
+        "//chips/esp32_c5:headers",
+        "//:internal_headers",
+    ],
+)
+
+cc_test(
+    name = "systimer_test",
+    srcs = ["//chips/esp32_c5:test_systimer.cpp"],
+    copts = ["-std=c++20"],
+    deps = [
+        "//arch/riscv:pmp",
+        "//chips/esp32_c5:systimer",
+    ],
+)
+
+cc_test(
+    name = "unwind_depth_test",
+    srcs = ["test_unwind_depth.cpp"],
+    copts = ["-std=c++20"],
+    deps = [
+        "//:internal_headers",
+        "//arch/armv6m:headers",
+    ],
+)

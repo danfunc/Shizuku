@@ -1,0 +1,14 @@
+/build/
+/build-*/
+/.cache/
+sdkconfig
+sdkconfig.*
+!sdkconfig.defaults
+!firmware/sdkconfig.defaults.esp32c5
+managed_components/
+dependencies.lock
+*.elf
+*.bin
+*.map
+*.o
+

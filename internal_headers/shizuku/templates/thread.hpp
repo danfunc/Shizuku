@@ -31,7 +31,7 @@ template <typename CONTEXT> struct thread {
   // 最内ヘッダのアドレスと段数だけを持つ (DESIGN §8.1)。
   struct call_stack_t {
     uintptr_t top = 0;  // 最内 call_frame_header のアドレス (0 = 空)
-    uint32_t depth = 0; // 巻き戻しの「今のネスト数」検算に使う
+    uint32_t depth = 0; // call / dispatch ledger の現在段数
   };
 
   // ★state は CAS の対象なので 32bit 幅を固定する (ARCH::cas32 が uint32_t* で叩く)。
@@ -44,7 +44,7 @@ template <typename CONTEXT> struct thread {
     uintptr_t handler_entry;
     uint8_t kind;
     uint8_t via;
-    uint16_t pad;
+    uint16_t unwind_floor; // earliest depth this activation may return to
   };
   call_ledger_entry *ledger = nullptr;
   uint32_t ledger_capacity = 0;

@@ -1,0 +1,86 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+# ESP32-C6 のテスト。★chips/ から移した target (chips の依存閉包に modules/esp_idf_support や
+#   objects.list を入れないため)。テストのソースは chips/esp32_c6 に残し、runfiles の
+#   repo 相対パス (chips/esp32_c6/...) は変えない。assert の中身も変えない。
+
+package(default_visibility = ["//visibility:public"])
+
+sh_test(
+    name = "selftest_record_test",
+    srcs = ["//chips/esp32_c6:test_selftest_record.sh"],
+    data = [
+        "//chips/esp32_c6:selftest_adapter.cpp",
+        "//chips/esp32_c6:selftest_record.h",
+        "//chips/esp32_c6:test_selftest_record.cpp",
+    ],
+)
+
+cc_test(
+    name = "c6_concepts_test",
+    srcs = ["//chips/esp32_c6:test_c6_concepts.cpp"],
+    copts = ["-std=c++20"],
+    deps = [
+        "//boards/esp32_c6:headers",
+        "//chips/esp32_c6:headers",
+        "//:internal_headers",
+    ],
+)
+
+sh_test(
+    name = "fail_closed_test",
+    srcs = ["//chips/esp32_c6:test_fail_closed.sh"],
+    data = [
+        "//arch/riscv:pmp.hpp",
+        "//boards/esp32_c6:esp32_c6.hpp",
+        "//arch/riscv:rv32.hpp",
+        "//arch/riscv:rv32_frame.h",
+        "//chips/esp32_c6:chip.hpp",
+        "//chips/esp32_c6:rv32_c6.hpp",
+        "//chips/esp32_c6:test_fail_closed.cpp",
+        "//chips/esp32_c6:test_fail_closed_board.cpp",
+        "//:c6_test_headers",
+    ],
+)
+
+cc_test(
+    name = "systimer_test",
+    srcs = ["//chips/esp32_c6:test_systimer.cpp"],
+    copts = ["-std=c++20"],
+    deps = [
+        "//arch/riscv:pmp",
+        "//chips/esp32_c6:systimer",
+    ],
+)
+
+sh_test(
+    name = "trap_static_test",
+    srcs = ["//chips/esp32_c6:test_trap_static.sh"],
+    data = [
+        "//boards/esp32_c6:board_esp32_c6.cpp",
+        "//arch/riscv:rv32.hpp",
+        "//arch/riscv:rv32_frame.h",
+        "//arch/riscv:rv32_trap.S",
+        "//chips/esp32_c6:c6_vectors.S",
+        "//chips/esp32_c6:rv32_c6.hpp",
+        "//chips/esp32_c6:test_trap_static.py",
+        "//chips/esp32_c6:trap.cpp",
+        "//chips/esp32_c6:trap_api.hpp",
+        "//modules/esp_idf_support/c6:early_boot.cpp",
+        "//modules/esp_idf_support/firmware:main/early_diag.c",
+        "//:c6_test_headers",
+    ],
+)
+
+# trap_route は arch/riscv/trap_route.hpp の純粋な経路判定。テストは C6 の型 (rv32_c6) を
+# 使うので chips 側の型に依存する (arch -> chips の逆依存は作らない)。
+cc_test(
+    name = "trap_route_test",
+    srcs = ["//chips/esp32_c6:test_trap_route.cpp"],
+    copts = ["-std=c++20"],
+    deps = [
+        "//arch/riscv:pmp",
+        "//chips/esp32_c6:headers",
+        "//:internal_headers",
+    ],
+)

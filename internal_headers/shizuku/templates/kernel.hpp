@@ -21,9 +21,9 @@ namespace templates {
 //    (2) **オブジェクトランドの svc ハンドラ** = カーネルオブジェクトが持ち、
 //        **スレッドモードで**走る方針側。番号を解釈し、担当へ配る
 //
-//  ★経路は**今走っているオブジェクトの種別** (object_kind) だけで決まる (I-1):
-//      PLAIN   → オブジェクトが走っている → (2) をメソッドとして呼ぶ
-//      HANDLER → ハンドラが走っている     → プリミティブを実行
+//  ★経路は ledger に記録した実行主体で決まる (I-1):
+//      PLAIN / HANDLER → 親ハンドラへ dispatch
+//      登録済み KOBJ   → KOBJ 本人が kernel primitive を解釈
 //    ★段数のパリティでも ID でもない (2026-09-05)。パリティは「ハンドラ =
 //      カーネルオブジェクト」を仮定するのでマルチ ABI で崩れ、ID の決め打ちは
 //      kobj の差し替え・多重化を禁じる。種別は独立した値として持つ。
@@ -31,9 +31,9 @@ namespace templates {
 //    偽装はできない。どのオブジェクトがどの種別かという台帳は持たない — 呼び出しの
 //    たびに kobj が call_request で申告する (PORT §3.1)。
 //
-//  ★カーネルオブジェクト以外は RETURN を撃てない。そのため、ハンドラを起こすときに
-//    **今のネスト数を渡し** (ARCH::set_handler_info)、オブジェクトは exit API に
-//    **何段戻すか**を載せて撃ち、ハンドラがその段数で巻き戻す (D5)。
+//  ★RETURN を解釈できるのは登録済み KOBJ だけ。dispatch 先へ呼出し鎖の unwind floor
+//    を第 5 引数で渡す。exit API は絶対戻り深さ d を指定し、KOBJ が現在深さとの差を
+//    RETURN count にして撃つ。kernel は ledger の floor を越えないことを検査する。
 template <typename CPU_MANAGER_T, typename MEMORY_MANAGER_T>
 class kernel {
 public:
@@ -71,8 +71,8 @@ public:
   //  【幾何】スタックは下へ伸びる。呼び出し元の生スタック境界を X とすると:
   //
   //    低位 ←                                                        → 高位
-  //    [ 呼び先が使う ][ 書き換え用フレーム ][ ヘッダ + 元の例外フレーム ][ 呼び出し元 ]
-  //                    X-total-frame       X-total                    X
+  //    [ 呼び先が使う ][ 書き換え用フレーム ][ stack arg ][ ヘッダ + 元の例外フレーム ]
+  //                    X-total-frame       X-total     X-total+arg       X
   //
   //  ★I-3: 元の例外フレームは 1 バイトも動かさない。退避域の一番上に元の位置のまま
   //    置き、下へ複製するのは書き換え用の作業コピーだけ (FP 拡張フレームの
@@ -81,7 +81,7 @@ public:
   //    SP を追加調整する場合 (ARMv8-M の xPSR bit9 による +4 など) は
   //    ARCH::normalize_frame で作業コピー側の調整を消してから積む。push はその結果を
   //    ARCH::psp_after_return で必ず検算する。
-  //  ★識別情報は特権 call ledger に置く。pop は ledger を 1 段落とす。
+  //  ★識別情報は特権 call ledger に置く。pop は ledger を target depth まで落とす。
   struct call_frame_header {
     uintptr_t prev;       // 一つ外側のヘッダのアドレス (0 = 最外)
     uint32_t total_bytes; // 退避域の総バイト数 (8B 境界に丸め済み)
@@ -113,6 +113,10 @@ public:
   // ★入口だけでなく「そのハンドラが何番のオブジェクトとして走るか」も一緒に
   //   受け取る。カーネルが 0 番と決め打つと、kobj を差し替えられなくなる。
   void set_object_handler(uintptr_t entry_pc, uint32_t object_id);
+  // The object layer uses the configured dispatch identity when validating a
+  // suspended ledger. This is distinct from its own handler implementation:
+  // a board may register a routing wrapper around the kernel object entry.
+  uintptr_t object_handler_entry() const { return m_object_svc_handler; }
 
   // 今の実行をスレッド 0 として採用し、entry へ移る (スレッドスタックへ
   // 切り替えるので戻らない)。★最初の 1 本のスタックも貸してもらう — ここだけ
@@ -234,6 +238,10 @@ public:
     return m_threads[current_thread_id()].thread;
   }
   uint32_t current_depth() const { return current_thread().call_stack.depth; }
+  uint32_t current_unwind_floor() const {
+    const THREAD &thread = current_thread();
+    return thread.call_stack.depth ? thread.ledger_top().unwind_floor : 0;
+  }
   // スケジューリング方針 (kobj 側) が候補を探すための読み出し。
   // そのスレッドを走らせてよいコアの集合 (方針側が候補を絞るために読む)。
   uint32_t thread_affinity(uint32_t thread) const {

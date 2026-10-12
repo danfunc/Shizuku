@@ -1,0 +1,74 @@
+[THERMAL] last 60 s: 600 samples spanning 59900 ms, 30.88..35.09 C (retries 0)
+malloc success
+[PERIPH] gpio ready (object 2)
+[PERIPH] spi ready (object 3)
+[PERIPH] i2c ready (object 4)
+[PERIPH] led: cyw43_arch_init() 開始
+[PERIPH] led: cyw43_arch_init() -> 0
+[PERIPH] led ready (object 5)
+[PERIPH] led talks to cyw43 over gSPI at 37500 kHz (div 2)
+[PERIPH] temperature ready (object 7)
+[SELFTEST] call ladder start
+[SELFTEST] PASS create object (=0)
+[SELFTEST] PASS create object (=0)
+[SELFTEST] PASS create object (=0)
+[SELFTEST] PASS call/1: error (=0)
+[SELFTEST] PASS call/1: value (=42)
+[SELFTEST] PASS call/1: callee identity (=13)
+[SELFTEST] PASS call/1: caller identity (=1)
+[SELFTEST] PASS call/1: depth restored (=0)
+[SELFTEST] PASS call/1 (fp): value (=2)
+[SELFTEST] PASS call/1 (fp): float preserved (=35)
+[SELFTEST] PASS return_stub: replace leaf with dirty scratch (=0)
+[SELFTEST] PASS return_stub: dirty scratch return error (=0)
+[SELFTEST] PASS return_stub: dirty scratch return value (=141)
+[SELFTEST] PASS return_stub: depth restored (=0)
+[SELFTEST] PASS return_stub: restore leaf (=0)
+[SELFTEST] PASS call/6 nested: value (=21)
+[SELFTEST] PASS call/6 nested: depth restored (=0)
+[CALLDBG] stage=800
+[SELFTEST] PASS nested: levels entered (=7)
+[CALLDBG] stage=801
+[CALLDBG] stage=802
+[SELFTEST] PASS nested: identity at every level (=0)
+[CALLDBG] stage=803
+[SELFTEST] PASS nested: depth grows by 2 per level (=0)
+[CALLDBG] stage=804
+[CALLDBG] stage=805
+[SELFTEST] PASS unknown api: rejected (=1)
+[CALLDBG] stage=806
+[SELFTEST] PASS absent object: rejected (=2)
+[SELFTEST_PROG] watchdog reset: stage=808 a=0 b=0
+[SELFTEST_PROG] fs_fault=6ab73121 pc=fffffffe lr=00000004 xpsr=b007c0d3
+[SELFTEST_PROG] watchdog reset: stage=808 a=0 b=0
+[SELFTEST_PROG] fs_fault=6ab73121 pc=fffffffe lr=00000004 xpsr=b007c0d3
+[SELFTEST_PROG] watchdog reset: stage=808 a=0 b=0
+[SELFTEST_PROG] fs_fault=6ab73121 pc=fffffffe lr=00000004 xpsr=b007c0d3
+[SELFTEST_PROG] watchdog reset: stage=808 a=0 b=0
+[SELFTEST_PROG] fs_fault=6ab73121 pc=fffffffe lr=00000004 xpsr=b007c0d3
+[SELFTEST_PROG] watchdog reset: stage=808 a=0 b=0
+[SELFTEST_PROG] fs_fault=6ab73121 pc=fffffffe lr=00000004 xpsr=b007c0d3
+[SELFTEST_PROG] watchdog reset: stage=808 a=0 b=0
+[SELFTEST_PROG] fs_fault=6ab73121 pc=fffffffe lr=00000004 xpsr=b007c0d3
+[SELFTEST_PROG] watchdog reset: stage=808 a=0 b=0
+[SELFTEST_PROG] fs_fault=6ab73121 pc=fffffffe lr=00000004 xpsr=b007c0d3
+[SELFTEST_PROG] watchdog reset: stage=808 a=0 b=0
+[SELFTEST_PROG] fs_fault=6ab73121 pc=fffffffe lr=00000004 xpsr=b007c0d3
+[SELFTEST_PROG] watchdog reset: stage=808 a=0 b=0
+[SELFTEST_PROG] fs_fault=6ab73121 pc=fffffffe lr=00000004 xpsr=b007c0d3
+[SELFTEST_PROG] watchdog reset: stage=808 a=0 b=0
+[SELFTEST_PROG] fs_fault=6ab73121 pc=fffffffe lr=00000004 xpsr=b007c0d3
+[SELFTEST_PROG] watchdog reset: stage=808 a=0 b=0
+[SELFTEST_PROG] fs_fault=6ab73121 pc=fffffffe lr=00000004 xpsr=b007c0d3
+[SELFTEST_PROG] watchdog reset: stage=808 a=0 b=0
+[SELFTEST_PROG] fs_fault=6ab73121 pc=fffffffe lr=00000004 xpsr=b007c0d3
+[SELFTEST_PROG] watchdog reset: stage=808 a=0 b=0
+[SELFTEST_PROG] fs_fault=6ab73121 pc=fffffffe lr=00000004 xpsr=b007c0d3
+[SELFTEST_PROG] watchdog reset: stage=808 a=0 b=0
+[SELFTEST_PROG] fs_fault=6ab73121 pc=fffffffe lr=00000004 xpsr=b007c0d3
+[SELFTEST_PROG] watchdog reset: stage=808 a=0 b=0
+[SELFTEST_PROG] fs_fault=6ab73121 pc=fffffffe lr=00000004 xpsr=b007c0d3
+[SELFTEST_PROG] watchdog reset: stage=808 a=0 b=0
+[SELFTEST_PROG] fs_fault=6ab73121 pc=fffffffe lr=00000004 xpsr=b007c0d3
+[SELFTEST_PROG] watchdog reset: stage=808 a=0 b=0
+[SELFTEST_PROG] fs_fault=6ab73121 pc=fffffffe lr=00000004 xpsr=b007c0d3
