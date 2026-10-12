@@ -13,13 +13,31 @@ sh_binary(
     data = [":shizuku_uf2"],
 )
 
-# ローカルの picotool で ELF → UF2 変換 (.bazelrc のコメント参照。非 hermetic)。
+# ELF → UF2 変換。
+# macOS (Apple Silicon) では pico-sdk 2.2.0 の src/host/hardware_sync が clang builtin
+# (__sev/__wfi/__wfe) と衝突し、Bazel 製 picotool をビルドできない (2026-08-19 実測、
+# 2026-10-12 再確認)。そのため macOS は --define=picotool=host (.bazelrc で設定) で
+# ホストの /opt/picotool を使う (非 hermetic)。Linux 等の既定は bazel_dep の picotool。
+# tags は select できないので、両方とも no-sandbox にしている (Bazel 製側は入力が全て
+# 宣言済みなので、sandbox を外しても結果は変わらない)。
+config_setting(
+    name = "host_picotool",
+    define_values = {"picotool": "host"},
+)
+
 genrule(
     name = "shizuku_uf2",
     srcs = [":shizuku"],
     outs = ["shizuku.uf2"],
-    cmd = "/opt/picotool/bin/picotool uf2 convert -t elf $(location :shizuku) $@",
+    cmd = select({
+        ":host_picotool": "/opt/picotool/bin/picotool uf2 convert -t elf $(location :shizuku) $@",
+        "//conditions:default": "$(location @picotool//:picotool) uf2 convert -t elf $(location :shizuku) $@",
+    }),
     tags = ["no-sandbox"],
+    tools = select({
+        ":host_picotool": [],
+        "//conditions:default": ["@picotool//:picotool"],
+    }),
 )
 
 # 生バイナリ (arm-none-eabi-objcopy -O binary)。OTA 転送用。

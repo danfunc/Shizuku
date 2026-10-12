@@ -37,3 +37,6 @@ http_archive(
 )
 
 register_toolchains("//toolchains/rv32_esp:rv32_esp_toolchain")
+
+# picotool (ELF → UF2 変換。//firmware:shizuku_uf2 が tools として使う)
+bazel_dep(name = "picotool", version = "2.2.0")
