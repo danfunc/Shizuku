@@ -15,14 +15,14 @@ _CONFIG_COMMON = {
     "${SHIZUKU_MEMORY_MANAGER}": "shizuku::memory_managers::pico_sdk",
 }
 
-def config_substitutions(arch, chip, board):
+def config_substitutions(arch, chip, board, ble = False):
     """config_template.hpp.in の置換表。ARCH / CHIP / BOARD の 3 軸を注入する。
 
     ARCH (ISA), CHIP (SoC の定義), BOARD (ボード実装) はそれぞれ別の軸で、
     呼び出し側 (configs/BUILD.bazel) が組み合わせを決める。
     """
     if arch == "rv32_c5":
-        return _CONFIG_COMMON | {
+        c5_config = _CONFIG_COMMON | {
             "${SHIZUKU_CPU_COUNT}": "1",
             "${SHIZUKU_MEMORY_MANAGER}": "shizuku::memory_managers::freestanding",
             "${INCLUDE_HEADERS_INSTRUCTION}": "\n".join([
@@ -32,6 +32,15 @@ def config_substitutions(arch, chip, board):
                 '#include "shizuku/memory_managers/freestanding.hpp"',
                 '#include "shizuku/app_entry.hpp"',
             ]),
+        }
+        if ble:
+            # Controller-init profile needs far fewer concurrent Shizuku calls
+            # than the general C5 selftest/application profile.
+            c5_config = c5_config | {
+                "${SHIZUKU_THREAD_COUNT}": "10",
+                "${SHIZUKU_CALL_DEPTH}": "8",
+            }
+        return c5_config | {
             "${SHIZUKU_ARCH}": arch,
             "${SHIZUKU_ARCH_TYPE}": "shizuku::chips::esp32_c5::chip::arch_type",
             "${SHIZUKU_CHIP}": chip,

@@ -1,7 +1,13 @@
 // Stage-2 / Stage-3 bootstrap for ESP32-C5. No IDF OS shim, heap or serial observer.
 #include "shizuku/kernel.hpp"
 #include "shizuku/kernel_object.hpp"
+#if !defined(SHIZUKU_C5_BLE)
 #include "chips/esp32_c5/selftest_record.h"
+#endif
+
+#if defined(SHIZUKU_C5_BLE)
+extern "C" [[noreturn]] void shizuku_c5_ble_stage1_start(void);
+#endif
 
 extern "C" {
 // entered, ECALL round-trip, live counter, observed error, observed value.
@@ -52,8 +58,15 @@ uintptr_t c5_combined_handler(uintptr_t a0, uintptr_t a1, uintptr_t a2,
   if (result.error == 0 && result.value == 0xC5000002 && !shizuku::ARCH::in_interrupt())
     shizuku_c5_thread0_diag[1] = 0xC5000002;
 
-  // 2. 実 boot 経路での selftest runner 実行 (RAM record への集中記録)
+  // 2. Selftest ladders run in the normal C5 profile, not the BLE DRAM profile.
+#if !defined(SHIZUKU_C5_BLE)
   shizuku_c5_run_selftests();
+#endif
+
+#if defined(SHIZUKU_C5_BLE)
+  // BLE-only archive variant: selftests finish before controller init starts.
+  shizuku_c5_ble_stage1_start();
+#endif
 
   // 3. 段2 thread1 スポーン (GRANT スイッチ試験用)
   shizuku::KERNEL::spawn_request request{};

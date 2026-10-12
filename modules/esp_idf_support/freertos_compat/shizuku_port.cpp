@@ -1,6 +1,9 @@
 #include "shizuku_port.hpp"
 #include <atomic>
 
+extern "C" void shizuku_c5_ble_note_task_started(uint32_t task_id) __attribute__((weak));
+extern "C" void shizuku_c5_pend_compat_context_switch(void) __attribute__((weak));
+
 namespace {
 // C5 is single-core. The active grant identifies the one task currently on CPU;
 // avoid C++ thread_local/TLS because the bare Shizuku bootstrap does not install TLS blocks.
@@ -18,7 +21,13 @@ shizuku::freertos_compat::shizuku_port::host_syscall_hook g_host_syscall_hook=nu
 namespace shizuku::freertos_compat {
 namespace { domain *g_handler_domain=nullptr; }
 bool shizuku_port::configure_route(uint32_t h,uint32_t m,uint32_t hz,void *d) {
-  if(!h||!hz||!d||!g_clock_us)return false;
+  if(!hz||!d||!g_clock_us)return false;
+  if(!h) {
+    if(m<kFirstPlainTaskObject||m>63)return false;
+    handler_object_=0; dispatch_method_=m; tick_hz_=hz; domain_=static_cast<domain *>(d);
+    g_handler_domain=domain_;
+    return true;
+  }
   handler_object_=h; dispatch_method_=m; tick_hz_=hz; domain_=static_cast<domain *>(d);
   g_handler_domain=domain_;
   task_start probe{kHandshake,0,0,0,nullptr,nullptr}; uintptr_t response=0;
@@ -58,6 +67,7 @@ uint64_t shizuku_port::now_ticks() {
   return (now_us()*tick_hz_)/1000000u;
 }
 uint64_t shizuku_port::now_us() {
+  if(!handler_object_)return g_clock_us?g_clock_us():0;
   task_start request{kReadClock,0,0,0,nullptr,nullptr};
   return call_handler(&request);
 }
@@ -93,15 +103,50 @@ bool shizuku_port::wake(uint32_t id) {
 bool shizuku_port::spawn(void (*entry)(void *),void *arg,uint32_t stack,uint32_t priority,uint32_t *id) {
   // Shizuku's current SPAWN API allocates a fixed 4096-byte thread stack.
   // IDF's RISC-V xTaskCreate stack depth is bytes; fail closed above capacity.
-  if(!handler_object_||!entry||!id||!stack||stack>kKernelThreadStackBytes)return false;
+  if(!entry||!id||!stack||stack>kKernelThreadStackBytes)return false;
   task_start *slot=nullptr;
   for(auto &candidate:starts_)if(candidate.operation==0){slot=&candidate;break;}
   if(!slot)return false;
   auto &packet=*slot; packet={kStartTask,0,priority,stack,entry,arg};
   uintptr_t spawned=0;
-  const auto error=call(shizuku::object_api::SPAWN,handler_object_,dispatch_method_,reinterpret_cast<uintptr_t>(&packet),&spawned);
+  uintptr_t error=0;
+  uint32_t object_id=dispatch_method_;
+  if(!handler_object_) {
+    // Each FreeRTOS task is represented by a PLAIN object with one entry point.
+    // Both syscalls return through the root KERNEL_OBJECT handler; this avoids
+    // HANDLER->HANDLER nesting and the currently unsupported grandchild route.
+    const uint32_t last=kFirstPlainTaskObject+(kMaxTasks-1);
+    for(;object_id<=last;++object_id) {
+      uintptr_t created=0;
+      error=call(shizuku::object_api::CREATE_OBJECT,object_id,
+                 reinterpret_cast<uintptr_t>(&plain_task_entry),0,&created);
+      if(error==0&&created==object_id)break;
+    }
+    if(object_id>last){packet={};return false;}
+    dispatch_method_=object_id+1;
+    packet.id=object_id;
+    error=call(shizuku::object_api::SPAWN,object_id,0,
+               reinterpret_cast<uintptr_t>(&packet),&spawned);
+  } else {
+    error=call(shizuku::object_api::SPAWN,handler_object_,dispatch_method_,reinterpret_cast<uintptr_t>(&packet),&spawned);
+  }
   if(error||!spawned){packet={};return false;}
-  packet.id=static_cast<uint32_t>(spawned); *id=packet.id; return true;
+  if(handler_object_)packet.id=static_cast<uint32_t>(spawned);
+  *id=packet.id; return true;
+}
+void shizuku_port::plain_task_entry(void *raw) {
+  auto *packet=static_cast<task_start *>(raw);
+  if(!packet||packet->operation!=kStartTask||!packet->entry) {
+    call(shizuku::object_api::EXIT_THREAD);
+    return;
+  }
+  const uint32_t previous=g_current_task_id;
+  g_current_task_id=packet->id;
+  if (shizuku_c5_ble_note_task_started) shizuku_c5_ble_note_task_started(packet->id);
+  packet->entry(packet->arg);
+  if(g_handler_domain)g_handler_domain->finish_current_task();
+  else call(shizuku::object_api::EXIT_THREAD);
+  g_current_task_id=previous;
 }
 bool shizuku_port::run_for(uint32_t task,uint32_t cycles) {
   const uint32_t previous=g_current_task_id,previous_parent=g_grant_parent_id,previous_depth=g_grant_depth;
@@ -151,6 +196,7 @@ extern "C" uintptr_t shizuku_freertos_compat_dispatch(uintptr_t raw) {
   if(packet->operation==shizuku_port::kHandshake)return shizuku_port::kHandshakeReply;
   if(packet->operation==shizuku_port::kStartTask) {
     const uint32_t previous=g_current_task_id; g_current_task_id=packet->id;
+    if (shizuku_c5_ble_note_task_started) shizuku_c5_ble_note_task_started(packet->id);
     if(packet->entry)packet->entry(packet->arg);
     // The dispatch method is spawned as a Shizuku task; return through the
     // object API so the caller's grant ledger is unwound by the HANDLER.
@@ -168,7 +214,10 @@ extern "C" void shizuku_freertos_compat_set_clock(uint64_t (*clock_us)(void)) {
 extern "C" void shizuku_freertos_compat_isr_enter(void) { shizuku::freertos_compat::shizuku_port::enter_isr(); }
 extern "C" void shizuku_freertos_compat_isr_exit(void) { shizuku::freertos_compat::shizuku_port::leave_isr(); }
 extern "C" void shizuku_freertos_compat_yield_from_isr(int higher) {
-  if(higher)shizuku::freertos_compat::shizuku_port::request_yield_from_isr();
+  if (higher) {
+    shizuku::freertos_compat::shizuku_port::request_yield_from_isr();
+    if (shizuku_c5_pend_compat_context_switch) shizuku_c5_pend_compat_context_switch();
+  }
 }
 extern "C" void shizuku_freertos_compat_run_scheduler(uint32_t cycles) {
   if(shizuku::freertos_compat::g_handler_domain)shizuku::freertos_compat::g_handler_domain->run_scheduler(cycles);

@@ -93,3 +93,9 @@ build:esp32c5 --copt=-DSHIZUKU_C5_SKELETON_PERMITTED=1
 build:esp32c5 --action_env=IDF_PATH
 build:esp32c5 --action_env=IDF_TOOLS_PATH
 build:esp32c5 --action_env=PATH
+
+# Separate C5 BLE controller-init image. The ordinary esp32c5 profile and
+# selftest firmware remain unchanged.
+build:esp32c5_ble --config=esp32c5
+build:esp32c5_ble --//configs:ble_profile=controller_init
+build:esp32c5_ble --copt=-DSHIZUKU_C5_BLE=1

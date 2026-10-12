@@ -14,6 +14,7 @@ BaseType_t xSemaphoreTakeFromISR(SemaphoreHandle_t, BaseType_t *);
 BaseType_t xSemaphoreGive(SemaphoreHandle_t);
 BaseType_t xSemaphoreGiveRecursive(SemaphoreHandle_t);
 BaseType_t xSemaphoreGiveFromISR(SemaphoreHandle_t, BaseType_t *);
+UBaseType_t uxSemaphoreGetCount(SemaphoreHandle_t);
 #ifdef __cplusplus
 }
 #endif

@@ -1,13 +1,14 @@
 #ifndef SHIZUKU_ESP_IDF_FREERTOS_SHIZUKU_PORT_HPP
 #define SHIZUKU_ESP_IDF_FREERTOS_SHIZUKU_PORT_HPP
 #include "compat.hpp"
-#include "../../../internal_headers/shizuku/object_api.hpp"
+#include "shizuku/object_api.hpp"
 
 namespace shizuku::freertos_compat {
 class shizuku_port final : public port {
  public:
   using host_syscall_hook = uintptr_t (*)(shizuku::object_api,uintptr_t,uintptr_t,uintptr_t,uintptr_t *);
   enum : uint32_t { kStartTask=1, kReadClock=2, kHandshake=3 };
+  static constexpr uint32_t kFirstPlainTaskObject = 48;
   static constexpr uintptr_t kHandshakeReply=0x46525453u; // "FRTS"
   static constexpr uint32_t kKernelThreadStackBytes=4096;
   struct task_start { uint32_t operation, id, priority, stack_depth_bytes; void (*entry)(void *); void *arg; };
@@ -39,13 +40,14 @@ class shizuku_port final : public port {
   static uintptr_t call(shizuku::object_api api, uintptr_t a1=0, uintptr_t a2=0, uintptr_t a3=0,
                         uintptr_t *value=nullptr);
  private:
-  uint32_t handler_object_ = 0;
+  uint32_t handler_object_ = 0; // zero selects PLAIN task objects
   uint32_t dispatch_method_ = 0;
   uint32_t tick_hz_ = 100;
   domain *domain_ = nullptr;
   static constexpr size_t kStartSlots = kMaxTasks;
   task_start starts_[kStartSlots]{};
   uintptr_t call_handler(task_start *packet);
+  static void plain_task_entry(void *raw);
 };
 } // namespace shizuku::freertos_compat
 #endif

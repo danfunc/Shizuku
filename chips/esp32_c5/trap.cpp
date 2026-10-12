@@ -15,6 +15,26 @@ volatile uint32_t shizuku_c5_trap_diag[5];
 // SYSTIMER IRQ count, max IRQ depth, pend/switch count, last oneshot ticks,
 // last IRQ mcause, clicint readback after init, pend_context_switch calls.
 volatile uint32_t shizuku_c5_timer_diag[7];
+// [0] dispatched IRQ count, [1] last raw mcause, [2] CPU IRQ number,
+// [3] peripheral source, [4] result (1=dispatched, 0=unregistered fatal).
+volatile uint32_t shizuku_c5_irq_diag[5];
+// Last interrupt setup snapshot: mstatus before masking, mintthresh,
+// configured CLIC index, and final CLIC control word.
+volatile uint32_t shizuku_c5_irq_control_diag[4];
+struct c5_irq_registration {
+  uint32_t source;
+  uint32_t cpu_irq;
+  shizuku::chips::esp32_c5::irq_handler_t handler;
+  void *arg;
+  bool enabled;
+  uint32_t dispatch_count;
+  uint32_t flags;
+  uint32_t matrix_readback;
+  uint32_t clic_readback;
+};
+static_assert(sizeof(c5_irq_registration) == 9 * sizeof(uint32_t),
+              "OpenOCD IRQ table layout must stay nine words per source");
+c5_irq_registration shizuku_c5_irq_registrations[16];
 void shizuku_c5_vector_table();
 void shizuku_c5_mtvt_table();
 extern char _bss_end;
@@ -24,11 +44,24 @@ uint32_t active_mstatus;
 volatile uint32_t pend_flag;
 uint64_t armed_target;
 namespace c5 = shizuku::ports::c5;
+extern "C" void shizuku_freertos_compat_isr_enter(void) __attribute__((weak));
+extern "C" void shizuku_freertos_compat_isr_exit(void) __attribute__((weak));
 inline void reg_write(uint32_t address, uint32_t value) {
   *reinterpret_cast<volatile uint32_t *>(address) = value;
 }
 inline uint32_t reg_read(uint32_t address) {
   return *reinterpret_cast<volatile uint32_t *>(address);
+}
+void note_irq_control(uint32_t mstatus_before_mask, uint32_t clic_index,
+                      uint32_t clic_readback) {
+  uint32_t mintthresh = 0;
+#if defined(__riscv)
+  asm volatile("csrr %0, 0x347" : "=r"(mintthresh));
+#endif
+  shizuku_c5_irq_control_diag[0] = mstatus_before_mask;
+  shizuku_c5_irq_control_diag[1] = mintthresh;
+  shizuku_c5_irq_control_diag[2] = clic_index;
+  shizuku_c5_irq_control_diag[3] = clic_readback;
 }
 uint64_t systimer_now() {
   reg_write(c5::SYSTIMER_UNIT0_OP, c5::UNIT0_OP_UPDATE);
@@ -88,6 +121,27 @@ void context_to_frame(arch::context_t &c) {
   // Actual U-mode is not safe before PMP and a trusted U-entry stack exist.
   if (!c.privileged) stop(0xE004);
 }
+bool dispatch_peripheral_irq(uint32_t cpu_irq, uint32_t raw_mcause) {
+  for (auto &entry : shizuku_c5_irq_registrations) {
+    if (entry.handler && entry.enabled && entry.cpu_irq == cpu_irq) {
+      shizuku_c5_irq_diag[0] = shizuku_c5_irq_diag[0] + 1;
+      entry.dispatch_count = entry.dispatch_count + 1u;
+      shizuku_c5_irq_diag[1] = raw_mcause;
+      shizuku_c5_irq_diag[2] = cpu_irq;
+      shizuku_c5_irq_diag[3] = entry.source;
+      shizuku_c5_irq_diag[4] = 1;
+      if (shizuku_freertos_compat_isr_enter) shizuku_freertos_compat_isr_enter();
+      entry.handler(entry.arg);
+      if (shizuku_freertos_compat_isr_exit) shizuku_freertos_compat_isr_exit();
+      return true;
+    }
+  }
+  shizuku_c5_irq_diag[1] = raw_mcause;
+  shizuku_c5_irq_diag[2] = cpu_irq;
+  shizuku_c5_irq_diag[3] = UINT32_MAX;
+  shizuku_c5_irq_diag[4] = 0;
+  return false;
+}
 }
 namespace {
 // The trapped thread was already saved by the caller; run the deferred switch after it.
@@ -126,16 +180,23 @@ extern "C" arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_f
   }, [&] {
     // MIE is clear inside traps, so IRQs cannot nest: depth is exactly 1.
     if (shizuku_c5_trap_depth != 1 || shizuku_c5_irq_depth != 1) stop(0xE009);
-    if ((frame->mcause & c5::MCAUSE_EXCCODE_MASK) != c5::TIMER_CLIC_INDEX) stop(0xE001);
+    const uint32_t clic_index = frame->mcause & c5::MCAUSE_EXCCODE_MASK;
     if ((frame->mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) stop(0xE004);
-    shizuku_c5_timer_diag[0] = shizuku_c5_timer_diag[0] + 1;
-    if (shizuku_c5_irq_depth > shizuku_c5_timer_diag[1]) shizuku_c5_timer_diag[1] = shizuku_c5_irq_depth;
-    shizuku_c5_timer_diag[4] = frame->mcause;
-    reg_write(c5::SYSTIMER_INT_CLR, c5::TARGET0_INT_BIT);
     auto &kernel = shizuku::kernel_instance;
     auto *context = kernel.current_context();
     frame_to_context(*frame, *context);
-    kernel.timer_expired();
+    if (clic_index == c5::TIMER_CLIC_INDEX) {
+      shizuku_c5_timer_diag[0] = shizuku_c5_timer_diag[0] + 1;
+      if (shizuku_c5_irq_depth > shizuku_c5_timer_diag[1]) shizuku_c5_timer_diag[1] = shizuku_c5_irq_depth;
+      shizuku_c5_timer_diag[4] = frame->mcause;
+      reg_write(c5::SYSTIMER_INT_CLR, c5::TARGET0_INT_BIT);
+      kernel.timer_expired();
+    } else {
+      if (clic_index < c5::CLIC_EXT_OFFSET || clic_index >= c5::CLIC_EXT_OFFSET + 32u)
+        stop(0xE011);
+      const uint32_t cpu_irq = clic_index - c5::CLIC_EXT_OFFSET;
+      if (!dispatch_peripheral_irq(cpu_irq, frame->mcause)) stop(0xE012);
+    }
     run_pending_switch();
     context = kernel.current_context();
     context_to_frame(*context);
@@ -156,6 +217,82 @@ void install_traps() { ::install_traps(); }
 void interrupt_init() { ::interrupt_init(); }
 [[noreturn]] void stop(uint32_t status) { ::stop(status); }
 uint64_t systimer_now() { return ::systimer_now(); }
+int irq_register(uint32_t source, uint32_t cpu_irq, irq_handler_t handler, void *arg,
+                 uint32_t flags, bool enabled, uint32_t level, bool edge) {
+  if (source >= 128u || cpu_irq < 16u || cpu_irq >= 32u ||
+      cpu_irq == c5::TIMER_CPU_INT || !handler) return -1;
+  uintptr_t old_mstatus = 0;
+  asm volatile("csrrc %0, mstatus, %1" : "=r"(old_mstatus) : "r"(uintptr_t{8}) : "memory");
+  c5_irq_registration *free_entry = nullptr;
+  for (auto &entry : shizuku_c5_irq_registrations) {
+    if (entry.handler && (entry.source == source || entry.cpu_irq == cpu_irq)) {
+      asm volatile("csrw mstatus, %0" :: "r"(old_mstatus) : "memory");
+      return -2;
+    }
+    if (!entry.handler && !free_entry) free_entry = &entry;
+  }
+  if (!free_entry) {
+    asm volatile("csrw mstatus, %0" :: "r"(old_mstatus) : "memory");
+    return -3;
+  }
+  free_entry->source = source;
+  free_entry->cpu_irq = cpu_irq;
+  free_entry->handler = handler;
+  free_entry->arg = arg;
+  free_entry->enabled = enabled;
+  free_entry->dispatch_count = 0;
+  free_entry->flags = flags;
+  const uint32_t clic_index = c5::clic_index_for_external_irq(cpu_irq);
+  reg_write(c5::INTMTX_BASE + 4u * source, clic_index);
+  reg_write(c5::clic_ctrl_reg(clic_index),
+            c5::clicint_value(level, enabled, edge));
+  asm volatile("fence iorw, iorw" ::: "memory");
+  free_entry->matrix_readback = reg_read(c5::INTMTX_BASE + 4u * source);
+  free_entry->clic_readback = reg_read(c5::clic_ctrl_reg(clic_index));
+  note_irq_control(static_cast<uint32_t>(old_mstatus), clic_index, free_entry->clic_readback);
+  asm volatile("csrw mstatus, %0" :: "r"(old_mstatus) : "memory");
+  return 0;
+}
+int irq_set_enabled(uint32_t source, uint32_t cpu_irq, irq_handler_t handler, void *arg,
+                    bool enabled) {
+  uintptr_t old_mstatus = 0;
+  asm volatile("csrrc %0, mstatus, %1" : "=r"(old_mstatus) : "r"(uintptr_t{8}) : "memory");
+  for (auto &entry : shizuku_c5_irq_registrations) {
+    if (entry.source != source || entry.cpu_irq != cpu_irq ||
+        entry.handler != handler || entry.arg != arg) continue;
+    const uint32_t clic_index = c5::clic_index_for_external_irq(cpu_irq);
+    reg_write(c5::clic_ctrl_reg(clic_index),
+              c5::clicint_value(entry.clic_readback >> 29 & 7u, enabled,
+                                (entry.clic_readback & c5::CLICINT_ATTR_EDGE) != 0));
+    entry.enabled = enabled;
+    asm volatile("fence iorw, iorw" ::: "memory");
+    entry.matrix_readback = reg_read(c5::INTMTX_BASE + 4u * source);
+    entry.clic_readback = reg_read(c5::clic_ctrl_reg(clic_index));
+    note_irq_control(static_cast<uint32_t>(old_mstatus), clic_index, entry.clic_readback);
+    asm volatile("csrw mstatus, %0" :: "r"(old_mstatus) : "memory");
+    return 0;
+  }
+  asm volatile("csrw mstatus, %0" :: "r"(old_mstatus) : "memory");
+  return -1;
+}
+int irq_unregister(uint32_t source, uint32_t cpu_irq, irq_handler_t handler, void *arg) {
+  uintptr_t old_mstatus = 0;
+  asm volatile("csrrc %0, mstatus, %1" : "=r"(old_mstatus) : "r"(uintptr_t{8}) : "memory");
+  for (auto &entry : shizuku_c5_irq_registrations) {
+    if (entry.source == source && entry.cpu_irq == cpu_irq &&
+        entry.handler == handler && entry.arg == arg) {
+      reg_write(c5::clic_ctrl_reg(cpu_irq + c5::CLIC_EXT_OFFSET),
+                c5::clicint_value(c5::TIMER_PRIORITY, false));
+      reg_write(c5::INTMTX_BASE + 4u * source, 0);
+      entry = {};
+      asm volatile("fence iorw, iorw" ::: "memory");
+      asm volatile("csrw mstatus, %0" :: "r"(old_mstatus) : "memory");
+      return 0;
+    }
+  }
+  asm volatile("csrw mstatus, %0" :: "r"(old_mstatus) : "memory");
+  return -1;
+}
 void clic_direct_mode::timer_oneshot(uint32_t cycles) {
   systimer_disarm();
   const uint64_t target = c5::alarm_target(systimer_now(), cycles);
@@ -191,3 +328,10 @@ bool clic_direct_mode::current_priv() {
     (active_mstatus & RV32_MSTATUS_MPP) == RV32_MSTATUS_MPP;
 }
 } // namespace shizuku::chips::esp32_c5
+
+// FreeRTOS ISR-yield shim hook. Called from the C5 peripheral trap after an
+// ISR notification unblocks a higher-priority Shizuku task; the ordinary
+// trap-exit path consumes this deferred switch request.
+extern "C" void shizuku_c5_pend_compat_context_switch(void) {
+  shizuku::chips::esp32_c5::clic_direct_mode::pend_context_switch();
+}

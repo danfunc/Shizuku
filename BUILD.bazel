@@ -41,6 +41,13 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+# Headers included by the IDF-side C5 compatibility implementation.
+filegroup(
+    name = "esp_idf_support_headers",
+    srcs = ["internal_headers/shizuku/object_api.hpp"],
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "internal_headers",
     hdrs = glob(["internal_headers/**/*.hpp"]),
@@ -178,6 +185,30 @@ cc_library(
         "//chips/esp32_c5:c5_vectors.S",
         "//chips/esp32_c5:selftest_adapter.cpp",
         "//modules/esp_idf_support/c5:selftest_runner.cpp",
+    ],
+    target_compatible_with = ["@platforms//cpu:riscv32"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":internal_headers",
+        "//configs:config",
+        "//arch/riscv:pmp",
+        "//chips/esp32_c5:headers",
+        "//boards/esp32_c5:headers",
+    ],
+)
+
+# Minimal C5 BLE controller-init archive: keep the same kernel/object/trap
+# implementation, but omit the C5 selftest ladders and their record runner.
+cc_library(
+    name = "shizuku_kernel_c5_ble",
+    srcs = KERNEL_SRCS + KERNEL_OBJECT_SRCS + [
+        "source/memory_manager/freestanding.cpp",
+        "//modules/esp_idf_support/c5:early_boot.cpp",
+        "//modules/esp_idf_support/c5:link_stubs.cpp",
+        "//chips/esp32_c5:trap.cpp",
+        "//boards/esp32_c5:board_esp32_c5.cpp",
+        "//boards/esp32_c5:board_esp32_c5_stubs.cpp",
+        "//chips/esp32_c5:c5_vectors.S",
     ],
     target_compatible_with = ["@platforms//cpu:riscv32"],
     visibility = ["//visibility:public"],

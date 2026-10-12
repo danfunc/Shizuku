@@ -139,7 +139,11 @@ template <> uintptr_t KERNEL_OBJECT::handler_entry() {
 //   (オブジェクトランド) で、置き場所の条件はカーネルが検査する。
 static_assert(sizeof(KERNEL::call_ledger_entry) == 16,
               "call ledger entry must be 16 bytes on supported targets");
+#if defined(SHIZUKU_C5_BLE)
+alignas(8) static uint8_t g_bookkeeping_storage[16 * 1024];
+#else
 alignas(8) static uint8_t g_bookkeeping_storage[65536];
+#endif
 static_assert(KERNEL::thread_record_bytes() * KERNEL_OBJECT::THREAD_COUNT +
                   sizeof(KERNEL_OBJECT::block) + KERNEL_OBJECT::BLOCK_ALIGN - 1 +
                   KERNEL_OBJECT::THREAD_COUNT *
@@ -188,7 +192,11 @@ template <> void KERNEL_OBJECT::init() {
   kernel_instance.set_thread_storage((void *)table, table_bytes);
 
   // オブジェクト用 arena: 非特権からも届く必要があるのでヒープ側から取る。
+#if defined(SHIZUKU_C5_BLE)
+  constexpr uintptr_t OBJECT_ARENA_BYTES = 56 * 1024;
+#else
   constexpr uintptr_t OBJECT_ARENA_BYTES = 128 * 1024;
+#endif
   auto heap = kernel_instance.memory_manager.kernel_malloc(OBJECT_ARENA_BYTES);
   if (!heap)
     KERNEL::BOARD::panic("no room for the object arena");

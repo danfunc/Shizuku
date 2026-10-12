@@ -21,12 +21,27 @@ test -n "${IDF_PATH:-}" || fail "IDF_PATH が未設定 (--action_env=IDF_PATH �
 test -n "${IDF_TOOLS_PATH:-}" || fail "IDF_TOOLS_PATH が未設定 (--action_env=IDF_TOOLS_PATH が要る)"
 ARCHIVE=$(abspath "$1")
 OUT=$(abspath "$2")
+ELF_OUT=""
+if test -n "${6:-}"; then ELF_OUT=$(abspath "$6"); fi
+MAP_OUT=""
+if test -n "${7:-}"; then MAP_OUT=$(abspath "$7"); fi
 IDF_PATH=$(abspath "$IDF_PATH")
 IDF_TOOLS_PATH=$(abspath "$IDF_TOOLS_PATH")
 export IDF_PATH IDF_TOOLS_PATH
 WANT_GCC=$3
 TARGET=${4:-esp32c6}
+PROFILE=${5:-}
 case "$TARGET" in esp32c6|esp32c5) ;; *) fail "未対応の IDF target: $TARGET" ;; esac
+IDF_PROFILE_ARGS=()
+case "$PROFILE" in
+  "") ;;
+  ble)
+    test "$TARGET" = esp32c5 || fail "ble profile は esp32c5 専用"
+    export SHIZUKU_C5_BLE=1
+    IDF_PROFILE_ARGS+=("-DSHIZUKU_C5_BLE=ON")
+    ;;
+  *) fail "未対応の firmware profile: $PROFILE" ;;
+esac
 SRC=$(cd -P "$(dirname "$0")" && pwd)
 
 test -s "$ARCHIVE" || fail "カーネルのアーカイブが無い/空: $ARCHIVE"
@@ -56,7 +71,13 @@ mkdir -p "$(dirname "$OUT")"
 BUILD_DIR=$(mktemp -d "$OUT.idf.XXXXXX")
 # ★sdkconfig / sdkconfig.old は BUILD_DIR 配下へ出す (SRC は Bazel の入力ツリーなので汚さない)。
 cd "$SRC"
-idf.py -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" -DSHIZUKU_KERNEL_ARCHIVE="$ARCHIVE" set-target "$TARGET" > "$BUILD_DIR.set-target.log" 2>&1 || fail "idf.py set-target 失敗 ($BUILD_DIR.set-target.log)"
-idf.py -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" -DSHIZUKU_KERNEL_ARCHIVE="$ARCHIVE" -DIDF_TARGET="$TARGET" build || fail "idf.py build 失敗"
+idf.py -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" -DSHIZUKU_KERNEL_ARCHIVE="$ARCHIVE" "${IDF_PROFILE_ARGS[@]}" set-target "$TARGET" > "$BUILD_DIR.set-target.log" 2>&1 || fail "idf.py set-target 失敗 ($BUILD_DIR.set-target.log)"
+if test "$PROFILE" = ble; then
+  grep -qx 'CONFIG_BT_ENABLED=y' "$BUILD_DIR/sdkconfig" || fail "BLE profile sdkconfig で CONFIG_BT_ENABLED が有効でない ($BUILD_DIR/sdkconfig)"
+  grep -qx 'CONFIG_BT_NIMBLE_ENABLED=y' "$BUILD_DIR/sdkconfig" || fail "BLE profile sdkconfig で CONFIG_BT_NIMBLE_ENABLED が有効でない ($BUILD_DIR/sdkconfig)"
+fi
+idf.py -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" -DSHIZUKU_KERNEL_ARCHIVE="$ARCHIVE" -DIDF_TARGET="$TARGET" "${IDF_PROFILE_ARGS[@]}" build || fail "idf.py build 失敗"
 cp "$BUILD_DIR/shizuku_$TARGET.bin" "$OUT"
+if test -n "$ELF_OUT"; then cp "$BUILD_DIR/shizuku_$TARGET.elf" "$ELF_OUT"; fi
+if test -n "$MAP_OUT"; then cp "$BUILD_DIR/shizuku_$TARGET.map" "$MAP_OUT"; fi
 echo "OK($TARGET): $IDF_VER / $GCC_BANNER -> $OUT"

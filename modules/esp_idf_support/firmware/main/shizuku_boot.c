@@ -24,10 +24,24 @@
 #endif
 
 __attribute__((noreturn)) void SHIZUKU_EARLY_BOOT(void);
+#if CONFIG_IDF_TARGET_ESP32C5 && defined(SHIZUKU_C5_BLE)
+int shizuku_c5_ble_pre_core(void);
+void shizuku_c5_ble_post_core_ctors(void);
+extern void __libc_init_array(void);
+#endif
 
 __attribute__((noreturn)) void start_cpu0(void)
 {
     shizuku_c6_early_diag_begin();
+#if CONFIG_IDF_TARGET_ESP32C5 && defined(SHIZUKU_C5_BLE)
+    if (!shizuku_c5_ble_pre_core()) {
+        // Let Shizuku bootstrap so the failure path can idle through SLEEP_US;
+        // libc constructors are skipped because CORE init did not complete.
+        SHIZUKU_EARLY_BOOT();
+    }
+    __libc_init_array();
+    shizuku_c5_ble_post_core_ctors();
+#endif
     SHIZUKU_EARLY_BOOT();
 }
 

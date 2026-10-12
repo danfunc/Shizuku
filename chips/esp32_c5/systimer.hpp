@@ -15,6 +15,11 @@ constexpr uint32_t INTMTX_SYSTIMER_TARGET0_MAP = INTMTX_BASE + 4 * SYSTIMER_TARG
 // CLIC の割込み番号 0..15 は内部、16..47 が外部 (CLIC_EXT_INTR_NUM_OFFSET=16)。
 // 外部線 17 を使う (C6 の TIMER_CPU_INT=17 と同じ番号)。matrix へ書く値と clicint の添字は +16 した値。
 constexpr uint32_t CLIC_EXT_OFFSET = 16;
+constexpr uint32_t clic_index_for_external_irq(uint32_t cpu_irq) {
+  return cpu_irq + CLIC_EXT_OFFSET;
+}
+static_assert(clic_index_for_external_irq(18) == 34 &&
+              clic_index_for_external_irq(31) == 47);
 constexpr uint32_t TIMER_CPU_INT = 17;
 constexpr uint32_t TIMER_CLIC_INDEX = CLIC_EXT_OFFSET + TIMER_CPU_INT;  // = 33 = mcause の exccode
 constexpr uint32_t MCAUSE_EXCCODE_MASK = 0xFFFu;  // CLIC では mcause に mpp/mpie/mpil が載る
@@ -31,8 +36,10 @@ constexpr uint32_t MTVEC_MODE_CLIC = 3;
 constexpr uint32_t clic_ctrl_reg(uint32_t index) { return CLIC_CTRL_BASE + 4 * index; }
 constexpr uint32_t CLICINT_IE = 1u << 8;
 constexpr uint32_t CLICINT_ATTR_MODE_M = 3u << 22;  // machine mode; trig=0 (level), shv=0 (non-vectored)
-constexpr uint32_t clicint_value(uint32_t level, bool enable) {
-  return (clic_level_byte(level) << 24) | CLICINT_ATTR_MODE_M | (enable ? CLICINT_IE : 0u);
+constexpr uint32_t CLICINT_ATTR_EDGE = 1u << 21;  // trig=01 (rising edge), shv=0
+constexpr uint32_t clicint_value(uint32_t level, bool enable, bool edge = false) {
+  return (clic_level_byte(level) << 24) | CLICINT_ATTR_MODE_M |
+         (edge ? CLICINT_ATTR_EDGE : 0u) | (enable ? CLICINT_IE : 0u);
 }
 
 constexpr uint32_t SYSTIMER_CONF = SYSTIMER_BASE + 0x0;

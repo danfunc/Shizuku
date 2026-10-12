@@ -22,7 +22,7 @@ genrule(
     target_compatible_with = ["@platforms//cpu:riscv32"],
 )
 
-# ESP32-C5: 同じ firmware project を IDF target だけ替えて作る (build.sh の第 4 引数)。
+# ESP32-C5: BLE profile builds the NimBLE GATT advertiser using its isolated sdkconfig.
 #   bazelisk build --config=esp32c5 //modules/esp_idf_support/firmware:esp32c5
 genrule(
     name = "esp32c5",
@@ -41,7 +41,33 @@ genrule(
     target_compatible_with = ["@platforms//cpu:riscv32"],
 )
 
+genrule(
+    name = "esp32c5_ble",
+    srcs = [
+        "//:shizuku_kernel_c5_ble",
+        ":esp32c6_project",
+    ],
+    outs = ["shizuku_esp32c5_ble.bin", "shizuku_esp32c5_ble.elf", "shizuku_esp32c5_ble.map"],
+    cmd = "ARCHIVE=; for f in $(locations //:shizuku_kernel_c5_ble); do case $$f in *libshizuku_kernel_c5_ble.a) ARCHIVE=$$f;; esac; done;" +
+          " $(location build.sh) $$ARCHIVE $(location shizuku_esp32c5_ble.bin) esp-15.2.0_20251204 esp32c5 ble $(location shizuku_esp32c5_ble.elf) $(location shizuku_esp32c5_ble.map)",
+    tools = ["build.sh"],
+    tags = ["local", "no-sandbox"],
+    target_compatible_with = ["@platforms//cpu:riscv32"],
+)
+
 filegroup(
     name = "esp32c6_project",
-    srcs = glob(["CMakeLists.txt", "sdkconfig.defaults", "sdkconfig.defaults.esp32c5", "main/*"]),
+    srcs = glob(["CMakeLists.txt", "sdkconfig.defaults", "sdkconfig.defaults.esp32c5", "sdkconfig.defaults.esp32c5.ble", "main/*"]) + [
+        "//modules/esp_idf_support/radio:c5_intr_alloc.cpp",
+        "//modules/esp_idf_support/radio:c5_libc_lock_diag.cpp",
+        "//modules/esp_idf_support/radio:osi_sync.hpp",
+        "//chips/esp32_c5:trap_api.hpp",
+        "//modules/esp_idf_support/freertos_compat:compat.cpp",
+        "//modules/esp_idf_support/freertos_compat:freertos_api.cpp",
+        "//modules/esp_idf_support/freertos_compat:shizuku_port.cpp",
+        "//modules/esp_idf_support/freertos_compat:compat.hpp",
+        "//modules/esp_idf_support/freertos_compat:shizuku_port.hpp",
+        "//modules/esp_idf_support/freertos_compat:freertos_headers",
+        "//:esp_idf_support_headers",
+    ],
 )

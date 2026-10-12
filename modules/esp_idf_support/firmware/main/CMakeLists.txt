@@ -1,4 +1,83 @@
-idf_component_register(SRCS "shizuku_boot.c" "usb_console.c" "early_diag.c" PRIV_REQUIRES esp_hal_usb esp_hal_wdt esp_rom soc)
+if(SHIZUKU_C5_BLE OR "$ENV{SHIZUKU_C5_BLE}" STREQUAL "1")
+  set(shizuku_c5_ble_extra_srcs "")
+  if("$ENV{SHIZUKU_C5_LIBC_LOCK_DIAG_WRAP}" STREQUAL "1")
+    list(APPEND shizuku_c5_ble_extra_srcs "../../radio/c5_libc_lock_diag.cpp")
+  endif()
+  idf_component_register(
+      SRCS "shizuku_boot.c" "usb_console.c" "early_diag.c"
+           "c5_ble_stage1.cpp"
+           "../../radio/c5_intr_alloc.cpp"
+           ${shizuku_c5_ble_extra_srcs}
+           "../../freertos_compat/compat.cpp"
+           "../../freertos_compat/freertos_api.cpp"
+           "../../freertos_compat/shizuku_port.cpp"
+      PRIV_REQUIRES esp_hal_usb esp_hal_wdt esp_rom soc heap bt esp_system esp_libc esp_timer nvs_flash log esp_hw_support esp_app_format)
+else()
+  idf_component_register(SRCS "shizuku_boot.c" "usb_console.c" "early_diag.c"
+                         PRIV_REQUIRES esp_hal_usb esp_hal_wdt esp_rom soc)
+endif()
+if(SHIZUKU_C5_BLE OR "$ENV{SHIZUKU_C5_BLE}" STREQUAL "1")
+  target_compile_definitions(${COMPONENT_LIB} PRIVATE SHIZUKU_C5_BLE=1 SHIZUKU_FREERTOS_COMPAT_TINY=1 SHIZUKU_FREERTOS_LINK_WRAP=1)
+  if("$ENV{SHIZUKU_C5_MUTEX_SELF_RETAKE_FAILFAST}" STREQUAL "1")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE SHIZUKU_C5_MUTEX_SELF_RETAKE_FAILFAST=1)
+  endif()
+  target_include_directories(${COMPONENT_LIB} BEFORE PRIVATE
+      "${CMAKE_CURRENT_LIST_DIR}/../../freertos_compat/include"
+      "${CMAKE_CURRENT_LIST_DIR}/../../freertos_compat"
+      "${CMAKE_CURRENT_LIST_DIR}/../../radio"
+      "${CMAKE_CURRENT_LIST_DIR}/../../../../internal_headers")
+  target_include_directories(${COMPONENT_LIB} PRIVATE
+      "${CMAKE_CURRENT_LIST_DIR}/../../../../chips/esp32_c5")
+  target_link_options(${COMPONENT_LIB} INTERFACE
+      "-Wl,--wrap=esp_intr_alloc" "-Wl,--wrap=esp_intr_free"
+      "-Wl,--wrap=esp_intr_enable" "-Wl,--wrap=esp_intr_disable")
+  target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=heap_caps_malloc")
+  target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--undefined=shizuku_c5_ble_stage1_start")
+  target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,-Map=${CMAKE_BINARY_DIR}/shizuku_esp32c5.map")
+  set(shizuku_freertos_wraps
+      xPortInIsrContext portENTER_CRITICAL portEXIT_CRITICAL portENTER_CRITICAL_ISR portEXIT_CRITICAL_ISR
+      vPortEnterCritical vPortExitCritical vPortClearInterruptMaskFromISR
+      vPortYield vPortYieldFromISR xPortSetInterruptMaskFromISR
+      vTaskSetTimeOutState vTaskInternalSetTimeOutState xTaskCheckForTimeOut xQueueSemaphoreTake
+      pcTaskGetName pvTaskGetThreadLocalStoragePointer ulTaskGenericNotifyTake
+      uxQueueMessagesWaitingFromISR uxQueueSpacesAvailable vListInitialise
+      vQueueDelete vQueueDeleteWithCaps vSemaphoreDeleteWithCaps vTaskDelete
+      vTaskGenericNotifyGiveFromISR vTaskGetSnapshot vTaskPlaceOnEventList
+      vTaskPrioritySet vTaskSetThreadLocalStoragePointerAndDelCallback vTaskSuspendAll
+      xQueueCreateCountingSemaphore xQueueCreateCountingSemaphoreStatic
+      xQueueCreateMutex xQueueCreateMutexStatic xQueueGenericCreate
+      xQueueGenericCreateStatic xQueueGenericReset xQueueGenericSend
+      xQueueGenericSendFromISR xQueueGetMutexHolder xQueueGetMutexHolderFromISR
+      xQueueGiveFromISR xQueueGiveMutexRecursive xQueueTakeMutexRecursive
+      xSemaphoreCreateGenericWithCaps xTaskGenericNotify xTaskGenericNotifyWait
+      xTaskGetCoreID xTaskGetCurrentTaskHandleForCore xTaskGetIdleTaskHandleForCore
+      xTaskRemoveFromEventList xTaskResumeAll xTaskGenericNotifyFromISR
+      xTaskGenericNotifyStateClear
+      ulTaskGenericNotifyValueClear
+      xTaskCreate xTaskCreatePinnedToCore xTaskCreatePinnedToCoreWithCaps vTaskDelay taskYIELD
+      uxTaskPriorityGet xTaskGetTickCount xTaskGetTickCountFromISR xTaskGetCurrentTaskHandle
+      xTaskGetSchedulerState vTaskSuspend vTaskResume xTaskResumeFromISR
+      xQueueCreate xQueueCreateWithCaps xQueueSend xQueueSendToBack xQueueSendToFront
+      xQueueSendFromISR xQueueSendToBackFromISR xQueueSendToFrontFromISR xQueueReceive
+      xQueueReceiveFromISR uxQueueMessagesWaiting xQueueIsQueueEmptyFromISR
+      xSemaphoreCreateBinary xSemaphoreCreateCounting xSemaphoreCreateMutex
+      xSemaphoreCreateRecursiveMutex xSemaphoreTake xSemaphoreTakeRecursive
+      xSemaphoreTakeFromISR xSemaphoreGive xSemaphoreGiveRecursive xSemaphoreGiveFromISR
+      uxSemaphoreGetCount xEventGroupCreate xEventGroupSetBits xEventGroupClearBits
+      xEventGroupWaitBits xTimerCreate xTimerStart xTimerStartFromISR xTimerStop
+      xTimerReset xTimerDelete xTimerChangePeriod xTimerResetFromISR xTimerStopFromISR
+      xTimerChangePeriodFromISR xTimerGetExpiryTime xTimerIsTimerActive pvTimerGetTimerID)
+  if("$ENV{SHIZUKU_C5_LIBC_LOCK_DIAG_WRAP}" STREQUAL "1")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE SHIZUKU_C5_LIBC_LOCK_DIAG_WRAP=1)
+    list(APPEND shizuku_freertos_wraps
+        _lock_acquire _lock_acquire_recursive _lock_try_acquire _lock_try_acquire_recursive
+        __retarget_lock_acquire __retarget_lock_acquire_recursive
+        __retarget_lock_try_acquire __retarget_lock_try_acquire_recursive)
+  endif()
+  foreach(api IN LISTS shizuku_freertos_wraps)
+    target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=${api}")
+  endforeach()
+endif()
 
 # ★カーネルのアーカイブを「リンクした」だけでは中身が入らない。2 段の落とし穴がある:
 #   1. 通常のリンクは、参照されないメンバーを抽出しない → WHOLE_ARCHIVE で全部抽出する。

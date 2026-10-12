@@ -28,6 +28,12 @@ string_flag(
     visibility = ["//visibility:public"],
 )
 string_flag(
+    name = "ble_profile",
+    build_setting_default = "disabled",
+    values = ["disabled", "controller_init"],
+    visibility = ["//visibility:public"],
+)
+string_flag(
     name = "bootsel_support",
     build_setting_default = "disabled",
     values = ["disabled", "enabled"],
@@ -96,6 +102,14 @@ config_setting(
     visibility = ["//visibility:public"],
 )
 config_setting(
+    name = "esp32_c5_ble",
+    flag_values = {
+        ":board": "esp32_c5",
+        ":ble_profile": "controller_init",
+    },
+    visibility = ["//visibility:public"],
+)
+config_setting(
     name = "esp32_c6",
     flag_values = {
         ":board": "esp32_c6",
@@ -156,6 +170,8 @@ expand_template(
         ":esp32_c6": config_substitutions("rv32_c6", "esp32_c6", "esp32_c6"),
         # ESP32-C5 (未完成・fail-closed)
         ":esp32_c5": config_substitutions("rv32_c5", "esp32_c5", "esp32_c5"),
+        # ESP32-C5 BLE controller-init memory profile; app/selftest profile remains unchanged.
+        ":esp32_c5_ble": config_substitutions("rv32_c5", "esp32_c5", "esp32_c5", ble = True),
     }),
     template = "config_template.hpp.in",
 )
@@ -170,6 +186,7 @@ cc_library(
     ] + select({
         ":esp32_c6": ["//chips/esp32_c6:headers", "//boards/esp32_c6:headers"],
         ":esp32_c5": ["//chips/esp32_c5:headers", "//boards/esp32_c5:headers"],
+        ":esp32_c5_ble": ["//chips/esp32_c5:headers", "//boards/esp32_c5:headers"],
         ":rp2040": ["//chips/rp2040:headers", "//modules/pico_sdk_support:headers"],
         ":rp2350": ["//chips/rp2350:headers", "//modules/pico_sdk_support:headers"],
         "//conditions:default": ["//modules/pico_sdk_support:headers"],
