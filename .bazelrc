@@ -59,8 +59,12 @@ build:v3gw --copt=-DSHIZUKU_KERNEL_SERVICE_PROFILE=1
 
 # UF2 生成: 公式の uf2_aspect は picotool をソースビルドするが、Apple Silicon ホスト
 # では pico-sdk 2.2.0 の src/host/hardware_sync が clang builtin (__sev/__wfi/__wfe) と
-# 衝突してビルドできない (2026-08-19 実測)。代わりにローカル picotool を使う
-# //:shizuku_uf2 (genrule) で変換する。
+# 衝突してビルドできない (2026-08-19 実測、2026-10-12 に bazel_dep picotool 2.2.0 でも再現)。
+# そこで //firmware:shizuku_uf2 (genrule) は、macOS ホストではローカルの
+# /opt/picotool、それ以外 (main-lxc などの Linux worker) では Bazel 製 picotool を使う。
+# ホスト OS の判定は --enable_platform_specific_config の build:macos で行う。
+common --enable_platform_specific_config
+build:macos --define=picotool=host
 # build --aspects=@pico-sdk//tools:uf2_aspect.bzl%pico_uf2_aspect
 # build --output_groups=+pico_uf2_files
 
