@@ -46,7 +46,8 @@ depends_on = "build_rp2350_pico2_w"
 [jobs.build_esp32c5]
 worker = "main-lxc"
 backend = "bazel"
-args = ["build", "--config=esp32c5", "--jobs=2", "--action_env=CMAKE_BUILD_PARALLEL_LEVEL=2", "//modules/esp_idf_support/firmware:esp32c5"]
+# worker の ESP-IDF は bazelisk-c5 ラッパーと同じ場所を action_env で渡す。
+args = ["build", "--config=esp32c5", "--jobs=2", "--action_env=CMAKE_BUILD_PARALLEL_LEVEL=2", "--action_env=IDF_PATH=/home/ishigakiyua/.local/esp-idf-c5-v6.1", "--action_env=IDF_TOOLS_PATH=/home/ishigakiyua/.local/idf-tools-c5-v6.1", "//modules/esp_idf_support/firmware:esp32c5"]
 artifacts = ["bazel-bin/modules/esp_idf_support/firmware/shizuku_esp32c5.bin"]
 
 [jobs.flash_esp32c5]
