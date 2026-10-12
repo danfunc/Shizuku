@@ -11,6 +11,14 @@
 #include "hardware/gpio.h"
 #include "hardware/i2c.h"
 #include "hardware/spi.h"
+#if defined(SHIZUKU_ENABLE_BOOTSEL)
+#include "hardware/structs/ioqspi.h"
+#include "hardware/structs/sio.h"
+#include "hardware/sync.h"
+#include "hardware/regs/io_qspi.h"
+#include "hardware/regs/sio.h"
+#include "hardware/address_mapped.h"
+#endif
 #if defined(CYW43_WL_GPIO_LED_PIN)
 #include "pico/cyw43_arch.h" // pico2_w: LED は無線チップ側の GPIO
 #endif
@@ -75,6 +83,38 @@ uintptr_t gpio_read(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
   return ::gpio_get(request->pin) ? 1u : 0u;
 }
 
+#if defined(SHIZUKU_ENABLE_BOOTSEL)
+// BOOTSEL は QSPI CS pin を Low に引く。QSPI の出力を一時的に Hi-Z にして
+// SIO の入力値を読む間、XIP と割込みを使えないため関数全体を SRAM に置く。
+bool __no_inline_not_in_flash_func(bootsel_read_pressed)(void) {
+  constexpr uint CS_PIN_INDEX = 1;
+  const uint32_t interrupts = save_and_disable_interrupts();
+  const uint32_t saved_ctrl = ioqspi_hw->io[CS_PIN_INDEX].ctrl;
+  hw_write_masked(&ioqspi_hw->io[CS_PIN_INDEX].ctrl,
+                  GPIO_OVERRIDE_LOW << IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_LSB,
+                  IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_BITS);
+  for (uint32_t delay = 0; delay < 1000; ++delay) __asm volatile("nop");
+#if defined(SHIZUKU_RP2040)
+  constexpr uint32_t kCsBit = 1u << 1;
+#else
+  constexpr uint32_t kCsBit = SIO_GPIO_HI_IN_QSPI_CSN_BITS;
+#endif
+  const bool pressed = (sio_hw->gpio_hi_in & kCsBit) == 0;
+  hw_write_masked(&ioqspi_hw->io[CS_PIN_INDEX].ctrl,
+                  saved_ctrl,
+                  IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_BITS);
+  restore_interrupts(interrupts);
+  return pressed;
+}
+
+uintptr_t bootsel_read(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  KERNEL::BOARD::park_other_cores();
+  const bool pressed = bootsel_read_pressed();
+  KERNEL::BOARD::resume_other_cores();
+  return pressed ? 1u : 0u;
+}
+#endif
+
 uintptr_t gpio_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   uintptr_t failures = declare_name("gpio");
   failures += export_method((uintptr_t)gpio_method::CONFIGURE,
@@ -83,8 +123,13 @@ uintptr_t gpio_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
                             (uintptr_t)&gpio_write);
   failures +=
       export_method((uintptr_t)gpio_method::READ, (uintptr_t)&gpio_read);
+#if defined(SHIZUKU_ENABLE_BOOTSEL)
+  failures += export_method((uintptr_t)gpio_method::BOOTSEL_READ_PRESSED,
+                            (uintptr_t)&bootsel_read);
+#endif
   return failures; // 0 = 全部登録できた
 }
+
 
 // ---- LED ------------------------------------------------------------------
 // ★ボードによって「LED がどこにあるか」が違うので、その差をこのオブジェクトに
@@ -354,6 +399,16 @@ uintptr_t i2c_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 
 } // namespace
 
+#if defined(SHIZUKU_ENABLE_BOOTSEL)
+bool bootsel_read(bool &pressed) {
+  const call_result result = api(object_api::CALL_METHOD, GPIO_OBJECT,
+                                 (uintptr_t)gpio_method::BOOTSEL_READ_PRESSED, 0);
+  if (result.error != 0) return false;
+  pressed = result.value != 0;
+  return true;
+}
+#endif
+
 // ★led_sync_hw / led_toggle は shizuku::objects の外部リンケージに置く。anonymous
 //   namespace に置くと ble_uart.cpp からは weak の空定義が呼ばれ、poll 側の反映と
 //   OTA の toggle が黙って消える (2026-10-09 確認)。
@@ -479,6 +534,27 @@ uint32_t register_peripherals() {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   KERNEL::BOARD::boot_trace_stage(81); // 5 オブジェクトの登録完了
 #endif
+  return failures;
+}
+
+uint32_t register_gpio() {
+  const call_result created = api(object_api::CREATE_OBJECT, GPIO_OBJECT,
+                                  (uintptr_t)&gpio_main, OBJECT_PRIVILEGED);
+  const call_result started =
+      api(object_api::CALL_METHOD, GPIO_OBJECT, 0, 0);
+  const uint32_t failures = created.error != 0 || started.error != 0 ||
+                                    started.value != 0
+                                ? 1u
+                                : 0u;
+  if (failures != 0) {
+    KERNEL::BOARD::diag_printf(
+        "[PERIPH] gpio FAILED: create=%lu call=%lu exports_failed=%lu\n",
+        (unsigned long)created.error, (unsigned long)started.error,
+        (unsigned long)started.value);
+  } else {
+    KERNEL::BOARD::diag_printf("[PERIPH] gpio ready (object %lu)\n",
+                               (unsigned long)GPIO_OBJECT);
+  }
   return failures;
 }
 
