@@ -10,7 +10,11 @@ add_library(shizuku_kernel STATIC IMPORTED GLOBAL)
 set_target_properties(shizuku_kernel PROPERTIES IMPORTED_LOCATION "${SHIZUKU_KERNEL_ARCHIVE}")
 target_link_libraries(${COMPONENT_LIB} INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,shizuku_kernel>")
 
-string(REGEX REPLACE "gcc(\\.exe)?$" "nm\\1" SHIZUKU_NM "${CMAKE_C_COMPILER}")
+if(CMAKE_C_COMPILER MATCHES "gcc\\.exe$")
+  string(REGEX REPLACE "gcc\\.exe$" "nm.exe" SHIZUKU_NM "${CMAKE_C_COMPILER}")
+else()
+  string(REGEX REPLACE "gcc$" "nm" SHIZUKU_NM "${CMAKE_C_COMPILER}")
+endif()
 execute_process(
   COMMAND "${SHIZUKU_NM}" -g --defined-only -P "${SHIZUKU_KERNEL_ARCHIVE}"
   OUTPUT_VARIABLE SHIZUKU_NM_OUT RESULT_VARIABLE SHIZUKU_NM_RC)
