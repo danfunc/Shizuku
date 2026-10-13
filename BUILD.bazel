@@ -111,7 +111,19 @@ cc_library(
     name = "kernel_object",
     srcs = KERNEL_OBJECT_SRCS,
     visibility = ["//visibility:public"],
-    deps = [":kernel"],
+    deps = [":kernel"] + select({
+        "//configs:crash_record_enabled": [
+            "//modules/pico_sdk_support/objects:usb_cdc",
+        ],
+        "//conditions:default": [],
+    }),
+    local_defines = select({
+        "//configs:crash_record_enabled": [
+            "SHIZUKU_CRASH_RECORD=1",
+            "SHIZUKU_BOOT_LOG_WAIT=1",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # アプリ。★いずれ XNO 側へ移す (D17) が、今は動かす場所がここしか無い。
@@ -220,6 +232,7 @@ cc_library(
         "//boards/esp32_c5:headers",
     ],
 )
+
 
 # ESP32-C6 向けの**名前付きカーネルアーカイブ** (libshizuku_kernel.a)。
 # カーネル本体 + freestanding メモリマネージャ + pre-init ROM 起動表示 + C6 の未実装 trap stub。

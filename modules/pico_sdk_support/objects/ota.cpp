@@ -6,18 +6,22 @@
 #include "shizuku/object_api.hpp"
 #include "shizuku/objects/ble_uart.hpp"
 #include "shizuku/objects/inflate.hpp"
+#include "shizuku/objects/flash_ops.hpp"
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+#include "shizuku/objects/usb_cdc.hpp"
+#endif
 #include "shizuku/stream.hpp"
 extern "C" {
-#include "boot/picoboot_constants.h"
 #include "hardware/flash.h"
 #include "hardware/regs/addressmap.h"
-#include "hardware/structs/psm.h"
-#include "hardware/structs/sio.h"
 #include "hardware/sync.h"
 #include "hardware/uart.h"
 #include "hardware/watchdog.h"
+#if !defined(SHIZUKU_RP2040)
+#include "boot/picoboot_constants.h"
 #include "pico/bootrom.h"
-#include "pico/flash.h"
+#endif
+#include "pico/error.h"
 }
 #include <cstdint>
 #include <cstdio>
@@ -36,6 +40,15 @@ namespace {
 
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
+enum ota_erase_stage : uint32_t {
+  OTA_ERASE_IDLE = 0,
+  OTA_ERASE_STARTED = 1,
+  OTA_ERASE_SAFE_ZONE_ENTERED = 2,
+  OTA_ERASE_FLASH_CALL = 3,
+  OTA_ERASE_CALLBACK_DONE = 4,
+  OTA_ERASE_COMPLETE = 5,
+  OTA_ERASE_FAILED = 6,
+};
 
 struct api_result {
   uintptr_t error;
@@ -44,8 +57,28 @@ struct api_result {
 
 api_result api(object_api number, uintptr_t a1 = 0, uintptr_t a2 = 0,
                uintptr_t a3 = 0) {
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(SHIZUKU_CRASH_RECORD)
+  if (number == object_api::YIELD || number == object_api::SLEEP_US)
+    usb_cdc_boot_diag_note_thread_yield(
+        shizuku::kernel_instance.current_thread_id());
+#endif
   const auto result = ARCH::syscall((uintptr_t)number, a1, a2, a3);
   return {result.error, result.value};
+}
+
+int flash_ops_retry(int (*operation)(void *), void *param) {
+  constexpr uint64_t kGuardRetryWindowUs = 100000u;
+  const uint64_t deadline = BOARD::time_us() + kGuardRetryWindowUs;
+  int result;
+  do {
+    result = operation(param);
+    if (result != PICO_ERROR_RESOURCE_IN_USE)
+      return result;
+    // Let the budget-0 CYW43 owner finish its synchronous PIO/DMA poll before
+    // retrying. Never wait indefinitely for the bus guard.
+    api(object_api::YIELD);
+  } while (BOARD::time_us() < deadline);
+  return result;
 }
 
 uintptr_t export_method(method m, uintptr_t entry) {
@@ -77,6 +110,10 @@ uintptr_t g_ota_obj_id = 0;
 uintptr_t g_status_sink_obj_id = 0;
 uintptr_t g_ble_uart_obj_id = 0;
 
+#if defined(SHIZUKU_CRASH_RECORD)
+void uart_try_puts(const char *text);
+#endif
+
 void say(const char *text) {
   frame_t f{};
   uint32_t n = (uint32_t)strlen(text);
@@ -88,11 +125,23 @@ void say(const char *text) {
   // ★UART0 は TX/RX が別線 (全二重) なので、host->device のバイナリ受信中
   //   (shizuku_shell の UART ブリッジ) でもこの行の送出は衝突しない。
   //   shizuku_shell が UART0 を初期化済みであることが前提 (起動順で保証)。
-  if (uart_is_enabled(uart0)) {
+#if defined(SHIZUKU_CRASH_RECORD)
+  uart_try_puts(text);
+#else
+  if (uart_is_enabled(uart0))
     uart_puts(uart0, text);
-  }
+#endif
   BOARD::diag_printf("[OTA] %s", text);
 }
+
+#if defined(SHIZUKU_CRASH_RECORD)
+void uart_try_puts(const char *text) {
+  if (!uart_is_enabled(uart0))
+    return;
+  while (*text != '\0' && uart_is_writable(uart0))
+    uart_putc_raw(uart0, *text++);
+}
+#endif
 
 // CRC32 (IEEE, 反転あり)
 const uint32_t CRC_NIBBLE[16] = {
@@ -120,17 +169,29 @@ struct program_op {
   uint32_t bytes;
 };
 
-void erase_range(void *param) {
+int erase_range(void *param) {
   const auto *op = (const erase_op *)param;
-  ::flash_range_erase(op->offset, op->bytes);
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(SHIZUKU_CRASH_RECORD)
+  // Mark entry into the common parked-core flash service.
+  usb_cdc_boot_diag_ota_erase_stage(OTA_ERASE_SAFE_ZONE_ENTERED, op->offset);
+  usb_cdc_boot_diag_ota_erase_stage(OTA_ERASE_FLASH_CALL, op->offset);
+#endif
+  const int rc = flash_ops::erase(op->offset, op->bytes);
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(SHIZUKU_CRASH_RECORD)
+  usb_cdc_boot_diag_ota_erase_stage(
+      rc == PICO_OK ? OTA_ERASE_CALLBACK_DONE : OTA_ERASE_FAILED, op->offset);
+#endif
+  return rc;
 }
 
-void program_range(void *param) {
+int program_range(void *param) {
   const auto *op = (const program_op *)param;
-  ::flash_range_program(op->offset, op->data, op->bytes);
+  return flash_ops::program(op->offset, op->data, op->bytes);
 }
 
+#if !defined(SHIZUKU_RP2040)
 using reboot_fn = int (*)(uint32_t, uint32_t, uint32_t, uint32_t);
+#endif
 
 struct commit_op {
   uint32_t src_offset;
@@ -138,7 +199,9 @@ struct commit_op {
   uint32_t copy_sectors;
   uint32_t erase_blocks;
   uint8_t *buffer;
+#if !defined(SHIZUKU_RP2040)
   reboot_fn reboot;
+#endif
 };
 
 void __no_inline_not_in_flash_func(commit_blast)(void *param) {
@@ -148,7 +211,9 @@ void __no_inline_not_in_flash_func(commit_blast)(void *param) {
   const uint32_t copy_sectors = op->copy_sectors;
   const uint32_t erase_blocks = op->erase_blocks;
   volatile uint32_t *const buffer = (volatile uint32_t *)op->buffer;
+#if !defined(SHIZUKU_RP2040)
   const reboot_fn reboot = op->reboot;
+#endif
 
   constexpr uint32_t SECTORS_PER_BLOCK = FLASH_BLOCK_SIZE / FLASH_SECTOR_SIZE;
   const uint32_t total_sectors = erase_blocks * SECTORS_PER_BLOCK;
@@ -165,17 +230,27 @@ void __no_inline_not_in_flash_func(commit_blast)(void *param) {
     }
 
     // 2. 消す: 対象セクタを 4KB (FLASH_SECTOR_SIZE) 単位で消去
-    ::flash_range_erase(dst_offset + at, FLASH_SECTOR_SIZE);
+    if (flash_ops::erase(dst_offset + at, FLASH_SECTOR_SIZE) != PICO_OK)
+      KERNEL::BOARD::panic("OTA commit erase rejected by flash service");
 
     // 3. 書く: コピー対象なら SRAM バッファの内容を 4KB 書き込む
-    // (セクタ 0 書き込み完了と同時に boot2 が復元され、以降も XIP から読める)
+    // (RP2040 の先頭 sector には boot2 も含まれ、イメージから復元される)
     if (s < copy_sectors) {
-      ::flash_range_program(dst_offset + at, (const uint8_t *)buffer,
-                            FLASH_SECTOR_SIZE);
+      if (flash_ops::program(dst_offset + at, (const uint8_t *)buffer,
+                             FLASH_SECTOR_SIZE) != PICO_OK)
+        KERNEL::BOARD::panic("OTA commit program rejected by flash service");
     }
   }
 
-  // 4. 再起動: ROM reboot 関数を呼び出し
+  // 4. 再起動。RP2040 には REBOOT2 ROM API がないため watchdog reset を使う。
+#if defined(SHIZUKU_RP2040)
+  // flash_range_* が各操作後に XIP を復帰済み。watchdog_reboot は通常の
+  // boot2 経由で起動し直し、呼出しが戻っても上書き済み flash へ戻らないよう
+  // SRAM 上の WFI で待つ。
+  watchdog_reboot(0, 0, 0);
+  while (true)
+    __asm volatile("wfi");
+#else
   if (reboot != nullptr) {
     reboot(REBOOT2_FLAG_REBOOT_TYPE_NORMAL | REBOOT2_FLAG_NO_RETURN_ON_SUCCESS,
            10, 0, 0);
@@ -183,6 +258,7 @@ void __no_inline_not_in_flash_func(commit_blast)(void *param) {
   *((volatile uint32_t *)0xE000ED0C) = 0x05FA0004;
   while (true)
     __asm volatile("wfi");
+#endif
 }
 
 // ★新しい値は**末尾へ足すこと**。GET_STATE は列挙値をそのまま数値で外
@@ -288,6 +364,12 @@ uint16_t read_le16(const uint8_t *p) {
 }
 
 state g_state = state::IDLE;
+void set_state(state next) {
+  g_state = next;
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(SHIZUKU_CRASH_RECORD)
+  usb_cdc_boot_diag_ota_state((uint32_t)next);
+#endif
+}
 // ★reset_transfer() では触らない。DONE/FAILED から IDLE へ落ちる一瞬にしか
 //   確定しない判定を、次の転送が始まるまで持ち越すための場所 (method::GET_LAST_OK)。
 bool g_last_ok = false;
@@ -362,7 +444,7 @@ uint32_t read_le32(const uint8_t *p) {
 }
 
 void reset_transfer() {
-  g_state = state::IDLE;
+  set_state(state::IDLE);
   g_header_len = 0;
   g_total = 0;
   g_expect_crc = 0;
@@ -395,12 +477,19 @@ void reset_transfer() {
 //   だから OTA 中に使っても干渉を増やさない。しかも USB の列挙は割り込みだけで
 //   回るので、スレッドが全部止まっても**最後の行は残る**。落ちる瞬間を掴む
 //   唯一の窓なので、ここだけは残しておくこと。
+#if defined(SHIZUKU_CRASH_RECORD)
+// Crash builds keep per-operation progress in no-init RAM. Avoid formatting and
+// attempting CDC output in the erase/program hot path; the CDC driver is
+// non-blocking, but this path is intentionally silent while flash work runs.
+#define OTA_TRACE(...) ((void)0)
+#else
 #define OTA_TRACE(...) KERNEL::BOARD::diag_printf(__VA_ARGS__)
+#endif
 
 bool ensure_erased(uint32_t needed_bytes) {
   if (needed_bytes > STAGING_BYTES)
     return false;
-  // ★★64KB ブロックを 1 回の flash_safe_execute でまとめて消していたら
+  // ★★64KB ブロックを一度に消していたら
   //   1 回あたり約 108ms 止まっていた (2026-09-02 実測、以前のメモに
   //   「対策済み」と書かれていた値は単位が us と誤記されていた可能性が高い —
   //   同じ 108ms/block の値と一致する)。flush_sector() が書き込みを 256B
@@ -413,6 +502,9 @@ bool ensure_erased(uint32_t needed_bytes) {
     if (g_erased + block_bytes > STAGING_BYTES)
       block_bytes = STAGING_BYTES - g_erased;
     erase_op op{STAGING_OFFSET + g_erased, block_bytes};
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(SHIZUKU_CRASH_RECORD)
+    usb_cdc_boot_diag_ota_erase_stage(OTA_ERASE_STARTED, op.offset);
+#endif
     OTA_TRACE("[OTA] erase>  off=%lu bytes=%lu rx=%lu\n",
               (unsigned long)(STAGING_OFFSET + g_erased),
               (unsigned long)block_bytes, (unsigned long)g_received);
@@ -420,13 +512,21 @@ bool ensure_erased(uint32_t needed_bytes) {
     int res;
     {
       flash_quiet quiet;
-      res = ::flash_safe_execute(erase_range, &op, UINT32_MAX);
+      res = flash_ops_retry(erase_range, &op);
     }
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(SHIZUKU_CRASH_RECORD)
+    usb_cdc_boot_diag_ota_erase_stage(
+        res == PICO_OK ? OTA_ERASE_COMPLETE : OTA_ERASE_FAILED, op.offset);
+#endif
     const uint64_t elapsed = BOARD::time_us() - t0;
     OTA_TRACE("[OTA] erase<  rc=%d took=%lu us\n", (int)res,
               (unsigned long)elapsed);
     g_erase_us += elapsed;
     ++g_erase_count;
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(SHIZUKU_CRASH_RECORD)
+    usb_cdc_boot_diag_ota_erase_progress(
+        g_erase_count, (uint32_t)(elapsed > UINT32_MAX ? UINT32_MAX : elapsed));
+#endif
     if (res != PICO_OK) {
       say("erase failed\n");
       return false;
@@ -454,7 +554,7 @@ bool flush_sector() {
   }
 
   // ★★1 セクタ (4KB) を一息に焼かず、**ページ (256B) ごとに区切って焼く**。
-  //   一息に焼くと `flash_safe_execute` が **8ms 割り込みを止め** (実測
+  //   一息に焼くと flash service が **8ms コアと割り込みを止め** (実測
   //   took=8143us)、その間 CYW43 の SDIO 共有バスが取り残されて壊れる。
   //   実測でこうなった: 書き込み直後に
   //     [CYW43] Bus error condition detected 0xffff
@@ -475,7 +575,7 @@ bool flush_sector() {
     const uint64_t p0 = BOARD::time_us();
     {
       flash_quiet quiet;
-      res = ::flash_safe_execute(program_range, &op, UINT32_MAX);
+      res = flash_ops_retry(program_range, &op);
     }
     const uint64_t page_us = BOARD::time_us() - p0;
     if (page_us > worst_page_us)
@@ -517,14 +617,26 @@ bool write_sector(uint32_t seq, const uint8_t *data, uint32_t len) {
   // 初回書き込みは INIT 段の事前消去で済んでいるため、再送(既に受領済みセクタへの上書き)のみ消去する。
   if (bm_get(g_ok_bm, seq)) {
     erase_op op{STAGING_OFFSET + at, FLASH_SECTOR_SIZE};
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(SHIZUKU_CRASH_RECORD)
+    usb_cdc_boot_diag_ota_erase_stage(OTA_ERASE_STARTED, op.offset);
+#endif
     const uint64_t t0 = BOARD::time_us();
     int res;
     {
       flash_quiet quiet;
-      res = ::flash_safe_execute(erase_range, &op, UINT32_MAX);
+      res = flash_ops_retry(erase_range, &op);
     }
-    g_erase_us += BOARD::time_us() - t0;
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(SHIZUKU_CRASH_RECORD)
+    usb_cdc_boot_diag_ota_erase_stage(
+        res == PICO_OK ? OTA_ERASE_COMPLETE : OTA_ERASE_FAILED, op.offset);
+#endif
+    const uint64_t elapsed = BOARD::time_us() - t0;
+    g_erase_us += elapsed;
     ++g_erase_count;
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(SHIZUKU_CRASH_RECORD)
+    usb_cdc_boot_diag_ota_erase_progress(
+        g_erase_count, (uint32_t)(elapsed > UINT32_MAX ? UINT32_MAX : elapsed));
+#endif
     if (res != PICO_OK) {
       say("erase failed\n");
       return false;
@@ -544,7 +656,7 @@ bool write_sector(uint32_t seq, const uint8_t *data, uint32_t len) {
     program_op op{STAGING_OFFSET + at + off, g_sector + off, FLASH_PAGE_SIZE};
     {
       flash_quiet quiet;
-      res = ::flash_safe_execute(program_range, &op, UINT32_MAX);
+      res = flash_ops_retry(program_range, &op);
     }
     if (res != PICO_OK)
       break;
@@ -561,7 +673,7 @@ bool write_sector(uint32_t seq, const uint8_t *data, uint32_t len) {
 void finish_upload() {
   if (!flush_sector()) {
     say("failed: flush\n");
-    g_state = state::FAILED;
+    set_state(state::FAILED);
     return;
   }
   const uint32_t actual_crc = g_crc ^ 0xFFFFFFFFu;
@@ -580,7 +692,7 @@ void finish_upload() {
              (unsigned long)actual_crc, (unsigned long)g_expect_crc,
              (unsigned long)g_received, (unsigned long)total_ms);
     say(line);
-    g_state = state::FAILED;
+    set_state(state::FAILED);
     return;
   }
 
@@ -597,7 +709,7 @@ void finish_upload() {
            (unsigned long)g_erase_count, (unsigned long)prog_ms,
            (unsigned long)infl_ms, (long)link_ms);
   say(line);
-  g_state = state::DONE;
+  set_state(state::DONE);
 }
 
 // ★戻り値だけでなく**計算した値も返す**。成功時に何も言わないと、
@@ -678,7 +790,7 @@ uint32_t report_missing() {
       //   flash へ書けていない (program の取りこぼし等)。再送しても直らない
       //   ので、素直に失敗として畳む。
       say("NEEDEND\n");
-      g_state = state::FAILED;
+      set_state(state::FAILED);
       return 0;
     }
     snprintf(line, sizeof(line),
@@ -697,7 +809,7 @@ uint32_t report_missing() {
     //   「返事が全部届いた」を判定する — 経路ごとに終端が違うと、一覧が
     //   途中で切れたのか正常に終わったのかを区別できない。
     say("NEEDEND\n");
-    g_state = state::DONE;
+    set_state(state::DONE);
     return 0;
   }
 
@@ -756,7 +868,7 @@ void reject_commit(const char *why) {
   char line[96];
   if (snprintf(line, sizeof(line), "commit rejected: %s\n", why) > 0)
     say(line);
-  g_state = state::FAILED;
+  set_state(state::FAILED);
 }
 
 uint32_t sectors_for(uint32_t bytes) {
@@ -783,10 +895,23 @@ void begin_commit() {
     return;
   }
 
-  const uint32_t *head = (const uint32_t *)(XIP_BASE + STAGING_OFFSET);
+  // RP2040 .bin は linker script 上、__flash_binary_start に続いて boot2
+  // (1 flash page = 256B) を含み、その後に vector table が始まる。RP2350
+  // の OTA .bin は vector table が先頭なので offset 0 のまま検証する。
+#if defined(SHIZUKU_RP2040)
+  constexpr uint32_t VECTOR_TABLE_OFFSET = FLASH_PAGE_SIZE;
+#else
+  constexpr uint32_t VECTOR_TABLE_OFFSET = 0;
+#endif
+  if (total < VECTOR_TABLE_OFFSET + 2 * sizeof(uint32_t)) {
+    reject_commit("image too small for vector table");
+    return;
+  }
+  const uint32_t *head = (const uint32_t *)(XIP_BASE + STAGING_OFFSET +
+                                            VECTOR_TABLE_OFFSET);
   if ((head[0] & 0xFF000000u) != SRAM_BASE ||
       (head[1] & 0xFF000000u) != XIP_BASE) {
-    reject_commit("staged image does not start with a vector table");
+    reject_commit("staged image vector table invalid");
     return;
   }
 
@@ -827,13 +952,14 @@ void begin_commit() {
   commit_op op{
       STAGING_OFFSET, dst_offset,
       sectors,        erase_blocks,
-      g_sector,       (reboot_fn)rom_func_lookup_inline(ROM_FUNC_REBOOT)};
+      g_sector,
+#if !defined(SHIZUKU_RP2040)
+      (reboot_fn)rom_func_lookup_inline(ROM_FUNC_REBOOT),
+#endif
+  };
 
   flash_quiet quiet;
-  const int rc = ::flash_safe_execute(commit_blast, &op, 10000);
-  if (snprintf(line, sizeof(line), "commit could not start (rc=%d)\n", rc) > 0)
-    say(line);
-  g_state = state::FAILED;
+  commit_blast(&op);
 }
 
 void consume_header_12(const uint8_t *hdr) {
@@ -865,7 +991,7 @@ void consume_header_12(const uint8_t *hdr) {
     memcpy(g_chdr, hdr, 12);
     g_chdr_got = 12;
     g_cwin_filled = 0;
-    g_state = state::CHDR;
+    set_state(state::CHDR);
     return;
   }
   if (hdr[0] == 'X' && hdr[1] == 'N' && hdr[2] == 'O' && hdr[3] == 'R') {
@@ -874,7 +1000,7 @@ void consume_header_12(const uint8_t *hdr) {
     g_nchunks = (g_total + FLASH_SECTOR_SIZE - 1) / FLASH_SECTOR_SIZE;
     if (g_total == 0 || g_nchunks > MAX_CHUNKS) {
       say("size out of range\n");
-      g_state = state::FAILED;
+      set_state(state::FAILED);
       return;
     }
     memset(g_ok_bm, 0, sizeof(g_ok_bm));
@@ -883,12 +1009,19 @@ void consume_header_12(const uint8_t *hdr) {
     g_queries = 0;
     g_cwin_filled = 0;
     g_chdr_got = 0;
-    g_state = state::CSEEK;
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(SHIZUKU_CRASH_RECORD)
+    // Start the persistent INIT timer before publishing CSEEK. If the next
+    // state diagnostic is the last instruction observed before a watchdog
+    // reset, the crash record still distinguishes INIT acceptance from a
+    // failure that happened earlier in the input path.
+    usb_cdc_boot_diag_ota_init_begin();
+#endif
+    set_state(state::CSEEK);
     // ★転送中に 38ms の flash 消去を行うと BLE 受信中の CYW43 SPI バスが
     //   破壊されてウェッジするため、BLE パケットが流れていない INIT 段で全域を事前消去する。
     if (!ensure_erased(g_total)) {
       say("erase failed\n");
-      g_state = state::FAILED;
+      set_state(state::FAILED);
       return;
     }
     say("ready (chunked)\n");
@@ -896,20 +1029,20 @@ void consume_header_12(const uint8_t *hdr) {
   }
   if (hdr[0] == 'X' && hdr[1] == 'N' && hdr[2] == 'O' && hdr[3] == 'Z') {
     g_compressed = true;
-    g_state = state::ZLEN;
+    set_state(state::ZLEN);
     g_zlen_got = 0;
     say("ready (compressed)\n");
     return;
   }
   if (hdr[0] == 'X' && hdr[1] == 'N' && hdr[2] == 'O' && hdr[3] == 'U') {
     g_compressed = false;
-    g_state = state::DATA;
+    set_state(state::DATA);
     say("ready\n");
     return;
   }
 
   say("unknown magic — upload を再開すること\n");
-  g_state = state::FAILED;
+  set_state(state::FAILED);
 }
 
 void process_uncompressed_bytes(const uint8_t *p, uint32_t len) {
@@ -925,7 +1058,7 @@ void process_uncompressed_bytes(const uint8_t *p, uint32_t len) {
     if (g_sector_len == sizeof(g_sector)) {
       if (!flush_sector()) {
         say("failed: flush\n");
-        g_state = state::FAILED;
+        set_state(state::FAILED);
         return;
       }
     }
@@ -946,10 +1079,10 @@ void process_compressed_stream(const uint8_t *p, uint32_t len) {
         g_zlen_got = 0;
         if (g_zlen == 0 || g_zlen > sizeof(g_zbuf)) {
           say("zchunk size invalid\n");
-          g_state = state::FAILED;
+          set_state(state::FAILED);
           return;
         }
-        g_state = state::ZDATA;
+        set_state(state::ZDATA);
       }
       continue;
     }
@@ -969,13 +1102,13 @@ void process_compressed_stream(const uint8_t *p, uint32_t len) {
 
         if (raw_bytes <= 0) {
           say("inflate failed\n");
-          g_state = state::FAILED;
+          set_state(state::FAILED);
           return;
         }
 
         process_uncompressed_bytes(g_raw, (uint32_t)raw_bytes);
         if (g_state != state::FAILED && g_state != state::DONE)
-          g_state = state::ZLEN;
+          set_state(state::ZLEN);
       }
     }
   }
@@ -1003,7 +1136,7 @@ void accept_chunk() {
     return;
   }
   if (!write_sector(g_cseq, g_raw, (uint32_t)raw_bytes)) {
-    g_state = state::FAILED; // flash が焼けないのは本物の失敗
+    set_state(state::FAILED); // flash が焼けないのは本物の失敗
     return;
   }
   if (!bm_get(g_ok_bm, g_cseq)) {
@@ -1037,7 +1170,7 @@ void process_chunked_stream(const uint8_t *p, uint32_t len) {
         continue;
       memcpy(g_chdr, CHUNK_MAGIC, 4);
       g_chdr_got = 4;
-      g_state = state::CHDR;
+      set_state(state::CHDR);
       continue;
     }
 
@@ -1065,7 +1198,7 @@ void process_chunked_stream(const uint8_t *p, uint32_t len) {
                            (unsigned long)g_chunks_bad);
         report_missing();
         if (g_state != state::FAILED && g_state != state::DONE)
-          g_state = state::CSEEK;
+          set_state(state::CSEEK);
         continue;
       }
       if (hdr_ok && g_cseq == RESET_SEQ && g_clen == 0) {
@@ -1086,11 +1219,11 @@ void process_chunked_stream(const uint8_t *p, uint32_t len) {
         //   飛び越える可能性がある**が、その場合はそのチャンクが NEED に出て
         //   次のラウンドで拾える。取りこぼしても壊れないほうを選ぶ。
         ++g_chunks_bad;
-        g_state = state::CSEEK;
+        set_state(state::CSEEK);
         continue;
       }
       g_cgot = 0;
-      g_state = state::CDATA;
+      set_state(state::CDATA);
       continue;
     }
 
@@ -1112,7 +1245,7 @@ void process_chunked_stream(const uint8_t *p, uint32_t len) {
       g_cwin_filled = 0;
       g_chdr_got = 0;
       if (g_state != state::FAILED && g_state != state::DONE)
-        g_state = state::CSEEK;
+        set_state(state::CSEEK);
       continue;
     }
     break;
@@ -1123,7 +1256,7 @@ void feed(const uint8_t *data, uint32_t len) {
   g_last_byte_us = BOARD::time_us();
   if (g_state == state::IDLE) {
     g_header_len = 0;
-    g_state = state::HEADER;
+    set_state(state::HEADER);
   }
   if (g_state == state::HEADER) {
     while (len > 0 && g_header_len < sizeof(g_header)) {
@@ -1245,7 +1378,7 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       if (lost != 0) {
         say("input overrun — 転送をやり直すこと\n");
         reset_transfer();
-        g_state = state::FAILED;
+        set_state(state::FAILED);
         continue;
       }
       for (uint32_t i = 0; i < count; ++i) {
@@ -1352,8 +1485,12 @@ uint32_t register_ota(uintptr_t object_id, uintptr_t status_sink_obj_id,
   g_ota_obj_id = object_id;
   g_status_sink_obj_id = status_sink_obj_id;
   g_ble_uart_obj_id = ble_uart_obj_id;
+  // CYW43/BTstack are owned by ble_uart's core-0 poll thread. Keep OTA callbacks
+  // and the common flash service on that same core so OTA cannot issue a second
+  // cross-core flash operation while the wireless owner is polling.
   const auto created = api(object_api::CREATE_OBJECT, g_ota_obj_id,
-                           (uintptr_t)&ota_main, OBJECT_PRIVILEGED);
+                           (uintptr_t)&ota_main,
+                           OBJECT_PRIVILEGED | OBJECT_ON_CORE(0));
   const auto started = api(object_api::CALL_METHOD, g_ota_obj_id, 0, 0);
   if (created.error != 0 || started.error != 0 || started.value != 0) {
     BOARD::diag_printf("[OTA] FAILED: create=%lu call=%lu exports_failed=%lu\n",

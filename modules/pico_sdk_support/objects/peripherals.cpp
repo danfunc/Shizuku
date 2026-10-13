@@ -25,6 +25,9 @@
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/objects/peripherals.hpp"
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+#include "shizuku/objects/usb_cdc.hpp"
+#endif
 
 namespace shizuku {
 namespace objects {
@@ -109,7 +112,13 @@ bool __no_inline_not_in_flash_func(bootsel_read_pressed)(void) {
 
 uintptr_t bootsel_read(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   KERNEL::BOARD::park_other_cores();
+#if defined(SHIZUKU_CRASH_RECORD)
+  usb_cdc_boot_diag_breadcrumb(boot_diag_breadcrumb::IRQ_DISABLE_ENTRY);
+#endif
   const bool pressed = bootsel_read_pressed();
+#if defined(SHIZUKU_CRASH_RECORD)
+  usb_cdc_boot_diag_breadcrumb(boot_diag_breadcrumb::IRQ_RESTORE_EXIT);
+#endif
   KERNEL::BOARD::resume_other_cores();
   return pressed ? 1u : 0u;
 }

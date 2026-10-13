@@ -44,6 +44,31 @@ config_setting(
     flag_values = {":bootsel_support": "enabled"},
     visibility = ["//visibility:public"],
 )
+config_setting(
+    name = "boot_log_wait_enabled",
+    define_values = {"boot_log_wait": "true"},
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "flashfs_only_selftest",
+    define_values = {"selftest": "flashfs_only"},
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "crash_record_enabled",
+    define_values = {"crash_record": "true"},
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "bt_tlv_ram",
+    define_values = {"bt_tlv": "ram"},
+    visibility = ["//visibility:public"],
+)
+selects.config_setting_group(
+    name = "rp2040_pico_w_ram_tlv",
+    match_all = [":rp2040_pico_w", ":bt_tlv_ram"],
+    visibility = ["//visibility:public"],
+)
 int_flag(
     name = "flash_capacity_bytes",
     build_setting_default = 0,

@@ -7,16 +7,26 @@
 #include "shizuku/objects/flash_fs.hpp"
 #if !defined(SHIZUKU_RP2040)
 #include "shizuku/objects/gdb_stub.hpp"
+#endif
 #if defined(CYW43_WL_GPIO_LED_PIN)
 #include "shizuku/objects/ble_uart.hpp"
 #include "shizuku/objects/ota.hpp"
-#endif
 #endif
 #include "shizuku/objects/usb_cdc.hpp"
 #include "shizuku/objects/peripherals.hpp"
 #include "shizuku/apps/thermal.hpp"
 #include "shizuku/selftest.hpp"
+
+#if defined(SHIZUKU_FLASHFS_ONLY)
+namespace shizuku::selftest {
+extern uint32_t passed;
+extern uint32_t failed;
+}
+#endif
 #include "stdio.h"
+#if defined(CYW43_WL_GPIO_LED_PIN)
+#include "pico/multicore.h"
+#endif
 
 #ifndef SHIZUKU_BUILD_ID
 #define SHIZUKU_BUILD_ID "v1"
@@ -26,6 +36,10 @@
 #include "hardware/watchdog.h"
 #include "hardware/structs/watchdog.h"
 #include "pico/bootrom.h"
+#endif
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_CRASH_RECORD)
+#include "hardware/watchdog.h"
+#include "hardware/structs/watchdog.h"
 #endif
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
 #include "hardware/watchdog.h"
@@ -87,6 +101,10 @@ extern "C" bool shizuku_selftest_deep_read(uint32_t *);
 #define APP_PROG(stage) ((void)0)
 #endif
 void shizuku::app_entry() {
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(CYW43_WL_GPIO_LED_PIN)
+  shizuku::objects::usb_cdc_boot_diag_set_stage(
+      shizuku::objects::boot_diag_stage::APP_ENTRY);
+#endif
   shizuku::KERNEL::BOARD::diag_printf("[BOOT] build: %s %s %s\n",
                                       SHIZUKU_BUILD_ID, __DATE__, __TIME__);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
@@ -98,6 +116,10 @@ void shizuku::app_entry() {
 
 
   // ボードが提供するペリフェラルオブジェクト (特権を宣言する数少ないオブジェクト)。
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(CYW43_WL_GPIO_LED_PIN)
+  shizuku::objects::usb_cdc_boot_diag_set_stage(
+      shizuku::objects::boot_diag_stage::PERIPHERALS);
+#endif
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   boot_stage(kPeripherals);
 #endif
@@ -107,7 +129,54 @@ void shizuku::app_entry() {
 #endif
   // 媒体を持つオブジェクト。読むのは XIP のアドレスを配るだけなので安いが、
   // 書くと XIP ごと止まるので、扱いはペリフェラルと同じく特権側。
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(CYW43_WL_GPIO_LED_PIN)
+  shizuku::objects::usb_cdc_boot_diag_set_stage(
+      shizuku::objects::boot_diag_stage::FLASHFS);
+#endif
   shizuku::objects::register_flash_fs();
+  bool secondary_core_ready = false;
+#if defined(SHIZUKU_FLASHFS_ONLY)
+  // Keep flash writes after core 1 is running: erase pauses XIP, so every
+  // executing core must participate in the flash-safe lockout.
+  secondary_core_ready = shizuku::kernel_object_instance.start_secondary_core();
+#if defined(CYW43_WL_GPIO_LED_PIN)
+  if (secondary_core_ready) {
+    const uint64_t lockout_deadline_us = time_us_64() + 1000000ull;
+    while (!multicore_lockout_victim_is_initialized(1) &&
+           time_us_64() < lockout_deadline_us)
+      tight_loop_contents();
+    secondary_core_ready = multicore_lockout_victim_is_initialized(1);
+  }
+#endif
+  shizuku::KERNEL::BOARD::diag_printf(
+      "[FLASHFS_ONLY] secondary core %s\n",
+      secondary_core_ready ? "ready" : "unavailable");
+  if (secondary_core_ready) {
+    const uint64_t flashfs_started_us = time_us_64();
+    const uint32_t flashfs_failures = shizuku::objects::flash_fs_probe();
+    const uint32_t stream_passed_before = shizuku::selftest::passed;
+    const uint32_t stream_failed_before = shizuku::selftest::failed;
+    shizuku::selftest::flash_stream_ladder();
+    const uint32_t stream_passed =
+        shizuku::selftest::passed - stream_passed_before;
+    const uint32_t stream_failed =
+        shizuku::selftest::failed - stream_failed_before;
+    shizuku::KERNEL::BOARD::diag_printf(
+        "[FLASHFS_ONLY] flash_fs_probe: %s (failures=%lu); "
+        "flash_stream_ladder: %lu passed, %lu failed; elapsed=%lu ms\n",
+        flashfs_failures == 0 ? "PASS" : "FAIL",
+        (unsigned long)flashfs_failures, (unsigned long)stream_passed,
+        (unsigned long)stream_failed,
+        (unsigned long)((time_us_64() - flashfs_started_us) / 1000ull));
+  } else {
+    shizuku::KERNEL::BOARD::diag_printf(
+        "[FLASHFS_ONLY] FAIL: skipped flash writes because core 1 is not ready\n");
+  }
+#elif !defined(SHIZUKU_SKIP_SELFTEST)
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(CYW43_WL_GPIO_LED_PIN)
+  shizuku::objects::usb_cdc_boot_diag_set_stage(
+      shizuku::objects::boot_diag_stage::SELFTEST);
+#endif
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   boot_stage(kCallLadder);
 #endif
@@ -142,7 +211,17 @@ void shizuku::app_entry() {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   boot_stage(kSecondaryCore);
 #endif
-  if (shizuku::kernel_object_instance.start_secondary_core())
+  secondary_core_ready = shizuku::kernel_object_instance.start_secondary_core();
+#if defined(CYW43_WL_GPIO_LED_PIN)
+  if (secondary_core_ready) {
+    const uint64_t lockout_deadline_us = time_us_64() + 1000000ull;
+    while (!multicore_lockout_victim_is_initialized(1) &&
+           time_us_64() < lockout_deadline_us)
+      tight_loop_contents();
+    secondary_core_ready = multicore_lockout_victim_is_initialized(1);
+  }
+#endif
+  if (secondary_core_ready)
     shizuku::KERNEL::BOARD::diag_printf("[BOOT] secondary core launched\n");
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   boot_stage(kMulticore);
@@ -193,8 +272,31 @@ void shizuku::app_entry() {
   // Leave the final stage recorded and stop feeding: recovery reports completion,
   // then enters BOOTSEL so a diagnostic image cannot strand the board.
 #endif
+#endif // !SHIZUKU_SKIP_SELFTEST
+#if defined(SHIZUKU_SKIP_SELFTEST) && !defined(SHIZUKU_FLASHFS_ONLY)
+  // BLE/BTstack first-run may erase the bonding TLV through flash_safe_execute,
+  // which requires core 1 to be running even when selftests are omitted.
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(CYW43_WL_GPIO_LED_PIN)
+  shizuku::objects::usb_cdc_boot_diag_set_stage(
+      shizuku::objects::boot_diag_stage::SECONDARY_CORE);
+#endif
+  secondary_core_ready = shizuku::kernel_object_instance.start_secondary_core();
+#if defined(CYW43_WL_GPIO_LED_PIN)
+  if (secondary_core_ready) {
+    const uint64_t lockout_deadline_us = time_us_64() + 1000000ull;
+    while (!multicore_lockout_victim_is_initialized(1) &&
+           time_us_64() < lockout_deadline_us)
+      tight_loop_contents();
+    secondary_core_ready = multicore_lockout_victim_is_initialized(1);
+  }
+#endif
+  if (secondary_core_ready)
+    shizuku::KERNEL::BOARD::diag_printf("[BOOT] secondary core launched\n");
+  else
+    shizuku::KERNEL::BOARD::diag_printf("[BOOT] secondary core unavailable\n");
+#endif
 
-#if !defined(SHIZUKU_RP2040)
+#if !defined(SHIZUKU_RP2040) && !defined(SHIZUKU_SKIP_SELFTEST)
   // ★GDB stub。繋がれるまでは何もしない (繋がれた瞬間に診断出力を GDB へ譲る)。
   // ★★2026-08-24 デモ用: 合成の debuggee ではなく実在の blink (LED を叩く
   //   スレッド) を対象にする。attach するだけで LED が目に見えて止まり、
@@ -203,10 +305,23 @@ void shizuku::app_entry() {
   shizuku::objects::start_gdb_stub(blink_thread);
 #endif
 
-#if !defined(SHIZUKU_RP2040) && defined(CYW43_WL_GPIO_LED_PIN)
+#if defined(CYW43_WL_GPIO_LED_PIN)
   const uintptr_t BLE_UART_OBJ = shizuku::object_id::ble_uart;
   const uintptr_t OTA_OBJ = shizuku::object_id::ota;
 
+  if (!secondary_core_ready) {
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+    shizuku::objects::usb_cdc_boot_diag_set_stage(
+        shizuku::objects::boot_diag_stage::ERROR);
+    shizuku::objects::usb_cdc_boot_diag_set_ble("core1-unavailable");
+#endif
+    shizuku::KERNEL::BOARD::diag_printf(
+        "[BOOT] BLE/OTA not started: core 1 unavailable for flash-safe CYW43 init\n");
+  } else {
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  shizuku::objects::usb_cdc_boot_diag_set_stage(
+      shizuku::objects::boot_diag_stage::BLE_REGISTER);
+#endif
   const uint32_t ble_rc =
       shizuku::objects::ble_uart::register_ble_uart(BLE_UART_OBJ);
   if (ble_rc != 0) {
@@ -214,6 +329,10 @@ void shizuku::app_entry() {
                                         (unsigned long)ble_rc);
   }
 
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  shizuku::objects::usb_cdc_boot_diag_set_stage(
+      shizuku::objects::boot_diag_stage::OTA_REGISTER);
+#endif
   const uint32_t ota_rc =
       shizuku::objects::ota::register_ota(OTA_OBJ, 0, BLE_UART_OBJ);
   if (ota_rc != 0) {
@@ -245,35 +364,78 @@ void shizuku::app_entry() {
     }
 
     // 起動 (CYW43 の owner = ble_uart の poll スレッド。init もここで行う)
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+    shizuku::objects::usb_cdc_boot_diag_set_stage(
+        shizuku::objects::boot_diag_stage::BLE_POLL_START);
+#endif
+#if defined(SHIZUKU_CRASH_RECORD)
+    shizuku::objects::usb_cdc_boot_diag_crash_arm();
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_LOG_WAIT)
+    shizuku::objects::usb_cdc_boot_diag_flash_selftest(0);
+#endif
+#endif
     shizuku::objects::ble_uart::start_ble_uart(BLE_UART_OBJ);
     shizuku::objects::ota::start_ota(OTA_OBJ);
   } else {
     // fail-closed: owner が立たないので CYW43 には一切触れない。LED 書込みは
     // LED_NO_OWNER で失敗し、ここに理由を残す。
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+    shizuku::objects::usb_cdc_boot_diag_set_stage(
+        shizuku::objects::boot_diag_stage::ERROR);
+    shizuku::objects::usb_cdc_boot_diag_set_ble("register-failed");
+#endif
     shizuku::KERNEL::BOARD::diag_printf(
         "[BOOT] BLE/OTA not started (ble=%lu ota=%lu): CYW43 owner absent, LED disabled\n",
         (unsigned long)ble_rc, (unsigned long)ota_rc);
   }
-#endif
-
-#if defined(SHIZUKU_RP2040) && defined(CYW43_WL_GPIO_LED_PIN)
-  // RP2040 Pico W は BLE / OTA を持たない (firmware/BUILD.bazel は rp2350_pico2_w のみ
-  // ble_uart を結ぶ)。CYW43 の owner は LED だけになるので、ここで LED の poll を起こす。
-  if (shizuku::objects::start_led_cyw43_actor() != 0) {
-    shizuku::KERNEL::BOARD::diag_printf(
-        "[BOOT] LED CYW43 owner not started: LED writes will report LED_NO_OWNER\n");
   }
 #endif
-
 
   // ★スレッド 0 は以後アイドル役に徹する。誰かが走れるなら渡し、誰も居なければ
   //   空回りするだけ。**ここで自分が仕事をしてはいけない** — アイドルが仕事を
   //   持つと、その仕事が他の全部の遅れになる。
-  while (true)
+  while (true) {
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+    shizuku::objects::usb_cdc_boot_diag_poll();
+#endif
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(SHIZUKU_CRASH_RECORD)
+    shizuku::objects::usb_cdc_boot_diag_breadcrumb(
+        shizuku::objects::boot_diag_breadcrumb::CORE_IDLE_ENTRY);
+#endif
     shizuku::KERNEL::ARCH::syscall((uintptr_t)shizuku::object_api::YIELD);
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(SHIZUKU_CRASH_RECORD)
+    shizuku::objects::usb_cdc_boot_diag_breadcrumb(
+        shizuku::objects::boot_diag_breadcrumb::CORE_IDLE_EXIT);
+#endif
+  }
 }
 
 int main() {
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_CRASH_RECORD)
+  const bool crash_recovered = watchdog_caused_reboot() &&
+      (watchdog_hw->scratch[0] == 0x43524153u ||
+       watchdog_hw->scratch[0] == 0x48465254u);
+  uint32_t crash_record[8] = {};
+  if (crash_recovered) {
+    for (uint32_t i = 0; i < 8; ++i)
+      crash_record[i] = watchdog_hw->scratch[i];
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+    shizuku::objects::usb_cdc_boot_diag_crash_report_capture(crash_record);
+#endif
+  }
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(CYW43_WL_GPIO_LED_PIN)
+  const char flashdiag_image_id[] =
+      SHIZUKU_BUILD_ID ":" __DATE__ ":" __TIME__;
+  uint32_t flashdiag_image_stamp = 2166136261u;
+  for (const char *p = flashdiag_image_id; *p != '\0'; ++p) {
+    flashdiag_image_stamp ^= (uint8_t)*p;
+    flashdiag_image_stamp *= 16777619u;
+  }
+  shizuku::objects::usb_cdc_boot_diag_flashdiag_begin_boot(
+      crash_recovered, flashdiag_image_stamp);
+#endif
+  watchdog_disable();
+#endif
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE)
   const uint32_t saved0 = watchdog_hw->scratch[0];
   const uint32_t saved1 = watchdog_hw->scratch[1];
@@ -417,8 +579,15 @@ int main() {
   const uint32_t selftest_fault5 = watchdog_hw->scratch[5];
   const uint32_t selftest_fault6 = watchdog_hw->scratch[6];
   const uint32_t selftest_fault7 = watchdog_hw->scratch[7];
-  uint32_t st_fault[18] = {};
-  const bool st_fault_valid = selftest_progress_recovered && shizuku_selftest_fault_read(st_fault);
+  uint32_t st_fault[26] = {};
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_CRASH_RECORD)
+  const bool st_fault_valid =
+      (selftest_progress_recovered || crash_recovered) &&
+      shizuku_selftest_fault_read(st_fault);
+#else
+  const bool st_fault_valid = selftest_progress_recovered &&
+                              shizuku_selftest_fault_read(st_fault);
+#endif
 #if !defined(SHIZUKU_RP2040)
   uint32_t st_fpre[10] = {};
   const bool st_fpre_valid = selftest_progress_recovered && shizuku_selftest_fault_read2(st_fpre);
@@ -436,6 +605,13 @@ int main() {
       printf("[SELFTEST_PROG] fs_fault=%08lx pc=%08lx lr=%08lx xpsr=%08lx\n",
              (unsigned long)selftest_fault4, (unsigned long)selftest_fault5,
              (unsigned long)selftest_fault6, (unsigned long)selftest_fault7);
+      if (st_fault_valid && st_fault[18] == 0x53545047u) {
+        printf("[SELFTEST_PROG] noinit mark stage=%lu run=%lu event=%lu value=%08lx\n",
+               (unsigned long)st_fault[19],
+               (unsigned long)(st_fault[20] >> 8),
+               (unsigned long)(st_fault[20] & 0xffu),
+               (unsigned long)st_fault[21]);
+      }
 #if !defined(SHIZUKU_RP2040)
       if (st_deep_valid)
         printf("[SELFTEST_PROG] deep last depth=%lu sp=%08lx calls=%lu\n",
@@ -458,16 +634,25 @@ int main() {
       }
 #else
       if (st_fault_valid) {
-        printf("[SELFTEST_PROG] kfault phase=%lu arg=%lu count=%lu pc=%08lx lr=%08lx xpsr=%08lx\n",
-               (unsigned long)st_fault[0], (unsigned long)st_fault[17], (unsigned long)st_fault[1],
-               (unsigned long)st_fault[2], (unsigned long)st_fault[3], (unsigned long)st_fault[4]);
-        printf("[SELFTEST_PROG] kfault r0-3=%08lx %08lx %08lx %08lx excret=%08lx ctl=%lu ipsr=%lu\n",
-               (unsigned long)st_fault[5], (unsigned long)st_fault[6], (unsigned long)st_fault[7],
-               (unsigned long)st_fault[8], (unsigned long)st_fault[9], (unsigned long)st_fault[10],
-               (unsigned long)st_fault[11]);
+        if (st_fault[0] != 0) {
+          printf("[SELFTEST_PROG] kfault phase=%lu arg=%lu count=%lu pc=%08lx lr=%08lx xpsr=%08lx\n",
+                 (unsigned long)st_fault[0], (unsigned long)st_fault[17], (unsigned long)st_fault[1],
+                 (unsigned long)st_fault[2], (unsigned long)st_fault[3], (unsigned long)st_fault[4]);
+          printf("[SELFTEST_PROG] kfault r0-3=%08lx %08lx %08lx %08lx excret=%08lx ctl=%lu ipsr=%lu\n",
+                 (unsigned long)st_fault[5], (unsigned long)st_fault[6], (unsigned long)st_fault[7],
+                 (unsigned long)st_fault[8], (unsigned long)st_fault[9], (unsigned long)st_fault[10],
+                 (unsigned long)st_fault[11]);
+        } else {
+          printf("[SELFTEST_PROG] no selftest fault frame; use crash-record report if present\n");
+        }
         printf("[SELFTEST_PROG] tick sample pc=%08lx lr=%08lx xpsr=%08lx hits=%lu stage=%lu\n",
                (unsigned long)st_fault[12], (unsigned long)st_fault[13], (unsigned long)st_fault[14],
                (unsigned long)st_fault[15], (unsigned long)st_fault[16]);
+#if defined(SHIZUKU_RP2040)
+        printf("[SELFTEST_PROG] tick psp=%08lx control=%lu frame=%08lx frame_uses_psp=%lu\n",
+               (unsigned long)st_fault[22], (unsigned long)st_fault[23],
+               (unsigned long)st_fault[24], (unsigned long)st_fault[25]);
+#endif
       }
 #endif
       fflush(stdout);
@@ -480,15 +665,65 @@ int main() {
 #endif
   // ★USB は自前で持つ (CDC 2 本: 診断と GDB)。pico_stdio_usb は 1 本前提で、
   //   記述子も差し替えられないため (D42)。
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  shizuku::objects::usb_cdc_boot_diag_set_stage(
+      shizuku::objects::boot_diag_stage::USB_WAIT);
+#endif
   shizuku::objects::usb_cdc_init();
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  const uint64_t wait_start_us = time_us_64();
+  const uint64_t wait_deadline_us = wait_start_us + 15000000ull;
+  while (!shizuku::objects::usb_cdc_connected(0) &&
+         time_us_64() < wait_deadline_us)
+    sleep_ms(10);
+  const bool cdc_connected = shizuku::objects::usb_cdc_connected(0);
+  printf("[BOOT_LOG_WAIT] CDC0 connected=%u waited_ms=%lu\n",
+         cdc_connected ? 1u : 0u,
+         (unsigned long)((time_us_64() - wait_start_us) / 1000ull));
+  fflush(stdout);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_CRASH_RECORD)
+  if (crash_recovered) {
+    shizuku::objects::usb_cdc_boot_diag_crash_report_drain();
+#if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0 && !defined(SHIZUKU_BOOT_STAGE_TRACE)
+    if (st_fault_valid && st_fault[18] == 0x53545047u) {
+      printf("[SELFTEST_PROG] noinit mark stage=%lu run=%lu event=%lu value=%08lx\n",
+             (unsigned long)st_fault[19],
+             (unsigned long)(st_fault[20] >> 8),
+             (unsigned long)(st_fault[20] & 0xffu),
+             (unsigned long)st_fault[21]);
+      printf("[SELFTEST_PROG] tick sample pc=%08lx lr=%08lx xpsr=%08lx hits=%lu stage=%lu\n",
+             (unsigned long)st_fault[12], (unsigned long)st_fault[13],
+             (unsigned long)st_fault[14], (unsigned long)st_fault[15],
+             (unsigned long)st_fault[16]);
+      printf("[SELFTEST_PROG] tick psp=%08lx control=%lu frame=%08lx frame_uses_psp=%lu\n",
+             (unsigned long)st_fault[22], (unsigned long)st_fault[23],
+             (unsigned long)st_fault[24], (unsigned long)st_fault[25]);
+      fflush(stdout);
+    }
+#endif
+    watchdog_hw->scratch[0] = 0;
+  }
+#endif
+  shizuku::objects::usb_cdc_boot_diag_set_stage(
+      shizuku::objects::boot_diag_stage::KERNEL_INIT);
+#else
   sleep_ms(1000); // ホストが CDC を開く前の出力を落とさないための待ち
+#endif
   shizuku::kernel_instance.init();
   // 系の組み立て: カーネルオブジェクトの表を用意し、そのハンドラをカーネルへ据える。
   // これ以降、オブジェクトが撃った svc はすべてそのハンドラへ届く。
   shizuku::kernel_object_instance.init();
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  shizuku::objects::usb_cdc_boot_diag_set_stage(
+      shizuku::objects::boot_diag_stage::OBJECT_TABLE_INIT);
+#endif
   shizuku::kernel_instance.set_object_handler(
       shizuku::KERNEL_OBJECT::handler_entry(),
       (uint32_t)shizuku::KERNEL_OBJECT::KERNEL_OBJECT_ID);
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  shizuku::objects::usb_cdc_boot_diag_set_stage(
+      shizuku::objects::boot_diag_stage::BOOTSTRAP);
+#endif
   // 今の実行をスレッド 0 として採用し、スレッドスタックへ移って app_entry へ。
   // ★最初の 1 本のスタックもオブジェクトランドから借りる (他のスレッドと同じ扱い)。
   const auto boot = shizuku::kernel_object_instance.lend_boot_stack();
