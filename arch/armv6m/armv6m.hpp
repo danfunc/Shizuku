@@ -9,9 +9,11 @@
 
 extern "C" {
 // atomic 用のロック。実体は modules/pico_sdk_support/rp2040 (SDK の spin lock)。
-// 戻り値は割込み状態で、解放時にそのまま渡す。
-uint32_t shizuku_armv6m_atomic_lock();
-void shizuku_armv6m_atomic_unlock(uint32_t saved_irq);
+// 戻り値は割込み状態で、解放時にそのまま渡す。診断ビルドでは対象語と
+// atomic 呼出し元も渡し、停止したロック操作を特定できるようにする。
+uint32_t shizuku_armv6m_atomic_lock(uintptr_t address, uintptr_t caller_pc);
+void shizuku_armv6m_atomic_unlock(uint32_t saved_irq, uintptr_t address,
+                                 uintptr_t caller_pc);
 void shizuku_armv6m_svc_entry();
 void shizuku_armv6m_pendsv_entry();
 void shizuku_armv6m_systick_entry();
@@ -51,6 +53,21 @@ public:
   static constexpr uint32_t EXC_FRAME_MAX_BYTES=32;
   static constexpr uint32_t HANDLER_STACK_ARG_BYTES=8;
   static constexpr uint32_t FAULT_CONTEXT_BYTES=sizeof(context_t);
+  // A PLAIN actor returns through a parent-handler dispatch, which allocates
+  // another call frame. Reserve that frame when admitting the actor: otherwise
+  // NO_STACK can also reject its return stub and leave it in the terminal loop.
+  static bool call_entry_has_return_room(const context_t &c, uint32_t header_bytes) {
+    if (c.stack_limit_addr == 0) return true;
+    const uintptr_t frame_bytes = EXC_FRAME_MAX_BYTES;
+    const uintptr_t unaligned = header_bytes + frame_bytes + HANDLER_STACK_ARG_BYTES;
+    const uintptr_t total = (unaligned + 7u) & ~(uintptr_t)7u;
+    const uintptr_t dispatch_reserve = unaligned + EXC_FRAME_MAX_BYTES +
+                                       FAULT_CONTEXT_BYTES + CALL_HEADROOM;
+    const uintptr_t sp = (uintptr_t)c.sp;
+    const uintptr_t limit = c.stack_limit_addr;
+    // One total is the new actor frame; the other is its return dispatch.
+    return sp >= limit && sp - limit >= 2u * total + dispatch_reserve;
+  }
   using method_t=uintptr_t (*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t,uintptr_t);
   static uint32_t exc_frame_bytes(const context_t &) { return 32; }
   static uintptr_t psp_after_return(const context_t &c) {
@@ -140,8 +157,9 @@ public:
   // ソフトウェア下限のみ。MPU ガード領域は未実装
   static void stack_limit_set(context_t &c, uintptr_t v){c.stack_limit_addr=(uint32_t)v;}
   static uintptr_t stack_limit(const context_t &c){return (uintptr_t)c.stack_limit_addr;}
-  // RP2040 M0+ has no LDREX/STREX. Reuse the Pico SDK's lock reserved for
-  // atomic operations; lock 31 belongs to the claim-free allocator.
+  // RP2040 M0+ has no LDREX/STREX, so compare-exchange and release stores use
+  // the Pico SDK atomic spinlock. Aligned acquire loads use LDR+DMB below and
+  // do not need to serialize with other single-word accesses.
   [[gnu::always_inline]] static inline uint32_t atomic_profile_begin(){
 #if SHIZUKU_KERNEL_SERVICE_PROFILE
     return shizuku_service_profile_now();
@@ -156,9 +174,30 @@ public:
     (void)start;
 #endif
   }
-  static bool cas32(volatile uint32_t *p,uint32_t expected,uint32_t desired){uint32_t start=atomic_profile_begin();uint32_t irq=shizuku_armv6m_atomic_lock();bool ok=*p==expected;if(ok)*p=desired;shizuku_armv6m_atomic_unlock(irq);atomic_profile_end(start);return ok;}
-  static void store_release32(volatile uint32_t *p,uint32_t v){uint32_t start=atomic_profile_begin();uint32_t irq=shizuku_armv6m_atomic_lock();asm volatile("dmb":::"memory");*p=v;asm volatile("dmb":::"memory");shizuku_armv6m_atomic_unlock(irq);atomic_profile_end(start);}
-  static uint32_t load_acquire32(volatile uint32_t *p){uint32_t start=atomic_profile_begin();uint32_t irq=shizuku_armv6m_atomic_lock();asm volatile("dmb":::"memory");uint32_t v=*p;shizuku_armv6m_atomic_unlock(irq);atomic_profile_end(start);return v;}
+  static bool cas32(volatile uint32_t *p,uint32_t expected,uint32_t desired){
+    uint32_t start=atomic_profile_begin();
+    const uintptr_t caller_pc=(uintptr_t)__builtin_return_address(0);
+    uint32_t irq=shizuku_armv6m_atomic_lock((uintptr_t)p,caller_pc);
+    bool ok=*p==expected;if(ok)*p=desired;
+    shizuku_armv6m_atomic_unlock(irq,(uintptr_t)p,caller_pc);atomic_profile_end(start);return ok;
+  }
+  static void store_release32(volatile uint32_t *p,uint32_t v){
+    uint32_t start=atomic_profile_begin();
+    const uintptr_t caller_pc=(uintptr_t)__builtin_return_address(0);
+    uint32_t irq=shizuku_armv6m_atomic_lock((uintptr_t)p,caller_pc);
+    asm volatile("dmb":::"memory");*p=v;asm volatile("dmb":::"memory");
+    shizuku_armv6m_atomic_unlock(irq,(uintptr_t)p,caller_pc);atomic_profile_end(start);
+  }
+  static uint32_t load_acquire32(volatile uint32_t *p){
+    // All callers pass naturally aligned uint32_t words. RP2040's Cortex-M0+
+    // performs an aligned word load as one indivisible bus access; acquire
+    // ordering only needs the barrier after the load. Do not take the shared
+    // Pico atomic spinlock here: loads are frequent in SVC/IRQ handlers, and a
+    // blocked handler with PRIMASK set can starve watchdog and lockout IRQs.
+    const uint32_t v=*p;
+    asm volatile("dmb":::"memory");
+    return v;
+  }
   static constexpr uint32_t DFSR_HALTED=1,DFSR_BKPT=2;
   // M0+ has no DebugMonitor. These API-compatible stubs keep phase-1 builds
   // possible; self-hosted debug is unavailable until a separate design exists.
