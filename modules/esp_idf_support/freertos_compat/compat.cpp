@@ -11,6 +11,8 @@ extern "C" void shizuku_c5_ble_note_queue_send(uint32_t, uint32_t, uint32_t)
     __attribute__((weak));
 extern "C" void shizuku_c5_ble_note_queue_receive(uint32_t, uint32_t, uint32_t)
     __attribute__((weak));
+extern "C" void shizuku_c5_ble_note_task_scheduled(uint32_t, uint32_t, uint32_t, uint32_t)
+    __attribute__((weak));
 
 namespace shizuku::freertos_compat {
 bool domain::task_create(void (*entry)(void *), const char *, uint32_t stack,
@@ -25,6 +27,8 @@ bool domain::task_create(void (*entry)(void *), const char *, uint32_t stack,
     t.priority = priority;
     t.base_priority = priority;
     t.wake_deadline = UINT64_MAX;
+    t.ready_since_us = p_.now_us();
+    t.ready_since_valid = true;
     t.entry = entry;
     t.arg = arg;
     if (handle) *handle = id;
@@ -45,7 +49,10 @@ bool domain::task_suspend(uint32_t id) {
 }
 bool domain::task_resume(uint32_t id, bool from_isr, bool *higher) {
   if (from_isr != p_.in_isr()) return false;
-  for (auto &t : tasks_) if (t.id == id && t.status == state::suspended) { t.status = state::ready; const bool hp=p_.wake(id);if(higher&&hp)*higher=true;return true; }
+  for (auto &t : tasks_) if (t.id == id && t.status == state::suspended) {
+    t.status = state::ready; t.ready_since_us = p_.now_us(); t.ready_since_valid = true;
+    const bool hp=p_.wake(id);if(higher&&hp)*higher=true;return true;
+  }
   return false;
 }
 bool domain::task_delete(uint32_t id) {
@@ -198,7 +205,9 @@ void domain::block_current(uint64_t deadline) {
   }
   for(auto &t:tasks_) if(t.id==id&&t.status!=state::done) {
     t.status=state::blocked; t.wake_deadline=deadline;
-    t.eligible_after_us=p_.now_us()+100; p_.block_task(id,deadline); return;
+    // A blocked task is not eligible until make_ready() transitions it back;
+    // add no extra delay here, especially for controller LL tasks woken by IRQ.
+    t.eligible_after_us=p_.now_us(); p_.block_task(id,deadline); return;
   }
 }
 void domain::make_ready(uint32_t id) {
@@ -209,7 +218,9 @@ void domain::make_ready(uint32_t id) {
     return;
   }
   for(auto &t:tasks_) if(t.id==id&&t.status==state::blocked) {
-    t.status=state::ready; t.wake_deadline=UINT64_MAX; p_.make_ready(id); return;
+    t.status=state::ready; t.wake_deadline=UINT64_MAX;
+    t.ready_since_us=p_.now_us(); t.ready_since_valid=true;
+    p_.make_ready(id); return;
   }
 }
 void domain::finish_current_task() {
@@ -228,13 +239,34 @@ void domain::run_scheduler(uint32_t grant_cycles) {
     for(size_t step=0;step<kMaxTasks;step++) {
       const size_t i=(scheduler_cursor_+step)%kMaxTasks; auto &t=tasks_[i];
       if(t.status==state::blocked) {
-        if(t.wake_deadline<=now) { t.status=state::ready; t.wake_deadline=UINT64_MAX; p_.make_ready(t.id); }
+        if(t.wake_deadline<=now) {
+          t.status=state::ready; t.wake_deadline=UINT64_MAX;
+          t.ready_since_us=now_us; t.ready_since_valid=true;
+          p_.make_ready(t.id);
+        }
         else if(t.wake_deadline<deadline) deadline=t.wake_deadline;
       }
       if(t.status==state::ready&&t.eligible_after_us<=now_us&&(!best||t.priority>best->priority)) { best=&t;best_index=i; }
     }
     if(best) {
       scheduler_cursor_=(best_index+1)%kMaxTasks;
+      if (best->ready_since_valid) {
+#if defined(SHIZUKU_C5_BLE_ENABLE_SCHED_DIAG_IRQ_MASK) && SHIZUKU_C5_BLE_ENABLE_SCHED_DIAG_IRQ_MASK
+        const uint32_t irq_key = p_.irq_save();
+#endif
+        const uint64_t ready_since_us = best->ready_since_us;
+        const uint64_t dispatch_us = p_.now_us();
+        best->ready_since_valid = false;
+#if defined(SHIZUKU_C5_BLE_ENABLE_SCHED_DIAG_IRQ_MASK) && SHIZUKU_C5_BLE_ENABLE_SCHED_DIAG_IRQ_MASK
+        p_.irq_restore(irq_key);
+#endif
+        const bool clock_skew = dispatch_us < ready_since_us;
+        const uint32_t latency = clock_skew ? 0u : static_cast<uint32_t>(
+            dispatch_us - ready_since_us);
+        if (shizuku_c5_ble_note_task_scheduled)
+          shizuku_c5_ble_note_task_scheduled(best->id, best->priority, latency,
+                                             clock_skew ? 1u : 0u);
+      }
       best->status=state::running;
       if(!p_.run_for(best->id,grant_cycles)) { best->status=state::suspended; return; }
       if(best->status==state::running) best->status=state::ready;

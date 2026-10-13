@@ -26,7 +26,7 @@ void shizuku_c5_ble_note_unimplemented(uint32_t) {}
 void shizuku_c5_ble_note_sync_alloc(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {}
 void shizuku_c5_ble_note_queue_shape(uint32_t, uint32_t) {}
 void shizuku_c5_ble_note_notification(uint32_t, bool) {}
-void shizuku_c5_ble_note_task_create(uint32_t, const char *, uint32_t) {}
+void shizuku_c5_ble_note_task_create(uint32_t, const char *, uint32_t, uint32_t) {}
 void shizuku_c5_ble_note_wait(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {}
 void shizuku_c5_ble_note_wait_callsite(uint32_t) {}
 void shizuku_c5_ble_note_scheduler(uint32_t, uint32_t) {}

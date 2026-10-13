@@ -5,6 +5,7 @@
 #include "esp_private/startup_internal.h"
 #include "nvs_flash.h"
 #include "host/ble_hs.h"
+#include "host/ble_gap.h"
 #include "host/ble_gatt.h"
 #include "host/ble_uuid.h"
 #include "nimble/nimble_port.h"
@@ -180,10 +181,35 @@ struct shizuku_c5_ble_diag_t {
   uint32_t npl_eventq_probe_records[8][8];
   uint32_t queue_payload_log_count;
   uint32_t queue_payload_records[16][5];
+  uint32_t adv_restart_count;
+  int32_t adv_restart_last_rc;
+  int32_t ble_connect_fail_status;
+  int32_t ble_disconnect_reason;
+  int32_t adv_callout_init_rc;
+  int32_t adv_retry_schedule_rc;
+  uint32_t ble_conn_duration_us;
+  uint32_t ble_conn_irq_registration_count;
+  uint32_t ble_conn_irq_total_delta;
+  uint32_t ble_conn_irq_sources[16];
+  uint32_t ble_conn_irq_dispatch_deltas[16];
+  uint32_t sched_task_priority[8];
+  uint32_t sched_task_ready_count[8];
+  uint32_t sched_task_last_wake_to_run_us[8];
+  uint32_t sched_task_max_wake_to_run_us[8];
+  int32_t ble_conn_params_find_rc;
+  int32_t ble_conn_params_update_rc;
+  int32_t ble_conn_params_update_status;
+  uint32_t ble_conn_interval;
+  uint32_t ble_conn_latency;
+  uint32_t ble_conn_supervision_timeout;
+  uint32_t sched_latency_clock_skew_count;
+  uint32_t ble_conn_pend_switch_delta;
+  uint32_t ble_irq_source4_dispatch_count;
+  uint32_t ble_irq_source7_dispatch_count;
 };
-static_assert(sizeof(shizuku_c5_ble_diag_t) == 1968);
+static_assert(sizeof(shizuku_c5_ble_diag_t) == 2300);
 
-// OpenOCD-readable word layout, 1968 bytes total (492 words):
+// OpenOCD-readable word layout, 2300 bytes total (575 words):
 // [0] magic='C5BL', [1] stage (1=early init, 4=NVS ready, 5=NimBLE init
 // returned, 6=host sync, 7=GATT ready after sync, 8=advertising,
 // 9=connected, 10=GATT read; 0x20/0x30/0x31 are earlier init failures,
@@ -212,7 +238,21 @@ static_assert(sizeof(shizuku_c5_ble_diag_t) == 1968);
 // installed probe function address; [347..410] are eight callback records
 // {sequence,task_handle,eventq_arg,timeout,storage,queue_handle,result,event};
 // [411] is queue payload log count; [412..491] are 16 records of
-// {sequence,operation(1=send,2=receive),handle,item_size,first_word}.
+// {sequence,operation(1=send,2=receive),handle,item_size,first_word};
+// [492..493] advertising restart count and most recent return code;
+// [494..497] failed-connect status, disconnect reason, callout-init rc, and
+// most recent retry-schedule rc; [498..500] connection duration, registration
+// count, and total IRQ delta; [501..516] raw IRQ source IDs; [517..532] matching
+// per-source dispatch deltas; [533..540] task priority; [541..548] READY-to-run
+// sample count; [549..556] last latency in us; [557..564] max latency in us;
+// [565..567] connection-parameter lookup/update rc and update status (-1 means
+// update was disabled at compile time);
+// [568..570] negotiated interval, latency, supervision timeout;
+// [571] wake timestamp race count; [572] connection-period pend-switch delta.
+// [573] cumulative BT controller IRQ dispatches (source 4); [574] cumulative
+// LP timer IRQ dispatches (source 7), counted from boot including advertising.
+// Task slots match task_diag order; interval units are 1.25ms and supervision
+// timeout units are 10ms.
 // Values 0x7fffffff mean the corresponding call has not returned.
 #if defined(__riscv)
 __attribute__((used, aligned(4), section(".noinit")))
@@ -234,18 +274,33 @@ volatile uint32_t shizuku_c5_ble_timeout_shim_calls = 0;
 volatile uint32_t shizuku_c5_ble_queue_sem_shim_calls = 0;
 volatile uint32_t shizuku_c5_ble_critical_shim_calls = 0;
 extern struct npl_funcs_t *r_npl_funcs;
+extern volatile uint32_t shizuku_c5_timer_diag[7];
 }
 
 namespace {
 constexpr char kBleDeviceName[] = "Shizuku-C5";
 constexpr uint16_t kShizukuGattServiceUuid = 0xFFF0;
 constexpr uint16_t kShizukuGattBuildVersionUuid = 0xFFF1;
-constexpr uint32_t kBleCompatGrantCycles = 16000u; // 1 ms at the C5 16 MHz timer rate.
+constexpr uint32_t kBleCompatGrantCycles = 1600u; // 100 us at the C5 16 MHz timer rate.
+// Regression probes are opt-in so the stage-8 baseline has no connection-only
+// update request or pend-switch sampling overhead.
+#ifndef SHIZUKU_C5_BLE_ENABLE_CONN_PARAM_UPDATE
+#define SHIZUKU_C5_BLE_ENABLE_CONN_PARAM_UPDATE 0
+#endif
+#ifndef SHIZUKU_C5_BLE_ENABLE_PEND_SWITCH_DIAG
+#define SHIZUKU_C5_BLE_ENABLE_PEND_SWITCH_DIAG 0
+#endif
 static ble_uuid16_t g_service_uuid{};
 static ble_uuid16_t g_build_version_uuid{};
 static ble_gatt_chr_def g_gatt_characteristics[2]{};
 static ble_gatt_svc_def g_gatt_services[2]{};
 static uint16_t g_build_version_value_handle = 0;
+static struct ble_npl_callout g_adv_retry_callout{};
+static bool g_adv_retry_callout_ready = false;
+static shizuku::chips::esp32_c5::irq_dispatch_snapshot g_ble_conn_irq_baseline[16]{};
+static size_t g_ble_conn_irq_baseline_count = 0;
+static uint32_t g_ble_conn_started_us = 0;
+static uint32_t g_ble_conn_pend_switch_baseline = 0;
 static struct ble_npl_event *(*g_npl_eventq_get_original)(
     struct ble_npl_eventq *, ble_npl_time_t) = nullptr;
 
@@ -328,6 +383,85 @@ void shizuku_c5_ble_install_npl_probe() {
 }
 
 int shizuku_c5_ble_gap_event(struct ble_gap_event *event, void *arg);
+int shizuku_c5_ble_start_advertising(void);
+void shizuku_c5_ble_schedule_adv_retry(uint32_t delay_ms);
+
+void shizuku_c5_ble_capture_connection_irq_baseline() {
+    g_ble_conn_started_us = static_cast<uint32_t>(
+        shizuku::boards::esp32_c5::time_us());
+#if SHIZUKU_C5_BLE_ENABLE_PEND_SWITCH_DIAG
+    g_ble_conn_pend_switch_baseline = shizuku_c5_timer_diag[6];
+#else
+    g_ble_conn_pend_switch_baseline = 0;
+#endif
+    g_ble_conn_irq_baseline_count = shizuku::chips::esp32_c5::irq_snapshot(
+        g_ble_conn_irq_baseline, sizeof(g_ble_conn_irq_baseline) /
+                                     sizeof(g_ble_conn_irq_baseline[0]));
+    if (g_ble_conn_irq_baseline_count >
+        sizeof(g_ble_conn_irq_baseline) / sizeof(g_ble_conn_irq_baseline[0]))
+        g_ble_conn_irq_baseline_count =
+            sizeof(g_ble_conn_irq_baseline) / sizeof(g_ble_conn_irq_baseline[0]);
+    shizuku_c5_ble_diag.ble_conn_duration_us = 0;
+    shizuku_c5_ble_diag.ble_conn_irq_registration_count =
+        static_cast<uint32_t>(g_ble_conn_irq_baseline_count);
+    shizuku_c5_ble_diag.ble_conn_irq_total_delta = 0;
+    shizuku_c5_ble_diag.ble_conn_pend_switch_delta = 0;
+    for (size_t i = 0; i < 16; ++i) {
+        shizuku_c5_ble_diag.ble_conn_irq_sources[i] =
+            i < g_ble_conn_irq_baseline_count ? g_ble_conn_irq_baseline[i].source : UINT32_MAX;
+        shizuku_c5_ble_diag.ble_conn_irq_dispatch_deltas[i] = 0;
+    }
+}
+
+void shizuku_c5_ble_capture_connection_irq_delta() {
+    shizuku::chips::esp32_c5::irq_dispatch_snapshot current[16]{};
+    const size_t reported_count = shizuku::chips::esp32_c5::irq_snapshot(
+        current, sizeof(current) / sizeof(current[0]));
+    const size_t current_count = reported_count < 16 ? reported_count : 16;
+    shizuku_c5_ble_diag.ble_conn_duration_us = static_cast<uint32_t>(
+        shizuku::boards::esp32_c5::time_us()) - g_ble_conn_started_us;
+#if SHIZUKU_C5_BLE_ENABLE_PEND_SWITCH_DIAG
+    shizuku_c5_ble_diag.ble_conn_pend_switch_delta =
+        shizuku_c5_timer_diag[6] - g_ble_conn_pend_switch_baseline;
+#else
+    shizuku_c5_ble_diag.ble_conn_pend_switch_delta = 0;
+#endif
+    shizuku_c5_ble_diag.ble_conn_irq_total_delta = 0;
+    for (size_t i = 0; i < g_ble_conn_irq_baseline_count; ++i) {
+        uint32_t delta = UINT32_MAX;
+        for (size_t j = 0; j < current_count; ++j) {
+            if (current[j].source != g_ble_conn_irq_baseline[i].source) continue;
+            delta = current[j].dispatch_count -
+                    g_ble_conn_irq_baseline[i].dispatch_count;
+            break;
+        }
+        shizuku_c5_ble_diag.ble_conn_irq_dispatch_deltas[i] = delta;
+        if (delta != UINT32_MAX)
+            shizuku_c5_ble_diag.ble_conn_irq_total_delta += delta;
+    }
+}
+
+void shizuku_c5_ble_record_conn_params(const struct ble_gap_conn_desc &desc) {
+    shizuku_c5_ble_diag.ble_conn_interval = desc.conn_itvl;
+    shizuku_c5_ble_diag.ble_conn_latency = desc.conn_latency;
+    shizuku_c5_ble_diag.ble_conn_supervision_timeout = desc.supervision_timeout;
+}
+
+int shizuku_c5_ble_read_conn_params(uint16_t conn_handle) {
+    struct ble_gap_conn_desc desc{};
+    const int rc = ble_gap_conn_find(conn_handle, &desc);
+    shizuku_c5_ble_diag.ble_conn_params_find_rc = rc;
+    if (rc == 0) shizuku_c5_ble_record_conn_params(desc);
+    return rc;
+}
+
+void shizuku_c5_ble_adv_retry_event(struct ble_npl_event *) {
+    const int rc = shizuku_c5_ble_start_advertising();
+    shizuku_c5_ble_diag.adv_restart_count =
+        shizuku_c5_ble_diag.adv_restart_count + 1u;
+    shizuku_c5_ble_diag.adv_restart_last_rc = rc;
+    if (rc != 0) shizuku_c5_ble_schedule_adv_retry(250);
+}
 
 void shizuku_c5_ble_set_stage(uint32_t stage) {
     if (shizuku_c5_ble_diag.stage < 0x30 &&
@@ -340,7 +474,7 @@ void shizuku_c5_ble_set_stage(uint32_t stage) {
     for (;;) {
         // The root Shizuku thread owns no implicit FreeRTOS time slice. Run
         // compat tasks explicitly; this grants each READY task for a bounded
-        // 1 ms quantum and lets blocked tasks wake through SLEEP_US/timer IRQs.
+        // 100 us quantum and lets blocked tasks wake through SLEEP_US/timer IRQs.
         shizuku_freertos_compat_run_scheduler(kBleCompatGrantCycles);
         // If the compat domain was never bound, keep the boot-failure path
         // cooperative too. With a bound domain, run_scheduler does not return.
@@ -402,6 +536,9 @@ int shizuku_c5_ble_start_advertising(void) {
     fields.name = reinterpret_cast<uint8_t *>(const_cast<char *>(kBleDeviceName));
     fields.name_len = sizeof(kBleDeviceName) - 1u;
     fields.name_is_complete = 1;
+    fields.uuids16 = &g_service_uuid;
+    fields.num_uuids16 = 1;
+    fields.uuids16_is_complete = 1;
     rc = ble_gap_adv_set_fields(&fields);
     shizuku_c5_ble_diag.adv_set_fields_rc = rc;
     if (rc != 0) return rc;
@@ -416,6 +553,14 @@ int shizuku_c5_ble_start_advertising(void) {
     return rc;
 }
 
+void shizuku_c5_ble_schedule_adv_retry(uint32_t delay_ms) {
+    if (!g_adv_retry_callout_ready) return;
+    ble_npl_time_t delay_ticks = ble_npl_time_ms_to_ticks32(delay_ms);
+    if (delay_ticks == 0) delay_ticks = 1;
+    shizuku_c5_ble_diag.adv_retry_schedule_rc =
+        ble_npl_callout_reset(&g_adv_retry_callout, delay_ticks);
+}
+
 void shizuku_c5_ble_on_reset(int reason) {
     shizuku_c5_ble_diag.nimble_reset_count =
         shizuku_c5_ble_diag.nimble_reset_count + 1u;
@@ -428,8 +573,15 @@ void shizuku_c5_ble_on_sync(void) {
     shizuku_c5_ble_set_stage(6);
     if (shizuku_c5_ble_diag.gatt_add_svcs_rc != 0) return;
     shizuku_c5_ble_set_stage(7);
+    if (!g_adv_retry_callout_ready) {
+        shizuku_c5_ble_diag.adv_callout_init_rc = ble_npl_callout_init(
+            &g_adv_retry_callout, nimble_port_get_dflt_eventq(),
+            shizuku_c5_ble_adv_retry_event, nullptr);
+        g_adv_retry_callout_ready = shizuku_c5_ble_diag.adv_callout_init_rc == 0;
+    }
     if (shizuku_c5_ble_start_advertising() != 0) {
         shizuku_c5_ble_diag.stage = 0x38;
+        shizuku_c5_ble_schedule_adv_retry(250);
         asm volatile("fence rw,rw" ::: "memory");
     }
 }
@@ -442,16 +594,49 @@ int shizuku_c5_ble_gap_event(struct ble_gap_event *event, void *) {
             shizuku_c5_ble_diag.ble_connect_count =
                 shizuku_c5_ble_diag.ble_connect_count + 1u;
             shizuku_c5_ble_diag.ble_connection_handle = event->connect.conn_handle;
+            shizuku_c5_ble_diag.ble_conn_params_find_rc = 0x7fffffff;
+            shizuku_c5_ble_diag.ble_conn_params_update_rc = 0x7fffffff;
+            shizuku_c5_ble_diag.ble_conn_params_update_status = 0x7fffffff;
+            shizuku_c5_ble_diag.ble_conn_interval = UINT32_MAX;
+            shizuku_c5_ble_diag.ble_conn_latency = UINT32_MAX;
+            shizuku_c5_ble_diag.ble_conn_supervision_timeout = UINT32_MAX;
+            shizuku_c5_ble_capture_connection_irq_baseline();
+            (void)shizuku_c5_ble_read_conn_params(event->connect.conn_handle);
+#if SHIZUKU_C5_BLE_ENABLE_CONN_PARAM_UPDATE
+            struct ble_gap_upd_params requested{};
+            requested.itvl_min = 12; // 15 ms
+            requested.itvl_max = 24; // 30 ms
+            requested.latency = 0;
+            requested.supervision_timeout = 400; // 4 s
+            requested.min_ce_len = 0;
+            requested.max_ce_len = 0;
+            shizuku_c5_ble_diag.ble_conn_params_update_rc =
+                ble_gap_update_params(event->connect.conn_handle, &requested);
+#else
+            shizuku_c5_ble_diag.ble_conn_params_update_rc = -1;
+#endif
             shizuku_c5_ble_set_stage(9);
         } else {
-            (void)shizuku_c5_ble_start_advertising();
+            shizuku_c5_ble_diag.ble_connect_fail_status = event->connect.status;
+            shizuku_c5_ble_schedule_adv_retry(100);
         }
         return 0;
     case BLE_GAP_EVENT_DISCONNECT:
         shizuku_c5_ble_diag.ble_disconnect_count =
             shizuku_c5_ble_diag.ble_disconnect_count + 1u;
+        shizuku_c5_ble_diag.ble_disconnect_reason = event->disconnect.reason;
         shizuku_c5_ble_diag.ble_connection_handle = UINT32_MAX;
-        (void)shizuku_c5_ble_start_advertising();
+        shizuku_c5_ble_record_conn_params(event->disconnect.conn);
+        shizuku_c5_ble_capture_connection_irq_delta();
+        shizuku_c5_ble_schedule_adv_retry(100);
+        return 0;
+    case BLE_GAP_EVENT_CONN_UPDATE:
+        shizuku_c5_ble_diag.ble_conn_params_update_status = event->conn_update.status;
+        if (event->conn_update.status == 0)
+            (void)shizuku_c5_ble_read_conn_params(event->conn_update.conn_handle);
+        return 0;
+    case BLE_GAP_EVENT_ADV_COMPLETE:
+        shizuku_c5_ble_schedule_adv_retry(100);
         return 0;
     default:
         return 0;
@@ -598,7 +783,8 @@ static volatile shizuku_c5_ble_task_diag_t *shizuku_c5_ble_add_task_diag(uint32_
     return nullptr;
 }
 
-void shizuku_c5_ble_note_task_create(uint32_t task_id, const char *name, uint32_t success) {
+void shizuku_c5_ble_note_task_create(uint32_t task_id, const char *name,
+                                    uint32_t success, uint32_t priority) {
     shizuku_c5_ble_diag.task_create_attempts = shizuku_c5_ble_diag.task_create_attempts + 1u;
     if (!success) {
         shizuku_c5_ble_diag.task_create_failures = shizuku_c5_ble_diag.task_create_failures + 1u;
@@ -607,6 +793,8 @@ void shizuku_c5_ble_note_task_create(uint32_t task_id, const char *name, uint32_
     shizuku_c5_ble_diag.task_create_successes = shizuku_c5_ble_diag.task_create_successes + 1u;
     auto *record = shizuku_c5_ble_add_task_diag(task_id);
     if (record) {
+        const size_t index = static_cast<size_t>(record - shizuku_c5_ble_diag.task_diag);
+        if (index < 8) shizuku_c5_ble_diag.sched_task_priority[index] = priority;
         bool name_ended = name == nullptr;
         for (size_t i = 0; i < sizeof(record->name); ++i) {
             record->name[i] = name_ended ? '\0' : name[i];
@@ -618,6 +806,29 @@ void shizuku_c5_ble_note_task_create(uint32_t task_id, const char *name, uint32_
         shizuku_c5_ble_diag.esp_timer_task_id = task_id;
         shizuku_c5_ble_diag.esp_timer_task_create_count = shizuku_c5_ble_diag.esp_timer_task_create_count + 1u;
     }
+}
+
+void shizuku_c5_ble_note_task_scheduled(uint32_t task_id, uint32_t priority,
+                                        uint32_t wake_to_run_us,
+                                        uint32_t clock_skew) {
+    if (clock_skew)
+        shizuku_c5_ble_diag.sched_latency_clock_skew_count += 1u;
+    auto *record = shizuku_c5_ble_find_task_diag(task_id);
+    if (!record) return;
+    const size_t index = static_cast<size_t>(record - shizuku_c5_ble_diag.task_diag);
+    if (index >= 8) return;
+    shizuku_c5_ble_diag.sched_task_priority[index] = priority;
+    shizuku_c5_ble_diag.sched_task_ready_count[index] += 1u;
+    shizuku_c5_ble_diag.sched_task_last_wake_to_run_us[index] = wake_to_run_us;
+    if (wake_to_run_us > shizuku_c5_ble_diag.sched_task_max_wake_to_run_us[index])
+        shizuku_c5_ble_diag.sched_task_max_wake_to_run_us[index] = wake_to_run_us;
+}
+
+extern "C" void shizuku_c5_ble_note_irq_dispatch(uint32_t source) {
+    if (source == 4u)
+        shizuku_c5_ble_diag.ble_irq_source4_dispatch_count += 1u;
+    else if (source == 7u)
+        shizuku_c5_ble_diag.ble_irq_source7_dispatch_count += 1u;
 }
 
 void shizuku_c5_ble_note_task_started(uint32_t task_id) {
@@ -847,6 +1058,18 @@ extern "C" int shizuku_c5_ble_pre_core(void)
     shizuku_c5_ble_diag.adv_set_fields_rc = kNotReturned;
     shizuku_c5_ble_diag.adv_start_rc = kNotReturned;
     shizuku_c5_ble_diag.adv_addr_infer_rc = kNotReturned;
+    shizuku_c5_ble_diag.ble_connect_fail_status = -1;
+    shizuku_c5_ble_diag.ble_disconnect_reason = -1;
+    shizuku_c5_ble_diag.adv_callout_init_rc = kNotReturned;
+    shizuku_c5_ble_diag.adv_retry_schedule_rc = kNotReturned;
+    shizuku_c5_ble_diag.ble_conn_params_find_rc = kNotReturned;
+    shizuku_c5_ble_diag.ble_conn_params_update_rc = kNotReturned;
+    shizuku_c5_ble_diag.ble_conn_params_update_status = kNotReturned;
+    shizuku_c5_ble_diag.ble_conn_interval = UINT32_MAX;
+    shizuku_c5_ble_diag.ble_conn_latency = UINT32_MAX;
+    shizuku_c5_ble_diag.ble_conn_supervision_timeout = UINT32_MAX;
+    for (size_t i = 0; i < 16; ++i)
+        shizuku_c5_ble_diag.ble_conn_irq_sources[i] = UINT32_MAX;
     shizuku_c5_ble_diag.ble_connection_handle = UINT32_MAX;
     shizuku_c5_ble_diag.compat_bind_rc = kNotReturned;
     shizuku_c5_ble_diag.idf_init_current_slot = UINT32_MAX;

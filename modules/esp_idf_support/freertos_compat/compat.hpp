@@ -58,6 +58,8 @@ struct task_control {
   uint32_t id = 0, priority = 0, base_priority = 0;
   uint64_t wake_deadline = UINT64_MAX;
   uint64_t eligible_after_us = 0;
+  uint64_t ready_since_us = 0;
+  bool ready_since_valid = false;
   void (*entry)(void *) = nullptr;
   void *arg = nullptr;
   uint32_t notification_value = 0;

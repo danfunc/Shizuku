@@ -24,7 +24,8 @@ extern "C" void shizuku_c5_ble_note_sync_alloc(uint32_t kind, uint32_t reason,
 extern "C" void shizuku_c5_ble_note_queue_shape(uint32_t capacity, uint32_t item_size) __attribute__((weak));
 extern "C" void shizuku_c5_ble_note_notification(uint32_t api_kind, bool success) __attribute__((weak));
 extern "C" void shizuku_c5_ble_note_task_create(uint32_t task_id, const char *name,
-                                                uint32_t success) __attribute__((weak));
+                                                uint32_t success, uint32_t priority)
+    __attribute__((weak));
 extern "C" void shizuku_c5_ble_note_wait(uint32_t task_id, uint32_t kind, uint32_t handle,
                                           uint32_t timeout_ticks, uint32_t entering,
                                           uint32_t result) __attribute__((weak));
@@ -305,7 +306,8 @@ extern "C" BaseType_t SHZ_FREERTOS_API(xTaskCreate)(TaskFunction_t f,const char 
   uint32_t id = 0;
   const bool success = g_domain && g_domain->task_create(f, n, s, a, p, &id);
   if (shizuku_c5_ble_note_task_create)
-    shizuku_c5_ble_note_task_create(success ? id : 0u, n, success ? 1u : 0u);
+    shizuku_c5_ble_note_task_create(success ? id : 0u, n,
+                                    success ? 1u : 0u, p);
   if (!success) return pdFAIL;
   if (h) *h = reinterpret_cast<void *>(static_cast<uintptr_t>(id));
   return pdPASS;

@@ -27,7 +27,7 @@ struct c5_irq_registration {
   shizuku::chips::esp32_c5::irq_handler_t handler;
   void *arg;
   bool enabled;
-  uint32_t dispatch_count;
+  volatile uint32_t dispatch_count;
   uint32_t flags;
   uint32_t matrix_readback;
   uint32_t clic_readback;
@@ -46,6 +46,7 @@ uint64_t armed_target;
 namespace c5 = shizuku::ports::c5;
 extern "C" void shizuku_freertos_compat_isr_enter(void) __attribute__((weak));
 extern "C" void shizuku_freertos_compat_isr_exit(void) __attribute__((weak));
+extern "C" void shizuku_c5_ble_note_irq_dispatch(uint32_t source) __attribute__((weak));
 inline void reg_write(uint32_t address, uint32_t value) {
   *reinterpret_cast<volatile uint32_t *>(address) = value;
 }
@@ -126,6 +127,9 @@ bool dispatch_peripheral_irq(uint32_t cpu_irq, uint32_t raw_mcause) {
     if (entry.handler && entry.enabled && entry.cpu_irq == cpu_irq) {
       shizuku_c5_irq_diag[0] = shizuku_c5_irq_diag[0] + 1;
       entry.dispatch_count = entry.dispatch_count + 1u;
+      if ((entry.source == 4u || entry.source == 7u) &&
+          shizuku_c5_ble_note_irq_dispatch)
+        shizuku_c5_ble_note_irq_dispatch(entry.source);
       shizuku_c5_irq_diag[1] = raw_mcause;
       shizuku_c5_irq_diag[2] = cpu_irq;
       shizuku_c5_irq_diag[3] = entry.source;
@@ -326,6 +330,18 @@ bool clic_direct_mode::current_priv() {
   // The stage-2 runnable domain is M-only; inside a trap report the saved MPP.
   return shizuku_c5_trap_depth == 0 ||
     (active_mstatus & RV32_MSTATUS_MPP) == RV32_MSTATUS_MPP;
+}
+size_t irq_snapshot(irq_dispatch_snapshot *out, size_t capacity) {
+  size_t registered = 0;
+  for (const auto &entry : shizuku_c5_irq_registrations) {
+    if (!entry.handler) continue;
+    if (out && registered < capacity) {
+      out[registered].source = entry.source;
+      out[registered].dispatch_count = entry.dispatch_count;
+    }
+    ++registered;
+  }
+  return registered;
 }
 } // namespace shizuku::chips::esp32_c5
 
