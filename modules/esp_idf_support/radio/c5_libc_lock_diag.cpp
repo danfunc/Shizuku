@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <sys/lock.h>
 
-extern "C" void shizuku_c5_ble_note_libc_lock(uint32_t lock_address,
+extern "C" void shizuku_esp_ble_note_libc_lock(uint32_t lock_address,
                                                uint32_t lock_value,
                                                uint32_t api_kind,
                                                uint32_t caller_pc);
@@ -24,7 +24,7 @@ void record_lock(void *lock_address, uint32_t kind, bool dereference, uint32_t p
   uint32_t value = 0;
   if (dereference && lock_address)
     value = *static_cast<volatile uint32_t *>(lock_address);
-  shizuku_c5_ble_note_libc_lock(address, value, kind, pc);
+  shizuku_esp_ble_note_libc_lock(address, value, kind, pc);
 }
 } // namespace
 

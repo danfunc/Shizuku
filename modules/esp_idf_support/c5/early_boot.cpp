@@ -6,7 +6,7 @@
 #endif
 
 #if defined(SHIZUKU_C5_BLE)
-extern "C" [[noreturn]] void shizuku_c5_ble_stage1_start(void);
+extern "C" [[noreturn]] void shizuku_esp_ble_stage1_start(void);
 #endif
 
 extern "C" {
@@ -65,7 +65,7 @@ uintptr_t c5_combined_handler(uintptr_t a0, uintptr_t a1, uintptr_t a2,
 
 #if defined(SHIZUKU_C5_BLE)
   // BLE-only archive variant: selftests finish before controller init starts.
-  shizuku_c5_ble_stage1_start();
+  shizuku_esp_ble_stage1_start();
 #endif
 
   // 3. 段2 thread1 スポーン (GRANT スイッチ試験用)

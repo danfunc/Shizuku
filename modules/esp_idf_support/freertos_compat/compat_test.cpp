@@ -18,24 +18,24 @@
 // The host API test links the same wrappers as BLE firmware. Firmware-only
 // diagnostics and deferred C5 context switching are inert in this test.
 extern "C" {
-volatile uint32_t shizuku_c5_ble_timeout_shim_calls = 0;
-volatile uint32_t shizuku_c5_ble_queue_sem_shim_calls = 0;
-volatile uint32_t shizuku_c5_ble_critical_shim_calls = 0;
-void shizuku_c5_pend_compat_context_switch(void) {}
-void shizuku_c5_ble_note_unimplemented(uint32_t) {}
-void shizuku_c5_ble_note_sync_alloc(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {}
-void shizuku_c5_ble_note_queue_shape(uint32_t, uint32_t) {}
-void shizuku_c5_ble_note_notification(uint32_t, bool) {}
-void shizuku_c5_ble_note_task_create(uint32_t, const char *, uint32_t, uint32_t) {}
-void shizuku_c5_ble_note_wait(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {}
-void shizuku_c5_ble_note_wait_callsite(uint32_t) {}
-void shizuku_c5_ble_note_scheduler(uint32_t, uint32_t) {}
-void shizuku_c5_ble_note_task_started(uint32_t) {}
-void shizuku_c5_ble_note_sync_object(uint32_t, uint32_t, uint32_t, uint32_t,
+volatile uint32_t shizuku_esp_ble_timeout_shim_calls = 0;
+volatile uint32_t shizuku_esp_ble_queue_sem_shim_calls = 0;
+volatile uint32_t shizuku_esp_ble_critical_shim_calls = 0;
+void shizuku_esp_ble_pend_compat_context_switch(void) {}
+void shizuku_esp_ble_note_unimplemented(uint32_t) {}
+void shizuku_esp_ble_note_sync_alloc(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {}
+void shizuku_esp_ble_note_queue_shape(uint32_t, uint32_t) {}
+void shizuku_esp_ble_note_notification(uint32_t, bool) {}
+void shizuku_esp_ble_note_task_create(uint32_t, const char *, uint32_t, uint32_t) {}
+void shizuku_esp_ble_note_wait(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {}
+void shizuku_esp_ble_note_wait_callsite(uint32_t) {}
+void shizuku_esp_ble_note_scheduler(uint32_t, uint32_t) {}
+void shizuku_esp_ble_note_task_started(uint32_t) {}
+void shizuku_esp_ble_note_sync_object(uint32_t, uint32_t, uint32_t, uint32_t,
     uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
     uint32_t, uint32_t, uint32_t, uint32_t) {}
-void shizuku_c5_ble_note_queue_send(uint32_t, uint32_t, uint32_t) {}
-void shizuku_c5_ble_note_queue_receive(uint32_t, uint32_t, uint32_t) {}
+void shizuku_esp_ble_note_queue_send(uint32_t, uint32_t, uint32_t) {}
+void shizuku_esp_ble_note_queue_receive(uint32_t, uint32_t, uint32_t) {}
 }
 
 using namespace shizuku::freertos_compat;

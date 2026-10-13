@@ -31,14 +31,18 @@ export IDF_PATH IDF_TOOLS_PATH
 WANT_GCC=$3
 TARGET=${4:-esp32c6}
 PROFILE=${5:-}
+BLE_PREFER_1M_PHY=${SHIZUKU_ESP_BLE_PREFER_1M_PHY:-${SHIZUKU_C5_BLE_PREFER_1M_PHY:-0}}
 case "$TARGET" in esp32c6|esp32c5) ;; *) fail "未対応の IDF target: $TARGET" ;; esac
 IDF_PROFILE_ARGS=()
 case "$PROFILE" in
   "") ;;
   ble)
-    test "$TARGET" = esp32c5 || fail "ble profile は esp32c5 専用"
-    export SHIZUKU_C5_BLE=1
-    IDF_PROFILE_ARGS+=("-DSHIZUKU_C5_BLE=ON")
+    case "$BLE_PREFER_1M_PHY" in 0|1) ;; *) fail "SHIZUKU_C5_BLE_PREFER_1M_PHY は 0 または 1" ;; esac
+    export SHIZUKU_ESP_BLE=1
+    IDF_PROFILE_ARGS+=("-DSHIZUKU_ESP_BLE=ON"
+                       "-DSHIZUKU_ESP_BLE_PREFER_1M_PHY=$BLE_PREFER_1M_PHY"
+                       "-DSHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG=1"
+                       "-DSHIZUKU_ESP_BLE_ENABLE_SCHED_DIAG_IRQ_MASK=1")
     ;;
   *) fail "未対応の firmware profile: $PROFILE" ;;
 esac

@@ -56,6 +56,7 @@ struct waiter { uint32_t task; uint32_t priority; uint64_t sequence; };
 struct task_control {
   state status = state::unused;
   uint32_t id = 0, priority = 0, base_priority = 0;
+  uint32_t scheduling_boost = 0;
   uint64_t wake_deadline = UINT64_MAX;
   uint64_t eligible_after_us = 0;
   uint64_t ready_since_us = 0;
@@ -104,6 +105,7 @@ class domain {
   bool task_resume(uint32_t task, bool from_isr = false, bool *higher_priority_woken = nullptr);
   bool task_delete(uint32_t task);
   bool task_set_priority(uint32_t task, uint32_t priority);
+  bool task_set_scheduling_boost(uint32_t task, uint32_t boost);
   uint32_t task_priority(uint32_t task) const;
   bool task_notify(uint32_t task, uint32_t index, uint32_t value, uint32_t action,
                    uint32_t *previous, bool from_isr = false,
@@ -121,6 +123,7 @@ class domain {
   void block_current(uint64_t deadline);
   void make_ready(uint32_t task);
   void run_scheduler(uint32_t grant_cycles);
+  void set_scheduler_idle_poll_us(uint32_t poll_us);
   void finish_current_task();
 
   int create_queue(size_t capacity, size_t item_size);
@@ -174,6 +177,7 @@ class domain {
   sync_object objects_[kMaxObjects]{};
   uint64_t sequence_ = 0;
   size_t scheduler_cursor_ = 0;
+  uint32_t scheduler_idle_poll_us_ = 100;
   uint32_t tick_hz_ = 100;
   bool polling_timers_ = false;
   sync_object *get(int handle, object_kind kind);

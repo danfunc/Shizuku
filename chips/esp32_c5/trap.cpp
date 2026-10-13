@@ -3,6 +3,14 @@
 #include "chips/esp32_c5/systimer.hpp"
 #include "chips/esp32_c5/trap_api.hpp"
 
+#ifndef SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG
+#if defined(SHIZUKU_C5_BLE) && SHIZUKU_C5_BLE
+#define SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG 1
+#else
+#define SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG 0
+#endif
+#endif
+
 using arch = shizuku::ARCH;
 static_assert((sizeof(shizuku::KERNEL::call_frame_header) + RV32_FRAME_BYTES) % 16 == 0,
               "V2 call-frame geometry must preserve the RV32 16-byte stack ABI");
@@ -46,7 +54,35 @@ uint64_t armed_target;
 namespace c5 = shizuku::ports::c5;
 extern "C" void shizuku_freertos_compat_isr_enter(void) __attribute__((weak));
 extern "C" void shizuku_freertos_compat_isr_exit(void) __attribute__((weak));
-extern "C" void shizuku_c5_ble_note_irq_dispatch(uint32_t source) __attribute__((weak));
+extern "C" uint32_t shizuku_freertos_compat_current_task_id(void) __attribute__((weak));
+extern "C" void shizuku_esp_ble_note_irq_dispatch(uint32_t source,
+    uint32_t interrupted_mepc, uint32_t task_id) __attribute__((weak));
+extern "C" void shizuku_esp_ble_irq_mask_begin(uint32_t kind,
+    uint32_t caller_pc, uint32_t task_id) __attribute__((weak));
+extern "C" void shizuku_esp_ble_irq_mask_end(uint32_t kind) __attribute__((weak));
+uint32_t mask_global_interrupts(uint32_t kind) {
+  uintptr_t old_mstatus = 0;
+  asm volatile("csrrc %0, mstatus, %1" : "=r"(old_mstatus) : "r"(uintptr_t{8}) : "memory");
+#if defined(SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG) && SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG
+  if ((old_mstatus & 8u) && shizuku_esp_ble_irq_mask_begin)
+    shizuku_esp_ble_irq_mask_begin(kind,
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(__builtin_return_address(0))),
+        shizuku_freertos_compat_current_task_id
+            ? shizuku_freertos_compat_current_task_id() : 0u);
+#else
+  (void)kind;
+#endif
+  return static_cast<uint32_t>(old_mstatus);
+}
+void restore_global_interrupts(uint32_t old_mstatus, uint32_t kind) {
+#if defined(SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG) && SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG
+  if ((old_mstatus & 8u) && shizuku_esp_ble_irq_mask_end)
+    shizuku_esp_ble_irq_mask_end(kind);
+#else
+  (void)kind;
+#endif
+  asm volatile("csrw mstatus, %0" :: "r"(static_cast<uintptr_t>(old_mstatus)) : "memory");
+}
 inline void reg_write(uint32_t address, uint32_t value) {
   *reinterpret_cast<volatile uint32_t *>(address) = value;
 }
@@ -122,21 +158,34 @@ void context_to_frame(arch::context_t &c) {
   // Actual U-mode is not safe before PMP and a trusted U-entry stack exist.
   if (!c.privileged) stop(0xE004);
 }
-bool dispatch_peripheral_irq(uint32_t cpu_irq, uint32_t raw_mcause) {
+bool dispatch_peripheral_irq(uint32_t cpu_irq, uint32_t raw_mcause,
+                             uint32_t interrupted_mepc) {
   for (auto &entry : shizuku_c5_irq_registrations) {
     if (entry.handler && entry.enabled && entry.cpu_irq == cpu_irq) {
       shizuku_c5_irq_diag[0] = shizuku_c5_irq_diag[0] + 1;
       entry.dispatch_count = entry.dispatch_count + 1u;
       if ((entry.source == 4u || entry.source == 7u) &&
-          shizuku_c5_ble_note_irq_dispatch)
-        shizuku_c5_ble_note_irq_dispatch(entry.source);
+          shizuku_esp_ble_note_irq_dispatch)
+        shizuku_esp_ble_note_irq_dispatch(entry.source, interrupted_mepc,
+            shizuku_freertos_compat_current_task_id
+                ? shizuku_freertos_compat_current_task_id() : 0u);
       shizuku_c5_irq_diag[1] = raw_mcause;
       shizuku_c5_irq_diag[2] = cpu_irq;
       shizuku_c5_irq_diag[3] = entry.source;
       shizuku_c5_irq_diag[4] = 1;
+#if defined(SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG) && SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG
+      if (entry.source == 4u && shizuku_esp_ble_irq_mask_begin)
+        shizuku_esp_ble_irq_mask_begin(4u, interrupted_mepc,
+            shizuku_freertos_compat_current_task_id
+                ? shizuku_freertos_compat_current_task_id() : 0u);
+#endif
       if (shizuku_freertos_compat_isr_enter) shizuku_freertos_compat_isr_enter();
       entry.handler(entry.arg);
       if (shizuku_freertos_compat_isr_exit) shizuku_freertos_compat_isr_exit();
+#if defined(SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG) && SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG
+      if (entry.source == 4u && shizuku_esp_ble_irq_mask_end)
+        shizuku_esp_ble_irq_mask_end(4u);
+#endif
       return true;
     }
   }
@@ -199,7 +248,7 @@ extern "C" arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_f
       if (clic_index < c5::CLIC_EXT_OFFSET || clic_index >= c5::CLIC_EXT_OFFSET + 32u)
         stop(0xE011);
       const uint32_t cpu_irq = clic_index - c5::CLIC_EXT_OFFSET;
-      if (!dispatch_peripheral_irq(cpu_irq, frame->mcause)) stop(0xE012);
+      if (!dispatch_peripheral_irq(cpu_irq, frame->mcause, frame->mepc)) stop(0xE012);
     }
     run_pending_switch();
     context = kernel.current_context();
@@ -225,18 +274,17 @@ int irq_register(uint32_t source, uint32_t cpu_irq, irq_handler_t handler, void 
                  uint32_t flags, bool enabled, uint32_t level, bool edge) {
   if (source >= 128u || cpu_irq < 16u || cpu_irq >= 32u ||
       cpu_irq == c5::TIMER_CPU_INT || !handler) return -1;
-  uintptr_t old_mstatus = 0;
-  asm volatile("csrrc %0, mstatus, %1" : "=r"(old_mstatus) : "r"(uintptr_t{8}) : "memory");
+  const uint32_t old_mstatus = mask_global_interrupts(2u);
   c5_irq_registration *free_entry = nullptr;
   for (auto &entry : shizuku_c5_irq_registrations) {
     if (entry.handler && (entry.source == source || entry.cpu_irq == cpu_irq)) {
-      asm volatile("csrw mstatus, %0" :: "r"(old_mstatus) : "memory");
+      restore_global_interrupts(old_mstatus, 2u);
       return -2;
     }
     if (!entry.handler && !free_entry) free_entry = &entry;
   }
   if (!free_entry) {
-    asm volatile("csrw mstatus, %0" :: "r"(old_mstatus) : "memory");
+    restore_global_interrupts(old_mstatus, 2u);
     return -3;
   }
   free_entry->source = source;
@@ -254,13 +302,12 @@ int irq_register(uint32_t source, uint32_t cpu_irq, irq_handler_t handler, void 
   free_entry->matrix_readback = reg_read(c5::INTMTX_BASE + 4u * source);
   free_entry->clic_readback = reg_read(c5::clic_ctrl_reg(clic_index));
   note_irq_control(static_cast<uint32_t>(old_mstatus), clic_index, free_entry->clic_readback);
-  asm volatile("csrw mstatus, %0" :: "r"(old_mstatus) : "memory");
+  restore_global_interrupts(old_mstatus, 2u);
   return 0;
 }
 int irq_set_enabled(uint32_t source, uint32_t cpu_irq, irq_handler_t handler, void *arg,
                     bool enabled) {
-  uintptr_t old_mstatus = 0;
-  asm volatile("csrrc %0, mstatus, %1" : "=r"(old_mstatus) : "r"(uintptr_t{8}) : "memory");
+  const uint32_t old_mstatus = mask_global_interrupts(2u);
   for (auto &entry : shizuku_c5_irq_registrations) {
     if (entry.source != source || entry.cpu_irq != cpu_irq ||
         entry.handler != handler || entry.arg != arg) continue;
@@ -273,15 +320,14 @@ int irq_set_enabled(uint32_t source, uint32_t cpu_irq, irq_handler_t handler, vo
     entry.matrix_readback = reg_read(c5::INTMTX_BASE + 4u * source);
     entry.clic_readback = reg_read(c5::clic_ctrl_reg(clic_index));
     note_irq_control(static_cast<uint32_t>(old_mstatus), clic_index, entry.clic_readback);
-    asm volatile("csrw mstatus, %0" :: "r"(old_mstatus) : "memory");
+    restore_global_interrupts(old_mstatus, 2u);
     return 0;
   }
-  asm volatile("csrw mstatus, %0" :: "r"(old_mstatus) : "memory");
+  restore_global_interrupts(old_mstatus, 2u);
   return -1;
 }
 int irq_unregister(uint32_t source, uint32_t cpu_irq, irq_handler_t handler, void *arg) {
-  uintptr_t old_mstatus = 0;
-  asm volatile("csrrc %0, mstatus, %1" : "=r"(old_mstatus) : "r"(uintptr_t{8}) : "memory");
+  const uint32_t old_mstatus = mask_global_interrupts(2u);
   for (auto &entry : shizuku_c5_irq_registrations) {
     if (entry.source == source && entry.cpu_irq == cpu_irq &&
         entry.handler == handler && entry.arg == arg) {
@@ -290,11 +336,11 @@ int irq_unregister(uint32_t source, uint32_t cpu_irq, irq_handler_t handler, voi
       reg_write(c5::INTMTX_BASE + 4u * source, 0);
       entry = {};
       asm volatile("fence iorw, iorw" ::: "memory");
-      asm volatile("csrw mstatus, %0" :: "r"(old_mstatus) : "memory");
+      restore_global_interrupts(old_mstatus, 2u);
       return 0;
     }
   }
-  asm volatile("csrw mstatus, %0" :: "r"(old_mstatus) : "memory");
+  restore_global_interrupts(old_mstatus, 2u);
   return -1;
 }
 void clic_direct_mode::timer_oneshot(uint32_t cycles) {
@@ -348,6 +394,6 @@ size_t irq_snapshot(irq_dispatch_snapshot *out, size_t capacity) {
 // FreeRTOS ISR-yield shim hook. Called from the C5 peripheral trap after an
 // ISR notification unblocks a higher-priority Shizuku task; the ordinary
 // trap-exit path consumes this deferred switch request.
-extern "C" void shizuku_c5_pend_compat_context_switch(void) {
+extern "C" void shizuku_esp_ble_pend_compat_context_switch(void) {
   shizuku::chips::esp32_c5::clic_direct_mode::pend_context_switch();
 }

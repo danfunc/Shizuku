@@ -13,24 +13,27 @@ using shizuku::freertos_compat::domain;
 #else
 #define SHZ_FREERTOS_API(name) name
 #endif
-extern "C" volatile uint32_t shizuku_c5_ble_timeout_shim_calls;
-extern "C" volatile uint32_t shizuku_c5_ble_queue_sem_shim_calls;
-extern "C" volatile uint32_t shizuku_c5_ble_critical_shim_calls;
-extern "C" void shizuku_c5_ble_note_unimplemented(uint32_t api_id) __attribute__((weak));
-extern "C" void shizuku_c5_ble_note_sync_alloc(uint32_t kind, uint32_t reason,
+extern "C" volatile uint32_t shizuku_esp_ble_timeout_shim_calls;
+extern "C" volatile uint32_t shizuku_esp_ble_queue_sem_shim_calls;
+extern "C" volatile uint32_t shizuku_esp_ble_critical_shim_calls;
+extern "C" void shizuku_esp_ble_note_unimplemented(uint32_t api_id) __attribute__((weak));
+extern "C" void shizuku_esp_ble_note_sync_alloc(uint32_t kind, uint32_t reason,
                                                 uint32_t objects_used,
                                                 uint32_t static_handles_used,
                                                 uint32_t mutex_storage_used) __attribute__((weak));
-extern "C" void shizuku_c5_ble_note_queue_shape(uint32_t capacity, uint32_t item_size) __attribute__((weak));
-extern "C" void shizuku_c5_ble_note_notification(uint32_t api_kind, bool success) __attribute__((weak));
-extern "C" void shizuku_c5_ble_note_task_create(uint32_t task_id, const char *name,
+extern "C" void shizuku_esp_ble_note_queue_shape(uint32_t capacity, uint32_t item_size) __attribute__((weak));
+extern "C" void shizuku_esp_ble_note_notification(uint32_t api_kind, bool success) __attribute__((weak));
+extern "C" void shizuku_esp_ble_note_task_create(uint32_t task_id, const char *name,
                                                 uint32_t success, uint32_t priority)
     __attribute__((weak));
-extern "C" void shizuku_c5_ble_note_wait(uint32_t task_id, uint32_t kind, uint32_t handle,
+extern "C" void shizuku_esp_ble_note_wait(uint32_t task_id, uint32_t kind, uint32_t handle,
                                           uint32_t timeout_ticks, uint32_t entering,
                                           uint32_t result) __attribute__((weak));
-extern "C" void shizuku_c5_ble_note_wait_callsite(uint32_t pc) __attribute__((weak));
-extern "C" void shizuku_c5_ble_note_scheduler(uint32_t event, uint32_t state) __attribute__((weak));
+extern "C" void shizuku_esp_ble_note_wait_callsite(uint32_t pc) __attribute__((weak));
+extern "C" void shizuku_esp_ble_note_scheduler(uint32_t event, uint32_t state) __attribute__((weak));
+extern "C" uint32_t shizuku_freertos_compat_current_task_id(void) __attribute__((weak));
+extern "C" void shizuku_esp_ble_irq_mask_begin(uint32_t, uint32_t, uint32_t) __attribute__((weak));
+extern "C" void shizuku_esp_ble_irq_mask_end(uint32_t) __attribute__((weak));
 namespace {
 domain *g_domain = nullptr;
 // C5's selected single-core profile has no TLS runtime in the early Shizuku boot.
@@ -100,7 +103,7 @@ uint32_t dynamic_mutex_count() {
   return count;
 }
 void note_sync(uint32_t kind, uint32_t reason) {
-  if (shizuku_c5_ble_note_sync_alloc) shizuku_c5_ble_note_sync_alloc(kind, reason,
+  if (shizuku_esp_ble_note_sync_alloc) shizuku_esp_ble_note_sync_alloc(kind, reason,
       g_domain ? static_cast<uint32_t>(g_domain->objects_used()) : 0u,
       static_handle_count(), dynamic_mutex_count());
 }
@@ -111,12 +114,12 @@ enum : uint32_t {
 };
 void note_wait(uint32_t kind, const void *handle, TickType_t timeout, bool entering,
                uint32_t result = 0, uint32_t caller_pc = 0) {
-  if (!shizuku_c5_ble_note_wait) return;
-  shizuku_c5_ble_note_wait(g_domain ? g_domain->current_task() : 0u, kind,
+  if (!shizuku_esp_ble_note_wait) return;
+  shizuku_esp_ble_note_wait(g_domain ? g_domain->current_task() : 0u, kind,
       static_cast<uint32_t>(reinterpret_cast<uintptr_t>(handle)), timeout,
       entering ? 1u : 0u, result);
-  if (entering && caller_pc && shizuku_c5_ble_note_wait_callsite)
-    shizuku_c5_ble_note_wait_callsite(caller_pc);
+  if (entering && caller_pc && shizuku_esp_ble_note_wait_callsite)
+    shizuku_esp_ble_note_wait_callsite(caller_pc);
 }
 uint32_t wait_kind_for_object(uint32_t api_kind, int object) {
   const uint32_t kind = g_domain ? g_domain->object_kind_code(object) : 0u;
@@ -171,7 +174,7 @@ int create_semaphore_object(UBaseType_t limit, UBaseType_t initial, uint32_t cre
   return id;
 }
 int create_queue_object(UBaseType_t capacity, UBaseType_t item_size, uint32_t *reason) {
-  if (shizuku_c5_ble_note_queue_shape) shizuku_c5_ble_note_queue_shape(capacity, item_size);
+  if (shizuku_esp_ble_note_queue_shape) shizuku_esp_ble_note_queue_shape(capacity, item_size);
   if (!g_domain) { *reason = kSyncFailNoDomain; return -1; }
   if (g_domain->isr_context()) { *reason = kSyncFailIsr; return -1; }
   if (!capacity || !item_size || capacity > SIZE_MAX / item_size ||
@@ -246,7 +249,7 @@ uint32_t tid(TaskHandle_t task) {
   return raw == 1u ? 0u : raw; // handle 1 is the compat representation of root task 0.
 }
 [[maybe_unused]] void fail_closed(uint32_t id) {
-  if (shizuku_c5_ble_note_unimplemented) shizuku_c5_ble_note_unimplemented(id);
+  if (shizuku_esp_ble_note_unimplemented) shizuku_esp_ble_note_unimplemented(id);
 }
 volatile uint32_t suspend_depth = 0;
 }
@@ -257,8 +260,8 @@ extern "C" BaseType_t shizuku_freertos_compat_bind(void *d, uint32_t handler, ui
   if(!next->configure_backend(handler,method,tick_hz))return pdFAIL;
   g_domain=next;
   g_scheduler_state=taskSCHEDULER_NOT_STARTED;
-  if (shizuku_c5_ble_note_scheduler)
-    shizuku_c5_ble_note_scheduler(0, static_cast<uint32_t>(g_scheduler_state));
+  if (shizuku_esp_ble_note_scheduler)
+    shizuku_esp_ble_note_scheduler(0, static_cast<uint32_t>(g_scheduler_state));
   return pdPASS;
 }
 extern "C" void shizuku_freertos_compat_set_scheduler_state(int32_t state) {
@@ -266,8 +269,8 @@ extern "C" void shizuku_freertos_compat_set_scheduler_state(int32_t state) {
                     state != taskSCHEDULER_SUSPENDED &&
                     state != taskSCHEDULER_RUNNING)) return;
   g_scheduler_state = state;
-  if (shizuku_c5_ble_note_scheduler)
-    shizuku_c5_ble_note_scheduler(0, static_cast<uint32_t>(g_scheduler_state));
+  if (shizuku_esp_ble_note_scheduler)
+    shizuku_esp_ble_note_scheduler(0, static_cast<uint32_t>(g_scheduler_state));
 }
 extern "C" void *shizuku_freertos_compat_last_mutex_handle(void) { return last_mutex_handle; }
 extern "C" BaseType_t SHZ_FREERTOS_API(xPortInIsrContext)(void) { return g_domain&&g_domain->isr_context()?pdTRUE:pdFALSE; }
@@ -281,12 +284,19 @@ extern "C" void SHZ_FREERTOS_API(portEXIT_CRITICAL)(portMUX_TYPE *) {
 }
 extern "C" void SHZ_FREERTOS_API(portENTER_CRITICAL_ISR)(portMUX_TYPE *m) { SHZ_FREERTOS_API(portENTER_CRITICAL)(m); }
 extern "C" void SHZ_FREERTOS_API(portEXIT_CRITICAL_ISR)(portMUX_TYPE *m) { SHZ_FREERTOS_API(portEXIT_CRITICAL)(m); }
-extern "C" void SHZ_FREERTOS_API(vPortEnterCritical)(portMUX_TYPE *m) { shizuku_c5_ble_critical_shim_calls = shizuku_c5_ble_critical_shim_calls + 1u; SHZ_FREERTOS_API(portENTER_CRITICAL)(m); }
+extern "C" void SHZ_FREERTOS_API(vPortEnterCritical)(portMUX_TYPE *m) { shizuku_esp_ble_critical_shim_calls = shizuku_esp_ble_critical_shim_calls + 1u; SHZ_FREERTOS_API(portENTER_CRITICAL)(m); }
 extern "C" void SHZ_FREERTOS_API(vPortExitCritical)(portMUX_TYPE *m) { SHZ_FREERTOS_API(portEXIT_CRITICAL)(m); }
 extern "C" UBaseType_t SHZ_FREERTOS_API(xPortSetInterruptMaskFromISR)(void) {
 #if defined(__riscv)
   uintptr_t old = 0;
   asm volatile("csrrc %0, mstatus, %1" : "=r"(old) : "r"(uintptr_t{8}) : "memory");
+#if defined(SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG) && SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG
+  if ((old & 8u) && shizuku_esp_ble_irq_mask_begin)
+    shizuku_esp_ble_irq_mask_begin(3u,
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(__builtin_return_address(0))),
+        shizuku_freertos_compat_current_task_id
+            ? shizuku_freertos_compat_current_task_id() : 0u);
+#endif
   return static_cast<UBaseType_t>(old & 8u);
 #else
   return 0;
@@ -294,7 +304,12 @@ extern "C" UBaseType_t SHZ_FREERTOS_API(xPortSetInterruptMaskFromISR)(void) {
 }
 extern "C" void SHZ_FREERTOS_API(vPortClearInterruptMaskFromISR)(UBaseType_t key) {
 #if defined(__riscv)
-  if (key & 8u) asm volatile("csrs mstatus, %0" : : "r"(uintptr_t{8}) : "memory");
+  if (key & 8u) {
+#if defined(SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG) && SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG
+    if (shizuku_esp_ble_irq_mask_end) shizuku_esp_ble_irq_mask_end(3u);
+#endif
+    asm volatile("csrs mstatus, %0" : : "r"(uintptr_t{8}) : "memory");
+  }
 #else
   (void)key;
 #endif
@@ -305,11 +320,21 @@ extern "C" void SHZ_FREERTOS_API(vPortYieldFromISR)(void) { shizuku_freertos_com
 extern "C" BaseType_t SHZ_FREERTOS_API(xTaskCreate)(TaskFunction_t f,const char *n,uint32_t s,void *a,UBaseType_t p,TaskHandle_t *h) {
   uint32_t id = 0;
   const bool success = g_domain && g_domain->task_create(f, n, s, a, p, &id);
-  if (shizuku_c5_ble_note_task_create)
-    shizuku_c5_ble_note_task_create(success ? id : 0u, n,
+  if (shizuku_esp_ble_note_task_create)
+    shizuku_esp_ble_note_task_create(success ? id : 0u, n,
                                     success ? 1u : 0u, p);
   if (!success) return pdFAIL;
   if (h) *h = reinterpret_cast<void *>(static_cast<uintptr_t>(id));
+  return pdPASS;
+}
+extern "C" BaseType_t shizuku_freertos_compat_set_ble_scheduler_boost(
+    uint32_t task_id, uint32_t enabled, uint32_t priority_boost,
+    uint32_t idle_poll_us) {
+  if (!g_domain || !task_id || g_domain->isr_context()) return pdFAIL;
+  if (!g_domain->task_set_scheduling_boost(task_id,
+                                           enabled ? priority_boost : 0u))
+    return pdFAIL;
+  g_domain->set_scheduler_idle_poll_us(enabled ? idle_poll_us : 100u);
   return pdPASS;
 }
 extern "C" BaseType_t SHZ_FREERTOS_API(xTaskCreatePinnedToCore)(TaskFunction_t f,const char *n,uint32_t s,void *a,UBaseType_t p,TaskHandle_t *h,BaseType_t core) {
@@ -332,8 +357,8 @@ extern "C" TickType_t SHZ_FREERTOS_API(xTaskGetTickCountFromISR)(void) { return 
 extern "C" TaskHandle_t SHZ_FREERTOS_API(xTaskGetCurrentTaskHandle)(void) { if(!g_domain)return nullptr; const uint32_t id=g_domain->current_task(); return reinterpret_cast<TaskHandle_t>(static_cast<uintptr_t>(id?id:1)); }
 extern "C" BaseType_t SHZ_FREERTOS_API(xTaskGetSchedulerState)(void) {
   const BaseType_t state = g_domain ? g_scheduler_state : taskSCHEDULER_NOT_STARTED;
-  if (shizuku_c5_ble_note_scheduler)
-    shizuku_c5_ble_note_scheduler(1, static_cast<uint32_t>(state));
+  if (shizuku_esp_ble_note_scheduler)
+    shizuku_esp_ble_note_scheduler(1, static_cast<uint32_t>(state));
   return state;
 }
 extern "C" void SHZ_FREERTOS_API(vTaskSuspend)(TaskHandle_t h) { if(g_domain)g_domain->task_suspend(h?tid(h):0); }
@@ -366,7 +391,7 @@ extern "C" void SHZ_FREERTOS_API(vTaskSetTimeOutState)(TimeOut_t *state) {
 }
 extern "C" void SHZ_FREERTOS_API(vTaskInternalSetTimeOutState)(TimeOut_t *state) { SHZ_FREERTOS_API(vTaskSetTimeOutState)(state); }
 extern "C" BaseType_t SHZ_FREERTOS_API(xTaskCheckForTimeOut)(TimeOut_t *state, TickType_t *wait) {
-  shizuku_c5_ble_timeout_shim_calls = shizuku_c5_ble_timeout_shim_calls + 1u;
+  shizuku_esp_ble_timeout_shim_calls = shizuku_esp_ble_timeout_shim_calls + 1u;
   if (!state || !wait) return pdTRUE;
   if (*wait == portMAX_DELAY) return pdFALSE;
   const TickType_t now = g_domain ? static_cast<TickType_t>(g_domain->tick_count()) : 0;
@@ -382,7 +407,7 @@ extern "C" BaseType_t SHZ_FREERTOS_API(xTaskGenericNotify)(
     uint32_t *previous) {
   const bool ok = g_domain && task &&
       g_domain->task_notify(tid(task), index, value, static_cast<uint32_t>(action), previous);
-  if (shizuku_c5_ble_note_notification) shizuku_c5_ble_note_notification(1, ok);
+  if (shizuku_esp_ble_note_notification) shizuku_esp_ble_note_notification(1, ok);
   return ok ? pdPASS : pdFAIL;
 }
 extern "C" BaseType_t SHZ_FREERTOS_API(xTaskGenericNotifyFromISR)(
@@ -392,7 +417,7 @@ extern "C" BaseType_t SHZ_FREERTOS_API(xTaskGenericNotifyFromISR)(
   const bool ok = g_domain && task &&
       g_domain->task_notify(tid(task), index, value, static_cast<uint32_t>(action), previous, true, &wake);
   if (higher && wake) *higher = pdTRUE;
-  if (shizuku_c5_ble_note_notification) shizuku_c5_ble_note_notification(2, ok);
+  if (shizuku_esp_ble_note_notification) shizuku_esp_ble_note_notification(2, ok);
   return ok ? pdPASS : pdFAIL;
 }
 extern "C" BaseType_t SHZ_FREERTOS_API(xTaskGenericNotifyWait)(
@@ -401,7 +426,7 @@ extern "C" BaseType_t SHZ_FREERTOS_API(xTaskGenericNotifyWait)(
   note_wait(kWaitNotifyWait, nullptr, timeout, true);
   const bool ok = g_domain && g_domain->task_notify_wait(index, clear_entry, clear_exit, value, timeout);
   note_wait(kWaitNotifyWait, nullptr, timeout, false, ok ? pdPASS : pdFAIL);
-  if (shizuku_c5_ble_note_notification) shizuku_c5_ble_note_notification(3, ok);
+  if (shizuku_esp_ble_note_notification) shizuku_esp_ble_note_notification(3, ok);
   return ok ? pdPASS : pdFAIL;
 }
 extern "C" uint32_t SHZ_FREERTOS_API(ulTaskGenericNotifyTake)(
@@ -409,7 +434,7 @@ extern "C" uint32_t SHZ_FREERTOS_API(ulTaskGenericNotifyTake)(
   note_wait(kWaitNotifyTake, nullptr, timeout, true);
   const uint32_t value = g_domain ? g_domain->task_notify_take(index, clear_on_exit != pdFALSE, timeout) : 0;
   note_wait(kWaitNotifyTake, nullptr, timeout, false, value);
-  if (shizuku_c5_ble_note_notification) shizuku_c5_ble_note_notification(4, value != 0);
+  if (shizuku_esp_ble_note_notification) shizuku_esp_ble_note_notification(4, value != 0);
   return value;
 }
 extern "C" void SHZ_FREERTOS_API(vTaskGenericNotifyGiveFromISR)(
@@ -418,12 +443,12 @@ extern "C" void SHZ_FREERTOS_API(vTaskGenericNotifyGiveFromISR)(
   const bool ok = g_domain && task &&
       g_domain->task_notify(tid(task), index, 0, static_cast<uint32_t>(eIncrement), nullptr, true, &wake);
   if (higher && wake) *higher = pdTRUE;
-  if (shizuku_c5_ble_note_notification) shizuku_c5_ble_note_notification(5, ok);
+  if (shizuku_esp_ble_note_notification) shizuku_esp_ble_note_notification(5, ok);
 }
 extern "C" BaseType_t SHZ_FREERTOS_API(xTaskGenericNotifyStateClear)(
     TaskHandle_t task, UBaseType_t index) {
   const bool ok = g_domain && g_domain->task_notify_state_clear(task ? tid(task) : g_domain->current_task(), index);
-  if (shizuku_c5_ble_note_notification) shizuku_c5_ble_note_notification(6, ok);
+  if (shizuku_esp_ble_note_notification) shizuku_esp_ble_note_notification(6, ok);
   return ok ? pdPASS : pdFAIL;
 }
 extern "C" uint32_t SHZ_FREERTOS_API(ulTaskGenericNotifyValueClear)(
@@ -431,7 +456,7 @@ extern "C" uint32_t SHZ_FREERTOS_API(ulTaskGenericNotifyValueClear)(
   const uint32_t value = g_domain
       ? g_domain->task_notify_value_clear(task ? tid(task) : g_domain->current_task(), index, bits)
       : 0u;
-  if (shizuku_c5_ble_note_notification) shizuku_c5_ble_note_notification(7, value != 0);
+  if (shizuku_esp_ble_note_notification) shizuku_esp_ble_note_notification(7, value != 0);
   return value;
 }
 
@@ -579,7 +604,7 @@ extern "C" BaseType_t SHZ_FREERTOS_API(xSemaphoreTake)(SemaphoreHandle_t s,TickT
   return ok?pdTRUE:pdFALSE;
 }
 extern "C" BaseType_t SHZ_FREERTOS_API(xQueueSemaphoreTake)(QueueHandle_t q,TickType_t t) {
-  shizuku_c5_ble_queue_sem_shim_calls = shizuku_c5_ble_queue_sem_shim_calls + 1u;
+  shizuku_esp_ble_queue_sem_shim_calls = shizuku_esp_ble_queue_sem_shim_calls + 1u;
   const uint32_t caller_pc = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(__builtin_return_address(0)));
   const uint32_t wait_kind = wait_kind_for_object(kWaitQueueSemaphore, decode(q));
   note_wait(wait_kind, q, t, true, 0, caller_pc);
@@ -639,7 +664,7 @@ extern "C" BaseType_t SHZ_FREERTOS_API(xTimerIsTimerActive)(TimerHandle_t h){ret
 extern "C" void *SHZ_FREERTOS_API(pvTimerGetTimerID)(TimerHandle_t h){return g_domain?g_domain->timer_id(decode(h)):nullptr;}
 
 #if defined(SHIZUKU_FREERTOS_LINK_WRAP)
-// Stable ids are copied into shizuku_c5_ble_diag.first_unimplemented_api.
+// Stable ids are copied into shizuku_esp_ble_diag.first_unimplemented_api.
 enum : uint32_t {
   kApiPcTaskGetName = 1, kApiPvTaskGetTls = 2, kApiUlTaskNotifyTake = 3,
   kApiVListInitialise = 4, kApiVQueueDeleteWithCaps = 5,

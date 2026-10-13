@@ -47,7 +47,7 @@ def config_substitutions(arch, chip, board, ble = False):
             "${SHIZUKU_BOARD}": board,
         }
     if arch == "rv32_c6":
-        return _CONFIG_COMMON | {
+        c6_config = _CONFIG_COMMON | {
             "${SHIZUKU_CPU_COUNT}": "1",
             "${SHIZUKU_MEMORY_MANAGER}": "shizuku::memory_managers::freestanding",
             "${INCLUDE_HEADERS_INSTRUCTION}": "\n".join([
@@ -62,6 +62,12 @@ def config_substitutions(arch, chip, board, ble = False):
             "${SHIZUKU_CHIP}": chip,
             "${SHIZUKU_BOARD}": board,
         }
+        if ble:
+            c6_config = c6_config | {
+                "${SHIZUKU_THREAD_COUNT}": "10",
+                "${SHIZUKU_CALL_DEPTH}": "8",
+            }
+        return c6_config
     if arch == "armv6m":
         return _CONFIG_COMMON | {
             "${INCLUDE_HEADERS_INSTRUCTION}": "\n".join([

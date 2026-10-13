@@ -1,5 +1,14 @@
 package(default_visibility = ["//visibility:public"])
 
+config_setting(
+    name = "c5_ble_prefer_1m_phy",
+    define_values = {"SHIZUKU_C5_BLE_PREFER_1M_PHY": "1"},
+)
+config_setting(
+    name = "esp_ble_prefer_1m_phy",
+    define_values = {"SHIZUKU_ESP_BLE_PREFER_1M_PHY": "1"},
+)
+
 exports_files(["main/early_diag.c"])
 
 # ESP32-C6: Bazel が作る libshizuku_kernel.a を ESP-IDF v6.1 の最終リンクへ渡し、
@@ -41,6 +50,8 @@ genrule(
     target_compatible_with = ["@platforms//cpu:riscv32"],
 )
 
+# Set --define=SHIZUKU_C5_BLE_PREFER_1M_PHY=1 to compile the BLE image with a
+# 1M PHY preference; the default is 0 and does not request 1M.
 genrule(
     name = "esp32c5_ble",
     srcs = [
@@ -49,7 +60,26 @@ genrule(
     ],
     outs = ["shizuku_esp32c5_ble.bin", "shizuku_esp32c5_ble.elf", "shizuku_esp32c5_ble.map"],
     cmd = "ARCHIVE=; for f in $(locations //:shizuku_kernel_c5_ble); do case $$f in *libshizuku_kernel_c5_ble.a) ARCHIVE=$$f;; esac; done;" +
+          select({
+              ":c5_ble_prefer_1m_phy": "SHIZUKU_ESP_BLE_PREFER_1M_PHY=1 ",
+              "//conditions:default": "SHIZUKU_ESP_BLE_PREFER_1M_PHY=0 ",
+          }) +
           " $(location build.sh) $$ARCHIVE $(location shizuku_esp32c5_ble.bin) esp-15.2.0_20251204 esp32c5 ble $(location shizuku_esp32c5_ble.elf) $(location shizuku_esp32c5_ble.map)",
+    tools = ["build.sh"],
+    tags = ["local", "no-sandbox"],
+    target_compatible_with = ["@platforms//cpu:riscv32"],
+)
+
+genrule(
+    name = "esp32c6_ble",
+    srcs = ["//:shizuku_kernel", ":esp32c6_project"],
+    outs = ["shizuku_esp32c6_ble.bin", "shizuku_esp32c6_ble.elf", "shizuku_esp32c6_ble.map"],
+    cmd = "ARCHIVE=; for f in $(locations //:shizuku_kernel); do case $$f in *libshizuku_kernel.a) ARCHIVE=$$f;; esac; done;" +
+          select({
+              ":esp_ble_prefer_1m_phy": "SHIZUKU_ESP_BLE_PREFER_1M_PHY=1 ",
+              "//conditions:default": "SHIZUKU_ESP_BLE_PREFER_1M_PHY=0 ",
+          }) +
+          " $(location build.sh) $$ARCHIVE $(location shizuku_esp32c6_ble.bin) esp-15.2.0_20251204 esp32c6 ble $(location shizuku_esp32c6_ble.elf) $(location shizuku_esp32c6_ble.map)",
     tools = ["build.sh"],
     tags = ["local", "no-sandbox"],
     target_compatible_with = ["@platforms//cpu:riscv32"],
@@ -57,11 +87,17 @@ genrule(
 
 filegroup(
     name = "esp32c6_project",
-    srcs = glob(["CMakeLists.txt", "sdkconfig.defaults", "sdkconfig.defaults.esp32c5", "sdkconfig.defaults.esp32c5.ble", "main/*"]) + [
+    srcs = glob(["CMakeLists.txt", "sdkconfig.defaults", "sdkconfig.defaults.esp32c5", "sdkconfig.defaults.esp32c5.ble", "sdkconfig.defaults.esp32c6.ble", "main/*"]) + [
         "//modules/esp_idf_support/radio:c5_intr_alloc.cpp",
+        "//modules/esp_idf_support/radio:c6_intr_alloc.cpp",
+        "//modules/esp_idf_support/radio:intr_alloc_impl.inc",
+        "//modules/esp_idf_support/radio:ble_chip.hpp",
+        "//modules/esp_idf_support/radio:ble_chip_c5.cpp",
+        "//modules/esp_idf_support/radio:ble_chip_c6.cpp",
         "//modules/esp_idf_support/radio:c5_libc_lock_diag.cpp",
         "//modules/esp_idf_support/radio:osi_sync.hpp",
         "//chips/esp32_c5:trap_api.hpp",
+        "//chips/esp32_c6:trap_api.hpp",
         "//modules/esp_idf_support/freertos_compat:compat.cpp",
         "//modules/esp_idf_support/freertos_compat:freertos_api.cpp",
         "//modules/esp_idf_support/freertos_compat:shizuku_port.cpp",

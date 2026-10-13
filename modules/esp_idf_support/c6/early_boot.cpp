@@ -3,6 +3,10 @@
 #include "shizuku/kernel_object.hpp"
 #include "chips/esp32_c6/selftest_record.h"
 
+#if defined(SHIZUKU_ESP_BLE)
+extern "C" [[noreturn]] void shizuku_esp_ble_stage1_start(void);
+#endif
+
 extern "C" {
 // entered, ECALL round-trip, live counter, observed error, observed value.
 volatile uint32_t shizuku_c6_thread0_diag[5];
@@ -52,8 +56,13 @@ uintptr_t c6_combined_handler(uintptr_t a0, uintptr_t a1, uintptr_t a2,
   if (result.error == 0 && result.value == 0xC6000002 && !shizuku::ARCH::in_interrupt())
     shizuku_c6_thread0_diag[1] = 0xC6000002;
 
+  // 2. BLE profile enters the shared ESP-IDF NimBLE stage after the kernel is live.
+#if defined(SHIZUKU_ESP_BLE)
+  shizuku_esp_ble_stage1_start();
+#else
   // 2. 実 boot 経路での selftest runner 実行 (RAM record への集中記録)
   shizuku_c6_run_selftests();
+#endif
 
   // 3. 段2 thread1 スポーン (GRANT スイッチ試験用)
   shizuku::KERNEL::spawn_request request{};

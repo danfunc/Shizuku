@@ -2,16 +2,16 @@
 #include <cstring>
 #include <cstdio>
 
-extern "C" void shizuku_c5_ble_note_sync_object(
+extern "C" void shizuku_esp_ble_note_sync_object(
     uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
     uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
     uint32_t, uint32_t, uint32_t)
     __attribute__((weak));
-extern "C" void shizuku_c5_ble_note_queue_send(uint32_t, uint32_t, uint32_t)
+extern "C" void shizuku_esp_ble_note_queue_send(uint32_t, uint32_t, uint32_t)
     __attribute__((weak));
-extern "C" void shizuku_c5_ble_note_queue_receive(uint32_t, uint32_t, uint32_t)
+extern "C" void shizuku_esp_ble_note_queue_receive(uint32_t, uint32_t, uint32_t)
     __attribute__((weak));
-extern "C" void shizuku_c5_ble_note_task_scheduled(uint32_t, uint32_t, uint32_t, uint32_t)
+extern "C" void shizuku_esp_ble_note_task_scheduled(uint32_t, uint32_t, uint32_t, uint32_t)
     __attribute__((weak));
 
 namespace shizuku::freertos_compat {
@@ -75,10 +75,20 @@ bool domain::task_set_priority(uint32_t id, uint32_t priority) {
   refresh_mutex_priority(id);
   return true;
 }
+bool domain::task_set_scheduling_boost(uint32_t id, uint32_t boost) {
+  if (p_.in_isr()) return false;
+  auto *t = find_task(id);
+  if (!t) return false;
+  t->scheduling_boost = boost;
+  return true;
+}
 uint32_t domain::task_priority(uint32_t id) const {
   if (id == 0) return root_task_.priority;
   for (const auto &t : tasks_) if (t.id == id && t.status != state::unused) return t.priority;
   return 0;
+}
+void domain::set_scheduler_idle_poll_us(uint32_t poll_us) {
+  scheduler_idle_poll_us_ = poll_us ? poll_us : 1u;
 }
 task_control *domain::find_task(uint32_t id) {
   if (id == 0) return &root_task_;
@@ -246,25 +256,30 @@ void domain::run_scheduler(uint32_t grant_cycles) {
         }
         else if(t.wake_deadline<deadline) deadline=t.wake_deadline;
       }
-      if(t.status==state::ready&&t.eligible_after_us<=now_us&&(!best||t.priority>best->priority)) { best=&t;best_index=i; }
+      const uint32_t effective_priority = UINT32_MAX - t.priority < t.scheduling_boost
+          ? UINT32_MAX : t.priority + t.scheduling_boost;
+      const uint32_t best_effective_priority = best && UINT32_MAX - best->priority < best->scheduling_boost
+          ? UINT32_MAX : (best ? best->priority + best->scheduling_boost : 0u);
+      if(t.status==state::ready&&t.eligible_after_us<=now_us&&(!best||effective_priority>best_effective_priority)) { best=&t;best_index=i; }
     }
     if(best) {
       scheduler_cursor_=(best_index+1)%kMaxTasks;
       if (best->ready_since_valid) {
-#if defined(SHIZUKU_C5_BLE_ENABLE_SCHED_DIAG_IRQ_MASK) && SHIZUKU_C5_BLE_ENABLE_SCHED_DIAG_IRQ_MASK
+#if defined(SHIZUKU_ESP_BLE_ENABLE_SCHED_DIAG_IRQ_MASK) && SHIZUKU_ESP_BLE_ENABLE_SCHED_DIAG_IRQ_MASK
         const uint32_t irq_key = p_.irq_save();
 #endif
         const uint64_t ready_since_us = best->ready_since_us;
         const uint64_t dispatch_us = p_.now_us();
         best->ready_since_valid = false;
-#if defined(SHIZUKU_C5_BLE_ENABLE_SCHED_DIAG_IRQ_MASK) && SHIZUKU_C5_BLE_ENABLE_SCHED_DIAG_IRQ_MASK
+#if defined(SHIZUKU_ESP_BLE_ENABLE_SCHED_DIAG_IRQ_MASK) && SHIZUKU_ESP_BLE_ENABLE_SCHED_DIAG_IRQ_MASK
         p_.irq_restore(irq_key);
 #endif
         const bool clock_skew = dispatch_us < ready_since_us;
         const uint32_t latency = clock_skew ? 0u : static_cast<uint32_t>(
             dispatch_us - ready_since_us);
-        if (shizuku_c5_ble_note_task_scheduled)
-          shizuku_c5_ble_note_task_scheduled(best->id, best->priority, latency,
+        if (shizuku_esp_ble_note_task_scheduled)
+          shizuku_esp_ble_note_task_scheduled(best->id,
+                                             best->priority + best->scheduling_boost, latency,
                                              clock_skew ? 1u : 0u);
       }
       best->status=state::running;
@@ -272,7 +287,7 @@ void domain::run_scheduler(uint32_t grant_cycles) {
       if(best->status==state::running) best->status=state::ready;
       continue;
     }
-    uint64_t idle_us=100; // IRQ wake is observed on the next bounded idle poll.
+    uint64_t idle_us=scheduler_idle_poll_us_; // IRQ wake is observed on the next bounded idle poll.
     if(deadline!=UINT64_MAX&&deadline>now) {
       const auto until_deadline=((deadline-now)*1000000u+tick_hz_-1)/tick_hz_;
       if(until_deadline<idle_us)idle_us=until_deadline;
@@ -376,15 +391,15 @@ bool domain::object_snapshot(int handle, sync_snapshot *out) const {
   return true;
 }
 void domain::publish_sync_object(int handle) {
-  if (!shizuku_c5_ble_note_sync_object) return;
+  if (!shizuku_esp_ble_note_sync_object) return;
   sync_snapshot s{};
   if (!object_snapshot(handle, &s)) {
-    shizuku_c5_ble_note_sync_object(static_cast<uint32_t>(handle), 0, 0, 0, 0,
+    shizuku_esp_ble_note_sync_object(static_cast<uint32_t>(handle), 0, 0, 0, 0,
         UINT32_MAX, 0, 0, 0, UINT32_MAX, UINT32_MAX, 0, 0, UINT32_MAX,
         UINT32_MAX);
     return;
   }
-  shizuku_c5_ble_note_sync_object(static_cast<uint32_t>(handle), s.kind, s.creator_pc,
+  shizuku_esp_ble_note_sync_object(static_cast<uint32_t>(handle), s.kind, s.creator_pc,
       s.raw_handle,
       s.recursive,
       s.owner, s.recursion, s.count, s.waiters, s.last_taker_task,
@@ -496,8 +511,8 @@ bool domain::queue_send(int h,const void *item,tick_t timeout,bool front,bool is
     const uint32_t item_size = static_cast<uint32_t>(o->item_size);
     const bool hp = wake_one(*o, true);
     p_.irq_restore(irq);
-    if (shizuku_c5_ble_note_queue_send)
-      shizuku_c5_ble_note_queue_send(raw_handle, item_size, first_word);
+    if (shizuku_esp_ble_note_queue_send)
+      shizuku_esp_ble_note_queue_send(raw_handle, item_size, first_word);
     if (higher && hp) *higher = true;
     return true;
   }
@@ -527,8 +542,8 @@ bool domain::queue_receive(int h,void *item,tick_t timeout,bool isr,bool *higher
     const uint32_t item_size = static_cast<uint32_t>(o->item_size);
     const bool hp = wake_one(*o, false);
     p_.irq_restore(irq);
-    if (shizuku_c5_ble_note_queue_receive)
-      shizuku_c5_ble_note_queue_receive(raw_handle, item_size, first_word);
+    if (shizuku_esp_ble_note_queue_receive)
+      shizuku_esp_ble_note_queue_receive(raw_handle, item_size, first_word);
     if (higher && hp) *higher = true;
     return true;
   }

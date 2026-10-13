@@ -13,8 +13,16 @@ cc_library(
 )
 
 cc_library(
+    name = "c6_intr_alloc",
+    srcs = ["c6_intr_alloc.cpp", "intr_alloc_impl.inc"],
+    hdrs = ["//chips/esp32_c6:trap_api.hpp"],
+    includes = ["."],
+    deps = [":osi_sync", "//chips/esp32_c6:headers"],
+)
+
+cc_library(
     name = "c5_intr_alloc",
-    srcs = ["c5_intr_alloc.cpp"],
+    srcs = ["c5_intr_alloc.cpp", "intr_alloc_impl.inc"],
     hdrs = ["//chips/esp32_c5:trap_api.hpp"],
     includes = ["."],
     deps = [":osi_sync", "//chips/esp32_c5:headers"],
@@ -22,4 +30,8 @@ cc_library(
 
 # ホスト単体テスト (Bazel の既定 platform は arm 向けなので cc_test にはしない):
 #   c++ -std=c++20 -o /tmp/osi_sync_test modules/esp_idf_support/radio/osi_sync_test.cpp && /tmp/osi_sync_test
-exports_files(["osi_sync.hpp", "osi_sync_test.cpp", "c5_intr_alloc.cpp", "c5_libc_lock_diag.cpp"])
+exports_files([
+    "osi_sync.hpp", "osi_sync_test.cpp", "c5_intr_alloc.cpp", "c6_intr_alloc.cpp",
+    "intr_alloc_impl.inc", "ble_chip.hpp", "ble_chip_c5.cpp", "ble_chip_c6.cpp",
+    "c5_libc_lock_diag.cpp",
+])

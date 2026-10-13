@@ -1,23 +1,48 @@
-if(SHIZUKU_C5_BLE OR "$ENV{SHIZUKU_C5_BLE}" STREQUAL "1")
-  set(shizuku_c5_ble_extra_srcs "")
+if(SHIZUKU_ESP_BLE OR SHIZUKU_C5_BLE OR "$ENV{SHIZUKU_ESP_BLE}" STREQUAL "1" OR "$ENV{SHIZUKU_C5_BLE}" STREQUAL "1")
+  set(shizuku_ble_priv_requires esp_hal_usb esp_hal_wdt esp_rom soc heap bt esp_system esp_libc esp_timer nvs_flash log esp_hw_support esp_app_format)
+  if(IDF_TARGET STREQUAL "esp32c5")
+    set(shizuku_ble_chip_src "../../radio/ble_chip_c5.cpp")
+    set(shizuku_ble_intr_src "../../radio/c5_intr_alloc.cpp")
+    set(shizuku_ble_chip_dir "${CMAKE_CURRENT_LIST_DIR}/../../../../chips/esp32_c5")
+  elseif(IDF_TARGET STREQUAL "esp32c6")
+    set(shizuku_ble_chip_src "../../radio/ble_chip_c6.cpp")
+    set(shizuku_ble_intr_src "../../radio/c6_intr_alloc.cpp")
+    set(shizuku_ble_chip_dir "${CMAKE_CURRENT_LIST_DIR}/../../../../chips/esp32_c6")
+    list(APPEND shizuku_ble_priv_requires esp_driver_gpio esp_phy)
+  else()
+    message(FATAL_ERROR "ESP BLE profile unsupported for IDF_TARGET=${IDF_TARGET}")
+  endif()
+  set(shizuku_ble_extra_srcs "")
   if("$ENV{SHIZUKU_C5_LIBC_LOCK_DIAG_WRAP}" STREQUAL "1")
-    list(APPEND shizuku_c5_ble_extra_srcs "../../radio/c5_libc_lock_diag.cpp")
+    list(APPEND shizuku_ble_extra_srcs "../../radio/c5_libc_lock_diag.cpp")
   endif()
   idf_component_register(
       SRCS "shizuku_boot.c" "usb_console.c" "early_diag.c"
-           "c5_ble_stage1.cpp"
-           "../../radio/c5_intr_alloc.cpp"
-           ${shizuku_c5_ble_extra_srcs}
+           "esp_ble_stage1.cpp" ${shizuku_ble_chip_src} ${shizuku_ble_intr_src}
+           ${shizuku_ble_extra_srcs}
            "../../freertos_compat/compat.cpp"
            "../../freertos_compat/freertos_api.cpp"
            "../../freertos_compat/shizuku_port.cpp"
-      PRIV_REQUIRES esp_hal_usb esp_hal_wdt esp_rom soc heap bt esp_system esp_libc esp_timer nvs_flash log esp_hw_support esp_app_format)
+      PRIV_REQUIRES ${shizuku_ble_priv_requires})
 else()
   idf_component_register(SRCS "shizuku_boot.c" "usb_console.c" "early_diag.c"
                          PRIV_REQUIRES esp_hal_usb esp_hal_wdt esp_rom soc)
 endif()
-if(SHIZUKU_C5_BLE OR "$ENV{SHIZUKU_C5_BLE}" STREQUAL "1")
-  target_compile_definitions(${COMPONENT_LIB} PRIVATE SHIZUKU_C5_BLE=1 SHIZUKU_FREERTOS_COMPAT_TINY=1 SHIZUKU_FREERTOS_LINK_WRAP=1)
+if(SHIZUKU_ESP_BLE OR SHIZUKU_C5_BLE OR "$ENV{SHIZUKU_ESP_BLE}" STREQUAL "1" OR "$ENV{SHIZUKU_C5_BLE}" STREQUAL "1")
+  if(NOT DEFINED SHIZUKU_ESP_BLE_PREFER_1M_PHY)
+    set(SHIZUKU_ESP_BLE_PREFER_1M_PHY 0)
+  endif()
+  if(NOT SHIZUKU_ESP_BLE_PREFER_1M_PHY MATCHES "^[01]$")
+    message(FATAL_ERROR "SHIZUKU_ESP_BLE_PREFER_1M_PHY must be 0 or 1")
+  endif()
+  target_compile_definitions(${COMPONENT_LIB} PRIVATE
+      SHIZUKU_ESP_BLE=1 SHIZUKU_FREERTOS_COMPAT_TINY=1 SHIZUKU_FREERTOS_LINK_WRAP=1
+      SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG=1
+      SHIZUKU_ESP_BLE_ENABLE_SCHED_DIAG_IRQ_MASK=1
+      SHIZUKU_ESP_BLE_PREFER_1M_PHY=${SHIZUKU_ESP_BLE_PREFER_1M_PHY})
+  if(IDF_TARGET STREQUAL "esp32c6")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE SHIZUKU_ESP32_C6=1)
+  endif()
   if("$ENV{SHIZUKU_C5_MUTEX_SELF_RETAKE_FAILFAST}" STREQUAL "1")
     target_compile_definitions(${COMPONENT_LIB} PRIVATE SHIZUKU_C5_MUTEX_SELF_RETAKE_FAILFAST=1)
   endif()
@@ -27,13 +52,13 @@ if(SHIZUKU_C5_BLE OR "$ENV{SHIZUKU_C5_BLE}" STREQUAL "1")
       "${CMAKE_CURRENT_LIST_DIR}/../../radio"
       "${CMAKE_CURRENT_LIST_DIR}/../../../../internal_headers")
   target_include_directories(${COMPONENT_LIB} PRIVATE
-      "${CMAKE_CURRENT_LIST_DIR}/../../../../chips/esp32_c5")
+      "${shizuku_ble_chip_dir}")
   target_link_options(${COMPONENT_LIB} INTERFACE
       "-Wl,--wrap=esp_intr_alloc" "-Wl,--wrap=esp_intr_free"
       "-Wl,--wrap=esp_intr_enable" "-Wl,--wrap=esp_intr_disable")
   target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=heap_caps_malloc")
-  target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--undefined=shizuku_c5_ble_stage1_start")
-  target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,-Map=${CMAKE_BINARY_DIR}/shizuku_esp32c5.map")
+  target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--undefined=shizuku_esp_ble_stage1_start")
+  target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,-Map=${CMAKE_BINARY_DIR}/shizuku_${IDF_TARGET}.map")
   set(shizuku_freertos_wraps
       xPortInIsrContext portENTER_CRITICAL portEXIT_CRITICAL portENTER_CRITICAL_ISR portEXIT_CRITICAL_ISR
       vPortEnterCritical vPortExitCritical vPortClearInterruptMaskFromISR

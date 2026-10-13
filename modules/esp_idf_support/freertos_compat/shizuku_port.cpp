@@ -1,8 +1,10 @@
 #include "shizuku_port.hpp"
 #include <atomic>
 
-extern "C" void shizuku_c5_ble_note_task_started(uint32_t task_id) __attribute__((weak));
-extern "C" void shizuku_c5_pend_compat_context_switch(void) __attribute__((weak));
+extern "C" void shizuku_esp_ble_note_task_started(uint32_t task_id) __attribute__((weak));
+extern "C" void shizuku_esp_ble_pend_compat_context_switch(void) __attribute__((weak));
+extern "C" void shizuku_esp_ble_irq_mask_begin(uint32_t, uint32_t, uint32_t) __attribute__((weak));
+extern "C" void shizuku_esp_ble_irq_mask_end(uint32_t) __attribute__((weak));
 
 namespace {
 // C5 is single-core. The active grant identifies the one task currently on CPU;
@@ -16,6 +18,10 @@ volatile uint32_t g_sleep_depth=0;
 uint64_t (*g_clock_us)()=nullptr;
 std::atomic<bool> g_reschedule_pending{false};
 shizuku::freertos_compat::shizuku_port::host_syscall_hook g_host_syscall_hook=nullptr;
+}
+
+extern "C" uint32_t shizuku_freertos_compat_current_task_id(void) {
+  return g_current_task_id;
 }
 
 namespace shizuku::freertos_compat {
@@ -142,7 +148,7 @@ void shizuku_port::plain_task_entry(void *raw) {
   }
   const uint32_t previous=g_current_task_id;
   g_current_task_id=packet->id;
-  if (shizuku_c5_ble_note_task_started) shizuku_c5_ble_note_task_started(packet->id);
+  if (shizuku_esp_ble_note_task_started) shizuku_esp_ble_note_task_started(packet->id);
   packet->entry(packet->arg);
   if(g_handler_domain)g_handler_domain->finish_current_task();
   else call(shizuku::object_api::EXIT_THREAD);
@@ -176,14 +182,26 @@ void shizuku_port::task_finished(uint32_t id) {
 }
 uint32_t shizuku_port::irq_save() {
 #if defined(__riscv)
-  uintptr_t old=0,mask=8; asm volatile("csrrc %0, mstatus, %1":"=r"(old):"r"(mask):"memory"); return (old&8)?1u:0u;
+  uintptr_t old=0,mask=8; asm volatile("csrrc %0, mstatus, %1":"=r"(old):"r"(mask):"memory");
+#if defined(SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG) && SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG
+  if ((old & 8u) && shizuku_esp_ble_irq_mask_begin)
+    shizuku_esp_ble_irq_mask_begin(0u,
+        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(__builtin_return_address(0))),
+        g_current_task_id);
+#endif
+  return (old&8)?1u:0u;
 #else
   return 0;
 #endif
 }
 void shizuku_port::irq_restore(uint32_t state) {
 #if defined(__riscv)
-  if(state&1u){uintptr_t mask=8;asm volatile("csrs mstatus, %0"::"r"(mask):"memory");}
+  if(state&1u){
+#if defined(SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG) && SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG
+    if (shizuku_esp_ble_irq_mask_end) shizuku_esp_ble_irq_mask_end(0u);
+#endif
+    uintptr_t mask=8;asm volatile("csrs mstatus, %0"::"r"(mask):"memory");
+  }
 #else
   (void)state;
 #endif
@@ -196,7 +214,7 @@ extern "C" uintptr_t shizuku_freertos_compat_dispatch(uintptr_t raw) {
   if(packet->operation==shizuku_port::kHandshake)return shizuku_port::kHandshakeReply;
   if(packet->operation==shizuku_port::kStartTask) {
     const uint32_t previous=g_current_task_id; g_current_task_id=packet->id;
-    if (shizuku_c5_ble_note_task_started) shizuku_c5_ble_note_task_started(packet->id);
+    if (shizuku_esp_ble_note_task_started) shizuku_esp_ble_note_task_started(packet->id);
     if(packet->entry)packet->entry(packet->arg);
     // The dispatch method is spawned as a Shizuku task; return through the
     // object API so the caller's grant ledger is unwound by the HANDLER.
@@ -216,7 +234,7 @@ extern "C" void shizuku_freertos_compat_isr_exit(void) { shizuku::freertos_compa
 extern "C" void shizuku_freertos_compat_yield_from_isr(int higher) {
   if (higher) {
     shizuku::freertos_compat::shizuku_port::request_yield_from_isr();
-    if (shizuku_c5_pend_compat_context_switch) shizuku_c5_pend_compat_context_switch();
+    if (shizuku_esp_ble_pend_compat_context_switch) shizuku_esp_ble_pend_compat_context_switch();
   }
 }
 extern "C" void shizuku_freertos_compat_run_scheduler(uint32_t cycles) {
