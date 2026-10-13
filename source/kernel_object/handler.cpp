@@ -10,6 +10,9 @@
 #include "shizuku/kernel.hpp"
 #include "shizuku/kernel_object.hpp"
 #include "shizuku/svc_attributes.hpp"
+#if defined(SHIZUKU_CRASH_RECORD)
+#include "shizuku/objects/usb_cdc.hpp"
+#endif
 
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
 extern "C" void shizuku_boot_trace_phase(uint32_t);
@@ -18,6 +21,15 @@ extern "C" void shizuku_boot_trace_phase(uint32_t);
 namespace shizuku {
 
 KERNEL_OBJECT kernel_object_instance;
+
+#if defined(SHIZUKU_CRASH_RECORD)
+namespace {
+inline void kobj_diag_mark(objects::boot_diag_breadcrumb id) {
+  objects::usb_cdc_boot_diag_breadcrumb_at(
+      id, (uintptr_t)__builtin_return_address(0));
+}
+}
+#endif
 
 // ★戻り口が撃つのはカーネルの RETURN なので、オブジェクトランドの exit API の番号は
 //   それと同じ値でなければならない (経路判定だけが両者の意味を分ける)。
@@ -499,6 +511,14 @@ uintptr_t KERNEL_OBJECT::grant_region(uintptr_t target, uintptr_t base,
     error = object_error::BAD_OBJECT;
     return 0;
   }
+#if defined(SHIZUKU_RP2040)
+  // Reject an unrepresentable grant before replacing the object's current
+  // window. A zero limit remains the existing revoke operation.
+  if (limit != 0 && !ARCH::region_range_representable(base, limit)) {
+    error = object_error::BAD_MEMORY;
+    return 0;
+  }
+#endif
   table_guard guard;
   m_objects[target].region_base = (uint32_t)base;
   m_objects[target].region_limit = (uint32_t)limit;
@@ -684,6 +704,9 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
 //     時限 0          → バトン渡し。返ってこない可能性を承知で渡す相手だけに使う
 // ★回転子から順に見る。自分の直後だけを見ると同じ相手ばかり選ばれて飢餓が出る。
 template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
+#if defined(SHIZUKU_CRASH_RECORD)
+  kobj_diag_mark(objects::boot_diag_breadcrumb::KOBJ_SCHEDULE_ENTRY);
+#endif
   using state_t = KERNEL::THREAD::state_t;
   const uint32_t core = KERNEL::BOARD::core_num();
   const uint64_t now = KERNEL::BOARD::time_us();
@@ -945,7 +968,16 @@ uintptr_t KERNEL_OBJECT::kill_thread(uintptr_t thread, object_error &error) {
 //   区間は短く、**syscall を含まない**ものだけ。握ったまま実行権を手放すと、
 //   相手のコアが「走っていない持ち主」を待って回り続ける。
 template <> void KERNEL_OBJECT::table_lock() {
-  while (!ARCH::cas32(&m_table_lock, 0u, 1u)) {
+  while (true) {
+    if (ARCH::cas32(&m_table_lock, 0u, 1u)) {
+#if defined(SHIZUKU_CRASH_RECORD)
+      kobj_diag_mark(objects::boot_diag_breadcrumb::KOBJ_TABLE_LOCK_ACQUIRED);
+#endif
+      return;
+    }
+#if defined(SHIZUKU_CRASH_RECORD)
+    kobj_diag_mark(objects::boot_diag_breadcrumb::KOBJ_TABLE_LOCK_WAIT);
+#endif
     // 待つ。★ここで yield しない — 錠を待っている相手は必ず走っており
     //   (握ったまま手放さない規律があるので)、待ちは有界。yield すると
     //   「錠を待つために実行権を配る」ことになり、順序が絡んで長くなる。
@@ -954,6 +986,9 @@ template <> void KERNEL_OBJECT::table_lock() {
 
 template <> void KERNEL_OBJECT::table_unlock() {
   ARCH::store_release32(&m_table_lock, 0u);
+#if defined(SHIZUKU_CRASH_RECORD)
+  kobj_diag_mark(objects::boot_diag_breadcrumb::KOBJ_TABLE_UNLOCK);
+#endif
 }
 
 // ---- 名乗り ----------------------------------------------------------------
@@ -997,7 +1032,15 @@ template <> KERNEL_OBJECT::stream_entry *KERNEL_OBJECT::stream_lookup(uintptr_t 
   if (slot >= STREAM_COUNT || generation == 0)
     return nullptr;
   stream_entry &entry = m_streams[slot];
-  return __atomic_load_n(&entry.active, __ATOMIC_ACQUIRE) == 1u &&
+#if defined(SHIZUKU_RP2040)
+  // Pico SDK lowers ARMv6-M __atomic_load_4 to PICO_SPINLOCK_ID_ATOMIC.
+  // This lookup runs inside the SVC handler; use the aligned lock-free acquire
+  // load supplied by the RP2040 arch instead of nesting another global lock.
+  const uint32_t active = ARCH::load_acquire32(&entry.active);
+#else
+  const uint32_t active = __atomic_load_n(&entry.active, __ATOMIC_ACQUIRE);
+#endif
+  return active == 1u &&
                  entry.generation == generation ? &entry : nullptr;
 }
 
@@ -1012,7 +1055,12 @@ template <> bool KERNEL_OBJECT::stream_pin(uintptr_t id, stream_entry *&entry) {
       return false;
     }
   } while (!ARCH::cas32(&entry->users, users, users + 1));
-  if (__atomic_load_n(&entry->active, __ATOMIC_ACQUIRE) != 1u ||
+#if defined(SHIZUKU_RP2040)
+  const uint32_t active = ARCH::load_acquire32(&entry->active);
+#else
+  const uint32_t active = __atomic_load_n(&entry->active, __ATOMIC_ACQUIRE);
+#endif
+  if (active != 1u ||
       entry->generation != (uint32_t)(id >> STREAM_SLOT_BITS)) {
     stream_unpin(*entry);
     entry = nullptr;
@@ -1358,8 +1406,15 @@ uintptr_t KERNEL_OBJECT::stream_disconnect(uintptr_t slot, object_error &error) 
 template <> void KERNEL_OBJECT::pump_connections() {
   if (ARCH::load_acquire32(&m_connection_count) == 0)
     return;
-  if (!ARCH::cas32(&m_pump_lock, 0u, 1u))
+  if (!ARCH::cas32(&m_pump_lock, 0u, 1u)) {
+#if defined(SHIZUKU_CRASH_RECORD)
+    kobj_diag_mark(objects::boot_diag_breadcrumb::KOBJ_PUMP_LOCK_BUSY);
+#endif
     return;
+  }
+#if defined(SHIZUKU_CRASH_RECORD)
+  kobj_diag_mark(objects::boot_diag_breadcrumb::KOBJ_PUMP_ENTRY);
+#endif
   for (uintptr_t index = 0; index < CONNECTION_COUNT; ++index) {
     connection &link = m_connections[index];
     const uint32_t state = ARCH::load_acquire32(&link.active);
@@ -1440,6 +1495,9 @@ template <> void KERNEL_OBJECT::pump_connections() {
     KERNEL::BOARD::dma_copy((int)link.channel, source, target, count * rec);
   }
   ARCH::store_release32(&m_pump_lock, 0u);
+#if defined(SHIZUKU_CRASH_RECORD)
+  kobj_diag_mark(objects::boot_diag_breadcrumb::KOBJ_PUMP_EXIT);
+#endif
 }
 
 // ---- メモリの授受 -----------------------------------------------------------
