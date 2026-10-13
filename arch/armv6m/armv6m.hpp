@@ -9,9 +9,11 @@
 
 extern "C" {
 // atomic 用のロック。実体は modules/pico_sdk_support/rp2040 (SDK の spin lock)。
-// 戻り値は割込み状態で、解放時にそのまま渡す。
-uint32_t shizuku_armv6m_atomic_lock();
-void shizuku_armv6m_atomic_unlock(uint32_t saved_irq);
+// 戻り値は割込み状態で、解放時にそのまま渡す。診断ビルドでは対象語と
+// atomic 呼出し元も渡し、停止したロック操作を特定できるようにする。
+uint32_t shizuku_armv6m_atomic_lock(uintptr_t address, uintptr_t caller_pc);
+void shizuku_armv6m_atomic_unlock(uint32_t saved_irq, uintptr_t address,
+                                 uintptr_t caller_pc);
 void shizuku_armv6m_svc_entry();
 void shizuku_armv6m_pendsv_entry();
 void shizuku_armv6m_systick_entry();
@@ -49,7 +51,23 @@ public:
     uint32_t stack_limit_addr=0;
   };
   static constexpr uint32_t EXC_FRAME_MAX_BYTES=32;
+  static constexpr uint32_t HANDLER_STACK_ARG_BYTES=8;
   static constexpr uint32_t FAULT_CONTEXT_BYTES=sizeof(context_t);
+  // A PLAIN actor returns through a parent-handler dispatch, which allocates
+  // another call frame. Reserve that frame when admitting the actor: otherwise
+  // NO_STACK can also reject its return stub and leave it in the terminal loop.
+  static bool call_entry_has_return_room(const context_t &c, uint32_t header_bytes) {
+    if (c.stack_limit_addr == 0) return true;
+    const uintptr_t frame_bytes = EXC_FRAME_MAX_BYTES;
+    const uintptr_t unaligned = header_bytes + frame_bytes + HANDLER_STACK_ARG_BYTES;
+    const uintptr_t total = (unaligned + 7u) & ~(uintptr_t)7u;
+    const uintptr_t dispatch_reserve = unaligned + EXC_FRAME_MAX_BYTES +
+                                       FAULT_CONTEXT_BYTES + CALL_HEADROOM;
+    const uintptr_t sp = (uintptr_t)c.sp;
+    const uintptr_t limit = c.stack_limit_addr;
+    // One total is the new actor frame; the other is its return dispatch.
+    return sp >= limit && sp - limit >= 2u * total + dispatch_reserve;
+  }
   using method_t=uintptr_t (*)(uintptr_t,uintptr_t,uintptr_t,uintptr_t,uintptr_t);
   static uint32_t exc_frame_bytes(const context_t &) { return 32; }
   static uintptr_t psp_after_return(const context_t &c) {
@@ -60,6 +78,10 @@ public:
     switch(n){case 0:return f.r0;case 1:return f.r1;case 2:return f.r2;case 3:return f.r3;default:return f.r12;}
   }
   static void set_args(exception_frame_t &f,const uintptr_t *a){f.r0=a[0];f.r1=a[1];f.r2=a[2];f.r3=a[3];}
+  static void set_handler_args(exception_frame_t &f,const uintptr_t *a,
+                               uintptr_t stack_arg_address){
+    set_args(f,a);*reinterpret_cast<uint32_t *>(stack_arg_address)=(uint32_t)a[4];
+  }
   static void set_result(exception_frame_t &f,uintptr_t e,uintptr_t v){f.r0=e;f.r1=v;}
   static void set_entry(exception_frame_t &f,uintptr_t pc,uintptr_t lr){f.pc=pc;f.lr=lr;}
   static uintptr_t return_stub(){return (uintptr_t)&shizuku_armv6m_return_stub;}
@@ -135,8 +157,9 @@ public:
   // ソフトウェア下限のみ。MPU ガード領域は未実装
   static void stack_limit_set(context_t &c, uintptr_t v){c.stack_limit_addr=(uint32_t)v;}
   static uintptr_t stack_limit(const context_t &c){return (uintptr_t)c.stack_limit_addr;}
-  // RP2040 M0+ has no LDREX/STREX. Reuse the Pico SDK's lock reserved for
-  // atomic operations; lock 31 belongs to the claim-free allocator.
+  // RP2040 M0+ has no LDREX/STREX, so compare-exchange and release stores use
+  // the Pico SDK atomic spinlock. Aligned acquire loads use LDR+DMB below and
+  // do not need to serialize with other single-word accesses.
   [[gnu::always_inline]] static inline uint32_t atomic_profile_begin(){
 #if SHIZUKU_KERNEL_SERVICE_PROFILE
     return shizuku_service_profile_now();
@@ -151,9 +174,30 @@ public:
     (void)start;
 #endif
   }
-  static bool cas32(volatile uint32_t *p,uint32_t expected,uint32_t desired){uint32_t start=atomic_profile_begin();uint32_t irq=shizuku_armv6m_atomic_lock();bool ok=*p==expected;if(ok)*p=desired;shizuku_armv6m_atomic_unlock(irq);atomic_profile_end(start);return ok;}
-  static void store_release32(volatile uint32_t *p,uint32_t v){uint32_t start=atomic_profile_begin();uint32_t irq=shizuku_armv6m_atomic_lock();asm volatile("dmb":::"memory");*p=v;asm volatile("dmb":::"memory");shizuku_armv6m_atomic_unlock(irq);atomic_profile_end(start);}
-  static uint32_t load_acquire32(volatile uint32_t *p){uint32_t start=atomic_profile_begin();uint32_t irq=shizuku_armv6m_atomic_lock();asm volatile("dmb":::"memory");uint32_t v=*p;shizuku_armv6m_atomic_unlock(irq);atomic_profile_end(start);return v;}
+  static bool cas32(volatile uint32_t *p,uint32_t expected,uint32_t desired){
+    uint32_t start=atomic_profile_begin();
+    const uintptr_t caller_pc=(uintptr_t)__builtin_return_address(0);
+    uint32_t irq=shizuku_armv6m_atomic_lock((uintptr_t)p,caller_pc);
+    bool ok=*p==expected;if(ok)*p=desired;
+    shizuku_armv6m_atomic_unlock(irq,(uintptr_t)p,caller_pc);atomic_profile_end(start);return ok;
+  }
+  static void store_release32(volatile uint32_t *p,uint32_t v){
+    uint32_t start=atomic_profile_begin();
+    const uintptr_t caller_pc=(uintptr_t)__builtin_return_address(0);
+    uint32_t irq=shizuku_armv6m_atomic_lock((uintptr_t)p,caller_pc);
+    asm volatile("dmb":::"memory");*p=v;asm volatile("dmb":::"memory");
+    shizuku_armv6m_atomic_unlock(irq,(uintptr_t)p,caller_pc);atomic_profile_end(start);
+  }
+  static uint32_t load_acquire32(volatile uint32_t *p){
+    // All callers pass naturally aligned uint32_t words. RP2040's Cortex-M0+
+    // performs an aligned word load as one indivisible bus access; acquire
+    // ordering only needs the barrier after the load. Do not take the shared
+    // Pico atomic spinlock here: loads are frequent in SVC/IRQ handlers, and a
+    // blocked handler with PRIMASK set can starve watchdog and lockout IRQs.
+    const uint32_t v=*p;
+    asm volatile("dmb":::"memory");
+    return v;
+  }
   static constexpr uint32_t DFSR_HALTED=1,DFSR_BKPT=2;
   // M0+ has no DebugMonitor. These API-compatible stubs keep phase-1 builds
   // possible; self-hosted debug is unavailable until a separate design exists.
@@ -170,11 +214,15 @@ public:
 };
 // context_t のレイアウトは region 数に依らないので、RP2040 の実体で代表して検査する。
 using armv6m_rp2040 = armv6m<8, 2>;
+// These offsets describe the 32-bit RP2040 ABI; host argument-placement tests
+// use a 64-bit uintptr_t and validate set_handler_args separately.
+#if UINTPTR_MAX == UINT32_MAX
 static_assert(offsetof(armv6m_rp2040::context_t,sp)==32);
 static_assert(offsetof(armv6m_rp2040::context_t,exc_return)==36);
 static_assert(offsetof(armv6m_rp2040::context_t,control)==40);
 static_assert(offsetof(armv6m_rp2040::context_t,region_base)==44);
 static_assert(offsetof(armv6m_rp2040::context_t,stack_limit_addr)==52);
+#endif
 static_assert((uintptr_t)shizuku::primitive::RETURN==2);
 static_assert(shizuku::concepts::arch_requires<armv6m_rp2040>);
 }

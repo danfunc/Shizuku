@@ -14,9 +14,19 @@ cc_library(
         "//chips/rp2040:headers",
         "//:kernel",
         "//configs:config",
+        "//modules/pico_sdk_support/objects:usb_cdc",
+        "@pico-sdk//src/rp2_common/hardware_watchdog:hardware_watchdog",
         "@pico-sdk//src/rp2_common/hardware_sync",
+        "@pico-sdk//src/rp2_common/pico_multicore",
         "@pico-sdk//src/rp2_common/pico_stdlib",
     ],
+    local_defines = select({
+        "//configs:crash_record_enabled": [
+            "SHIZUKU_CRASH_RECORD=1",
+            "SHIZUKU_BOOT_LOG_WAIT=1",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 cc_library(

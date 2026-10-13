@@ -33,4 +33,14 @@ cc_library(
         "@pico-sdk//src/rp2_common/pico_multicore",
         "@pico-sdk//src/rp2_common/pico_stdlib",
     ],
+    local_defines = select({
+        "//configs:boot_log_wait_enabled": ["SHIZUKU_BOOT_LOG_WAIT=1"],
+        "//conditions:default": [],
+    }) + select({
+        "//configs:crash_record_enabled": [
+            "SHIZUKU_CRASH_RECORD=1",
+            "SHIZUKU_BOOT_LOG_WAIT=1",
+        ],
+        "//conditions:default": [],
+    }),
 )

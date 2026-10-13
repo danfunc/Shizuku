@@ -25,6 +25,7 @@ public:
   };
   static constexpr uint32_t CALL_HEADROOM = 0;
   static constexpr uint32_t EXC_FRAME_MAX_BYTES = sizeof(exception_frame_t);
+  static constexpr uint32_t HANDLER_STACK_ARG_BYTES = 0;
   static constexpr uint32_t FAULT_CONTEXT_BYTES = sizeof(context_t);
   static constexpr uint32_t TIMER_MAX_CYCLES = 0xFFFFFFFF;
   static constexpr uint32_t TIMER_MIN_CYCLES = 1;
@@ -42,6 +43,11 @@ public:
   static void set_args(exception_frame_t &frame, const uintptr_t *args) {
     for (unsigned i = 0; i < 4; ++i)
       frame.slot[i] = args[i];
+  }
+  static void set_handler_args(exception_frame_t &frame, const uintptr_t *args,
+                               uintptr_t) {
+    set_args(frame, args);
+    frame.slot[4] = args[4];
   }
   static void set_result(exception_frame_t &frame, uintptr_t error,
                          uintptr_t value) {

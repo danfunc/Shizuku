@@ -14,11 +14,16 @@
 import argparse
 import asyncio
 import datetime
+import hashlib
 import os
 import re
+import select
 import struct
 import sys
+import termios
+import threading
 import time
+import tty
 import zlib
 from typing import List, Optional, Set, Tuple
 
@@ -51,6 +56,102 @@ RESET_SEQ = 0xFFFE
 DEFAULT_PACKET_SIZE = 244  # ATT MTU 247 - 3
 DEFAULT_PACKET_DELAY = 0.003  # 1 パケット送信後のスリープ秒 (3ms)
 DEFAULT_CHUNK_GAP = 0.055  # 1 チャンク完了後の flash 書き込み待機秒 (55ms: erase 38ms + prog 12ms)
+DEFAULT_READY_TIMEOUT = 10.0  # XNOR/XNOU INIT 後の ready 応答待ち秒
+
+
+class CdcApprovalMonitor:
+    """CDC のペアリング確認行を監視し、対応する承認を返す。"""
+
+    _PAIR_LINE = re.compile(
+        r"\[BLE_UART\] PAIR\? conn=0x[0-9a-fA-F]{4} "
+        r"mode=(NC|JW)(?: num=(\d{6}))?\s*$"
+    )
+
+    def __init__(self, path: str, mode: str = "nc"):
+        self.path = path
+        self.mode = mode
+        self.fd: Optional[int] = None
+        self._saved_attrs = None
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        self.fd = os.open(self.path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        original = termios.tcgetattr(self.fd)
+        self._saved_attrs = list(original)
+        self._saved_attrs[6] = list(original[6])
+        tty.setraw(self.fd)
+        attrs = termios.tcgetattr(self.fd)
+        attrs[4] = termios.B115200
+        attrs[5] = termios.B115200
+        termios.tcsetattr(self.fd, termios.TCSANOW, attrs)
+        if self.mode == "jw":
+            os.write(self.fd, b"A\r\n")
+            log("CDC: pairing mode JW に切り替えました")
+            time.sleep(0.1)
+        self._thread = threading.Thread(
+            target=self._read_loop, name="ble-ota-cdc", daemon=True
+        )
+        self._thread.start()
+        log(f"CDC 承認監視開始: {self.path}")
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        if self.fd is not None:
+            try:
+                if self._saved_attrs is not None:
+                    termios.tcsetattr(self.fd, termios.TCSANOW, self._saved_attrs)
+            finally:
+                os.close(self.fd)
+                self.fd = None
+
+    def _read_loop(self) -> None:
+        assert self.fd is not None
+        pending = bytearray()
+        while not self._stop.is_set():
+            try:
+                readable, _, _ = select.select([self.fd], [], [], 0.1)
+                if not readable:
+                    continue
+                chunk = os.read(self.fd, 512)
+            except (OSError, ValueError) as exc:
+                if not self._stop.is_set():
+                    log(f"ERROR: CDC 読み取り失敗: {exc}")
+                return
+            if not chunk:
+                continue
+            for byte in chunk:
+                if byte in (10, 13):
+                    if pending:
+                        line = pending.decode("utf-8", errors="replace")
+                        log(f"[CDC] {line}")
+                        self._handle_line(line)
+                        pending.clear()
+                elif len(pending) < 256:
+                    pending.append(byte)
+                else:
+                    pending.clear()
+
+    def _handle_line(self, line: str) -> None:
+        match = self._PAIR_LINE.search(line)
+        if match is None:
+            return
+        pairing_mode, number = match.groups()
+        if pairing_mode == "NC":
+            if number is None:
+                log("ERROR: CDC PAIR? NC 行に番号がありません。承認を送りません")
+                return
+            response = f"Y {number}\r\n".encode("ascii")
+        else:
+            response = b"Y\r\n"
+        assert self.fd is not None
+        try:
+            os.write(self.fd, response)
+            log(f"CDC: {pairing_mode} ペアリング要求を承認しました")
+        except OSError as exc:
+            log(f"ERROR: CDC 承認送信失敗: {exc}")
 
 
 def log(msg: str) -> None:
@@ -201,6 +302,11 @@ def run_selfcheck() -> bool:
     assert c_123456789 == 0x29B1, f"crc16 123456789 expected 0x29B1, got {hex(c_123456789)}"
     log("  [PASS] CRC16/CCITT-FALSE 計算検算")
 
+    # 1b. SHA-256 (送受信する成果物を外部で照合する時の基準)
+    sha256 = hashlib.sha256(b"abc").hexdigest()
+    assert sha256 == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", f"SHA-256 mismatch: {sha256}"
+    log("  [PASS] SHA-256 標準既知ベクトル")
+
     # 2. XNOR チャンクヘッダ
     dummy_payload = b"HelloWorld12345678"
     p_len = len(dummy_payload)
@@ -306,7 +412,7 @@ def run_selfcheck() -> bool:
     assert check_commit_line("commit could not start (rc=-1)") is False, "commit could not start must return False"
     log("  [PASS] commit 受理判定検算 (正常 / rejected / start失敗)")
 
-    log("=== [SELFCHECK] ALL TESTS PASSED (全 11 項目合格) ===")
+    log("=== [SELFCHECK] ALL TESTS PASSED (全 12 項目合格) ===")
     return True
 
 
@@ -424,6 +530,7 @@ async def do_send(
     use_response: bool = False,
     max_rounds: int = 15,
     auto_reconnect: bool = True,
+    ready_timeout: float = DEFAULT_READY_TIMEOUT,
 ) -> bool:
     if BleakClient is None:
         log("ERROR: bleak がインストールされていません")
@@ -537,7 +644,9 @@ async def do_send(
                 log(f"初期化ヘッダ送信: magic={mode.upper()}, total={total_len}, crc32={hex(image_crc32)}")
                 drain_queue(notify_queue)
                 await client.write_gatt_char(OTA_RX_CHAR_UUID, init_hdr, response=True)
-                ready_ok = await wait_for_notify_matching(notify_queue, r"ready", timeout=10.0)
+                ready_ok = await wait_for_notify_matching(
+                    notify_queue, r"ready", timeout=ready_timeout
+                )
                 if not check_ready_timeout(ready_ok):
                     log("ERROR: デバイスからの 'ready' 応答タイムアウト (失敗)")
                     return False
@@ -807,6 +916,9 @@ def main():
     sub_send.add_argument("--response", action="store_true", help="チャンクデータ送信に Write with Response を使用")
     sub_send.add_argument("--packet-size", type=int, default=DEFAULT_PACKET_SIZE, help="1 パケットのバイト数 (既定: 244)")
     sub_send.add_argument("--max-rounds", type=int, default=15, help="再送ラウンド最大数 (既定: 15)")
+    sub_send.add_argument("--ready-timeout", type=float, default=DEFAULT_READY_TIMEOUT, help=f"INIT 後の ready 応答待ち秒 (既定: {DEFAULT_READY_TIMEOUT})")
+    sub_send.add_argument("--cdc-port", help="ペアリング承認に使うデバイス CDC ポート")
+    sub_send.add_argument("--cdc-mode", choices=["nc", "jw"], default="nc", help="CDC ペアリング方式 (jw は接続前に A を送信)")
     sub_send.add_argument("--no-reconnect", action="store_true", help="切断時の自動再接続を無効化")
 
     args = parser.parse_args()
@@ -834,6 +946,9 @@ def main():
         sys.exit(0 if ok else 1)
 
     elif args.command == "send":
+        if args.cdc_mode == "jw" and not args.cdc_port:
+            log("ERROR: --cdc-mode jw には --cdc-port が必要です")
+            sys.exit(2)
         addr = args.address
         if not addr:
             addr = asyncio.run(do_scan(timeout=3.0))
@@ -844,21 +959,33 @@ def main():
         # --chunk-delay が指定されていた場合は packet_delay として反映
         pkt_delay = args.chunk_delay if args.chunk_delay is not None else args.packet_delay
 
-        ok = asyncio.run(
-            do_send(
-                address=addr,
-                bin_path=args.bin,
-                mode=args.mode,
-                commit=args.commit,
-                packet_size=args.packet_size,
-                packet_delay=pkt_delay,
-                chunk_gap=args.chunk_gap,
-                window_size=args.window_size,
-                use_response=args.response,
-                max_rounds=args.max_rounds,
-                auto_reconnect=not args.no_reconnect,
+        cdc_monitor = None
+        try:
+            if args.cdc_port:
+                cdc_monitor = CdcApprovalMonitor(args.cdc_port, args.cdc_mode)
+                cdc_monitor.start()
+            ok = asyncio.run(
+                do_send(
+                    address=addr,
+                    bin_path=args.bin,
+                    mode=args.mode,
+                    commit=args.commit,
+                    packet_size=args.packet_size,
+                    packet_delay=pkt_delay,
+                    chunk_gap=args.chunk_gap,
+                    window_size=args.window_size,
+                    use_response=args.response,
+                    max_rounds=args.max_rounds,
+                    auto_reconnect=not args.no_reconnect,
+                    ready_timeout=args.ready_timeout,
+                )
             )
-        )
+        except (OSError, termios.error) as exc:
+            log(f"ERROR: CDC ポートを開けませんでした: {exc}")
+            sys.exit(1)
+        finally:
+            if cdc_monitor is not None:
+                cdc_monitor.close()
         sys.exit(0 if ok else 1)
 
 

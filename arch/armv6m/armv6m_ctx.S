@@ -118,7 +118,22 @@ shizuku_armv6m_pendsv_entry:
 .global shizuku_armv6m_fault_entry
 .type shizuku_armv6m_fault_entry,%function
 shizuku_armv6m_fault_entry:
-#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+#if defined(SHIZUKU_CRASH_RECORD)
+  @ Capture the hardware exception frame and stop feeding the 3 s watchdog.
+  @ The C helper is placed in SRAM so this also works while XIP is unavailable.
+  mov r1, lr
+  movs r2, #4
+  tst r1, r2
+  beq 4f
+  mrs r0, PSP
+  b 5f
+4:
+  mrs r0, MSP
+5:
+  bl shizuku_crash_record_fault
+6:
+  b 6b
+#elif defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   // Snapshot the hardware frame before CTX_SAVE calls into kernel state.
   // EXC_RETURN bit 2 selects the stack holding the frame; bit 3 identifies
   // whether the interrupted code was Thread or Handler mode.
@@ -151,7 +166,8 @@ shizuku_armv6m_debugmon_entry:
 .type shizuku_armv6m_systick_entry,%function
 shizuku_armv6m_systick_entry:
   push {r4, lr}
-#if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+#if (defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0) || \
+    defined(SHIZUKU_CRASH_RECORD)
   mov r1, lr
   movs r2, #4
   tst r1, r2
@@ -179,9 +195,12 @@ shizuku_armv6m_enter_thread_mode:
 .type shizuku_armv6m_return_stub,%function
 shizuku_armv6m_return_stub:
   mov r2, r0
-  movs r1, #1
-  movs r3, #0
+  movs r1, #1 // legacy one-pop notification
+  movs r3, #0xA5
+  lsls r3, r3, #8
+  adds r3, #0x5A
   mov r12, r3
+  movs r3, #0 // keep the RETURN error argument clear; marker lives in r12
   movs r0, #2
   svc 0
 1: b 1b

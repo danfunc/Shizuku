@@ -104,6 +104,7 @@ public:
   // 以下の policy 値は IntMode (チップ・割込み方式側) から受ける。generic は値を持たない。
   static constexpr uint32_t CALL_HEADROOM = IntMode::CALL_HEADROOM;
   static constexpr uint32_t EXC_FRAME_MAX_BYTES = sizeof(exception_frame_t);
+  static constexpr uint32_t HANDLER_STACK_ARG_BYTES = 0;
   static constexpr uint32_t FAULT_CONTEXT_BYTES = sizeof(context_t);
   static constexpr bool HAS_CYCLE_COUNTER = IntMode::HAS_CYCLE_COUNTER;
   static constexpr uint32_t TIMER_MAX_CYCLES = IntMode::TIMER_MAX_CYCLES;
@@ -141,6 +142,13 @@ public:
     frame.a1 = args[1];
     frame.a2 = args[2];
     frame.a3 = args[3];
+  }
+
+  // RV32's fifth AAPCS argument is a4, which is already in the saved trap frame.
+  static void set_handler_args(exception_frame_t &frame,
+                               const uintptr_t *args, uintptr_t) {
+    set_args(frame, args);
+    frame.a4 = args[4];
   }
 
   static void set_result(exception_frame_t &frame, uintptr_t error,

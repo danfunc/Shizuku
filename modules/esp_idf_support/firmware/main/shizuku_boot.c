@@ -8,6 +8,7 @@
 // ★置き換えの代償 (IDF の private ABI、v6.1 固定): start_cpu0_default が行う
 //   do_core_init / グローバルコンストラクタ / do_secondary_init /
 //   esp_startup_start_app (= main タスク生成と vTaskStartScheduler) を**すべて飛ばす**。
+//   RTC/PMU とクロック初期化は call_start_cpu0 側で、この入口より前に実行済み。
 //   ヒープ・libc・PMP の初期化責任は誰も負っていない。RTC WDTは従来同様snapshot後に停止し、他WDTには書込み/給餌しない。
 //
 // start_cpu0 は C6 kernel archive の pre-init entry を呼ぶ。
@@ -24,10 +25,27 @@
 #endif
 
 __attribute__((noreturn)) void SHIZUKU_EARLY_BOOT(void);
+#if (CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C6) && defined(SHIZUKU_ESP_BLE)
+int shizuku_esp_ble_pre_core(void);
+void shizuku_esp_ble_post_core_ctors(void);
+extern void __libc_init_array(void);
+#endif
 
 __attribute__((noreturn)) void start_cpu0(void)
 {
     shizuku_c6_early_diag_begin();
+    // IDF call_start_cpu0() already ran sys_rtc_init() and system_early_init()
+    // before SYS_STARTUP_FN. The latter initializes the clock tree, CPU clock,
+    // and peripheral clocks; replaying them here would initialize them twice.
+#if (CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C6) && defined(SHIZUKU_ESP_BLE)
+    if (!shizuku_esp_ble_pre_core()) {
+        // Let Shizuku bootstrap so the failure path can idle through SLEEP_US;
+        // libc constructors are skipped because CORE init did not complete.
+        SHIZUKU_EARLY_BOOT();
+    }
+    __libc_init_array();
+    shizuku_esp_ble_post_core_ctors();
+#endif
     SHIZUKU_EARLY_BOOT();
 }
 

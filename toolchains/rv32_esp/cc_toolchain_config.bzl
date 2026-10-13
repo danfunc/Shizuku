@@ -29,21 +29,24 @@ _LINK_ACTIONS = [
     ACTION_NAMES.cpp_link_nodeps_dynamic_library,
 ]
 
-# (Bazel の tool 名, toolchains/rv32_esp/bin/ のラッパ名)。ラッパは実体の GCC を exec する。
+# (Bazel の tool 名, toolchains/rv32_esp/bin/ 配下のラッパ名)。ラッパは実体の GCC を exec する。
 _TOOLS = [
-    ("gcc", "bin/gcc"),
-    ("g++", "bin/g++"),
-    ("cpp", "bin/cpp"),
-    ("ar", "bin/ar"),
-    ("ld", "bin/ld"),
-    ("nm", "bin/nm"),
-    ("objdump", "bin/objdump"),
-    ("strip", "bin/strip"),
-    ("gcov", "bin/gcov"),
+    ("gcc", "gcc"),
+    ("g++", "g++"),
+    ("cpp", "cpp"),
+    ("ar", "ar"),
+    ("ld", "ld"),
+    ("nm", "nm"),
+    ("objdump", "objdump"),
+    ("strip", "strip"),
+    ("gcov", "gcov"),
 ]
 
 def _impl(ctx):
-    tool_paths = [tool_path(name = name, path = path) for name, path in _TOOLS]
+    tool_paths = [
+        tool_path(name = name, path = ctx.attr.tool_path_prefix + "/" + path)
+        for name, path in _TOOLS
+    ]
 
     default_flags = feature(
         name = "default_flags",
@@ -93,6 +96,9 @@ def _impl(ctx):
 
 rv32_esp_cc_toolchain_config = rule(
     implementation = _impl,
-    attrs = dict(builtin_include_directories = attr.string_list()),
+    attrs = dict(
+        builtin_include_directories = attr.string_list(),
+        tool_path_prefix = attr.string(default = "bin"),
+    ),
     provides = [CcToolchainConfigInfo],
 )

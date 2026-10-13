@@ -1,0 +1,56 @@
+# Shizuku の rbuild job 定義。
+#   ビルドは main-lxc (Linux worker) で行い、書込み (flash) は手元の Mac で行う。
+#   ESP32-C5 は esptool ではなく OpenOCD の JTAG で書く。
+#   子エージェントの sandbox からは Tailscale に届かないので、rbuild は sandbox 外で実行する。
+#
+# 注意: worker 定義 (bazelisk_path を含む) は project 側ではなく user 側の
+#   ~/.config/rbuild.toml にある。job には bazelisk_path の項目が無いため、
+#   build_esp32c5 は worker "main-lxc" の既定 bazelisk を使う。
+#   C5 用 bazelisk-c5 を使うには、user 側に専用 worker (bazelisk_path 指定) を作り、
+#   build_esp32c5 の worker をそれに向ける必要がある。
+
+[jobs.build_rp2040_xiao]
+worker = "main-lxc"
+backend = "bazel"
+args = ["build", "--config=rp2040_xiao", "//firmware:shizuku_uf2"]
+artifacts = ["bazel-bin/firmware/shizuku.uf2"]
+
+[jobs.flash_rp2040_xiao]
+worker = "local"
+command = ["/bin/sh", "-c", "/opt/picotool/bin/picotool load -x -v -f \"$RBUILD_ARTIFACTS_DIR/firmware/shizuku.uf2\""]
+depends_on = "build_rp2040_xiao"
+
+[jobs.build_rp2040_pico_w]
+worker = "main-lxc"
+backend = "bazel"
+# picotool host build が通常並列で止まった実績があるため --jobs=2。
+args = ["build", "--config=rp2040_pico_w", "--jobs=2", "//firmware:shizuku_uf2"]
+artifacts = ["bazel-bin/firmware/shizuku.uf2"]
+
+[jobs.flash_rp2040_pico_w]
+worker = "local"
+command = ["/bin/sh", "-c", "/opt/picotool/bin/picotool load -x -v -f \"$RBUILD_ARTIFACTS_DIR/firmware/shizuku.uf2\""]
+depends_on = "build_rp2040_pico_w"
+
+[jobs.build_rp2350_pico2_w]
+worker = "main-lxc"
+backend = "bazel"
+args = ["build", "--config=rp2350_pico2_w", "//firmware:shizuku_uf2"]
+artifacts = ["bazel-bin/firmware/shizuku.uf2"]
+
+[jobs.flash_rp2350_pico2_w]
+worker = "local"
+command = ["/bin/sh", "-c", "/opt/picotool/bin/picotool load -x -v -f \"$RBUILD_ARTIFACTS_DIR/firmware/shizuku.uf2\""]
+depends_on = "build_rp2350_pico2_w"
+
+[jobs.build_esp32c5]
+worker = "main-lxc"
+backend = "bazel"
+# worker の ESP-IDF は bazelisk-c5 ラッパーと同じ場所を action_env で渡す。
+args = ["build", "--config=esp32c5", "--jobs=2", "--action_env=CMAKE_BUILD_PARALLEL_LEVEL=2", "--action_env=IDF_PATH=/home/ishigakiyua/.local/esp-idf-c5-v6.1", "--action_env=IDF_TOOLS_PATH=/home/ishigakiyua/.local/idf-tools-c5-v6.1", "//modules/esp_idf_support/firmware:esp32c5"]
+artifacts = ["bazel-bin/modules/esp_idf_support/firmware/shizuku_esp32c5.bin"]
+
+[jobs.flash_esp32c5]
+worker = "local"
+command = ["/bin/sh", "-c", "/Users/ishigakiyua/github/Shizuku-esp32/.local/idf-tools/tools/openocd-esp32/v0.12.0-esp32-20260703/openocd-esp32/bin/openocd -s /Users/ishigakiyua/github/Shizuku-esp32/.local/idf-tools/tools/openocd-esp32/v0.12.0-esp32-20260703/openocd-esp32/share/openocd/scripts -f board/esp32c5-builtin.cfg -c \"program_esp $RBUILD_ARTIFACTS_DIR/modules/esp_idf_support/firmware/shizuku_esp32c5.bin 0x10000 verify reset exit\""]
+depends_on = "build_esp32c5"

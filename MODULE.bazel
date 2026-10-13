@@ -36,7 +36,18 @@ http_archive(
     urls = ["https://github.com/espressif/crosstool-NG/releases/download/esp-15.2.0_20251204/riscv32-esp-elf-15.2.0_20251204-aarch64-apple-darwin.tar.xz"],
 )
 
-register_toolchains("//toolchains/rv32_esp:rv32_esp_toolchain")
+http_archive(
+    name = "riscv32_esp_elf_gcc_linux",
+    build_file = "//toolchains/rv32_esp:gcc.BUILD",
+    sha256 = "ace5aae6afe98f754947be043d40173e2e22ace57754b11a394b7238eefa01cf",
+    strip_prefix = "riscv32-esp-elf",
+    urls = ["https://github.com/espressif/crosstool-NG/releases/download/esp-15.2.0_20251204/riscv32-esp-elf-15.2.0_20251204-x86_64-linux-gnu.tar.xz"],
+)
+
+register_toolchains(
+    "//toolchains/rv32_esp:rv32_esp_toolchain",
+    "//toolchains/rv32_esp:rv32_esp_linux_toolchain",
+)
 
 # picotool (ELF → UF2 変換。//firmware:shizuku_uf2 が tools として使う)
 bazel_dep(name = "picotool", version = "2.2.0")

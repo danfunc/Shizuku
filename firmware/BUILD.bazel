@@ -1,5 +1,6 @@
 # 実行ファイルを作るのはここだけ (BUILD.bazel の冒頭を参照)。
 load("@rules_cc//cc:defs.bzl", "cc_binary")
+load("@pico-sdk//bazel/toolchain:objcopy.bzl", "objcopy_to_bin")
 
 
 # 書き込み: bazelisk run //firmware:flash (ビルドしてから焼く)。
@@ -40,13 +41,17 @@ genrule(
     }),
 )
 
-# 生バイナリ (arm-none-eabi-objcopy -O binary)。OTA 転送用。
-genrule(
+# 自己テストを省略する OTA 検証用ビルド。既定プロファイルは変更しない。
+config_setting(
+    name = "skip_selftest",
+    define_values = {"skip_selftest": "true"},
+)
+
+# 生バイナリ (選択中の pico-sdk C++ toolchain の objcopy)。OTA 転送用。
+objcopy_to_bin(
     name = "shizuku_bin",
-    srcs = [":shizuku"],
-    outs = ["shizuku.bin"],
-    cmd = "/opt/homebrew/bin/arm-none-eabi-objcopy -O binary $(location :shizuku) $@",
-    tags = ["no-sandbox"],
+    src = ":shizuku",
+    out = "shizuku.bin",
 )
 
 config_setting(
@@ -67,6 +72,21 @@ cc_binary(
         ":build_id_v2": ["SHIZUKU_BUILD_ID=\\\"v2\\\""],
         ":build_id_v1": ["SHIZUKU_BUILD_ID=\\\"v1\\\""],
         "//conditions:default": ["SHIZUKU_BUILD_ID=\\\"v1\\\""],
+    }) + select({
+        "//configs:flashfs_only_selftest": ["SHIZUKU_FLASHFS_ONLY=1"],
+        "//conditions:default": [],
+    }) + select({
+        ":skip_selftest": ["SHIZUKU_SKIP_SELFTEST=1"],
+        "//conditions:default": [],
+    }) + select({
+        "//configs:boot_log_wait_enabled": ["SHIZUKU_BOOT_LOG_WAIT=1"],
+        "//conditions:default": [],
+    }) + select({
+        "//configs:crash_record_enabled": [
+            "SHIZUKU_CRASH_RECORD=1",
+            "SHIZUKU_BOOT_LOG_WAIT=1",
+        ],
+        "//conditions:default": [],
     }),
     additional_linker_inputs = [
         "rp2040_flash_limit.ld",
@@ -75,19 +95,32 @@ cc_binary(
     linkopts = select({
         "//configs:rp2040": ["-Wl,-T,$(location :rp2040_flash_limit.ld)"],
         "//conditions:default": ["-Wl,-T,$(location :rp2350_flash_limit.ld)"],
+    }) + select({
+        "//configs:rp2040_pico_w": [
+            "-Wl,--wrap=pico_flash_bank_instance",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//configs:rp2040_pico_w_ram_tlv": [
+            "-Wl,--wrap=btstack_tlv_flash_bank_init_instance",
+        ],
+        "//conditions:default": [],
     }),
     deps = [
         "//:internal_headers",
         "//:apps",
         "//:kernel_object",
-        "//:selftest",
         "//configs:config",
         "//modules/pico_sdk_support",
         "@pico-sdk//src/rp2_common/hardware_watchdog:hardware_watchdog",
         "@pico-sdk//src/rp2_common/pico_bootrom",
+        "@pico-sdk//src/rp2_common/pico_multicore",
         "@pico-sdk//src/rp2_common/pico_stdlib",
     ] + select({
-        "//configs:rp2350_pico2_w": [
+        ":skip_selftest": [],
+        "//conditions:default": ["//:selftest"],
+    }) + select({
+        "//configs:cyw43": [
             "//modules/pico_sdk_support:ble_uart",
             "//modules/pico_sdk_support:ota",
         ],

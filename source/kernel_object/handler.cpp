@@ -4,12 +4,15 @@
 //  スレッドモードで走る方針側。番号の意味を持つのはここだけで、カーネルは
 //  何も解釈せずにここへ渡してくる。
 //
-//  ★カーネルのプリミティブを撃てるのはここだけ。オブジェクトは撃てないので、
-//    カーネルは起動時に「今のネスト数」を渡し (第 5 引数)、オブジェクトは exit API に
-//    「何段戻すか」を載せて撃ち、ここがその段数で巻き戻す (D5)。段数は必ず申告する。
+//  ★カーネルのプリミティブを解釈できるのは登録済み KOBJ だけ。dispatch の第 5 引数は
+//    呼出し鎖の unwind floor、exit API は絶対戻り深さ d を指定する。KOBJ は差分を
+//    RETURN count にし、kernel が ledger の floor と照合する。
 #include "shizuku/kernel.hpp"
 #include "shizuku/kernel_object.hpp"
 #include "shizuku/svc_attributes.hpp"
+#if defined(SHIZUKU_CRASH_RECORD)
+#include "shizuku/objects/usb_cdc.hpp"
+#endif
 
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
 extern "C" void shizuku_boot_trace_phase(uint32_t);
@@ -19,6 +22,15 @@ namespace shizuku {
 
 KERNEL_OBJECT kernel_object_instance;
 
+#if defined(SHIZUKU_CRASH_RECORD)
+namespace {
+inline void kobj_diag_mark(objects::boot_diag_breadcrumb id) {
+  objects::usb_cdc_boot_diag_breadcrumb_at(
+      id, (uintptr_t)__builtin_return_address(0));
+}
+}
+#endif
+
 // ★戻り口が撃つのはカーネルの RETURN なので、オブジェクトランドの exit API の番号は
 //   それと同じ値でなければならない (経路判定だけが両者の意味を分ける)。
 static_assert((uintptr_t)object_api::EXIT_METHOD == (uintptr_t)primitive::RETURN,
@@ -27,8 +39,8 @@ static_assert((uintptr_t)object_api::EXIT_METHOD == (uintptr_t)primitive::RETURN
 // 実装より前に使う (下の入口が handle を呼ぶ) ので、特殊化の宣言を先に置く。
 // これが無いと暗黙の実体化が先に起きて「実体化後の特殊化」になる。
 template <>
-uintptr_t KERNEL_OBJECT::handle(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
-template <> uint32_t KERNEL_OBJECT::claimed_depth() const;
+uintptr_t KERNEL_OBJECT::handle(uintptr_t, uintptr_t, uintptr_t, uintptr_t,
+                                uintptr_t);
 template <> uintptr_t KERNEL_OBJECT::current_object(uint32_t) const;
 template <> uintptr_t KERNEL_OBJECT::caller_object(uint32_t) const;
 template <> void KERNEL_OBJECT::init();
@@ -53,6 +65,10 @@ template <>
 uintptr_t KERNEL_OBJECT::call_method(uintptr_t, uintptr_t, uintptr_t,
                                      object_error &);
 template <> void KERNEL_OBJECT::exit_method(uintptr_t, uintptr_t, uintptr_t);
+template <> uintptr_t KERNEL_OBJECT::return_to_depth(uint32_t, uintptr_t,
+                                                     uintptr_t);
+template <> void KERNEL_OBJECT::forward_child_exit(uintptr_t, uintptr_t,
+                                                   uintptr_t);
 template <>
 uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t, uintptr_t, uintptr_t,
                                       object_error &);
@@ -112,19 +128,18 @@ uintptr_t KERNEL_OBJECT::arena_allocate(arena &, uintptr_t, uintptr_t);
 template <> bool KERNEL_OBJECT::arena_release(arena &, uintptr_t);
 
 // カーネルが起こすハンドラの入口。**素の C 関数**でよい。
-// ★ネストした呼び出しの情報をレジスタで持ち回らない: 番号は引数スロット (a0) に
-//   そのまま乗っており、今のネスト数はカーネルが積んだフレームの段数そのもの
-//   (kernel_instance.current_depth() で読める)。どちらも呼び出しフレーム側にあるので
+// ★番号は a0 に乗り、戻り境界 (unwind floor) は第 5 引数でカーネルが渡す。
+//   どちらも呼び出しフレーム側にあるので
 //   ネストしても混ざらず、C 関数が callee-saved を潰しても壊れない。
 //   参照実装はこれを callee-saved レジスタで渡し、C の引数へ変換する naked シムを
 //   必要としていた — push 順と引数位置の対応を何度も間違えた箇所なので、構造ごと
 //   無くすのが正しい。
 uintptr_t handler_entry_point(uintptr_t a0, uintptr_t a1, uintptr_t a2,
-                              uintptr_t a3) {
+                              uintptr_t a3, uintptr_t unwind_floor) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(419);
 #endif
-  return kernel_object_instance.handle(a0, a1, a2, a3);
+  return kernel_object_instance.handle(a0, a1, a2, a3, unwind_floor);
 }
 
 template <> uintptr_t KERNEL_OBJECT::handler_entry() {
@@ -136,7 +151,11 @@ template <> uintptr_t KERNEL_OBJECT::handler_entry() {
 //   (オブジェクトランド) で、置き場所の条件はカーネルが検査する。
 static_assert(sizeof(KERNEL::call_ledger_entry) == 16,
               "call ledger entry must be 16 bytes on supported targets");
+#if defined(SHIZUKU_C5_BLE)
+alignas(8) static uint8_t g_bookkeeping_storage[16 * 1024];
+#else
 alignas(8) static uint8_t g_bookkeeping_storage[65536];
+#endif
 static_assert(KERNEL::thread_record_bytes() * KERNEL_OBJECT::THREAD_COUNT +
                   sizeof(KERNEL_OBJECT::block) + KERNEL_OBJECT::BLOCK_ALIGN - 1 +
                   KERNEL_OBJECT::THREAD_COUNT *
@@ -185,7 +204,11 @@ template <> void KERNEL_OBJECT::init() {
   kernel_instance.set_thread_storage((void *)table, table_bytes);
 
   // オブジェクト用 arena: 非特権からも届く必要があるのでヒープ側から取る。
+#if defined(SHIZUKU_C5_BLE)
+  constexpr uintptr_t OBJECT_ARENA_BYTES = 56 * 1024;
+#else
   constexpr uintptr_t OBJECT_ARENA_BYTES = 128 * 1024;
+#endif
   auto heap = kernel_instance.memory_manager.kernel_malloc(OBJECT_ARENA_BYTES);
   if (!heap)
     KERNEL::BOARD::panic("no room for the object arena");
@@ -301,20 +324,6 @@ template <> bool KERNEL_OBJECT::start_secondary_core() {
   return true;
 }
 
-// ★両側チェックの申告値を**自分の台帳から**計算する (§9.3)。
-//   カーネルのフレーム段数を写して返すのでは検算にならない。こちらは
-//   「呼び出しを何段積んだか」を独立に数えており、フレームは 1 段あたり 2 枚
-//   (呼び先の枠 + その中の svc を運ぶ枠) なので、ハンドラとして走っている今の
-//   段数は 2 * 呼び出し段数 + 1 になるはず。ここがズレたら台帳とカーネルの
-//   どちらかが壊れているので、カーネルが 1 枚も落とさずに弾く。
-template <> uint32_t KERNEL_OBJECT::claimed_depth() const {
-  const uint32_t thread = kernel_instance.current_thread_id();
-  uint32_t calls = 0;
-  for (uint32_t i = 0; i < kernel_instance.ledger_size(thread); ++i)
-    calls += kernel_instance.ledger_entry(thread, i)->via == KERNEL::LEDGER_CALL;
-  return 2u * calls + 1u;
-}
-
 template <> uintptr_t KERNEL_OBJECT::current_object(uint32_t thread) const {
   for (uint32_t i = 0; i < kernel_instance.ledger_size(thread); ++i) {
     const auto *entry = kernel_instance.ledger_entry(thread, i);
@@ -334,31 +343,25 @@ template <> uintptr_t KERNEL_OBJECT::caller_object(uint32_t thread) const {
   return calls == 1 ? m_thread_object[thread] : (uintptr_t)NO_OBJECT;
 }
 
-template <>
-uint32_t KERNEL_OBJECT::interposed_handler(uint32_t thread) const {
-  const auto *root = kernel_instance.ledger_entry(thread, 0);
-  const auto *handler = kernel_instance.ledger_entry(thread, 1);
-  const auto *child_entry = kernel_instance.ledger_entry(thread, 2);
-  if (!root || !handler || !child_entry || root->via != KERNEL::LEDGER_DISPATCH ||
-      root->object != KERNEL_OBJECT_ID || handler->via != KERNEL::LEDGER_DISPATCH ||
-      handler->kind != (uint8_t)object_kind::HANDLER ||
-      handler->object == KERNEL_OBJECT_ID || child_entry->via != KERNEL::LEDGER_CALL)
-    return (uint32_t)NO_OBJECT;
-  const uint32_t child = child_entry->object;
-  const uint32_t handler_id = handler->object;
-  if (child >= OBJECT_COUNT || !m_objects[child].created ||
-      handler_id >= OBJECT_COUNT || !m_objects[handler_id].created ||
-      m_objects[handler_id].kind != object_kind::HANDLER ||
-      m_objects[child].parent_handler_object != handler_id)
-    return (uint32_t)NO_OBJECT;
-  return handler_id;
-}
-
 // 巻き戻さずにその場で答える。**エラーを黙って捨てない**ための共通口 (D12)。
 template <> void KERNEL_OBJECT::reply(object_error error, uintptr_t value) {
-  ARCH::syscall((uintptr_t)primitive::RETURN, 1, value, (uintptr_t)error,
-                claimed_depth());
+  const uint32_t depth = kernel_instance.current_depth();
+  if (depth == 0)
+    return;
+  return_to_depth(depth - 1, value, (uintptr_t)error);
   // 成功すれば戻らない。
+}
+
+template <> uintptr_t KERNEL_OBJECT::return_to_depth(uint32_t target_depth,
+                                                     uintptr_t value,
+                                                     uintptr_t error) {
+  const uint32_t depth = kernel_instance.current_depth();
+  if (target_depth >= depth)
+    return (uintptr_t)kernel_error::BAD_COUNT;
+  const uintptr_t count = depth - target_depth;
+  const auto result = ARCH::syscall((uintptr_t)primitive::RETURN, count, value,
+                                    error, target_depth);
+  return result.error;
 }
 
 template <>
@@ -508,6 +511,14 @@ uintptr_t KERNEL_OBJECT::grant_region(uintptr_t target, uintptr_t base,
     error = object_error::BAD_OBJECT;
     return 0;
   }
+#if defined(SHIZUKU_RP2040)
+  // Reject an unrepresentable grant before replacing the object's current
+  // window. A zero limit remains the existing revoke operation.
+  if (limit != 0 && !ARCH::region_range_representable(base, limit)) {
+    error = object_error::BAD_MEMORY;
+    return 0;
+  }
+#endif
   table_guard guard;
   m_objects[target].region_base = (uint32_t)base;
   m_objects[target].region_limit = (uint32_t)limit;
@@ -581,70 +592,37 @@ uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
 }
 
 template <>
-void KERNEL_OBJECT::exit_method(uintptr_t levels, uintptr_t value,
+void KERNEL_OBJECT::exit_method(uintptr_t target_depth, uintptr_t value,
                                 uintptr_t error) {
   const uint32_t thread = kernel_instance.current_thread_id();
 
-  // ★専用ハンドラ (HANDLER) が child の処理を終えて通常 return してきた場合 (指摘 6)
-  //   発行元は特権 ledger から導く (スレッドスタック上の値は信用しない)。
-  if (interposed_handler(thread) != (uint32_t)NO_OBJECT) {
-    const uint32_t cur_depth = kernel_instance.current_depth();
-    const uintptr_t count = 2; // kobj (Frame 2) と dedicated handler (Frame 1) の 2 枚
-    if (cur_depth >= count) {
-      const auto result = ARCH::syscall((uintptr_t)primitive::RETURN, count,
-                                        value, error, cur_depth);
-      reply(object_error::UNWIND_REJECTED, (uintptr_t)result.error);
-      return;
-    }
-  }
-
-  const uint32_t depth = claimed_depth(); // 台帳から申告する値 (落とす前に取る)
-  const uintptr_t pops = levels == 0 ? 1 : levels;
-  const uintptr_t count = 2 * pops;
-  // ★戻り先が無い = スレッドの入口が return した。呼び出しを畳むのではなく
-  //   「このスレッドが終わった」ということなので、そう扱う (§9.4 の exit)。
-  //   自分の枠しか落とせないので、全オブジェクトに開放しても昇格にはならない。
-  if (kernel_instance.current_depth() < count) {
+  bool has_call = false;
+  for (uint32_t index = 0; index < kernel_instance.ledger_size(thread); ++index)
+    has_call |= kernel_instance.ledger_entry(thread, index)->via == KERNEL::LEDGER_CALL;
+  if (target_depth == 0 && !has_call) {
     exit_thread();
     return;
   }
-  // 成功時の台帳 pop はカーネルが RETURN と同時に行う。
-  const auto result =
-      ARCH::syscall((uintptr_t)primitive::RETURN, count, value, error, depth);
-  // ★ここへ戻ってきた = 巻き戻しが検算で弾かれた。台帳は変化していないので、発行元へ
-  //   エラーとして返す (系は落とさない = I-9)。
-  reply(object_error::UNWIND_REJECTED, (uintptr_t)result.error);
+  const uintptr_t result = return_to_depth((uint32_t)target_depth, value, error);
+  reply(object_error::UNWIND_REJECTED, result);
 }
 
 template <>
-void KERNEL_OBJECT::forward_child_exit(uintptr_t value, uintptr_t error) {
+void KERNEL_OBJECT::forward_child_exit(uintptr_t target_depth,
+                                       uintptr_t value, uintptr_t error) {
   const uint32_t thread = kernel_instance.current_thread_id();
-
-  // 発行元は専用ハンドラ (HANDLER) でなければならない (重大指摘 1, 2)。
-  // ★台帳上の子の親ハンドラが、今 SVC を撃っている段として在席していること
-  //   (= なりすまし転送防止) を interposed_handler がまとめて確かめる。
+  // The immediately preceding ledger entry identifies the API issuer's role.
+  // Check provenance without matching a fixed ledger shape.
+  const auto *source = kernel_instance.ledger_entry(thread, 1);
+  const bool from_handler = source &&
+      source->kind == (uint8_t)object_kind::HANDLER &&
+      source->object != KERNEL_OBJECT_ID;
   if (!svc_permission_allows((uintptr_t)object_api::FORWARD_CHILD_EXIT, false,
-                              false, interposed_handler(thread) != (uint32_t)NO_OBJECT)) {
+                              false, from_handler)) {
     reply(object_error::NOT_PRIVILEGED, 0);
     return;
   }
-
-  // 台帳はカーネルが RETURN で物理フレームと一緒に pop する。
-
-  // 物理フレームの巻き戻し:
-  // Root (F4) + 専用ハンドラ (F3) + 子オブジェクト (F2) の計 3 フレームをまとめて畳み、
-  // 子オブジェクトの呼び出し元 (Caller = F1) の直後へ復帰させる。
-  const uint32_t cur_depth = kernel_instance.current_depth();
-  const uintptr_t count = 3;
-  if (cur_depth >= count) {
-    const auto result = ARCH::syscall((uintptr_t)primitive::RETURN, count,
-                                      value, error, cur_depth);
-    // 巻き戻し失敗時 (カーネル検算で弾かれた場合) のみ戻る
-    reply(object_error::UNWIND_REJECTED, (uintptr_t)result.error);
-    return;
-  }
-
-  reply(object_error::UNWIND_REJECTED, 0);
+  exit_method(target_depth, value, error);
 }
 
 // ---- スレッドと実行権の方針 -------------------------------------------------
@@ -726,6 +704,9 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
 //     時限 0          → バトン渡し。返ってこない可能性を承知で渡す相手だけに使う
 // ★回転子から順に見る。自分の直後だけを見ると同じ相手ばかり選ばれて飢餓が出る。
 template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
+#if defined(SHIZUKU_CRASH_RECORD)
+  kobj_diag_mark(objects::boot_diag_breadcrumb::KOBJ_SCHEDULE_ENTRY);
+#endif
   using state_t = KERNEL::THREAD::state_t;
   const uint32_t core = KERNEL::BOARD::core_num();
   const uint64_t now = KERNEL::BOARD::time_us();
@@ -987,7 +968,16 @@ uintptr_t KERNEL_OBJECT::kill_thread(uintptr_t thread, object_error &error) {
 //   区間は短く、**syscall を含まない**ものだけ。握ったまま実行権を手放すと、
 //   相手のコアが「走っていない持ち主」を待って回り続ける。
 template <> void KERNEL_OBJECT::table_lock() {
-  while (!ARCH::cas32(&m_table_lock, 0u, 1u)) {
+  while (true) {
+    if (ARCH::cas32(&m_table_lock, 0u, 1u)) {
+#if defined(SHIZUKU_CRASH_RECORD)
+      kobj_diag_mark(objects::boot_diag_breadcrumb::KOBJ_TABLE_LOCK_ACQUIRED);
+#endif
+      return;
+    }
+#if defined(SHIZUKU_CRASH_RECORD)
+    kobj_diag_mark(objects::boot_diag_breadcrumb::KOBJ_TABLE_LOCK_WAIT);
+#endif
     // 待つ。★ここで yield しない — 錠を待っている相手は必ず走っており
     //   (握ったまま手放さない規律があるので)、待ちは有界。yield すると
     //   「錠を待つために実行権を配る」ことになり、順序が絡んで長くなる。
@@ -996,6 +986,9 @@ template <> void KERNEL_OBJECT::table_lock() {
 
 template <> void KERNEL_OBJECT::table_unlock() {
   ARCH::store_release32(&m_table_lock, 0u);
+#if defined(SHIZUKU_CRASH_RECORD)
+  kobj_diag_mark(objects::boot_diag_breadcrumb::KOBJ_TABLE_UNLOCK);
+#endif
 }
 
 // ---- 名乗り ----------------------------------------------------------------
@@ -1039,7 +1032,15 @@ template <> KERNEL_OBJECT::stream_entry *KERNEL_OBJECT::stream_lookup(uintptr_t 
   if (slot >= STREAM_COUNT || generation == 0)
     return nullptr;
   stream_entry &entry = m_streams[slot];
-  return __atomic_load_n(&entry.active, __ATOMIC_ACQUIRE) == 1u &&
+#if defined(SHIZUKU_RP2040)
+  // Pico SDK lowers ARMv6-M __atomic_load_4 to PICO_SPINLOCK_ID_ATOMIC.
+  // This lookup runs inside the SVC handler; use the aligned lock-free acquire
+  // load supplied by the RP2040 arch instead of nesting another global lock.
+  const uint32_t active = ARCH::load_acquire32(&entry.active);
+#else
+  const uint32_t active = __atomic_load_n(&entry.active, __ATOMIC_ACQUIRE);
+#endif
+  return active == 1u &&
                  entry.generation == generation ? &entry : nullptr;
 }
 
@@ -1054,7 +1055,12 @@ template <> bool KERNEL_OBJECT::stream_pin(uintptr_t id, stream_entry *&entry) {
       return false;
     }
   } while (!ARCH::cas32(&entry->users, users, users + 1));
-  if (__atomic_load_n(&entry->active, __ATOMIC_ACQUIRE) != 1u ||
+#if defined(SHIZUKU_RP2040)
+  const uint32_t active = ARCH::load_acquire32(&entry->active);
+#else
+  const uint32_t active = __atomic_load_n(&entry->active, __ATOMIC_ACQUIRE);
+#endif
+  if (active != 1u ||
       entry->generation != (uint32_t)(id >> STREAM_SLOT_BITS)) {
     stream_unpin(*entry);
     entry = nullptr;
@@ -1400,8 +1406,15 @@ uintptr_t KERNEL_OBJECT::stream_disconnect(uintptr_t slot, object_error &error) 
 template <> void KERNEL_OBJECT::pump_connections() {
   if (ARCH::load_acquire32(&m_connection_count) == 0)
     return;
-  if (!ARCH::cas32(&m_pump_lock, 0u, 1u))
+  if (!ARCH::cas32(&m_pump_lock, 0u, 1u)) {
+#if defined(SHIZUKU_CRASH_RECORD)
+    kobj_diag_mark(objects::boot_diag_breadcrumb::KOBJ_PUMP_LOCK_BUSY);
+#endif
     return;
+  }
+#if defined(SHIZUKU_CRASH_RECORD)
+  kobj_diag_mark(objects::boot_diag_breadcrumb::KOBJ_PUMP_ENTRY);
+#endif
   for (uintptr_t index = 0; index < CONNECTION_COUNT; ++index) {
     connection &link = m_connections[index];
     const uint32_t state = ARCH::load_acquire32(&link.active);
@@ -1482,6 +1495,9 @@ template <> void KERNEL_OBJECT::pump_connections() {
     KERNEL::BOARD::dma_copy((int)link.channel, source, target, count * rec);
   }
   ARCH::store_release32(&m_pump_lock, 0u);
+#if defined(SHIZUKU_CRASH_RECORD)
+  kobj_diag_mark(objects::boot_diag_breadcrumb::KOBJ_PUMP_EXIT);
+#endif
 }
 
 // ---- メモリの授受 -----------------------------------------------------------
@@ -1570,12 +1586,13 @@ uintptr_t KERNEL_OBJECT::memory_owner(uintptr_t handle, object_error &error) {
 
 template <>
 uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
-                                uintptr_t a3) {
+                                uintptr_t a3, uintptr_t unwind_floor) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(420);
 #endif
   object_error error = object_error::OK;
   uintptr_t value = 0;
+  (void)unwind_floor; // Scope is also kernel-authored in the active ledger entry.
   switch ((object_api)number) {
   case object_api::CREATE_OBJECT:
     value = create_object(a1, a2, a3, error);
@@ -1590,13 +1607,12 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
     value = call_method(a1, a2, a3, error);
     break;
   case object_api::EXIT_METHOD:
-    // カーネルの戻り口が撃った svc がここへ届く (a1 = 畳む段数, a2 = 戻り値,
-    // a3 = エラー)。巻き戻しに成功すればここから戻らない。
+    // a1 = absolute return depth, a2 = value, a3 = error.
     exit_method(a1, a2, a3);
     return 0;
   case object_api::FORWARD_CHILD_EXIT:
-    // 専用ハンドラ (HANDLER) からの子オブジェクト終了転送 (重大指摘 2)
-    forward_child_exit(a1, a2);
+    // a1 = absolute return depth, a2 = value, a3 = error.
+    forward_child_exit(a1, a2, a3);
     return 0;
   case object_api::GET_CURRENT_OBJECT:
     value = current_object(kernel_instance.current_thread_id());

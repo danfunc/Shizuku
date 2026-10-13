@@ -5,9 +5,9 @@
 //  持つ**オブジェクトランドの svc ハンドラ** (スレッドモードで走る方針側) とは
 //  別概念で、ここでは後者を「登録された entry」としてしか扱わない。
 //
-//  ★経路は**今走っているオブジェクトの種別** (object_kind) だけで決まる (I-1):
-//      PLAIN   → オブジェクトが走っている → 登録済みハンドラをメソッドとして呼ぶ
-//      HANDLER → ハンドラが走っている     → プリミティブを実行
+//  ★経路は ledger の実行主体で決まる (I-1):
+//      PLAIN / HANDLER → 登録済み親ハンドラへ dispatch
+//      登録済み KOBJ  → KOBJ 本人が kernel primitive を解釈
 //    種別は特権 call ledger から読み、遷移させるのはカーネルだけ:
 //    CALL では呼び先の申告 (call_request::callee_kind) を載せ、トランポリンでは
 //    HANDLER を載せ、戻るときは ledger の段を pop する。
@@ -29,9 +29,8 @@
 //    ★ID で代用しないことが要点。ID は名前であって役ではなく、決め打つと kobj を
 //      差し替えることも多重化することもできない。
 //
-//  ★HANDLER 種別以外は RETURN を撃てないので、ハンドラを起こすときに
-//    今のネスト数を渡す。オブジェクトは exit API に何段戻すかを載せて撃ち、
-//    ハンドラがその段数で巻き戻す (D5)。
+//  ★RETURN を解釈できるのは登録済み KOBJ だけ。各 dispatch 先には呼出し鎖の
+//    unwind floor を第 5 引数で渡し、exit API は絶対戻り深さ d を指定する。
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_api.hpp"
 #if defined(__arm__) || defined(__thumb__)
@@ -72,11 +71,14 @@ template <>
 bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                              KERNEL::FRAME **frame) {
   const uint32_t frame_bytes = ARCH::exc_frame_bytes(*context);
-  uint32_t total = (uint32_t)sizeof(call_frame_header) + frame_bytes;
+  const uint32_t stack_arg_bytes = ARCH::HANDLER_STACK_ARG_BYTES;
+  uint32_t total = (uint32_t)sizeof(call_frame_header) + frame_bytes +
+                   stack_arg_bytes;
   total = (total + 7u) & ~7u; // 8B 境界を保つ
   // 呼び出し元の生スタック境界。元の例外フレームはこのすぐ下に居る。
   const uintptr_t caller_stack = (uintptr_t)context->sp + frame_bytes;
-  const uintptr_t snapshot = caller_stack - total; // 退避域の先頭 (ヘッダの位置)
+  const uintptr_t snapshot = caller_stack - total; // 呼び先の復帰 SP / stack arg area
+  const uintptr_t header_address = snapshot + stack_arg_bytes;
   const uintptr_t callee_frame = snapshot - frame_bytes;
   if (thread.ledger == nullptr || thread.call_stack.depth >= thread.ledger_capacity)
     return false; // 台帳容量超過は呼び出し側が NO_STACK にする
@@ -99,6 +101,7 @@ bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   //     入口の CTX_SAVE が退避する文脈。これが無いと、トランポリンは積めるのに
   //     その後の fault 入口が PSPLIM を割り、フォールト報告すら出ず lockup した。
   const uintptr_t reserve = (uintptr_t)sizeof(call_frame_header) + frame_bytes +
+                            stack_arg_bytes +
                             ARCH::EXC_FRAME_MAX_BYTES +
                             ARCH::FAULT_CONTEXT_BYTES + ARCH::CALL_HEADROOM;
   const uintptr_t limit = ARCH::stack_limit(*context);
@@ -111,7 +114,7 @@ bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
     return false;
   }
 
-  call_frame_header *header = (call_frame_header *)snapshot;
+  call_frame_header *header = (call_frame_header *)header_address;
   header->prev = thread.call_stack.top;
   header->total_bytes = total;
   header->frame_bytes = frame_bytes;
@@ -130,7 +133,7 @@ bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
     BOARD::panic("call frame geometry mismatch");
 
   *frame = context->sp;
-  thread.call_stack.top = snapshot;
+  thread.call_stack.top = header_address;
   thread.call_stack.depth++;
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_push_context(
@@ -177,13 +180,16 @@ kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
 #if defined(SHIZUKU_RP2040)
   if (!ARCH::region_range_representable(request.region_base, request.region_limit))
     return kernel_error::BAD_REQUEST;
+  if (!ARCH::call_entry_has_return_room(*context, sizeof(call_frame_header)))
+    return kernel_error::NO_STACK;
 #endif
-  if (!call_frame_push(thread, context, frame))
+  const uint32_t unwind_floor = thread.call_stack.depth;
+  if (unwind_floor > UINT16_MAX || !call_frame_push(thread, context, frame))
     return kernel_error::NO_STACK;
   auto &entry = thread.ledger[thread.call_stack.depth - 1];
   entry = {request.callee_object, request.parent_handler_object,
            request.parent_handler_entry, (uint8_t)request.callee_kind,
-           LEDGER_CALL, 0};
+           LEDGER_CALL, (uint16_t)unwind_floor};
   // 戻り口は常にカーネルの 1 本。撃つ svc は同じでも、そこから出たときの**種別**で
   // 「プリミティブとしての巻き戻し」か「メソッドが戻った知らせ」かが決まる
   // (発行側が戻り口を選ぶ必要は無い)。
@@ -267,21 +273,28 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
       shizuku_boot_trace_return_enter((uint32_t)context->sp, (uint32_t)frame);
 #endif
-      const uintptr_t count = ARCH::arg(*frame, 1);
+      uintptr_t count = ARCH::arg(*frame, 1);
       const uintptr_t value = ARCH::arg(*frame, 2);
       const uintptr_t error = ARCH::arg(*frame, 3);
-      const uintptr_t claim = ARCH::arg(*frame, 4);
       const uint32_t depth = thread.call_stack.depth;
-      if (depth == 0) {
-        ARCH::set_result(*frame, (uintptr_t)kernel_error::BAD_COUNT, 0);
+      const uintptr_t target_arg = ARCH::arg(*frame, 4);
+      const uint32_t floor = current_unwind_floor();
+      uint32_t target_depth;
+      if (target_arg == RETURN_STUB_MARKER) {
+        const auto request = resolve_return_stub(depth);
+        target_depth = request.target_depth;
+        count = request.count;
+      } else if (target_arg > UINT32_MAX) {
+        ARCH::set_result(*frame, (uintptr_t)kernel_error::DEPTH_MISMATCH,
+                         depth);
         break;
+      } else {
+        target_depth = (uint32_t)target_arg;
       }
-      if (claim != 0 && claim != depth) {
-        ARCH::set_result(*frame, (uintptr_t)kernel_error::DEPTH_MISMATCH, depth);
-        break;
-      }
-      if (count == 0 || count > depth) {
-        ARCH::set_result(*frame, (uintptr_t)kernel_error::BAD_COUNT, depth);
+      const kernel_error validation = validate_return_depth(
+          depth, floor, target_depth, count);
+      if (validation != kernel_error::OK) {
+        ARCH::set_result(*frame, (uintptr_t)validation, depth);
         break;
       }
       for (uintptr_t index = 0; index < count; ++index)
@@ -337,7 +350,11 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(412);
 #endif
-  if (!call_frame_push(thread, context, &frame)) {
+  const uint32_t unwind_floor = thread.call_stack.depth
+                                    ? thread.ledger_top().unwind_floor
+                                    : 0;
+  if (unwind_floor > UINT16_MAX ||
+      !call_frame_push(thread, context, &frame)) {
     // ★この拒否は object_api の呼出しへの答え。object 版 NO_STACK で返し、呼出し元が
     //   「どちらの push で断られたか」を区別しなくて済むようにする (KERNEL_ERROR_MARK は
     //   語彙を持たないエラー用に残す)。
@@ -360,13 +377,21 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
   //   無制限のハンドラ多段ネストはサポートしない (独立監査指摘)。
   entry.handler_object = m_object_svc_handler_object;
   entry.handler_entry = m_object_svc_handler;
+  entry.unwind_floor = (uint16_t)unwind_floor;
 
-  uintptr_t args[4];
+  uintptr_t args[5];
   for (unsigned index = 0; index < 4; ++index)
     args[index] = ARCH::arg(*frame, index);
+  // A return stub cannot know its parent's absolute depth. Its private marker
+  // turns the legacy one-pop notification into a return to the actor's floor.
+  if (args[0] == (uintptr_t)primitive::RETURN &&
+      ARCH::arg(*frame, 4) == RETURN_STUB_MARKER)
+    args[1] = unwind_floor;
+  args[4] = unwind_floor;
 
   ARCH::set_entry(*frame, target_entry, ARCH::return_stub());
-  ARCH::set_args(*frame, args);
+  ARCH::set_handler_args(*frame, args,
+                         ARCH::psp_after_return(*context));
   ARCH::set_priv(*context, true);
   ARCH::set_region_window(*context, 0, 0);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0

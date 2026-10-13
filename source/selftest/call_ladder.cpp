@@ -20,7 +20,7 @@
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
 extern "C" void shizuku_selftest_progress_mark(uint32_t, uint32_t, uint32_t);
 #define CL_PROG(n) shizuku_selftest_progress_mark((n), 0, 0)
-#include "pico/platform.h"
+#include "pico.h"
 namespace {
 struct deep_trace_t { uint32_t magic, depth, sp, calls; };
 volatile deep_trace_t __uninitialized_ram(g_deep_trace);
@@ -327,7 +327,7 @@ void call_ladder() {
           (unsigned long)object_error::ALREADY_NAMED);
     // ★衝突が**声を出す**ことの確認。今日の 2 件はどちらもここが黙っていたせいで
     //   別物が動き続けた。上のログに
-    //   「[KOBJ] object 15 is already taken by 'namer'」が出ていること。
+    //   「[KOBJ] object <generated namer ID> is already taken by 'namer'」が出ていること。
     const api_result clash =
         api(object_api::CREATE_OBJECT, OBJECT_NAMER, (uintptr_t)&namer, 0);
     check("name: a colliding id is refused, loudly",

@@ -37,6 +37,7 @@ enum struct gpio_method : uintptr_t {
   CONFIGURE = 1, // a0 = gpio_request*  (出力として初期化)
   WRITE = 2,     // a0 = gpio_request*  (value を出力)
   READ = 3,      // a0 = gpio_request*  (戻り値 = ピンの値)
+  BOOTSEL_READ_PRESSED = 4, // QSPI CS を安全な特権経路で読み、押下中なら 1
 };
 enum struct spi_method : uintptr_t {
   MAIN = 0,
@@ -115,6 +116,9 @@ struct i2c_transfer {
 //   なり、原因の切り分けが一気に難しくなる (D12)。
 uint32_t register_peripherals();
 
+// GPIOだけを使う組込みで、他のperipheral objectを起動せずGPIOを登録する。
+uint32_t register_gpio();
+
 // Pico 2 W など CYW43 経由の LED において、CYW43 の owner スレッドだけが呼ぶ
 // (ポーリングループから状態を反映する)。他のスレッドから呼んではいけない。
 void led_sync_hw();
@@ -122,6 +126,12 @@ void led_sync_hw();
 // どのコア・スレッドからでも安全に呼べる LED トグル関数 (Pico 2 / Pico 2 W 両対応)。
 // 状態 (parity) は owner の有無に関係なく記録する。CYW43 への反映は owner が行う。
 void led_toggle();
+
+// feature enabled の製品だけに使う。未有効時はGPIO method 4をexportしない。
+#if defined(SHIZUKU_ENABLE_BOOTSEL)
+bool bootsel_read(bool &pressed);
+#endif
+
 
 #if defined(CYW43_WL_GPIO_LED_PIN)
 // CYW43 の owner が init に成功した時点で owner 自身が呼ぶ。以後 LED 書込みを受理する。

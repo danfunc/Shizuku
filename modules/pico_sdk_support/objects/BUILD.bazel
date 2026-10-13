@@ -57,6 +57,20 @@ cc_library(
 )
 
 cc_library(
+    name = "flash_ops",
+    srcs = ["flash_ops.cpp"],
+    hdrs = ["internal_headers/shizuku/objects/flash_ops.hpp"],
+    includes = ["internal_headers"],
+    deps = [
+        "//:kernel",
+        "//configs:config",
+        "@pico-sdk//src/rp2_common/hardware_flash",
+        "@pico-sdk//src/rp2_common/hardware_sync",
+        "@pico-sdk//src/rp2_common/pico_stdlib",
+    ],
+)
+
+cc_library(
     name = "flash_fs",
     srcs = ["flash_fs.cpp"],
     hdrs = ["internal_headers/shizuku/objects/flash_fs.hpp"],
@@ -64,6 +78,8 @@ cc_library(
     alwayslink = True,
     deps = [
         ":flash_layout",
+        ":flash_ops",
+        ":usb_cdc",
         "//:internal_headers",
         "//:kernel",
         "//configs:config",
@@ -71,6 +87,16 @@ cc_library(
         "@pico-sdk//src/rp2_common/hardware_sync",
         "@pico-sdk//src/rp2_common/pico_stdlib",
     ],
+    local_defines = select({
+        "//configs:boot_log_wait_enabled": ["SHIZUKU_BOOT_LOG_WAIT=1"],
+        "//conditions:default": [],
+    }) + select({
+        "//configs:crash_record_enabled": [
+            "SHIZUKU_CRASH_RECORD=1",
+            "SHIZUKU_BOOT_LOG_WAIT=1",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # ---- I/O --------------------------------------------------------------------
@@ -83,6 +109,8 @@ cc_library(
     includes = ["internal_headers"],
     alwayslink = True,
     deps = [
+        ":flash_ops",
+        "//:kernel",
         "@pico-sdk//bazel/config:PICO_TINYUSB_LIB",
         "@pico-sdk//src/common/pico_usb_reset_interface_headers",
         "@pico-sdk//src/rp2_common/pico_bootrom",
@@ -90,7 +118,46 @@ cc_library(
         "@pico-sdk//src/rp2_common/pico_stdio_usb:reset_interface_headers",
         "@pico-sdk//src/rp2_common/pico_stdlib",
         "@pico-sdk//src/rp2_common/pico_unique_id",
-    ],
+    ] + select({
+        "//configs:cyw43": [
+            ":flash_layout",
+            "@pico-sdk//src/rp2_common/hardware_clocks",
+            "@pico-sdk//src/rp2_common/hardware_dma",
+            "@pico-sdk//src/rp2_common/hardware_flash",
+            "@pico-sdk//src/rp2_common/hardware_gpio",
+            "@pico-sdk//src/rp2_common:hardware_regs",
+            "@pico-sdk//src/rp2_common/pico_cyw43_driver:pico_cyw43_driver",
+            "@pico-sdk//src/rp2_common:pico_platform",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//configs:rp2040_pico_w": [
+            "@pico-sdk//src/rp2_common/pico_flash",
+            "@pico-sdk//src/rp2_common/pico_btstack:pico_btstack_flash_bank",
+            "@pico-sdk//src/rp2_common/pico_btstack:pico_btstack_base",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//configs:crash_record_enabled": [
+            "@pico-sdk//src/rp2_common/hardware_watchdog:hardware_watchdog",
+            "@pico-sdk//src/rp2_common:hardware_structs",
+            "@pico-sdk//src/rp2_common/pico_multicore",
+        ],
+        "//conditions:default": [],
+    }),
+    local_defines = select({
+        "//configs:boot_log_wait_enabled": ["SHIZUKU_BOOT_LOG_WAIT=1"],
+        "//conditions:default": [],
+    }) + select({
+        "//configs:crash_record_enabled": [
+            "SHIZUKU_CRASH_RECORD=1",
+            "SHIZUKU_BOOT_LOG_WAIT=1",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//configs:bt_tlv_ram": ["SHIZUKU_BT_TLV_RAM=1"],
+        "//conditions:default": [],
+    }),
 )
 
 cc_library(
@@ -100,6 +167,7 @@ cc_library(
     includes = ["internal_headers"],
     alwayslink = True,
     deps = [
+        ":usb_cdc",
         "//:internal_headers",
         "//:kernel",
         "//configs:config",
@@ -108,7 +176,32 @@ cc_library(
         "@pico-sdk//src/rp2_common/hardware_i2c",
         "@pico-sdk//src/rp2_common/hardware_spi",
         "@pico-sdk//src/rp2_common/pico_stdlib",
-    ] + _CYW43_ARCH,
+    ] + select({
+        # Cortex-M0+ has no LDREX/STREX. Resolve compiler __atomic_* helpers
+        # (including fetch_xor_4 used by led_toggle) with the SDK spinlock ABI.
+        "//configs:rp2040": ["@pico-sdk//src/rp2_common/pico_atomic:pico_atomic"],
+        "//conditions:default": [],
+    }) + select({
+        "//configs:bootsel_enabled": [
+            "@pico-sdk//src/rp2_common/hardware_sync",
+            "@pico-sdk//src/rp2_common:hardware_regs",
+            "@pico-sdk//src/rp2_common:hardware_structs",
+        ],
+        "//conditions:default": [],
+    }) + _CYW43_ARCH,
+    local_defines = select({
+        "//configs:bootsel_enabled": ["SHIZUKU_ENABLE_BOOTSEL=1"],
+        "//conditions:default": [],
+    }) + select({
+        "//configs:boot_log_wait_enabled": ["SHIZUKU_BOOT_LOG_WAIT=1"],
+        "//conditions:default": [],
+    }) + select({
+        "//configs:crash_record_enabled": [
+            "SHIZUKU_CRASH_RECORD=1",
+            "SHIZUKU_BOOT_LOG_WAIT=1",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # ---- BLE (W ボードのみ) -------------------------------------------------------
@@ -130,17 +223,41 @@ cc_library(
     target_compatible_with = _CYW43_ONLY,
     deps = [
         ":ble_uart_gatt_header",
+        ":flash_layout",
+        ":flash_ops",
         ":peripherals",
+        # Startup diagnostics report BLE state through CDC; usb_cdc has no
+        # dependency on ble_uart, so this edge does not form a cycle.
+        ":usb_cdc",
         "//:internal_headers",
         "//:kernel",
         "//configs:config",
         "//modules/pico_sdk_support:btstack_config",
         "@pico-sdk//src/rp2_common/pico_btstack",
         "@pico-sdk//src/rp2_common/pico_btstack:pico_btstack_flash_bank",
+        "@pico-sdk//src/rp2_common/hardware_flash",
+        "@pico-sdk//src/rp2_common/pico_flash",
+        "@pico-sdk//src/rp2_common/pico_multicore",
         "@pico-sdk//src/rp2_common/pico_stdlib",
     ] + _CYW43_ARCH + select({
         # ★GDB リンクを BLE で運ぶ口 (gdb_stub があるチップだけ)。
         "//configs:rp2350": ["//modules/pico_sdk_support/rp2350:gdb_stub"],
+        "//conditions:default": [],
+    }),
+    local_defines = select({
+        "//configs:boot_log_wait_enabled": ["SHIZUKU_BOOT_LOG_WAIT=1"],
+        "//conditions:default": [],
+    }) + select({
+        "//configs:crash_record_enabled": [
+            "SHIZUKU_CRASH_RECORD=1",
+            "SHIZUKU_BOOT_LOG_WAIT=1",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//configs:bt_tlv_ram": ["SHIZUKU_BT_TLV_RAM=1"],
+        "//conditions:default": [],
+    }) + select({
+        "//configs:flashfs_only_selftest": ["SHIZUKU_FLASHFS_ONLY=1"],
         "//conditions:default": [],
     }),
 )
@@ -157,6 +274,8 @@ cc_library(
     deps = [
         ":ble_uart",
         ":flash_layout",
+        ":flash_ops",
+        ":usb_cdc",
         "//:internal_headers",
         "//:kernel",
         "//configs:config",
@@ -168,4 +287,14 @@ cc_library(
         "@pico-sdk//src/rp2_common/pico_bootrom",
         "@pico-sdk//src/rp2_common/pico_flash",
     ],
+    local_defines = select({
+        "//configs:boot_log_wait_enabled": ["SHIZUKU_BOOT_LOG_WAIT=1"],
+        "//conditions:default": [],
+    }) + select({
+        "//configs:crash_record_enabled": [
+            "SHIZUKU_CRASH_RECORD=1",
+            "SHIZUKU_BOOT_LOG_WAIT=1",
+        ],
+        "//conditions:default": [],
+    }),
 )

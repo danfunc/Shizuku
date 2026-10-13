@@ -9,6 +9,7 @@ void handler_binding_probe();
 void thread_ladder();
 void memory_ladder();
 void stream_ladder();
+void compat_premise_probe();
 }
 }
 
@@ -49,4 +50,8 @@ extern "C" void shizuku_c5_run_selftests(void) {
     shizuku_c5_selftest_record_ladder_done(SHIZUKU_C5_LADDER_STREAM, 0x5008u);
 
     shizuku_c5_selftest_record_finish();
+
+    // 6. FreeRTOS 互換 段1 の前提 probe。★selftest の記録確定 (finish) のあとに、
+    //    別カウンタで走らせる。136/0 とは混ぜない。
+    shizuku::selftest::compat_premise_probe();
 }

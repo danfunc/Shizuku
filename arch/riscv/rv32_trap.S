@@ -113,12 +113,12 @@ shizuku_rv32_first_return:
 .global shizuku_rv32_return_stub
 .type shizuku_rv32_return_stub,@function
 shizuku_rv32_return_stub:
-  // V2 RETURN(number=2, count=1, value=a0, error=0, claim=0).
+  // V2 RETURN(number=2, count=1, value=a0, error=0, return-stub marker).
   mv a2, a0
   li a0, 2
   li a1, 1
   li a3, 0
-  li a4, 0
+  li a4, 0xA55A
   ecall
   call shizuku_rv32_return_failed
 2: j 2b

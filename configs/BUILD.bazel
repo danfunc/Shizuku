@@ -27,6 +27,48 @@ string_flag(
     ],
     visibility = ["//visibility:public"],
 )
+string_flag(
+    name = "ble_profile",
+    build_setting_default = "disabled",
+    values = ["disabled", "controller_init"],
+    visibility = ["//visibility:public"],
+)
+string_flag(
+    name = "bootsel_support",
+    build_setting_default = "disabled",
+    values = ["disabled", "enabled"],
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "bootsel_enabled",
+    flag_values = {":bootsel_support": "enabled"},
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "boot_log_wait_enabled",
+    define_values = {"boot_log_wait": "true"},
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "flashfs_only_selftest",
+    define_values = {"selftest": "flashfs_only"},
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "crash_record_enabled",
+    define_values = {"crash_record": "true"},
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "bt_tlv_ram",
+    define_values = {"bt_tlv": "ram"},
+    visibility = ["//visibility:public"],
+)
+selects.config_setting_group(
+    name = "rp2040_pico_w_ram_tlv",
+    match_all = [":rp2040_pico_w", ":bt_tlv_ram"],
+    visibility = ["//visibility:public"],
+)
 int_flag(
     name = "flash_capacity_bytes",
     build_setting_default = 0,
@@ -81,6 +123,22 @@ config_setting(
     name = "esp32_c5",
     flag_values = {
         ":board": "esp32_c5",
+    },
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "esp32_c5_ble",
+    flag_values = {
+        ":board": "esp32_c5",
+        ":ble_profile": "controller_init",
+    },
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "esp32_c6_ble",
+    flag_values = {
+        ":board": "esp32_c6",
+        ":ble_profile": "controller_init",
     },
     visibility = ["//visibility:public"],
 )
@@ -145,6 +203,9 @@ expand_template(
         ":esp32_c6": config_substitutions("rv32_c6", "esp32_c6", "esp32_c6"),
         # ESP32-C5 (未完成・fail-closed)
         ":esp32_c5": config_substitutions("rv32_c5", "esp32_c5", "esp32_c5"),
+        # ESP32-C5 BLE controller-init memory profile; app/selftest profile remains unchanged.
+        ":esp32_c5_ble": config_substitutions("rv32_c5", "esp32_c5", "esp32_c5", ble = True),
+        ":esp32_c6_ble": config_substitutions("rv32_c6", "esp32_c6", "esp32_c6", ble = True),
     }),
     template = "config_template.hpp.in",
 )
@@ -159,6 +220,8 @@ cc_library(
     ] + select({
         ":esp32_c6": ["//chips/esp32_c6:headers", "//boards/esp32_c6:headers"],
         ":esp32_c5": ["//chips/esp32_c5:headers", "//boards/esp32_c5:headers"],
+        ":esp32_c5_ble": ["//chips/esp32_c5:headers", "//boards/esp32_c5:headers"],
+        ":esp32_c6_ble": ["//chips/esp32_c6:headers", "//boards/esp32_c6:headers"],
         ":rp2040": ["//chips/rp2040:headers", "//modules/pico_sdk_support:headers"],
         ":rp2350": ["//chips/rp2350:headers", "//modules/pico_sdk_support:headers"],
         "//conditions:default": ["//modules/pico_sdk_support:headers"],

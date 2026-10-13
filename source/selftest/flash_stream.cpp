@@ -19,12 +19,26 @@
 #include "shizuku/objects/flash_fs.hpp"
 #include "shizuku/selftest.hpp"
 #include "shizuku/stream.hpp"
+#include "shizuku/freestanding_mem.hpp"
 
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+#include "pico.h"
 extern "C" void shizuku_selftest_progress_mark(uint32_t, uint32_t, uint32_t);
-#define FSTREAM_PROG(stage) shizuku_selftest_progress_mark((stage), 0, 0)
+namespace {
+struct flash_stream_run_state_t { uint32_t magic, sequence; };
+volatile flash_stream_run_state_t __uninitialized_ram(g_flash_stream_run_state);
+uint32_t g_flash_stream_run_id;
+constexpr uint32_t kFlashStreamRunMagic = 0x46535233u; // "FSR3"
+}
+#define FSTREAM_PROG(stage, event, value) \
+  shizuku_selftest_progress_mark((stage), \
+      ((g_flash_stream_run_id & 0x00ffffffu) << 8) | ((event) & 0xffu), \
+      (uint32_t)(value))
+#define FSTREAM_EVENT(event, value) \
+  FSTREAM_PROG(610u + (((event) - 1u) % 6u), (event), (value))
 #else
-#define FSTREAM_PROG(stage) ((void)0)
+#define FSTREAM_PROG(stage, event, value) ((void)0)
+#define FSTREAM_EVENT(event, value) ((void)0)
 #endif
 namespace shizuku {
 namespace selftest {
@@ -37,7 +51,13 @@ constexpr uintptr_t OBJECT_WRITER = object_id::unpriv_writer;
 constexpr uintptr_t OBJECT_READER = object_id::unpriv_reader;
 constexpr uintptr_t OBJECT_SINK = object_id::unpriv_sink;
 constexpr uintptr_t OBJECT_TRESPASSER = object_id::flash_trespasser;
+#if defined(SHIZUKU_RP2040)
+// RP2040 PMSAv6 cannot represent an exact 300-byte window. The file starts at
+// a 4 KiB boundary, so 512 bytes is an exact MPU region for this test.
+constexpr uint32_t PAYLOAD_BYTES = 512;
+#else
 constexpr uint32_t PAYLOAD_BYTES = 300; // ページ 1 枚を跨がせる
+#endif
 
 struct api_result {
   uintptr_t error;
@@ -86,7 +106,8 @@ uintptr_t unprivileged_reader(uintptr_t stream_id, uintptr_t, uintptr_t,
           (uintptr_t)stream::role::CONSUMER).error != 0)
     return 0xFFFFFFFFu;
   uint32_t sum = 0;
-  stream::extent extent{};
+  stream::extent extent;
+  shizuku_zero_record(&extent);
   if (in.pop(&extent)) {
     const volatile uint8_t *bytes = (const volatile uint8_t *)extent.address;
     for (uint32_t i = 0; i < extent.bytes; ++i) sum += bytes[i];
@@ -105,7 +126,8 @@ uintptr_t unprivileged_sink(uintptr_t stream_id, uintptr_t, uintptr_t,
           (uintptr_t)stream::role::CONSUMER).error != 0)
     return 0xFFFFFFFFu;
   uint32_t sum = 0;
-  stream::extent extent{};
+  stream::extent extent;
+  shizuku_zero_record(&extent);
   if (in.pop(&extent)) {
     const volatile uint8_t *bytes = (const volatile uint8_t *)extent.address;
     for (uint32_t i = 0; i < extent.bytes; ++i) sum += bytes[i];
@@ -114,7 +136,7 @@ uintptr_t unprivileged_sink(uintptr_t stream_id, uintptr_t, uintptr_t,
 }
 
 // ★拒否のテスト (Q8)。GRANT_REGION された extent の**外**を直接ポインタで
-//   読もうとしたら落ちること。触る先は「自分の extent のすぐ 1 バイト先」—
+//   読もうとしたら落ちること。触る先は extent と MPU 粒度を越えた XIP 範囲—
 //   flash_fs のデータ領域の中ではあるが、この対象には開示していない場所。
 //   (docs/selftest/unprivileged.cpp と同じ形: 別スレッドで走らせ、系は続ける)。
 uintptr_t flash_trespasser(uintptr_t address, uintptr_t, uintptr_t, uintptr_t) {
@@ -138,7 +160,16 @@ void check(const char *name, bool ok, unsigned long got, unsigned long want) {
 void flash_stream_ladder() {
   using namespace shizuku::objects;
   BOARD::diag_printf("[SELFTEST] flash stream ladder start\n");
-  FSTREAM_PROG(610);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
+  if (g_flash_stream_run_state.magic != kFlashStreamRunMagic) {
+    g_flash_stream_run_state.magic = kFlashStreamRunMagic;
+    g_flash_stream_run_state.sequence = 0;
+  }
+  g_flash_stream_run_id =
+      (g_flash_stream_run_state.sequence + 1u) & 0x00ffffffu;
+  g_flash_stream_run_state.sequence = g_flash_stream_run_id;
+#endif
+  FSTREAM_EVENT(1, 0);
 
   api(object_api::CREATE_OBJECT, OBJECT_WRITER, (uintptr_t)&unprivileged_writer,
       OBJECT_UNPRIVILEGED);
@@ -148,62 +179,91 @@ void flash_stream_ladder() {
       OBJECT_UNPRIVILEGED);
   api(object_api::CREATE_OBJECT, OBJECT_TRESPASSER,
       (uintptr_t)&flash_trespasser, OBJECT_UNPRIVILEGED);
-  FSTREAM_PROG(611);
+  FSTREAM_EVENT(2, 0);
 
   // ---- 書き: 非特権がバイトを流し、特権側が焼く ----------------------------
   flash_open opening{"unpriv.bin", 4096, 0, 0, 0, 0};
   const api_result opened =
       api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
           (uintptr_t)flash_fs_method::OPEN_WRITE, (uintptr_t)&opening);
-  FSTREAM_PROG(612);
+  FSTREAM_EVENT(3, PAYLOAD_BYTES);
   check("flash stream: opened for writing", opened.value != 0,
         (unsigned long)opened.value, 1);
   if (opened.value == 0)
     return;
   const api_result write_desc = api(object_api::STREAM_OPEN, opening.stream);
   // ★席を明け渡す: producer は非特権の書き手にする。FS は consumer のまま。
-  FSTREAM_PROG(613);
+  FSTREAM_EVENT(4, write_desc.value);
   const api_result wrote = api(object_api::CALL_METHOD, OBJECT_WRITER, 0,
                                write_desc.value);
-  FSTREAM_PROG(614);
+  FSTREAM_EVENT(5, wrote.value);
   check("flash stream: the unprivileged writer ran non-privileged",
         (wrote.value & 1u) == 1u, (unsigned long)wrote.value, 1);
   const api_result closed =
       api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
           (uintptr_t)flash_fs_method::CLOSE_WRITE, 0);
-  FSTREAM_PROG(615);
+  FSTREAM_EVENT(6, closed.value);
   check("flash stream: the whole payload reached flash",
         closed.value == PAYLOAD_BYTES, (unsigned long)closed.value,
         (unsigned long)PAYLOAD_BYTES);
 
   // ---- 読み: stream で extent を受け、非特権 consumer が XIP を読む ----------
   flash_open reading{"unpriv.bin", 0, 1, 0, 0, 0};
+  FSTREAM_EVENT(7, 0);
   const api_result opened_read =
       api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
           (uintptr_t)flash_fs_method::OPEN_READ, (uintptr_t)&reading);
+  FSTREAM_EVENT(8, opened_read.value);
   check("flash stream: opened for reading", opened_read.value != 0,
         (unsigned long)opened_read.value, 1);
   // Ring contains one extent record; file bytes remain at their XIP address.
   check("flash stream: one extent describes the file",
         reading.records == 1 && reading.bytes == PAYLOAD_BYTES,
         (unsigned long)reading.bytes, (unsigned long)PAYLOAD_BYTES);
+#if defined(SHIZUKU_RP2040)
+  check("flash stream: RP2040 extent starts on a 4 KiB boundary",
+        (reading.address & 0xFFFu) == 0,
+        (unsigned long)(reading.address & 0xFFFu), 0);
+#endif
   if (opened_read.value == 0)
     return;
   // ★Q8: region0 の外なので、読む本人 (OBJECT_READER) へ明示的に開示する。
   //   開示するのはこちら (特権で走っている選テストコード自身) — 「誰が誰に
   //   何を見せるか」を決めるのは特権行為 (call_method の呼び出し元ではなく、
   //   対象オブジェクトの性質として効く)。
-  const api_result granted =
-      api(object_api::GRANT_REGION, OBJECT_READER, reading.address,
-          reading.address + reading.bytes);
+  FSTREAM_EVENT(9, reading.address);
+  const api_result granted = api(object_api::GRANT_REGION, OBJECT_READER,
+                                 reading.address,
+                                 reading.address + reading.bytes);
+  FSTREAM_EVENT(10, granted.value);
   check("flash stream: granted the reader its own extent", granted.value == 1,
         (unsigned long)granted.value, 1);
+#if defined(SHIZUKU_RP2040)
+  // A 300-byte grant is impossible here. Rejecting it must leave the valid
+  // 512-byte grant above intact.
+  FSTREAM_EVENT(11, reading.address + 300);
+  const api_result narrow_grant =
+      api(object_api::GRANT_REGION, OBJECT_READER, reading.address,
+          reading.address + 300);
+  FSTREAM_EVENT(12, narrow_grant.error);
+  check("flash stream: RP2040 rejects an unrepresentable 300-byte grant",
+        narrow_grant.error == (uintptr_t)object_error::BAD_MEMORY &&
+            narrow_grant.value == 0,
+        (unsigned long)narrow_grant.error,
+        (unsigned long)object_error::BAD_MEMORY);
+#endif
+  FSTREAM_EVENT(13, reading.stream);
   const api_result read_desc = api(object_api::STREAM_OPEN, reading.stream);
+  FSTREAM_EVENT(14, read_desc.value);
+  FSTREAM_EVENT(15, read_desc.value);
   const api_result got =
       api(object_api::CALL_METHOD, OBJECT_READER, 0, read_desc.value);
+  FSTREAM_EVENT(16, got.value);
   uint32_t want = 0;
   for (uint32_t index = 0; index < PAYLOAD_BYTES; ++index)
     want += expected_byte(index);
+  check("flash stream: reader call succeeded", got.error == 0,
+        (unsigned long)got.error, 0);
   check("flash stream: the unprivileged reader ran non-privileged",
         ((got.value >> 24) & 1u) == 1u, (unsigned long)(got.value >> 24), 1);
   // ★★本命。非特権のまま XIP を直接読んで、書いた通りの中身が取れた。
@@ -214,39 +274,58 @@ void flash_stream_ladder() {
   const api_result closed_read = api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
                                      (uintptr_t)flash_fs_method::CLOSE_READ,
                                      reading.stream);
+  FSTREAM_EVENT(17, reading.stream);
   check("flash stream: close destroys its owned stream",
         closed_read.value == 1, (unsigned long)closed_read.value, 1);
+  FSTREAM_EVENT(18, closed_read.value);
 
   // ---- 接続: flash から DMA で直に汲む ------------------------------------
   // DMA transports the extent record. The sink dereferences the extent under
   // its own explicitly granted MPU region.
   {
     flash_open again{"unpriv.bin", 0, 1, 0, 0, 0};
-    api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
+    FSTREAM_EVENT(19, 0);
+    const api_result again_opened = api(
+        object_api::CALL_METHOD, FLASH_FS_OBJECT,
         (uintptr_t)flash_fs_method::OPEN_READ, (uintptr_t)&again);
+    FSTREAM_EVENT(20, again_opened.value);
+    FSTREAM_EVENT(21, 0);
     const api_result sink_id = api(object_api::STREAM_CREATE,
                                    sizeof(stream::extent), 1,
                                    stream::LOSSLESS);
+    FSTREAM_EVENT(22, sink_id.value);
     check("connect: kernel allocated the sink ring", sink_id.error == 0,
           (unsigned long)sink_id.error, 0);
     if (sink_id.error != 0) return;
-    api(object_api::GRANT_REGION, OBJECT_SINK, again.address,
-        again.address + again.bytes);
+    FSTREAM_EVENT(23, again.address);
+    const api_result sink_grant =
+        api(object_api::GRANT_REGION, OBJECT_SINK, again.address,
+            again.address + again.bytes);
+    FSTREAM_EVENT(24, sink_grant.value);
+    check("connect: granted the sink its own extent",
+          sink_grant.error == 0 && sink_grant.value == 1,
+          (unsigned long)sink_grant.error, 0);
+    FSTREAM_EVENT(25, again.stream);
     const api_result linked =
         api(object_api::STREAM_CONNECT, again.stream, sink_id.value);
+    FSTREAM_EVENT(26, linked.value);
     check("connect: the two streams were joined", linked.error == 0,
           (unsigned long)linked.error, 0);
     // ★繋いだ席は埋まる。手押しとの二重供給を機構で防いでいるか。
+    FSTREAM_EVENT(27, sink_id.value);
     const api_result intruder = api(object_api::STREAM_BIND, sink_id.value,
                                     (uintptr_t)stream::role::PRODUCER);
+    FSTREAM_EVENT(28, intruder.error);
     check("connect: a hand-fed producer is refused on a joined stream",
           intruder.error == (uintptr_t)object_error::SEAT_TAKEN,
           (unsigned long)intruder.error,
           (unsigned long)object_error::SEAT_TAKEN);
 
+    FSTREAM_EVENT(29, again.stream);
     const api_result busy_destroy =
         api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
             (uintptr_t)flash_fs_method::CLOSE_READ, again.stream);
+    FSTREAM_EVENT(30, busy_destroy.value);
     check("connect: connected source cannot be destroyed",
           busy_destroy.value == (uintptr_t)object_error::STREAM_BUSY + 1,
           (unsigned long)busy_destroy.value,
@@ -256,14 +335,36 @@ void flash_stream_ladder() {
     //   「少し汲む → 譲る」を繰り返す。受け手が特権だと、非特権から使えることの
     //   証明にならない。
     uint32_t sum = 0;
+    bool sink_call_success_checked = false;
+    bool sink_call_failure_reported = false;
+    bool sink_call_progress_marked = false;
+    FSTREAM_EVENT(31, sink_id.value);
     for (uint32_t spin = 0; spin < 20000; ++spin) {
       const api_result got = api(object_api::CALL_METHOD, OBJECT_SINK, 0,
                                   sink_id.value);
+      if (!sink_call_progress_marked) {
+        FSTREAM_EVENT(32, got.error);
+        sink_call_progress_marked = true;
+      }
+      if (got.error != 0) {
+        if (!sink_call_failure_reported) {
+          check("connect: sink call succeeded", false,
+                (unsigned long)got.error, 0);
+          sink_call_failure_reported = true;
+        }
+        break;
+      }
+      if (!sink_call_success_checked) {
+        check("connect: sink call succeeded", true,
+              (unsigned long)got.error, 0);
+        sink_call_success_checked = true;
+      }
       if (got.value != 0) sum = (uint32_t)got.value;
       api(object_api::YIELD); // ポンプに 1 歩進ませる
       if (sum != 0)
         break;
     }
+    FSTREAM_EVENT(33, sum);
     const uint32_t drained = sum != 0 ? 1 : 0;
     uint32_t want = 0;
     for (uint32_t index = 0; index < PAYLOAD_BYTES; ++index)
@@ -273,14 +374,21 @@ void flash_stream_ladder() {
     // ★★本命。CPU が 1 バイトも写さずに、flash の中身が受け手の環まで届いた。
     check("connect: the bytes are the ones in flash", sum == want,
           (unsigned long)sum, (unsigned long)want);
-    api(object_api::STREAM_DISCONNECT, linked.value);
+    FSTREAM_EVENT(34, linked.value);
+    const api_result disconnected =
+        api(object_api::STREAM_DISCONNECT, linked.value);
+    FSTREAM_EVENT(35, disconnected.error);
     for (uint32_t spin = 0; spin < 1000; ++spin) api(object_api::YIELD);
+    FSTREAM_EVENT(36, again.stream);
     const api_result source_closed = api(
         object_api::CALL_METHOD, FLASH_FS_OBJECT,
         (uintptr_t)flash_fs_method::CLOSE_READ, again.stream);
+    FSTREAM_EVENT(37, source_closed.value);
     check("connect: source destroy succeeds after disconnect completion",
           source_closed.value == 1, (unsigned long)source_closed.value, 1);
+    FSTREAM_EVENT(38, sink_id.value);
     const api_result sink_closed = api(object_api::STREAM_DESTROY, sink_id.value);
+    FSTREAM_EVENT(39, sink_closed.error);
     check("connect: owner destroys disconnected sink",
           sink_closed.error == 0, (unsigned long)sink_closed.error, 0);
   }
@@ -290,36 +398,53 @@ void flash_stream_ladder() {
     // ★同じファイルを、境界を確かめるために narrow に開き直す。開示するのは
     //   ちょうどこの extent だけ — grant の外なので、region の外 = 特権のみに
     //   落ちるはず。
-    // ★★狙う先は extent の**ちょうど 1 バイト先ではない**。PMSAv8 は 32B 粒度
-    //   なので、1 バイト外はハードウェアの丸め次第でたまたま同じブロックに
-    //   収まり、落ちないことがある (実測で踏んだ — 境界ちょうどは粒度の限界で
-    //   判定できない)。粒度の余地を確実に超える先 (1 ページ = 4096B 先、まだ
-    //   flash_fs のデータ領域の中だが自分には開示されていない場所) を狙う。
+    // ★★境界のすぐ外は MPU の領域粒度次第で同じ許可範囲に入り得るため、
+    //   十分離れた先 (1 ページ = 4096B 先、まだ flash_fs のデータ領域の中だが
+    //   自分には開示されていない場所) を狙う。
     flash_open bounded{"unpriv.bin", 0, 1, 0, 0, 0};
-    api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
+    FSTREAM_EVENT(40, 0);
+    const api_result bounded_opened = api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
         (uintptr_t)flash_fs_method::OPEN_READ, (uintptr_t)&bounded);
+    FSTREAM_EVENT(41, bounded_opened.value);
     const uintptr_t extent_end = bounded.address + bounded.bytes;
     const uintptr_t trespass_address = extent_end + 4096;
-    api(object_api::GRANT_REGION, OBJECT_TRESPASSER, bounded.address,
-        extent_end);
+    FSTREAM_EVENT(42, bounded.address);
+    const api_result trespass_grant =
+        api(object_api::GRANT_REGION, OBJECT_TRESPASSER, bounded.address,
+            extent_end);
+    FSTREAM_EVENT(43, trespass_grant.value);
+    check("deny: granted the trespasser its bounded extent",
+          trespass_grant.error == 0 && trespass_grant.value == 1,
+          (unsigned long)trespass_grant.error, 0);
 
     const auto faults_before = kernel_instance.faults().count;
     // ★**別スレッドで**走らせる (unprivileged.cpp と同じ理由: 落ちるのは
     //   スレッド単位なので、呼び出しで試すと自分ごと止まってテストの続きが
     //   走れない)。
+    FSTREAM_EVENT(44, trespass_address);
     const auto spawned = ARCH::syscall((uintptr_t)object_api::SPAWN,
                                        OBJECT_TRESPASSER, 0, trespass_address);
-    for (uint32_t guard = 0;
-         guard < 200 && kernel_instance.faults().count == faults_before;
-         ++guard)
-      ARCH::syscall((uintptr_t)object_api::YIELD);
+    FSTREAM_EVENT(45, spawned.value);
+    const bool spawn_succeeded = spawned.error == 0 && spawned.value != 0;
+    check("deny: trespasser thread spawned", spawn_succeeded,
+          (unsigned long)spawned.error, 0);
+    if (spawn_succeeded) {
+      for (uint32_t guard =
+               0; guard < 200 && kernel_instance.faults().count == faults_before;
+           ++guard)
+        ARCH::syscall((uintptr_t)object_api::YIELD);
+    }
 
     const auto &record = kernel_instance.faults();
+    FSTREAM_EVENT(46, record.count);
+    const bool new_fault = spawn_succeeded &&
+                           record.count == faults_before + 1;
     check("deny: reading past the granted extent faults",
-          record.count == faults_before + 1, (unsigned long)record.count,
+          new_fault, (unsigned long)record.count,
           (unsigned long)(faults_before + 1));
     check("deny: the offending thread was stopped",
-          record.thread == spawned.value, (unsigned long)record.thread,
+          new_fault && record.thread == spawned.value,
+          (unsigned long)record.thread,
           (unsigned long)spawned.value);
     BOARD::diag_printf(
         "[SELFTEST] deny: flash extent [%08lx,%08lx) trespass at %08lx "
@@ -330,23 +455,39 @@ void flash_stream_ladder() {
 
     // ---- 対照: 同じ extent の**中**なら読める (境界そのものを確かめる) ------
     const auto in_bounds_faults = kernel_instance.faults().count;
+    FSTREAM_EVENT(47, extent_end - 1);
     const auto in_bounds = ARCH::syscall((uintptr_t)object_api::SPAWN,
                                          OBJECT_TRESPASSER, 0,
                                          extent_end - 1);
-    for (uint32_t guard = 0; guard < 200; ++guard) {
-      ARCH::syscall((uintptr_t)object_api::YIELD);
-      if (kernel_instance.thread_state((uint32_t)in_bounds.value) ==
-          KERNEL::THREAD::state_t::TERMINATED)
-        break;
+    FSTREAM_EVENT(48, in_bounds.value);
+    const bool in_bounds_spawned =
+        in_bounds.error == 0 && in_bounds.value != 0;
+    check("deny: in-bounds probe thread spawned", in_bounds_spawned,
+          (unsigned long)in_bounds.error, 0);
+    bool in_bounds_terminated = false;
+    if (in_bounds_spawned) {
+      for (uint32_t guard = 0; guard < 200; ++guard) {
+        ARCH::syscall((uintptr_t)object_api::YIELD);
+        if (kernel_instance.thread_state((uint32_t)in_bounds.value) ==
+            KERNEL::THREAD::state_t::TERMINATED) {
+          in_bounds_terminated = true;
+          break;
+        }
+      }
     }
-    check("deny: the last byte inside the extent does not fault",
-          kernel_instance.faults().count == in_bounds_faults,
+    FSTREAM_EVENT(49, in_bounds_terminated ? in_bounds.value : 0);
+    check("deny: the last byte inside the extent completes without fault",
+          in_bounds_spawned && in_bounds_terminated &&
+              kernel_instance.faults().count == in_bounds_faults,
           (unsigned long)kernel_instance.faults().count,
           (unsigned long)in_bounds_faults);
-    api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
+    FSTREAM_EVENT(50, bounded.stream);
+    const api_result bounded_closed = api(object_api::CALL_METHOD, FLASH_FS_OBJECT,
         (uintptr_t)flash_fs_method::CLOSE_READ, bounded.stream);
+    FSTREAM_EVENT(51, bounded_closed.value);
   }
 
+  FSTREAM_PROG(62, 52, 0);
   BOARD::diag_printf("[SELFTEST] flash stream ladder done\n");
 }
 

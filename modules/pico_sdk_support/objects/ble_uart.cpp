@@ -6,7 +6,7 @@
 //  固定)。 ★ペアリング方式は CDC の実行時コマンドで切替 (既定 = NC
 //  必須、事故防止)。
 //    'A'+Enter で自動ペアリング (Just Works) へ、'S'+Enter で NC 必須へ戻す
-//    (g_auto_pair / apply_security_mode 参照)。
+//    (g_just_works_mode / apply_security_mode 参照)。
 //
 //  ★今回見送ったもの (旧実装にはあるが、ここには無い):
 //    - 接続ウォッチドッグ (生存兆候途絶での強制切断) と BT 電源再投入による
@@ -67,15 +67,37 @@ extern "C" {
 #if !defined(SHIZUKU_RP2040)
 #include "shizuku/objects/gdb_stub.hpp" // GDB リンクをストリームで運ぶ
 #endif
+#include "shizuku/objects/usb_cdc.hpp"
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_FLASHFS_ONLY)
+#include "shizuku/objects/flash_ops.hpp"
+#include "shizuku/objects/flash_map.hpp"
+#include "hardware/flash.h"
+#include "pico/error.h"
+#endif
 #include "shizuku/objects/peripherals.hpp"
 #include "shizuku/stream.hpp"
+#include "hardware/gpio.h"
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#if defined(SHIZUKU_RP2040) && !defined(SHIZUKU_BT_TLV_RAM)
+#include "hardware/flash.h"
+#include "pico/error.h"
+#include "pico/btstack_flash_bank.h"
+#include "shizuku/objects/flash_ops.hpp"
+#include "shizuku/objects/flash_map.hpp"
+#endif
 #include <pico/cyw43_arch.h> // cyw43_arch_init / cyw43_arch_poll
 
 namespace shizuku {
 namespace objects {
+
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+static inline void crash_mark(boot_diag_breadcrumb id) {
+  usb_cdc_boot_diag_breadcrumb_at(
+      id, (uintptr_t)__builtin_return_address(0));
+}
+#endif
 
 #if defined(CYW43_WL_GPIO_LED_PIN)
 // peripherals オブジェクトがリンクされていないバイナリでもリンクを通すための
@@ -97,13 +119,131 @@ namespace {
 using ARCH = shizuku::KERNEL::ARCH;
 using BOARD = shizuku::KERNEL::BOARD;
 
-// ★ペアリング方式は CDC(診断チャネル)の専用コマンドで実行時に切り替える
-//   (ビルドを分けない)。既定は **NC 必須 (安全側、事故防止)**。
-//   'A' + Enter でテスト用の自動ペアリング (Just Works, MITM 無し) へ、
-//   'S' + Enter で NC 必須へ戻す。切替は次回以降のペアリング交渉に効く
-//   (今まさに進行中の交渉には効かない — sm_set_* は次の手続き開始時に
-//   読まれる値を変えるだけなので)。
-static bool g_auto_pair = false;
+// BTstack 1.8.2's TLV iterator advances by `8 + len` in uint32_t without
+// checking that len fits in the remaining bank. A torn/foreign record with a
+// large length can wrap the offset and keep the iterator reading forever.
+// Validate only the selected bank before handing the storage to BTstack; a
+// malformed active bank is disposable, while a structurally valid bank (and
+// its bonds) is left intact.
+#if defined(SHIZUKU_RP2040) && !defined(SHIZUKU_BT_TLV_RAM)
+constexpr uint32_t kBtBankBytes = PICO_FLASH_BANK_TOTAL_SIZE / 2u;
+constexpr uint32_t kBtBankHeaderBytes = 8u;
+constexpr uint32_t kBtEntryHeaderBytes = 8u;
+constexpr uint8_t kBtBankMagic[] = {'B', 'T', 's', 't', 'a', 'c', 'k'};
+static_assert(PICO_FLASH_BANK_TOTAL_SIZE % (2u * FLASH_SECTOR_SIZE) == 0,
+              "BTstack banks must each span whole flash sectors");
+
+uint32_t read_be32(const uint8_t *bytes) {
+  return (uint32_t(bytes[0]) << 24) | (uint32_t(bytes[1]) << 16) |
+         (uint32_t(bytes[2]) << 8) | uint32_t(bytes[3]);
+}
+
+bool bt_bank_records_well_formed(uint32_t bank, uint32_t *bad_offset) {
+  const auto *base = reinterpret_cast<const uint8_t *>(
+      XIP_BASE + PICO_FLASH_BANK_STORAGE_OFFSET + bank * kBtBankBytes);
+  uint32_t offset = kBtBankHeaderBytes;
+  while (offset + kBtEntryHeaderBytes < kBtBankBytes) {
+    const uint8_t *entry = base + offset;
+    const uint32_t tag = read_be32(entry);
+    if (tag == 0xffffffffu)
+      return true; // BTstack stops at the first erased tag.
+
+    const uint32_t value_bytes = read_be32(entry + 4);
+    const uint32_t remaining = kBtBankBytes - offset - kBtEntryHeaderBytes;
+    if (value_bytes > remaining) {
+      *bad_offset = offset;
+      return false;
+    }
+    // pico_flash_bank_get_alignment() is 1 in pico-sdk 2.2.0, so the TLV
+    // record size is exactly header + value. The remaining-space check above
+    // also prevents the upstream uint32_t offset addition from wrapping.
+    offset += kBtEntryHeaderBytes + value_bytes;
+  }
+  return true;
+}
+
+bool repair_malformed_bt_bank() {
+  BOARD::diag_printf(
+      "[BT_TLV] preflight core=%lu offset=%08lx total=%lu\n",
+      (unsigned long)BOARD::core_num(),
+      (unsigned long)PICO_FLASH_BANK_STORAGE_OFFSET,
+      (unsigned long)PICO_FLASH_BANK_TOTAL_SIZE);
+  uint8_t header0[kBtBankHeaderBytes];
+  uint8_t header1[kBtBankHeaderBytes];
+  const auto *bank0 = reinterpret_cast<const uint8_t *>(
+      XIP_BASE + PICO_FLASH_BANK_STORAGE_OFFSET);
+  const auto *bank1 = bank0 + kBtBankBytes;
+  memcpy(header0, bank0, sizeof(header0));
+  memcpy(header1, bank1, sizeof(header1));
+  const bool valid0 = memcmp(header0, kBtBankMagic, sizeof(kBtBankMagic)) == 0;
+  const bool valid1 = memcmp(header1, kBtBankMagic, sizeof(kBtBankMagic)) == 0;
+
+  int active = -1;
+  if (valid0 && !valid1) active = 0;
+  else if (!valid0 && valid1) active = 1;
+  else if (valid0 && valid1) {
+    const uint32_t epoch0 = header0[7] & 3u;
+    const uint32_t epoch1 = header1[7] & 3u;
+    if (epoch0 == ((epoch1 + 1u) & 3u)) active = 0;
+    else if (epoch1 == ((epoch0 + 1u) & 3u)) active = 1;
+  }
+  if (active < 0) {
+    BOARD::diag_printf(
+        "[BLE_UART] BT TLV has no active bank; SDK will initialize offset=%08lx size=%lu\n",
+        (unsigned long)PICO_FLASH_BANK_STORAGE_OFFSET,
+        (unsigned long)PICO_FLASH_BANK_TOTAL_SIZE);
+    return true; // BTstack will initialize the no-valid-bank case itself.
+  }
+
+  uint32_t bad_offset = 0;
+  if (bt_bank_records_well_formed((uint32_t)active, &bad_offset)) {
+    BOARD::diag_printf(
+        "[BLE_UART] BT TLV active bank=%d offset=%08lx size=%lu validated\n",
+        active,
+        (unsigned long)(PICO_FLASH_BANK_STORAGE_OFFSET +
+                        (uint32_t)active * kBtBankBytes),
+        (unsigned long)kBtBankBytes);
+    return true;
+  }
+
+  const uint32_t bank_offset =
+      PICO_FLASH_BANK_STORAGE_OFFSET + (uint32_t)active * kBtBankBytes;
+  const int rc = flash_ops::erase(bank_offset, kBtBankBytes);
+  if (rc != PICO_OK) {
+    BOARD::diag_printf(
+        "[BLE_UART] malformed BT TLV bank %lu at +%lu; common erase failed (%d)\n",
+        (unsigned long)active, (unsigned long)bad_offset, rc);
+    return false;
+  }
+  BOARD::diag_printf(
+      "[BLE_UART] malformed BT TLV bank %lu at +%lu; erased for re-init\n",
+      (unsigned long)active, (unsigned long)bad_offset);
+  return true;
+}
+#endif // SHIZUKU_RP2040 && !SHIZUKU_BT_TLV_RAM
+
+// Pairing mode can be changed through CDC; every mode still requires explicit
+// approval on CDC for the current connection.
+static bool g_just_works_mode = false;
+enum class cdc_approval_mode : uint8_t { NONE, NUMERIC, JUST_WORKS };
+static cdc_approval_mode g_cdc_approval_mode = cdc_approval_mode::NONE;
+static hci_con_handle_t g_cdc_approval_handle = HCI_CON_HANDLE_INVALID;
+static uint64_t g_cdc_approval_deadline_us = 0;
+static uint32_t g_cdc_approval_number = 0;
+static bool g_pairing_approved = false;
+static volatile uint8_t g_cdc_answer_requested = 0; // 0=none, 1=Y, 2=N
+static char g_cdc_command_line[32]{};
+static uint8_t g_cdc_command_length = 0;
+static constexpr uint64_t CDC_APPROVAL_TIMEOUT_US = 30000000ull;
+static hci_con_handle_t nc_pending_handle = HCI_CON_HANDLE_INVALID;
+static bool restart_requested = false;
+static volatile uint32_t g_cyw43_poll_active = 0;
+static volatile uint32_t g_cyw43_poll_owner_thread = UINT32_MAX;
+static volatile uint32_t g_cyw43_bus_ready = 0;
+static bool cmd_authorized = false;
+static void update_gdb_connected();
+static void print_conn_interval(const char *tag);
+static void request_fast_ci();
 
 // ===========================================================================
 //  ペアリング施錠 (2026-08-31)
@@ -188,25 +328,170 @@ static void apply_security_mode() {
   } else {
     sm_set_accepted_stk_generation_methods(
         SM_STK_GENERATION_METHOD_JUST_WORKS |
-        SM_STK_GENERATION_METHOD_NUMERIC_COMPARISON |
-        SM_STK_GENERATION_METHOD_PASSKEY | SM_STK_GENERATION_METHOD_OOB);
+        SM_STK_GENERATION_METHOD_NUMERIC_COMPARISON);
   }
-  if (g_auto_pair) {
-    // Just Works: MITM を要求しないので NC (Numeric Comparison) 自体が
-    // 発生せず、OS 側の確認ダイアログも Pico 側の y/n 入力も無しで
-    // ペアリング〜暗号化まで自動的に終わる (macOS の CoreBluetooth は
-    // NC の承認をアプリ側から自動化する API を提供していないため、
-    // ヘッドレスなテストで確実に自動化する手段は実質これだけ)。
+  if (g_just_works_mode) {
+    // Just Works is available only as a test mode. The user still approves it
+    // explicitly through CDC when BTstack raises SM_EVENT_JUST_WORKS_REQUEST.
     sm_set_io_capabilities(IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
-    sm_set_authentication_requirements(SM_AUTHREQ_SECURE_CONNECTION |
-                                       SM_AUTHREQ_BONDING);
+    sm_set_authentication_requirements(
+        SM_AUTHREQ_SECURE_CONNECTION
+#if !defined(SHIZUKU_BT_TLV_RAM)
+        | SM_AUTHREQ_BONDING
+#endif
+        );
   } else {
     // LE Secure Connections + Numeric Comparison (既定、事故防止)。
     sm_set_io_capabilities(IO_CAPABILITY_DISPLAY_YES_NO);
-    sm_set_authentication_requirements(SM_AUTHREQ_SECURE_CONNECTION |
-                                       SM_AUTHREQ_MITM_PROTECTION |
-                                       SM_AUTHREQ_BONDING);
+    sm_set_authentication_requirements(
+        SM_AUTHREQ_SECURE_CONNECTION | SM_AUTHREQ_MITM_PROTECTION
+#if !defined(SHIZUKU_BT_TLV_RAM)
+        | SM_AUTHREQ_BONDING
+#endif
+        );
   }
+}
+
+static void request_cdc_approval(cdc_approval_mode mode,
+                                 hci_con_handle_t handle,
+                                 uint32_t number = 0) {
+  g_cdc_approval_mode = mode;
+  g_cdc_approval_handle = handle;
+  g_cdc_approval_number = number;
+  g_cdc_approval_deadline_us = BOARD::time_us() + CDC_APPROVAL_TIMEOUT_US;
+  if (mode == cdc_approval_mode::NUMERIC) {
+    BOARD::diag_printf(
+        "[BLE_UART] PAIR? conn=0x%04x mode=NC num=%06lu\n",
+        (unsigned)handle,
+        (unsigned long)number);
+  } else if (mode == cdc_approval_mode::JUST_WORKS) {
+    BOARD::diag_printf("[BLE_UART] PAIR? conn=0x%04x mode=JW\n",
+                       (unsigned)handle);
+  }
+}
+
+static void clear_cdc_approval() {
+  g_cdc_approval_mode = cdc_approval_mode::NONE;
+  g_cdc_approval_handle = HCI_CON_HANDLE_INVALID;
+  g_cdc_approval_deadline_us = 0;
+  g_cdc_approval_number = 0;
+  g_cdc_answer_requested = 0;
+}
+
+static void decline_cdc_approval(bool timed_out) {
+  const auto mode = g_cdc_approval_mode;
+  const auto handle = g_cdc_approval_handle;
+  if (mode == cdc_approval_mode::NONE)
+    return;
+  clear_cdc_approval();
+  if (mode == cdc_approval_mode::NUMERIC)
+    nc_pending_handle = HCI_CON_HANDLE_INVALID;
+  ++g_pair_strikes;
+  BOARD::diag_printf("[BLE_UART] pairing approval %s via CDC\n",
+                     timed_out ? "timed out" : "declined");
+  if (handle != HCI_CON_HANDLE_INVALID)
+    sm_bonding_decline(handle);
+  g_pairing_approved = false;
+}
+
+static void handle_cdc_command_line(const char *line) {
+  if (strcmp(line, "A") == 0) {
+    g_just_works_mode = true;
+    apply_security_mode();
+    BOARD::diag_printf(
+        "[BLE_UART] pairing mode -> JW (Just Works, no MITM; CDC approval required)\n");
+    return;
+  }
+  if (strcmp(line, "S") == 0) {
+    g_just_works_mode = false;
+    apply_security_mode();
+    BOARD::diag_printf("[BLE_UART] pairing mode -> NC (MITM required)\n");
+    return;
+  }
+  if (strcmp(line, "R") == 0) {
+    BOARD::diag_printf("[BLE_UART] chip reset requested from the console\n");
+    restart_requested = true;
+    return;
+  }
+
+  if (strcmp(line, "N") == 0) {
+    if (g_cdc_approval_mode != cdc_approval_mode::NONE)
+      g_cdc_answer_requested = 2;
+    return;
+  }
+
+  bool approved = false;
+  if (g_cdc_approval_mode == cdc_approval_mode::NUMERIC) {
+    char expected[16];
+    snprintf(expected, sizeof(expected), "Y %06lu",
+             (unsigned long)g_cdc_approval_number);
+    approved = strcmp(line, expected) == 0;
+  } else if (g_cdc_approval_mode == cdc_approval_mode::JUST_WORKS) {
+    approved = strcmp(line, "Y") == 0;
+  }
+  if (!approved)
+    return;
+  g_cdc_answer_requested = 1;
+}
+
+// Called only by poll_loop on the CYW43/BTstack owner thread. CDC parsing
+// records an answer; this owner-thread phase applies it after BTstack polling.
+static void process_cdc_approval_response() {
+  const uint8_t answer = g_cdc_answer_requested;
+  if (answer == 0)
+    return;
+  g_cdc_answer_requested = 0;
+  const auto mode = g_cdc_approval_mode;
+  const auto handle = g_cdc_approval_handle;
+  if (mode == cdc_approval_mode::NONE)
+    return;
+  if (answer == 2) {
+    decline_cdc_approval(false);
+    return;
+  }
+
+  clear_cdc_approval();
+  // Set this before calling BTstack: its API can run the state machine
+  // synchronously and may deliver PAIRING_COMPLETE before returning.
+  g_pairing_approved = true;
+  if (mode == cdc_approval_mode::NUMERIC) {
+    nc_pending_handle = HCI_CON_HANDLE_INVALID;
+    BOARD::diag_printf(
+        "[BLE_UART] applying CDC approval on BTstack owner (mode=NC)\n");
+    sm_numeric_comparison_confirm(handle);
+    BOARD::diag_printf("[BLE_UART] pairing approved via CDC (mode=NC, MITM)\n");
+  } else if (mode == cdc_approval_mode::JUST_WORKS) {
+    BOARD::diag_printf(
+        "[BLE_UART] applying CDC approval on BTstack owner (mode=JW)\n");
+    sm_just_works_confirm(handle);
+    BOARD::diag_printf(
+        "[BLE_UART] pairing approved via CDC (mode=JW, no MITM)\n");
+  }
+}
+
+static void poll_cdc_commands() {
+  for (unsigned count = 0; count < 64; ++count) {
+    const int c = usb_cdc_read(0);
+    if (c < 0)
+      break;
+    if (c == '\r' || c == '\n') {
+      if (g_cdc_command_length != 0) {
+        g_cdc_command_line[g_cdc_command_length] = '\0';
+        handle_cdc_command_line(g_cdc_command_line);
+        g_cdc_command_length = 0;
+      }
+    } else if (g_cdc_command_length + 1u < sizeof(g_cdc_command_line)) {
+      g_cdc_command_line[g_cdc_command_length++] = (char)c;
+    } else {
+      g_cdc_command_length = 0;
+    }
+  }
+}
+
+static void expire_cdc_approval() {
+  if (g_cdc_approval_mode != cdc_approval_mode::NONE &&
+      BOARD::time_us() >= g_cdc_approval_deadline_us)
+    decline_cdc_approval(true);
 }
 
 struct call_result {
@@ -216,7 +501,32 @@ struct call_result {
 
 call_result api(shizuku::object_api number, uintptr_t a1 = 0, uintptr_t a2 = 0,
                 uintptr_t a3 = 0) {
+  bool cyw43_owner_yield = false;
+#if defined(CYW43_WL_GPIO_LED_PIN)
+  cyw43_owner_yield =
+      (number == shizuku::object_api::YIELD ||
+       number == shizuku::object_api::SLEEP_US) &&
+      g_cyw43_poll_active != 0 &&
+      shizuku::kernel_instance.current_thread_id() ==
+          g_cyw43_poll_owner_thread;
+  if (cyw43_owner_yield) {
+    g_cyw43_poll_active = 0;
+    __asm volatile("dmb" ::: "memory");
+  }
+#endif
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(SHIZUKU_CRASH_RECORD)
+  if (number == shizuku::object_api::YIELD ||
+      number == shizuku::object_api::SLEEP_US)
+    usb_cdc_boot_diag_note_thread_yield(
+        shizuku::kernel_instance.current_thread_id());
+#endif
   const auto result = ARCH::syscall((uintptr_t)number, a1, a2, a3);
+#if defined(CYW43_WL_GPIO_LED_PIN)
+  if (cyw43_owner_yield) {
+    g_cyw43_poll_active = 1;
+    __asm volatile("dmb" ::: "memory");
+  }
+#endif
   return {result.error, result.value};
 }
 
@@ -226,7 +536,6 @@ uintptr_t export_method(method m, uintptr_t entry) {
 
 // ---- セキュリティ / 接続状態 (旧実装 §「セキュリティ設定」「接続/通知状態」)
 // ----
-static hci_con_handle_t nc_pending_handle = HCI_CON_HANDLE_INVALID;
 static hci_con_handle_t con_handle = HCI_CON_HANDLE_INVALID;
 // リンクが張られた時刻。認可されないまま居座る相手を畳むのに使う。
 static uint64_t conn_started_us = 0;
@@ -234,7 +543,6 @@ static bool tx_notify_enabled = false;
 static bool can_send_requested = false;
 static uint16_t conn_interval = 0;
 // SM の判定 (暗号化+認証) を反映するだけ。独自の秘密は持たない (fail-closed)。
-static bool cmd_authorized = false;
 
 // ---- RX: Shizuku ストリームとして外へ出す (shell 的な解釈はしない) ----------
 shizuku::stream::handle<frame_t> g_rx;
@@ -339,6 +647,9 @@ static void tx_push_line(const char *s) {
 // ---- 広告データ (旧実装のまま) ----------------------------------------------
 static uint8_t adv_buffer[31];
 static uint8_t adv_len = 0;
+static uint8_t scan_rsp_buffer[31];
+static uint8_t scan_rsp_len = 0;
+static constexpr uint16_t kBleAppearance = 0x0080; // Generic Computer
 
 static void build_adv_data() {
   uint8_t *p = adv_buffer;
@@ -352,6 +663,22 @@ static void build_adv_data() {
   memcpy(p, name, name_len);
   p += name_len;
   adv_len = (uint8_t)(p - adv_buffer);
+
+  // Flags + complete name are 17 bytes. The 128-bit NUS UUID (18 bytes)
+  // and Appearance AD (4 bytes) therefore go in the scan response (22 bytes).
+  p = scan_rsp_buffer;
+  *p++ = 17;
+  *p++ = BLUETOOTH_DATA_TYPE_COMPLETE_LIST_OF_128_BIT_SERVICE_CLASS_UUIDS;
+  static const uint8_t nus_uuid[16] = {
+      0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
+      0x93, 0xf3, 0xa3, 0xb5, 0x01, 0x00, 0x40, 0x6e};
+  memcpy(p, nus_uuid, sizeof(nus_uuid));
+  p += sizeof(nus_uuid);
+  *p++ = 3;
+  *p++ = BLUETOOTH_DATA_TYPE_APPEARANCE;
+  *p++ = static_cast<uint8_t>(kBleAppearance & 0xff);
+  *p++ = static_cast<uint8_t>(kBleAppearance >> 8);
+  scan_rsp_len = static_cast<uint8_t>(p - scan_rsp_buffer);
 }
 
 static btstack_packet_callback_registration_t hci_event_callback_registration;
@@ -395,10 +722,12 @@ static constexpr uint16_t FORCED_CI = 12;
 //   電源」の順にすることで、**代償の大きい手を最後にだけ払う**。
 static uint32_t hci_event_count = 0; // 何か HCI/SM イベントが来た印
 static uint64_t last_conn_activity_us = 0;
+// CYW43 uses the poll async_context in this build (whose SDK lock is a no-op).
+// Track the budget-0 owner while it is inside CYW43/BTstack, so the common
+// flash service can reject a call from another thread during an active poll.
 static bool wd_recovery_pending = false; // 掃除したので応答を見張っている
 static uint64_t wd_cleanup_us = 0;
 static uint32_t wd_evt_snapshot = 0;
-static bool restart_requested = false; // 診断 CDC の 'R' から
 
 // ★接続中の無音をどれだけ許すか。テレメトリが流れている限り CAN_SEND_NOW が
 //   絶えず来るので、生きたリンクがここまで黙ることはない。GDB でブレーク
@@ -718,10 +1047,61 @@ static bool advertising_allowed(uint64_t now_us) {
   return g_pair_block_until_us == 0 || now_us >= g_pair_block_until_us;
 }
 
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_FLASHFS_ONLY)
+static void flashfs_only_ble_flash_probe() {
+  constexpr uint32_t offset = flash_map::STAGING_OFFSET +
+                              flash_map::STAGING_BYTES - FLASH_SECTOR_SIZE;
+  alignas(4) static uint8_t page[FLASH_PAGE_SIZE];
+  for (uint32_t i = 0; i < FLASH_PAGE_SIZE; ++i)
+    page[i] = static_cast<uint8_t>(0xC3u ^ i);
+  flash_ops::timing erase_time{};
+  flash_ops::timing program_time{};
+  const int erase_rc = flash_ops::erase(offset, FLASH_SECTOR_SIZE, &erase_time);
+  int program_rc = PICO_ERROR_RESOURCE_IN_USE;
+  bool readback_ok = false;
+  if (erase_rc == PICO_OK) {
+    program_rc = flash_ops::program(offset, page, FLASH_PAGE_SIZE,
+                                    &program_time);
+    if (program_rc == PICO_OK) {
+      const volatile uint8_t *readback =
+          reinterpret_cast<const volatile uint8_t *>(XIP_BASE + offset);
+      readback_ok = true;
+      for (uint32_t i = 0; i < FLASH_PAGE_SIZE; ++i)
+        readback_ok = readback_ok && readback[i] == page[i];
+    }
+  }
+  BOARD::diag_printf(
+      "[FLASHFS_ONLY] ble_flash_probe offset=%08lx erase=%d/%luus program=%d/%luus readback=%s\n",
+      (unsigned long)offset, erase_rc, (unsigned long)erase_time.elapsed_us,
+      program_rc, (unsigned long)program_time.elapsed_us,
+      readback_ok ? "PASS" : "FAIL");
+}
+#endif
+
+static void set_advertising(bool enabled) {
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  crash_mark(boot_diag_breadcrumb::ADVERTISE_API_ENTRY);
+#endif
+  gap_advertisements_enable(enabled ? 1 : 0);
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  crash_mark(boot_diag_breadcrumb::ADVERTISE_API_EXIT);
+  usb_cdc_boot_diag_set_advertising(enabled);
+#endif
+}
+
 // ---- HCI / ATT イベント (旧実装から診断・ウォッチドッグ・PHY 系を落とした版)
 // ----
 static void packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
                            uint16_t) {
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  crash_mark(boot_diag_breadcrumb::PACKET_HANDLER_ENTRY);
+#endif
+  if (BOARD::core_num() != 0) {
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+    crash_mark(boot_diag_breadcrumb::BLE_CORE_VIOLATION);
+#endif
+    return;
+  }
   // ★「何か来た」印。ウォッチドッグはこの数字が動くかどうかだけを見る。
   ++hci_event_count;
 #ifdef GEMINI_MODIFY_20260905
@@ -739,7 +1119,27 @@ static void packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
   case BTSTACK_EVENT_STATE:
     if (btstack_event_state_get_state(packet) == HCI_STATE_WORKING) {
       BOARD::diag_printf("[BLE_UART] HCI ready, advertising start\n");
-      gap_advertisements_enable(1);
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+      crash_mark(boot_diag_breadcrumb::BEFORE_ADVERTISE_ENABLE);
+#endif
+      set_advertising(true);
+      // Give the first advertising interval a chance to run before the flash
+      // probe. This executes on the CYW43 owner after the state change.
+      api(shizuku::object_api::SLEEP_US, 100000);
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_FLASHFS_ONLY)
+      flashfs_only_ble_flash_probe();
+#endif
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_CRASH_RECORD) && \
+    defined(SHIZUKU_BOOT_LOG_WAIT)
+      usb_cdc_boot_diag_flash_selftest(1);
+#endif
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+      crash_mark(boot_diag_breadcrumb::AFTER_ADVERTISE_ENABLE);
+      usb_cdc_boot_diag_set_ble("hci-ready");
+      usb_cdc_boot_diag_set_stage(
+          shizuku::objects::boot_diag_stage::ADVERTISING);
+      crash_mark(boot_diag_breadcrumb::AFTER_ADVERTISING_STAGE);
+#endif
     }
     break;
   case L2CAP_EVENT_CONNECTION_PARAMETER_UPDATE_RESPONSE: {
@@ -758,7 +1158,7 @@ static void packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
             "[BLE_UART] connection failed (status=0x%02x), re-advertising\n",
             st);
         if (advertising_allowed(BOARD::time_us()))
-          gap_advertisements_enable(1);
+          set_advertising(true);
         break;
       }
       hci_con_handle_t h =
@@ -766,12 +1166,19 @@ static void packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
       if (h == con_handle)
         break; // 二重配送ガード
       con_handle = h;
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+      usb_cdc_boot_diag_set_connections(1);
+      usb_cdc_boot_diag_set_advertising(false);
+      usb_cdc_boot_diag_set_ble("connected");
+#endif
       conn_started_us = BOARD::time_us();
       conn_interval =
           hci_subevent_le_connection_complete_get_conn_interval(packet);
       tx_notify_enabled = false;
       can_send_requested = false;
       cmd_authorized = false;
+      g_pairing_approved = false;
+      clear_cdc_approval();
       update_gdb_connected();
       ci_nego_stage = 0;
       BOARD::diag_printf(
@@ -795,6 +1202,9 @@ static void packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
         "[BLE_UART] disconnected (reason=0x%02x), re-advertising\n",
         hci_event_disconnection_complete_get_reason(packet));
     con_handle = HCI_CON_HANDLE_INVALID;
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+    usb_cdc_boot_diag_set_connections(0);
+#endif
     tx_notify_enabled = false;
     can_send_requested = false;
     cmd_authorized = false;
@@ -806,11 +1216,21 @@ static void packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
     update_gdb_connected();
     ci_nego_stage = 0;
     nc_pending_handle = HCI_CON_HANDLE_INVALID;
+    g_pairing_approved = false;
+    clear_cdc_approval();
 #ifdef GEMINI_MODIFY_20260905
     g_pair_strikes = 0;
 #endif
     if (advertising_allowed(BOARD::time_us()))
-      gap_advertisements_enable(1);
+      set_advertising(true);
+    else {
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+      usb_cdc_boot_diag_set_advertising(false);
+#endif
+    }
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+    usb_cdc_boot_diag_set_ble("hci-ready");
+#endif
     break;
   case ATT_EVENT_CAN_SEND_NOW:
     can_send_requested = false;
@@ -819,6 +1239,9 @@ static void packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
   default:
     break;
   }
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  crash_mark(boot_diag_breadcrumb::PACKET_HANDLER_EXIT);
+#endif
 }
 
 // ---- SM (ペアリング/暗号化) イベント ----------------------------------------
@@ -847,22 +1270,12 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
           (unsigned long)g_bonded_count, (unsigned long)g_pair_strikes);
       break;
     }
-    // ★事故防止のため必須: 番号を CDC へ出し、オペレータの y/n 確認を
-    //   ble_uart_poll 側で待つ (自動 confirm にしない = MITM 防御が成立する)。
-    // ★★承認の口は CDC だけではない。飛行前に USB は繋がないので、
-    //   有線の XIAO (UART0) からも同じ答えを入れられるように、番号と
-    //   「待っている」ことを pairing_state として外へ出す (GET_PAIRING_STATE)。
-    //   ここで UART へ直接書かないのは、UART0 の持ち主が shizuku_shell 側で、
-    //   二人で書くと行が混ざるため (読み手も一人に保つのと同じ理由)。
+    // Require the matching six-digit number on CDC before confirming.
     nc_pending_handle = h;
     g_nc_passkey =
         (uint32_t)sm_event_numeric_comparison_request_get_passkey(packet);
     ++g_nc_generation;
-    BOARD::diag_printf("[BLE_UART] === NUMERIC COMPARISON ===\n");
-    BOARD::diag_printf("[BLE_UART] device number : %06lu\n",
-                       (unsigned long)g_nc_passkey);
-    BOARD::diag_printf("[BLE_UART] 一致していれば CDC で 'y' / XIAO で 'nc y'、"
-                       "違えば 'n' / 'nc n'\n");
+    request_cdc_approval(cdc_approval_mode::NUMERIC, h, g_nc_passkey);
     break;
   }
   case SM_EVENT_JUST_WORKS_REQUEST: {
@@ -876,40 +1289,51 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
       BOARD::diag_printf(
           "[BLE_UART] just-works DECLINED (locked, strike %lu)\n",
           (unsigned long)g_pair_strikes);
-    } else if (!g_auto_pair) {
-      // ★NC 必須モードなのに Just Works に落ちた = 相手が MITM 防御を要求して
-      //   いない (格下げ)。要求した保護が得られていない以上、通してはいけない。
+    } else if (!g_just_works_mode) {
       sm_bonding_decline(h);
       ++g_pair_strikes;
       BOARD::diag_printf(
-          "[BLE_UART] just-works DECLINED (SECURE モードでの格下げ拒否)\n");
+          "[BLE_UART] just-works DECLINED (NC mode downgrade)\n");
+    } else {
+      request_cdc_approval(cdc_approval_mode::JUST_WORKS, h);
     }
-    // AUTO モードでは**何もしない** = btstack がそのまま自動継続する。
-    // ここで sm_just_works_confirm() を呼んでも等価だが、実機で通っている
-    // 経路を触らない (テスト用モードのために本番経路を動かす価値が無い)。
     break;
   }
   case SM_EVENT_PASSKEY_DISPLAY_NUMBER:
     BOARD::diag_printf(
-        "[BLE_UART] passkey (enter on phone) = %06lu\n",
-        (unsigned long)sm_event_passkey_display_number_get_passkey(packet));
+        "[BLE_UART] unsupported passkey pairing request; declining\n");
+    sm_bonding_decline(con_handle);
     break;
   case SM_EVENT_PAIRING_COMPLETE:
     nc_pending_handle = HCI_CON_HANDLE_INVALID;
+    clear_cdc_approval();
     if (sm_event_pairing_complete_get_status(packet) == ERROR_CODE_SUCCESS) {
-      cmd_authorized = true;
+      cmd_authorized = g_pairing_approved;
       update_gdb_connected();
+      if (!g_pairing_approved) {
+        BOARD::diag_printf(
+            "[BLE_UART] pairing completed without CDC approval; disconnecting\n");
+        gap_disconnect(con_handle);
+        break;
+      }
+      g_pairing_approved = false;
       // ★一回券は**使ったら失効**させる。時間切れを待つと「解錠したまま
       //   飛ばす」窓が残り、施錠の意味が薄れる。
       g_pair_allow_until_us = 0;
       g_pair_strikes = 0;
       g_pair_mode_dirty = true; // 新しいボンドを数え直して施錠を掛け直す
+#if defined(SHIZUKU_BT_TLV_RAM)
       BOARD::diag_printf(
-          "[BLE_UART] pairing complete -> authorized (再施錠)\n");
+          "[BLE_UART] pairing complete -> authorized via CDC (bondless)\n");
+#else
+      BOARD::diag_printf(
+          "[BLE_UART] pairing complete -> authorized via CDC (再施錠)\n");
+#endif
       print_conn_interval("paired");
       request_fast_ci();
     } else {
       cmd_authorized = false;
+      g_pairing_approved = false;
       update_gdb_connected();
       ++g_pair_strikes;
       BOARD::diag_printf(
@@ -937,9 +1361,7 @@ static void sm_packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
       cmd_authorized = false;
       update_gdb_connected();
       BOARD::diag_printf("[BLE_UART] reencryption failed -> stays locked\n");
-#ifdef GEMINI_MODIFY_20260905
       gap_disconnect(con_handle);
-#endif
     }
     break;
   default:
@@ -1057,6 +1479,12 @@ uintptr_t method_forget_bonds(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 // ---- BT スタック起動 (旧実装の bt_stack_bringup から診断/Stage1/2
 // を落とした版) --
 static void bt_stack_bringup() {
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  crash_mark(boot_diag_breadcrumb::BTSTACK_ENTRY);
+  usb_cdc_boot_diag_set_stage(
+      shizuku::objects::boot_diag_stage::BTSTACK_INIT);
+  usb_cdc_boot_diag_set_ble("btstack-init");
+#endif
   // ★この関数は owner スレッド (poll_loop) からだけ呼ぶ。cyw43_arch_init は
   //   呼び手が poll_loop で済ませている (init は owner 1 本に集める)。ここで
   //   もう一度 init すると PIO/IRQ の再取得・ファーム再送信でハングする実測あり。
@@ -1086,11 +1514,24 @@ static void bt_stack_bringup() {
   //   ★ここで読まないと、poll スレッドが最初の 1 秒を回すまで**解錠状態**の
   //     まま HCI が上がってしまい、その窓で新規ペアリングが通る。
   g_bonded_count = (uint32_t)le_device_db_count();
-  // 既定 (g_auto_pair=false) = NC 必須。'A'/'S' コマンドで実行時に切替可能
+#if defined(SHIZUKU_BT_TLV_RAM)
+  BOARD::diag_printf(
+      "[BLE_UART] bonding disabled (RAM TLV; pairing keys are not retained)\n");
+#endif
+  // 既定 (g_just_works_mode=false) = NC 必須。'A'/'S' で切替可能
   // (apply_security_mode 参照)。
   apply_security_mode();
 
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  crash_mark(boot_diag_breadcrumb::BEFORE_GATT_INIT);
+  usb_cdc_boot_diag_set_stage(
+      shizuku::objects::boot_diag_stage::GATT_REGISTER);
+  usb_cdc_boot_diag_set_ble("gatt-init");
+#endif
   att_server_init(profile_data, att_read_callback, att_write_callback);
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  crash_mark(boot_diag_breadcrumb::AFTER_GATT_INIT);
+#endif
 
   hci_event_callback_registration.callback = &packet_handler;
   hci_add_event_handler(&hci_event_callback_registration);
@@ -1106,8 +1547,20 @@ static void bt_stack_bringup() {
   gap_advertisements_set_params(0x0030, 0x0060, 0 /*ADV_IND*/, 0, null_addr,
                                 0x07, 0x00);
   gap_advertisements_set_data(adv_len, adv_buffer);
+  gap_scan_response_set_data(scan_rsp_len, scan_rsp_buffer);
 
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  usb_cdc_boot_diag_set_stage(
+      shizuku::objects::boot_diag_stage::ADVERTISEMENT_CONFIG);
+  usb_cdc_boot_diag_set_ble("gatt-ready");
+  usb_cdc_boot_diag_set_stage(shizuku::objects::boot_diag_stage::HCI_POWER_ON);
+  usb_cdc_boot_diag_set_ble("hci-starting");
+  crash_mark(boot_diag_breadcrumb::BEFORE_HCI_POWER);
+#endif
   hci_power_control(HCI_POWER_ON);
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  crash_mark(boot_diag_breadcrumb::AFTER_HCI_POWER);
+#endif
 }
 
 // ---- BT スタック解体 → チップ電源断 ----------------------------------------
@@ -1148,6 +1601,8 @@ static void bt_full_chip_restart() {
   nc_pending_handle = HCI_CON_HANDLE_INVALID;
 
   led_owner_stopped(); // 解体中は LED を反映しない (owner 自身だけが CYW43 に触れる)
+  g_cyw43_bus_ready = 0;
+  __asm volatile("dmb" ::: "memory");
   bt_stack_teardown();
   busy_wait_us(100000); // 電源断を落ち着かせる。★sleep ではない (譲らない)
 #ifdef GEMINI_MODIFY_20260905
@@ -1161,11 +1616,15 @@ static void bt_full_chip_restart() {
     }
     busy_wait_us(100000);
   }
+  g_cyw43_bus_ready = 1;
+  __asm volatile("dmb" ::: "memory");
 #else
   if (cyw43_arch_init() != 0) {
     BOARD::diag_printf("[BLE_UART] cyw43_arch_init FAILED after reset\n");
     return;
   }
+  g_cyw43_bus_ready = 1;
+  __asm volatile("dmb" ::: "memory");
 #endif
   led_owner_started();
   bt_stack_bringup();
@@ -1176,6 +1635,31 @@ static void bt_full_chip_restart() {
 // ---- ポーリングスレッド (SPAWN で起こす。budget-0 = 主ループに戻す/戻される
 //   バトン渡し — cyw43/btstack 内部が preemption-safe でないため) ------------
 uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  crash_mark(boot_diag_breadcrumb::BLE_POLL_ENTRY);
+#endif
+  if (BOARD::core_num() != 0) {
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+    crash_mark(boot_diag_breadcrumb::BLE_CORE_VIOLATION);
+    usb_cdc_boot_diag_set_ble("wrong-core");
+    usb_cdc_boot_diag_set_stage(boot_diag_stage::ERROR);
+#endif
+    BOARD::diag_printf(
+        "[BLE_UART] refusing CYW43/BTstack poll on core %lu (required core 0)\n",
+        (unsigned long)BOARD::core_num());
+    return 1;
+  }
+  BOARD::diag_printf("[BLE_UART] poll owner core=%lu thread=%lu\n",
+                     (unsigned long)BOARD::core_num(),
+                     (unsigned long)shizuku::kernel_instance.current_thread_id());
+  g_cyw43_poll_owner_thread =
+      shizuku::kernel_instance.current_thread_id();
+  __asm volatile("dmb" ::: "memory");
+  g_cyw43_poll_active = 1;
+  __asm volatile("dmb" ::: "memory");
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  crash_mark(boot_diag_breadcrumb::BLE_POLL_OWNER);
+#endif
   // ★席に座るのはここ (このスレッド) — STREAM_BIND は発行元のオブジェクトから
   //   席を導出するので、実際に読み書きする側で座る。RX は producer (btstack の
   //   write コールバックがここのスレッドで走る)、ハブからの本線は consumer。
@@ -1245,12 +1729,56 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   // ★CYW43 の唯一の owner はこのスレッド。立ち上げ (init) → LED owner 宣言 →
   //   BTstack bring-up の順。init に失敗したら何も触らずに終わる (fail-closed:
   //   BLE は止まり、LED 書込みは LED_NO_OWNER で失敗する)。
+#if defined(SHIZUKU_RP2040) && !defined(SHIZUKU_BT_TLV_RAM)
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(SHIZUKU_CRASH_RECORD)
+  usb_cdc_boot_diag_tlv_begin();
+#endif
+  if (!repair_malformed_bt_bank()) {
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+    usb_cdc_boot_diag_set_stage(boot_diag_stage::ERROR);
+    usb_cdc_boot_diag_set_ble("bt-tlv-repair-failed");
+#endif
+#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(SHIZUKU_CRASH_RECORD)
+    usb_cdc_boot_diag_tlv_end();
+#endif
+    return 1;
+  }
+#endif
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  crash_mark(boot_diag_breadcrumb::BEFORE_CYW43_INIT);
+  usb_cdc_boot_diag_set_stage(shizuku::objects::boot_diag_stage::CYW43_INIT);
+  usb_cdc_boot_diag_set_ble("cyw43-init");
+#endif
   if (cyw43_arch_init() != 0) {
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+    usb_cdc_boot_diag_set_stage(shizuku::objects::boot_diag_stage::ERROR);
+    usb_cdc_boot_diag_set_ble("cyw43-init-failed");
+#endif
+#if defined(SHIZUKU_RP2040) && !defined(SHIZUKU_BT_TLV_RAM) && \
+    defined(SHIZUKU_BOOT_LOG_WAIT) && defined(SHIZUKU_CRASH_RECORD)
+    usb_cdc_boot_diag_tlv_end();
+#endif
+    g_cyw43_poll_active = 0;
+    __asm volatile("dmb" ::: "memory");
     BOARD::diag_printf("[BLE_UART] cyw43_arch_init FAILED at owner start (BLE/LED off)\n");
     return 1;
   }
+  g_cyw43_bus_ready = 1;
+  __asm volatile("dmb" ::: "memory");
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  crash_mark(boot_diag_breadcrumb::AFTER_CYW43_INIT);
+  usb_cdc_boot_diag_set_stage(shizuku::objects::boot_diag_stage::CYW43_READY);
+  usb_cdc_boot_diag_set_ble("cyw43-ready");
+#endif
   led_owner_started();
   bt_stack_bringup();
+#if defined(SHIZUKU_RP2040) && !defined(SHIZUKU_BT_TLV_RAM) && \
+    defined(SHIZUKU_BOOT_LOG_WAIT) && defined(SHIZUKU_CRASH_RECORD)
+  usb_cdc_boot_diag_tlv_end();
+#endif
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  crash_mark(boot_diag_breadcrumb::AFTER_HCI_POWER);
+#endif
 
   uint64_t next_adv_ensure_us = 0;
   uint64_t next_bond_check_us = 0;
@@ -1258,7 +1786,13 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   uint64_t forget_deadline_us = 0;
   last_conn_activity_us = BOARD::time_us();
   while (true) {
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+    crash_mark(boot_diag_breadcrumb::BEFORE_CYW43_POLL);
+#endif
     cyw43_arch_poll();
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+    crash_mark(boot_diag_breadcrumb::AFTER_CYW43_POLL);
+#endif
 #if defined(CYW43_WL_GPIO_LED_PIN)
     led_sync_hw();
 #endif
@@ -1273,43 +1807,9 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       }
     }
 
-    // USB CDC (診断チャネル) からの 1 文字コマンドを覗く (非ブロッキング)。
-    // NC 確認待ちなら y/n、そうでなければペアリング方式の切替コマンド。
-    {
-      int c = getchar_timeout_us(0);
-      if (nc_pending_handle != HCI_CON_HANDLE_INVALID) {
-        if (c == 'y' || c == 'Y') {
-          BOARD::diag_printf("[BLE_UART] numeric comparison confirmed\n");
-          sm_numeric_comparison_confirm(nc_pending_handle);
-          nc_pending_handle = HCI_CON_HANDLE_INVALID;
-        } else if (c == 'n' || c == 'N') {
-          BOARD::diag_printf("[BLE_UART] numeric comparison declined\n");
-          sm_bonding_decline(nc_pending_handle);
-          // ★拒否は「その相手は自分ではなかった」の表明。UART 経由の拒否
-          //   (上の (a)) と同じく失敗として数える — 数え方が経路で違うと、
-          //   DoS 判定が「どちらの口から拒んだか」に依存してしまう。
-          ++g_pair_strikes;
-          nc_pending_handle = HCI_CON_HANDLE_INVALID;
-        }
-      } else if (c == 'A') {
-        g_auto_pair = true;
-        apply_security_mode();
-        BOARD::diag_printf(
-            "[BLE_UART] pairing mode -> AUTO (Just Works, no MITM). "
-            "次の接続から有効\n");
-      } else if (c == 'R') {
-        // ★手で起こせるようにしておく。壊れてからしか通らない経路を
-        //   壊れる前に一度通しておかないと、いざという時に動く保証が無い。
-        BOARD::diag_printf(
-            "[BLE_UART] chip reset requested from the console\n");
-        restart_requested = true;
-      } else if (c == 'S') {
-        g_auto_pair = false;
-        apply_security_mode();
-        BOARD::diag_printf("[BLE_UART] pairing mode -> SECURE (NC required). "
-                           "次の接続から有効\n");
-      }
-    }
+    poll_cdc_commands();
+    process_cdc_approval_response();
+    expire_cdc_approval();
 
     // ---- ペアリング施錠まわりの世話 ------------------------------------
     // ★btstack (sm_*/gap_*/le_device_db_*) を叩いてよいのはこのループだけ。
@@ -1318,26 +1818,12 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
     {
       const uint64_t now = BOARD::time_us();
 
-      // (a) 外部からの NC 承認/拒否。CDC の 'y'/'n' と**同じ答え**を、
-      //     有線の XIAO (UART0 → shizuku_shell → CALL_METHOD) からも入れられる
-      //     ようにするための口。飛行前に USB を繋ぐ運用が無いので、承認経路が
-      //     CDC しか無いと NC が実質使えなかった。
+      // Pairing approval is deliberately restricted to CDC. Keep the legacy
+      // request API inert so another channel cannot authorize a connection.
       if (g_pair_answer_requested != 0) {
-        const uint8_t answer = g_pair_answer_requested;
         g_pair_answer_requested = 0;
-        if (nc_pending_handle != HCI_CON_HANDLE_INVALID) {
-          if (answer == 1) {
-            BOARD::diag_printf(
-                "[BLE_UART] numeric comparison confirmed (wire)\n");
-            sm_numeric_comparison_confirm(nc_pending_handle);
-          } else {
-            BOARD::diag_printf(
-                "[BLE_UART] numeric comparison declined (wire)\n");
-            sm_bonding_decline(nc_pending_handle);
-            ++g_pair_strikes;
-          }
-          nc_pending_handle = HCI_CON_HANDLE_INVALID;
-        }
+        BOARD::diag_printf(
+            "[BLE_UART] pairing answer rejected; CDC approval required\n");
       }
 
       // (b) 鍵を全部消す (施錠から締め出されたときの唯一の逃げ道)。
@@ -1422,7 +1908,7 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       if (g_pair_strikes >= PAIR_STRIKE_LIMIT && advertising_allowed(now)) {
         g_pair_strikes = 0;
         g_pair_block_until_us = now + PAIR_BLOCK_US;
-        gap_advertisements_enable(0);
+        set_advertising(false);
         if (con_handle != HCI_CON_HANDLE_INVALID)
           gap_disconnect(con_handle);
         BOARD::diag_printf(
@@ -1529,7 +2015,7 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
     if (con_handle == HCI_CON_HANDLE_INVALID &&
         BOARD::time_us() >= next_adv_ensure_us &&
         advertising_allowed(BOARD::time_us())) {
-      gap_advertisements_enable(1);
+      set_advertising(true);
       next_adv_ensure_us = BOARD::time_us() + 1000000ull;
     }
 
@@ -1556,7 +2042,13 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       }
     }
 
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+    crash_mark(boot_diag_breadcrumb::BEFORE_SLEEP);
+#endif
     api(shizuku::object_api::SLEEP_US, 1000);
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+    crash_mark(boot_diag_breadcrumb::AFTER_SLEEP);
+#endif
   }
   return 0;
 }
@@ -1631,6 +2123,21 @@ uintptr_t ble_uart_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 
 } // namespace
 
+extern "C" uint32_t shizuku_cyw43_flash_guard_state(
+    uint32_t *owner_thread, uint32_t *bus_ready, uint32_t *cs_high) {
+  __asm volatile("dmb" ::: "memory");
+  if (owner_thread != nullptr)
+    *owner_thread = g_cyw43_poll_owner_thread;
+  const uint32_t ready = g_cyw43_bus_ready;
+  if (bus_ready != nullptr)
+    *bus_ready = ready;
+  if (cs_high != nullptr)
+    *cs_high = ready ? (gpio_get(CYW43_PIN_WL_CS) ? 1u : 0u) : 1u;
+  const uint32_t active = g_cyw43_poll_active;
+  __asm volatile("dmb" ::: "memory");
+  return active;
+}
+
 uint32_t register_ble_uart(uintptr_t object_id) {
   s_object_id = object_id;
   const uintptr_t OBJECT = object_id;
@@ -1644,12 +2151,19 @@ uint32_t register_ble_uart(uintptr_t object_id) {
           shizuku::OBJECT_PRIVILEGED | shizuku::OBJECT_ON_CORE(0));
   const auto started = api(shizuku::object_api::CALL_METHOD, OBJECT, 0, 0);
   if (created.error != 0 || started.error != 0 || started.value != 0) {
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+    usb_cdc_boot_diag_set_ble("register-failed");
+    usb_cdc_boot_diag_set_stage(shizuku::objects::boot_diag_stage::ERROR);
+#endif
     BOARD::diag_printf(
         "[BLE_UART] FAILED: create=%lu call=%lu exports_failed=%lu\n",
         (unsigned long)created.error, (unsigned long)started.error,
         (unsigned long)started.value);
     return 1;
   }
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  usb_cdc_boot_diag_set_ble("registered");
+#endif
   BOARD::diag_printf("[BLE_UART] registered (object %lu, rx stream %lu)\n",
                      (unsigned long)OBJECT, (unsigned long)g_rx_stream_id);
   return 0;
@@ -1657,11 +2171,18 @@ uint32_t register_ble_uart(uintptr_t object_id) {
 
 uint32_t start_ble_uart(uintptr_t object_id) {
   const uintptr_t OBJECT = object_id;
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  usb_cdc_boot_diag_set_ble("poll-starting");
+#endif
   // ★method 0 (main) を起こしてはいけない — export して戻るだけ。ポーリングは
   //   別スレッドで (apps/thermal.cpp の sampler と同じ形)。
   const auto spawned =
       api(shizuku::object_api::SPAWN, OBJECT, (uintptr_t)method::POLL, 0);
   if (spawned.error != 0) {
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+    usb_cdc_boot_diag_set_ble("poll-spawn-failed");
+    usb_cdc_boot_diag_set_stage(shizuku::objects::boot_diag_stage::ERROR);
+#endif
     BOARD::diag_printf("[BLE_UART] could not spawn the poll loop (%lu)\n",
                        (unsigned long)spawned.error);
     return 1;

@@ -146,9 +146,8 @@ shizuku_armv8m_pendsv_entry:
 // 戻り口 — ハンドラが普通に return するとここへ落ちる (カーネルが lr に載せる)。
 // 自分の枠を 1 枚ぶん巻き戻す。
 //   r0 = 呼び先の戻り値 (C の return 値がそのまま乗っている)
-// ★ここでは**レジスタから情報を拾わない**。呼び先は普通の C 関数で、callee-saved を
-//   自由に潰すので信用できない。ネストの情報はカーネルが積んだフレームの側にあり、
-//   何段落とすかはこれを受け取ったカーネルオブジェクトが自分の台帳から決める。
+// ★ここでは callee-saved を信用しない。a4 の marker は syscall frame に退避され、
+//   dispatch が ledger の unwind floor へ置き換える。
 // ---------------------------------------------------------------------------
 .thumb_func
 .global shizuku_armv8m_return_stub
@@ -156,10 +155,13 @@ shizuku_armv8m_pendsv_entry:
 .type shizuku_armv8m_return_stub, %function
 shizuku_armv8m_return_stub:
     mov   r2, r0        // a2 = 戻り値
-    movs  r1, #1        // a1 = 落とす段数 1
+    movs  r1, #1        // legacy one-pop notification
     movs  r3, #0        // a3 = エラーコード 0 (成功)
-    movs  r3, #0
-    mov   r12, r3       // a4 = 申告なし (申告はこれを受けるハンドラ側が行う)
+    movs  r3, #0xA5
+    lsls  r3, r3, #8
+    adds  r3, #0x5A
+    mov   r12, r3       // RETURN_STUB_MARKER
+    movs  r3, #0        // keep the RETURN error argument clear; marker lives in r12
     movs  r0, #2        // a0 = RETURN (kernel_abi.hpp と static_assert で両縛り)
     svc   0
     b     shizuku_return_stub_failed // 戻ってきた = 巻き戻しが弾かれた

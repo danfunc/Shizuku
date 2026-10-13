@@ -1,4 +1,108 @@
-idf_component_register(SRCS "shizuku_boot.c" "usb_console.c" "early_diag.c" PRIV_REQUIRES esp_hal_usb esp_hal_wdt esp_rom soc)
+if(SHIZUKU_ESP_BLE OR SHIZUKU_C5_BLE OR "$ENV{SHIZUKU_ESP_BLE}" STREQUAL "1" OR "$ENV{SHIZUKU_C5_BLE}" STREQUAL "1")
+  set(shizuku_ble_priv_requires esp_hal_usb esp_hal_wdt esp_rom soc heap bt esp_system esp_libc esp_timer nvs_flash log esp_hw_support esp_app_format)
+  if(IDF_TARGET STREQUAL "esp32c5")
+    set(shizuku_ble_chip_src "../../radio/ble_chip_c5.cpp")
+    set(shizuku_ble_intr_src "../../radio/c5_intr_alloc.cpp")
+    set(shizuku_ble_chip_dir "${CMAKE_CURRENT_LIST_DIR}/../../../../chips/esp32_c5")
+  elseif(IDF_TARGET STREQUAL "esp32c6")
+    set(shizuku_ble_chip_src "../../radio/ble_chip_c6.cpp")
+    set(shizuku_ble_intr_src "../../radio/c6_intr_alloc.cpp")
+    set(shizuku_ble_chip_dir "${CMAKE_CURRENT_LIST_DIR}/../../../../chips/esp32_c6")
+    list(APPEND shizuku_ble_priv_requires esp_driver_gpio esp_phy)
+  else()
+    message(FATAL_ERROR "ESP BLE profile unsupported for IDF_TARGET=${IDF_TARGET}")
+  endif()
+  set(shizuku_ble_extra_srcs "")
+  if("$ENV{SHIZUKU_C5_LIBC_LOCK_DIAG_WRAP}" STREQUAL "1")
+    list(APPEND shizuku_ble_extra_srcs "../../radio/c5_libc_lock_diag.cpp")
+  endif()
+  idf_component_register(
+      SRCS "shizuku_boot.c" "usb_console.c" "early_diag.c"
+           "esp_ble_stage1.cpp" ${shizuku_ble_chip_src} ${shizuku_ble_intr_src}
+           ${shizuku_ble_extra_srcs}
+           "../../freertos_compat/compat.cpp"
+           "../../freertos_compat/freertos_api.cpp"
+           "../../freertos_compat/shizuku_port.cpp"
+      PRIV_REQUIRES ${shizuku_ble_priv_requires})
+else()
+  idf_component_register(SRCS "shizuku_boot.c" "usb_console.c" "early_diag.c"
+                         PRIV_REQUIRES esp_hal_usb esp_hal_wdt esp_rom soc)
+endif()
+if(SHIZUKU_ESP_BLE OR SHIZUKU_C5_BLE OR "$ENV{SHIZUKU_ESP_BLE}" STREQUAL "1" OR "$ENV{SHIZUKU_C5_BLE}" STREQUAL "1")
+  if(NOT DEFINED SHIZUKU_ESP_BLE_PREFER_1M_PHY)
+    set(SHIZUKU_ESP_BLE_PREFER_1M_PHY 0)
+  endif()
+  if(NOT SHIZUKU_ESP_BLE_PREFER_1M_PHY MATCHES "^[01]$")
+    message(FATAL_ERROR "SHIZUKU_ESP_BLE_PREFER_1M_PHY must be 0 or 1")
+  endif()
+  target_compile_definitions(${COMPONENT_LIB} PRIVATE
+      SHIZUKU_ESP_BLE=1 SHIZUKU_FREERTOS_COMPAT_TINY=1 SHIZUKU_FREERTOS_LINK_WRAP=1
+      SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG=1
+      SHIZUKU_ESP_BLE_ENABLE_SCHED_DIAG_IRQ_MASK=1
+      SHIZUKU_ESP_BLE_PREFER_1M_PHY=${SHIZUKU_ESP_BLE_PREFER_1M_PHY})
+  if(IDF_TARGET STREQUAL "esp32c6")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE SHIZUKU_ESP32_C6=1)
+  endif()
+  if("$ENV{SHIZUKU_C5_MUTEX_SELF_RETAKE_FAILFAST}" STREQUAL "1")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE SHIZUKU_C5_MUTEX_SELF_RETAKE_FAILFAST=1)
+  endif()
+  target_include_directories(${COMPONENT_LIB} BEFORE PRIVATE
+      "${CMAKE_CURRENT_LIST_DIR}/../../freertos_compat/include"
+      "${CMAKE_CURRENT_LIST_DIR}/../../freertos_compat"
+      "${CMAKE_CURRENT_LIST_DIR}/../../radio"
+      "${CMAKE_CURRENT_LIST_DIR}/../../../../internal_headers")
+  target_include_directories(${COMPONENT_LIB} PRIVATE
+      "${shizuku_ble_chip_dir}")
+  target_link_options(${COMPONENT_LIB} INTERFACE
+      "-Wl,--wrap=esp_intr_alloc" "-Wl,--wrap=esp_intr_free"
+      "-Wl,--wrap=esp_intr_enable" "-Wl,--wrap=esp_intr_disable")
+  target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=heap_caps_malloc")
+  target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--undefined=shizuku_esp_ble_stage1_start")
+  target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,-Map=${CMAKE_BINARY_DIR}/shizuku_${IDF_TARGET}.map")
+  set(shizuku_freertos_wraps
+      xPortInIsrContext portENTER_CRITICAL portEXIT_CRITICAL portENTER_CRITICAL_ISR portEXIT_CRITICAL_ISR
+      vPortEnterCritical vPortExitCritical vPortClearInterruptMaskFromISR
+      vPortYield vPortYieldFromISR xPortSetInterruptMaskFromISR
+      vTaskSetTimeOutState vTaskInternalSetTimeOutState xTaskCheckForTimeOut xQueueSemaphoreTake
+      pcTaskGetName pvTaskGetThreadLocalStoragePointer ulTaskGenericNotifyTake
+      uxQueueMessagesWaitingFromISR uxQueueSpacesAvailable vListInitialise
+      vQueueDelete vQueueDeleteWithCaps vSemaphoreDeleteWithCaps vTaskDelete
+      vTaskGenericNotifyGiveFromISR vTaskGetSnapshot vTaskPlaceOnEventList
+      vTaskPrioritySet vTaskSetThreadLocalStoragePointerAndDelCallback vTaskSuspendAll
+      xQueueCreateCountingSemaphore xQueueCreateCountingSemaphoreStatic
+      xQueueCreateMutex xQueueCreateMutexStatic xQueueGenericCreate
+      xQueueGenericCreateStatic xQueueGenericReset xQueueGenericSend
+      xQueueGenericSendFromISR xQueueGetMutexHolder xQueueGetMutexHolderFromISR
+      xQueueGiveFromISR xQueueGiveMutexRecursive xQueueTakeMutexRecursive
+      xSemaphoreCreateGenericWithCaps xTaskGenericNotify xTaskGenericNotifyWait
+      xTaskGetCoreID xTaskGetCurrentTaskHandleForCore xTaskGetIdleTaskHandleForCore
+      xTaskRemoveFromEventList xTaskResumeAll xTaskGenericNotifyFromISR
+      xTaskGenericNotifyStateClear
+      ulTaskGenericNotifyValueClear
+      xTaskCreate xTaskCreatePinnedToCore xTaskCreatePinnedToCoreWithCaps vTaskDelay taskYIELD
+      uxTaskPriorityGet xTaskGetTickCount xTaskGetTickCountFromISR xTaskGetCurrentTaskHandle
+      xTaskGetSchedulerState vTaskSuspend vTaskResume xTaskResumeFromISR
+      xQueueCreate xQueueCreateWithCaps xQueueSend xQueueSendToBack xQueueSendToFront
+      xQueueSendFromISR xQueueSendToBackFromISR xQueueSendToFrontFromISR xQueueReceive
+      xQueueReceiveFromISR uxQueueMessagesWaiting xQueueIsQueueEmptyFromISR
+      xSemaphoreCreateBinary xSemaphoreCreateCounting xSemaphoreCreateMutex
+      xSemaphoreCreateRecursiveMutex xSemaphoreTake xSemaphoreTakeRecursive
+      xSemaphoreTakeFromISR xSemaphoreGive xSemaphoreGiveRecursive xSemaphoreGiveFromISR
+      uxSemaphoreGetCount xEventGroupCreate xEventGroupSetBits xEventGroupClearBits
+      xEventGroupWaitBits xTimerCreate xTimerStart xTimerStartFromISR xTimerStop
+      xTimerReset xTimerDelete xTimerChangePeriod xTimerResetFromISR xTimerStopFromISR
+      xTimerChangePeriodFromISR xTimerGetExpiryTime xTimerIsTimerActive pvTimerGetTimerID)
+  if("$ENV{SHIZUKU_C5_LIBC_LOCK_DIAG_WRAP}" STREQUAL "1")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE SHIZUKU_C5_LIBC_LOCK_DIAG_WRAP=1)
+    list(APPEND shizuku_freertos_wraps
+        _lock_acquire _lock_acquire_recursive _lock_try_acquire _lock_try_acquire_recursive
+        __retarget_lock_acquire __retarget_lock_acquire_recursive
+        __retarget_lock_try_acquire __retarget_lock_try_acquire_recursive)
+  endif()
+  foreach(api IN LISTS shizuku_freertos_wraps)
+    target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=${api}")
+  endforeach()
+endif()
 
 # ★カーネルのアーカイブを「リンクした」だけでは中身が入らない。2 段の落とし穴がある:
 #   1. 通常のリンクは、参照されないメンバーを抽出しない → WHOLE_ARCHIVE で全部抽出する。
@@ -10,7 +114,11 @@ add_library(shizuku_kernel STATIC IMPORTED GLOBAL)
 set_target_properties(shizuku_kernel PROPERTIES IMPORTED_LOCATION "${SHIZUKU_KERNEL_ARCHIVE}")
 target_link_libraries(${COMPONENT_LIB} INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,shizuku_kernel>")
 
-string(REGEX REPLACE "gcc(\\.exe)?$" "nm\\1" SHIZUKU_NM "${CMAKE_C_COMPILER}")
+if(CMAKE_C_COMPILER MATCHES "gcc\\.exe$")
+  string(REGEX REPLACE "gcc\\.exe$" "nm.exe" SHIZUKU_NM "${CMAKE_C_COMPILER}")
+else()
+  string(REGEX REPLACE "gcc$" "nm" SHIZUKU_NM "${CMAKE_C_COMPILER}")
+endif()
 execute_process(
   COMMAND "${SHIZUKU_NM}" -g --defined-only -P "${SHIZUKU_KERNEL_ARCHIVE}"
   OUTPUT_VARIABLE SHIZUKU_NM_OUT RESULT_VARIABLE SHIZUKU_NM_RC)

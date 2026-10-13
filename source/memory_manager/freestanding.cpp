@@ -7,10 +7,16 @@ extern "C" void free(void *ptr);
 namespace shizuku {
 namespace memory_managers {
 
-// ESP32-C6 専用静的 object arena (128KiB)
+// ESP32-C5/C6 pre-init static backing arena. The BLE C5 controller-init profile
+// has a separate, bounded object arena and must leave DRAM for the BT controller.
 // start_cpu0 置換により IDF libc/heap 初期化をバイパスしているため、
 // 実行時に未初期化の libc malloc() を呼ばず、静的メモリ領域から安全に割り当てる。
-alignas(8) static uint8_t s_c6_kernel_heap[128 * 1024];
+#if defined(SHIZUKU_C5_BLE)
+constexpr size_t kFreestandingHeapBytes = 64 * 1024;
+#else
+constexpr size_t kFreestandingHeapBytes = 128 * 1024;
+#endif
+alignas(8) static uint8_t s_c6_kernel_heap[kFreestandingHeapBytes];
 static uintptr_t s_allocated_offset = 0;
 
 templates::result<void *> freestanding::kernel_malloc(uintptr_t size) {

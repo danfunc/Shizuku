@@ -28,9 +28,42 @@ extern "C" char __data_end__[];
 #include "hardware/structs/watchdog.h"
 #include "pico/bootrom.h"
 #include "shizuku/objects/usb_cdc.hpp"
+namespace {
+struct selftest_fault_t {
+  uint32_t magic, phase, count;
+  uint32_t r0, r1, r2, r3, r12, lr, pc, xpsr;
+  uint32_t exc_return, control, ipsr;
+  uint32_t tick_pc, tick_lr, tick_xpsr, tick_hits, tick_stage, arg;
+  uint32_t progress_magic, progress_stage, progress_a, progress_b;
+  uint32_t tick_psp, tick_control, tick_frame, tick_frame_uses_psp;
+};
+volatile selftest_fault_t __uninitialized_ram(g_st_fault);
+constexpr uint32_t kStFaultMagic = 0x53544654u; // "STFT"
+constexpr uint32_t kStProgressMagic = 0x53545047u; // "STPG"
+}
 // 停止箇所の最後の進捗を、watchdog リセットをまたいで読めるように scratch レジスタへ
 // 焼く (SRAM ではなく、USB/割込みが死んでいても書ける独立したレジスタ)。
 extern "C" void shizuku_selftest_progress_mark(uint32_t stage, uint32_t a, uint32_t b) {
+  const uint32_t run_id = a >> 8;
+  if (g_st_fault.magic != kStFaultMagic) {
+    g_st_fault.magic = kStFaultMagic;
+    g_st_fault.phase = 0;
+    g_st_fault.count = 0;
+    g_st_fault.tick_hits = 0;
+  } else if (run_id != 0 &&
+             (g_st_fault.progress_a >> 8) != run_id) {
+    g_st_fault.phase = 0;
+    g_st_fault.count = 0;
+    g_st_fault.tick_hits = 0;
+  }
+  // Preserve the latest checkpoint outside scratch[0..3] as the crash recorder
+  // uses those registers for a fault snapshot.
+  g_st_fault.progress_magic = 0;
+  g_st_fault.progress_stage = stage;
+  g_st_fault.progress_a = a;
+  g_st_fault.progress_b = b;
+  __asm volatile("dmb" ::: "memory");
+  g_st_fault.progress_magic = kStProgressMagic;
   watchdog_hw->scratch[0] = 0x53505247u; // "SPRG"
   watchdog_hw->scratch[1] = stage;
   watchdog_hw->scratch[2] = a;
@@ -38,14 +71,6 @@ extern "C" void shizuku_selftest_progress_mark(uint32_t stage, uint32_t a, uint3
 }
 namespace {
 // fault と SysTick 標本の記録。watchdog リセットをまたいで残す (scratch は満杯)。
-struct selftest_fault_t {
-  uint32_t magic, phase, count;
-  uint32_t r0, r1, r2, r3, r12, lr, pc, xpsr;
-  uint32_t exc_return, control, ipsr;
-  uint32_t tick_pc, tick_lr, tick_xpsr, tick_hits, tick_stage, arg;
-};
-volatile selftest_fault_t __uninitialized_ram(g_st_fault);
-constexpr uint32_t kStFaultMagic = 0x53544654u; // "STFT"
 void selftest_progress_panic_pump(uint32_t ms) {
   fflush(stdout);
   shizuku::objects::usb_cdc_isolate_for_panic();
@@ -82,6 +107,7 @@ extern "C" void shizuku_selftest_fault_phase(uint32_t phase, uint32_t arg) {
   g_st_fault.arg = arg;
 }
 extern "C" void shizuku_selftest_tick_sample(const uint32_t *frame) {
+  if (get_core_num() != 0) return;
   if (g_st_fault.magic != kStFaultMagic) {
     g_st_fault.magic = kStFaultMagic;
     g_st_fault.count = 0;
@@ -92,6 +118,19 @@ extern "C" void shizuku_selftest_tick_sample(const uint32_t *frame) {
   g_st_fault.tick_lr = frame[5];
   g_st_fault.tick_xpsr = frame[7];
   g_st_fault.tick_stage = watchdog_hw->scratch[1];
+  uint32_t current_psp;
+  __asm volatile("mrs %0, PSP" : "=r"(current_psp));
+  const bool frame_uses_psp = current_psp == (uintptr_t)frame;
+  const uint32_t stack_align = (frame[7] >> 9) & 1u;
+  // SysTick supplies a frame from PSP for Thread mode and MSP for Handler mode.
+  // Record the interrupted thread's pre-exception PSP (or the current PSP if a
+  // higher-priority handler was sampled) and the saved CONTROL for this thread.
+  g_st_fault.tick_psp = frame_uses_psp
+                            ? (uint32_t)(uintptr_t)frame + 32u + stack_align * 4u
+                            : current_psp;
+  g_st_fault.tick_control = shizuku::kernel_instance.current_context()->control;
+  g_st_fault.tick_frame = (uint32_t)(uintptr_t)frame;
+  g_st_fault.tick_frame_uses_psp = frame_uses_psp ? 1u : 0u;
   g_st_fault.tick_hits = g_st_fault.tick_hits + 1u;
 }
 extern "C" bool shizuku_selftest_fault_read(uint32_t *out) {
@@ -102,6 +141,10 @@ extern "C" bool shizuku_selftest_fault_read(uint32_t *out) {
   out[9] = g_st_fault.exc_return; out[10] = g_st_fault.control; out[11] = g_st_fault.ipsr;
   out[12] = g_st_fault.tick_pc; out[13] = g_st_fault.tick_lr; out[14] = g_st_fault.tick_xpsr;
   out[15] = g_st_fault.tick_hits; out[16] = g_st_fault.tick_stage; out[17] = g_st_fault.arg;
+  out[18] = g_st_fault.progress_magic; out[19] = g_st_fault.progress_stage;
+  out[20] = g_st_fault.progress_a; out[21] = g_st_fault.progress_b;
+  out[22] = g_st_fault.tick_psp; out[23] = g_st_fault.tick_control;
+  out[24] = g_st_fault.tick_frame; out[25] = g_st_fault.tick_frame_uses_psp;
   g_st_fault.magic = 0;
   return true;
 }
@@ -117,10 +160,13 @@ void rp2040_pico_w::init(uint32_t core){
     exception_set_exclusive_handler(HARDFAULT_EXCEPTION,shizuku_armv6m_fault_entry);
   }
   multicore_lockout_victim_init();
-  // 優先度の値と bit 数 (RP2040 は 2 bit = 4 段) は chips/rp2040/chip.hpp。
-  // 順序は syscall > SysTick > USB > PendSV。HardFault は ARMv6-M で固定優先度 -1
-  // なので USB より下には置けない。
-  exception_set_priority(SVCALL_EXCEPTION,SOC::kPrioritySvc);
+  // A flash-safe lockout request arrives on SIO_FIFO_IRQ_NUM(core). Keep it
+  // above SVC so the victim can be parked even if it is inside svc_dispatch.
+  irq_set_priority(SIO_FIFO_IRQ_NUM(core), 0x00);
+  // RP2040 has four configurable levels. SIO lockout uses 0x00; keep SVC
+  // below it so a lockout can interrupt a victim in svc_dispatch. SysTick,
+  // USB, and PendSV retain their existing priorities.
+  exception_set_priority(SVCALL_EXCEPTION,0x40);
   exception_set_priority(SYSTICK_EXCEPTION,SOC::kPrioritySysTick);
   exception_set_priority(PENDSV_EXCEPTION,SOC::kPriorityPendSv);
   irq_set_priority(USBCTRL_IRQ,SOC::kPriorityUsbCtrl);
@@ -187,17 +233,33 @@ void rp2040_pico_w::park_other_cores(){
 #endif
   if (!multicore_lockout_victim_is_initialized(other))
     return;
+#if defined(SHIZUKU_CRASH_RECORD)
+  shizuku::objects::usb_cdc_boot_diag_breadcrumb(
+      shizuku::objects::boot_diag_breadcrumb::MULTICORE_LOCKOUT_ENTRY);
+#endif
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
   shizuku_selftest_progress_mark(721, other, 0);
 #endif
   multicore_lockout_start_blocking();
   g_parked = true;
+#if defined(SHIZUKU_CRASH_RECORD)
+  shizuku::objects::usb_cdc_boot_diag_breadcrumb(
+      shizuku::objects::boot_diag_breadcrumb::MULTICORE_LOCKOUT_EXIT);
+#endif
 }
 void rp2040_pico_w::resume_other_cores(){
   if (!g_parked)
     return;
   g_parked = false;
+#if defined(SHIZUKU_CRASH_RECORD)
+  shizuku::objects::usb_cdc_boot_diag_breadcrumb(
+      shizuku::objects::boot_diag_breadcrumb::MULTICORE_LOCKOUT_ENTRY);
+#endif
   multicore_lockout_end_blocking();
+#if defined(SHIZUKU_CRASH_RECORD)
+  shizuku::objects::usb_cdc_boot_diag_breadcrumb(
+      shizuku::objects::boot_diag_breadcrumb::MULTICORE_LOCKOUT_EXIT);
+#endif
 }
 void rp2040_pico_w::diag_mute(bool){}
 int rp2040_pico_w::dma_claim(){return dma_claim_unused_channel(false);}
@@ -214,18 +276,41 @@ uint32_t rp2040_pico_w::cycles_per_us(){return clock_get_hz(clk_sys)/1000000u;}
 uint64_t rp2040_pico_w::time_us(){return time_us_64();}
 uintptr_t rp2040_pico_w::unprivileged_floor(){return ((uintptr_t)__end__+31u)&~(uintptr_t)31u;}
 void rp2040_pico_w::diag_printf(const char*f,...){
-  static char lines[2][384];
-  const auto state=shizuku::kernel_services::irq_save();
-  char*line=lines[shizuku::chips::rp2040::chip::core_id()];
+  char line[384];
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  shizuku::objects::usb_cdc_boot_diag_breadcrumb(
+      shizuku::objects::boot_diag_breadcrumb::DIAG_PRINTF_ENTRY);
+#endif
   va_list a;va_start(a,f);
-  int n=vsnprintf(line,sizeof(lines[0]),f,a);
+  int n=vsnprintf(line,sizeof(line),f,a);
   va_end(a);
-  if(n>(int)sizeof(lines[0])-1)n=(int)sizeof(lines[0])-1;
-  if(n>0)shizuku::objects::usb_cdc_diag_write_line(line,(uint32_t)n);
-  shizuku::kernel_services::irq_restore(state);
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  shizuku::objects::usb_cdc_boot_diag_breadcrumb(
+      shizuku::objects::boot_diag_breadcrumb::DIAG_FORMAT_DONE);
+#endif
+  if(n>(int)sizeof(line)-1)n=(int)sizeof(line)-1;
+  if(n>0){
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+    shizuku::objects::usb_cdc_boot_diag_breadcrumb(
+        shizuku::objects::boot_diag_breadcrumb::DIAG_CDC_WRITE);
+#endif
+    shizuku::objects::usb_cdc_diag_write_line(line,(uint32_t)n);
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+    shizuku::objects::usb_cdc_boot_diag_breadcrumb(
+        shizuku::objects::boot_diag_breadcrumb::DIAG_CDC_WRITTEN);
+#endif
+  }
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+  shizuku::objects::usb_cdc_boot_diag_breadcrumb(
+      shizuku::objects::boot_diag_breadcrumb::DIAG_PRINTF_EXIT);
+#endif
 }
 [[noreturn]] void rp2040_pico_w::panic(const char*m){
   printf("PANIC: %s\n",m);
+#if defined(SHIZUKU_CRASH_RECORD)
+  shizuku::objects::usb_cdc_boot_diag_breadcrumb(
+      shizuku::objects::boot_diag_breadcrumb::IRQ_DISABLE_ENTRY);
+#endif
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
   selftest_progress_panic_pump(3000);
 #endif
@@ -234,6 +319,10 @@ void rp2040_pico_w::diag_printf(const char*f,...){
 // Referenced by PICO_PANIC_FUNCTION from pico_config_extra_headers.h.
 extern "C" [[noreturn]] void shizuku_panic_dump(const char *format,...){
   va_list args;va_start(args,format);vprintf(format,args);va_end(args);
+#if defined(SHIZUKU_CRASH_RECORD)
+  shizuku::objects::usb_cdc_boot_diag_breadcrumb(
+      shizuku::objects::boot_diag_breadcrumb::IRQ_DISABLE_ENTRY);
+#endif
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
   selftest_progress_panic_pump(3000);
 #endif

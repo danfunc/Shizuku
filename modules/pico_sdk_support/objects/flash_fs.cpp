@@ -5,10 +5,15 @@
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 #include "pico/time.h"
+#include "pico/error.h"
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/objects/flash_fs.hpp"
 #include "shizuku/objects/flash_map.hpp"
+#include "shizuku/objects/flash_ops.hpp"
+#if defined(SHIZUKU_BOOT_LOG_WAIT)
+#include "shizuku/objects/usb_cdc.hpp"
+#endif
 
 // ★リンカが置いたファーム末尾。名前空間の中に書くと C++ のマングリングが効いて
 //   別物になるので、必ずファイルスコープの extern "C" で受ける (同じ罠を
@@ -54,16 +59,9 @@ namespace {
 
 using ARCH = KERNEL::ARCH;
 
-// ★消去中は XIP が止まる = flash 上のコードを誰も実行できない。もう一方のコアが
-//   その間に flash を踏むと即死するので、本来は相手を RAM 上へ退避させて止める
-//   (pico-sdk の flash_safe_execute) 必要がある。今の構成は 1 コアなので割り込みを
-//   落とすだけで足りる — が、「足りる理由」は構成に依存しているので、構成が
-//   変わったらここで気づけるようにしておく。
-// ★多コアでは割り込みを落とすだけでは足りない。消去中は XIP そのものが止まるので、
-//   もう一方のコアが flash を踏んだ瞬間に死ぬ。BOARD::park_other_cores() が
-//   相手を RAM 上のコードへ引き剥がして待たせる (board.cpp の注記を参照)。
-//   ★止めるのは「行儀」ではなく機械の要求。そして止めている間、相手のコアは
-//     何も進まない — **書き込みは両方のコアを止める操作**。
+// ★媒体操作は flash_ops に集約する。そこで他コアを RAM 上へ退避させ、
+//   割り込みと MPU を制御してから SDK の flash_range_* を呼ぶ。
+//   XIP は停止するため、書き込み元は必ず SRAM に置く。
 
 struct call_result {
   uintptr_t error;
@@ -220,35 +218,20 @@ uint32_t g_erase_count = 0;
 uint32_t g_program_count = 0;
 uint32_t g_erased_bytes = 0;
 
-// ★論理的な 1 操作 (store / remove / format) を丸ごと囲むための入れ物。
-//   囲まなくても flash_write が個別に止めるので**正しさは変わらない** — 変わるのは
-//   止め直す回数だけ (1 回の store で 3 回 → 1 回)。正しさを「気をつけて囲むこと」に
-//   依存させないために、入れ子で数える形にしてある (board.cpp の注記)。
-struct stop_the_world {
-  stop_the_world() { KERNEL::BOARD::park_other_cores(); }
-  ~stop_the_world() { KERNEL::BOARD::resume_other_cores(); }
-  stop_the_world(const stop_the_world &) = delete;
-  stop_the_world &operator=(const stop_the_world &) = delete;
-};
-
 void flash_write(uint32_t offset, const uint8_t *ram_data, uint32_t bytes,
                  bool erase_first, uint32_t erase_bytes) {
-  // ★順序が大事: **先に相手を止めてから**自分の割り込みを落とす。逆にすると、
-  //   相手を止めるための往復 (FIFO と応答待ち) が割り込みを落とした状態で走る
-  //   ことになり、応答が来ないまま固まり得る。
+  // Parking, interrupt control, and measurement are centralized in flash_ops.
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(810);
 #endif
   FS_PROG(700, offset);
-  KERNEL::BOARD::park_other_cores();
   FS_PROG(701, offset);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(811);
 #endif
-  const uint32_t interrupts = save_and_disable_interrupts();
-  // ★消去・書込み中の ROM ルーチンは XIP 領域や周辺レジスタを特権で触る。MPU が
-  //   有効だとそこで fault するので、割込み禁止・他コア停止の区間だけ止める。
-  ARCH::protection_disable();
+#if defined(SHIZUKU_CRASH_RECORD)
+  usb_cdc_boot_diag_breadcrumb(boot_diag_breadcrumb::IRQ_DISABLE_ENTRY);
+#endif
   FS_PROG(702, offset);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
   uint32_t fs_control, fs_primask;
@@ -267,13 +250,15 @@ void flash_write(uint32_t offset, const uint8_t *ram_data, uint32_t bytes,
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     shizuku_boot_trace_phase(812);
 #endif
-    const uint64_t began = ::time_us_64();
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
     shizuku_selftest_progress_mark(703, offset, fs_info);
 #endif
-    ::flash_range_erase(offset, erase_bytes);
+    flash_ops::timing measure{};
+    const int rc = flash_ops::erase(offset, erase_bytes, &measure);
+    if (rc != PICO_OK)
+      KERNEL::BOARD::panic("flash_fs erase rejected by flash service");
     FS_PROG(704, offset);
-    g_erase_us += ::time_us_64() - began;
+    g_erase_us += measure.elapsed_us;
     ++g_erase_count;
     g_erased_bytes += erase_bytes;
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
@@ -284,11 +269,13 @@ void flash_write(uint32_t offset, const uint8_t *ram_data, uint32_t bytes,
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     shizuku_boot_trace_phase(814);
 #endif
-    const uint64_t began = ::time_us_64();
     FS_PROG(705, offset);
-    ::flash_range_program(offset, ram_data, bytes);
+    flash_ops::timing measure{};
+    const int rc = flash_ops::program(offset, ram_data, bytes, &measure);
+    if (rc != PICO_OK)
+      KERNEL::BOARD::panic("flash_fs program rejected by flash service");
     FS_PROG(706, offset);
-    g_program_us += ::time_us_64() - began;
+    g_program_us += measure.elapsed_us;
     ++g_program_count;
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     shizuku_boot_trace_phase(815);
@@ -297,10 +284,10 @@ void flash_write(uint32_t offset, const uint8_t *ram_data, uint32_t bytes,
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
   fs_vtable[3] = fs_old_fault;
 #endif
-  ARCH::protection_enable();
-  restore_interrupts(interrupts);
+#if defined(SHIZUKU_CRASH_RECORD)
+  usb_cdc_boot_diag_breadcrumb(boot_diag_breadcrumb::IRQ_RESTORE_EXIT);
+#endif
   FS_PROG(707, offset);
-  KERNEL::BOARD::resume_other_cores();
   FS_PROG(708, offset);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(816);
@@ -340,7 +327,6 @@ void directory_rebuild(bool keep_live) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(801);
 #endif
-  stop_the_world stopped; // 消去 + 書き直しをまとめて 1 回の停止で済ませる
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(802);
 #endif
@@ -405,7 +391,6 @@ uintptr_t flash_store_method(uintptr_t argument, uintptr_t, uintptr_t,
   // ★1 回の store は「中身のページ + 古い項目を殺す + 新項目」で最大 3 回書く。
   //   ここで囲むと止めるのは 1 回で済む (囲まなくても正しいが、止め直す往復が
   //   そのぶん減る)。
-  stop_the_world stopped;
   const uint32_t reserved = sector_round_up(request->bytes);
   const uint32_t bump = derive_bump();
   if (bump + reserved > REGION_ADDRESS + REGION_BYTES)
@@ -472,7 +457,6 @@ uintptr_t flash_remove_method(uintptr_t argument, uintptr_t, uintptr_t,
   // ★消えるのは**名前だけ**。領域は返らない。返すには後ろを詰めるしかなく、
   //   詰めればアドレスが動く — アドレスこそがこの FS の API なので、動かせない。
   //   ★殺すのはビットを落とす向きの遷移なので、消去は要らない。
-  stop_the_world stopped;
   directory_entry dead = g_directory[slot];
   dead.state = ENTRY_DEAD;
   write_entry((uint32_t)slot, dead);
@@ -598,7 +582,6 @@ uintptr_t flash_open_write_method(uintptr_t argument, uintptr_t, uintptr_t,
   // ★開けた時点で消しておく。書いている最中に 33ms を挟むと、流し込む側が
   //   その間ずっと押し戻される (D34: 消去は締切のある経路に置かない)。
   if (!is_blank(base, reserved)) {
-    stop_the_world stopped;
     flash_write(base - XIP_BASE, nullptr, 0, true, reserved);
   }
   request->stream = created.value;
@@ -630,7 +613,6 @@ uintptr_t flash_close_write_method(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   if (!g_write.open)
     return 0;
   drain_write();
-  stop_the_world stopped;
   const uint32_t length = g_write.written + g_write.staged;
   if (g_write.staged != 0) {
     // 半端なページは 0xFF で埋めて出す (0xFF はビットを落とさないので後続に無害)。
@@ -679,7 +661,6 @@ uintptr_t flash_prepare_method(uintptr_t argument, uintptr_t, uintptr_t,
   if (limit > REGION_ADDRESS + REGION_BYTES)
     limit = REGION_ADDRESS + REGION_BYTES;
 
-  stop_the_world stopped; // 一続きの操作として 1 回だけ止める
   const uint64_t began = KERNEL::BOARD::time_us();
   uint32_t run_start = 0;
   for (uint32_t at = from; at < limit; at += FLASH_SECTOR_SIZE) {
@@ -934,7 +915,6 @@ uint32_t flash_fs_probe() {
     if (base + kib * 1024u > REGION_ADDRESS + REGION_BYTES)
       break;
     {
-      stop_the_world stopped;
       for (uint32_t at = 0; at < sectors; ++at) {
         for (uint32_t index = 0; index < FLASH_PAGE_SIZE; ++index)
           g_page[index] = 0x00; // 全ビットを落とす = 確実に「空いていない」
@@ -944,7 +924,6 @@ uint32_t flash_fs_probe() {
     }
     flash_prepare prepare{};
     {
-      stop_the_world stopped;
       const uint64_t began = KERNEL::BOARD::time_us();
       flash_write(base - XIP_BASE, nullptr, 0, true, kib * 1024u);
       prepare.took_us = (uint32_t)(KERNEL::BOARD::time_us() - began);

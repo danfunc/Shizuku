@@ -86,6 +86,9 @@ public:
   // 余白の算術に使う、実際に積まれる量。
   // 例外 1 回でハードウェアが積む最大 (FPU 活性時の拡張フレーム 104B)。
   static constexpr uint32_t EXC_FRAME_MAX_BYTES = 104;
+  // The fifth C argument is passed on the stack by AAPCS. Reserve an aligned
+  // eight-byte slot in every call frame so dispatch can populate it safely.
+  static constexpr uint32_t HANDLER_STACK_ARG_BYTES = 8;
   // fault 入口が CTX_SAVE でスレッドスタックへ退避する文脈の大きさ。
   static constexpr uint32_t FAULT_CONTEXT_BYTES = sizeof(context_t);
   // メソッド ABI (引数 4 本 + r12)。
@@ -129,6 +132,12 @@ public:
     frame.r1 = (uint32_t)args[1];
     frame.r2 = (uint32_t)args[2];
     frame.r3 = (uint32_t)args[3];
+  }
+  static void set_handler_args(exception_frame_t &frame, const uintptr_t *args,
+                               uintptr_t stack_arg_address) {
+    set_args(frame, args);
+    *reinterpret_cast<uint32_t *>(stack_arg_address) =
+        static_cast<uint32_t>(args[4]);
   }
   static void set_result(exception_frame_t &frame, uintptr_t error,
                          uintptr_t value) {

@@ -4,6 +4,9 @@
 sdkconfig
 sdkconfig.*
 !sdkconfig.defaults
+!firmware/sdkconfig.defaults.esp32c5
+!firmware/sdkconfig.defaults.esp32c5.ble
+!firmware/sdkconfig.defaults.esp32c6.ble
 managed_components/
 dependencies.lock
 *.elf

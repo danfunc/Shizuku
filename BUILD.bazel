@@ -41,6 +41,13 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+# Headers included by the IDF-side C5 compatibility implementation.
+filegroup(
+    name = "esp_idf_support_headers",
+    srcs = ["internal_headers/shizuku/object_api.hpp"],
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "internal_headers",
     hdrs = glob(["internal_headers/**/*.hpp"]),
@@ -104,7 +111,19 @@ cc_library(
     name = "kernel_object",
     srcs = KERNEL_OBJECT_SRCS,
     visibility = ["//visibility:public"],
-    deps = [":kernel"],
+    deps = [":kernel"] + select({
+        "//configs:crash_record_enabled": [
+            "//modules/pico_sdk_support/objects:usb_cdc",
+        ],
+        "//conditions:default": [],
+    }),
+    local_defines = select({
+        "//configs:crash_record_enabled": [
+            "SHIZUKU_CRASH_RECORD=1",
+            "SHIZUKU_BOOT_LOG_WAIT=1",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # アプリ。★いずれ XNO 側へ移す (D17) が、今は動かす場所がここしか無い。
@@ -121,6 +140,7 @@ cc_library(
 # C6 M-only で成立可能な selftest の 5 つのサブセット
 C6_SELFTEST_SRCS = [
     "source/selftest/call_ladder.cpp",
+    "source/selftest/compat_premise_probe.cpp",
     "source/selftest/handler_binding.cpp",
     "source/selftest/memory_ladder.cpp",
     "source/selftest/stream_ladder.cpp",
@@ -188,6 +208,31 @@ cc_library(
         "//boards/esp32_c5:headers",
     ],
 )
+
+# Minimal C5 BLE controller-init archive: keep the same kernel/object/trap
+# implementation, but omit the C5 selftest ladders and their record runner.
+cc_library(
+    name = "shizuku_kernel_c5_ble",
+    srcs = KERNEL_SRCS + KERNEL_OBJECT_SRCS + [
+        "source/memory_manager/freestanding.cpp",
+        "//modules/esp_idf_support/c5:early_boot.cpp",
+        "//modules/esp_idf_support/c5:link_stubs.cpp",
+        "//chips/esp32_c5:trap.cpp",
+        "//boards/esp32_c5:board_esp32_c5.cpp",
+        "//boards/esp32_c5:board_esp32_c5_stubs.cpp",
+        "//chips/esp32_c5:c5_vectors.S",
+    ],
+    target_compatible_with = ["@platforms//cpu:riscv32"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":internal_headers",
+        "//configs:config",
+        "//arch/riscv:pmp",
+        "//chips/esp32_c5:headers",
+        "//boards/esp32_c5:headers",
+    ],
+)
+
 
 # ESP32-C6 向けの**名前付きカーネルアーカイブ** (libshizuku_kernel.a)。
 # カーネル本体 + freestanding メモリマネージャ + pre-init ROM 起動表示 + C6 の未実装 trap stub。

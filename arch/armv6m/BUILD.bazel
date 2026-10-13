@@ -1,6 +1,13 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
+
+# Exercises the RP2040 range checks without touching MPU registers.
+cc_test(
+    name = "region_range_test",
+    srcs = ["region_range_test.cpp"],
+    deps = [":headers"],
+)
 
 cc_library(
     name = "headers",
@@ -18,4 +25,8 @@ cc_library(
     name = "ctx",
     srcs = ["armv6m_ctx.S"],
     alwayslink = True,
+    local_defines = select({
+        "//configs:crash_record_enabled": ["SHIZUKU_CRASH_RECORD=1"],
+        "//conditions:default": [],
+    }),
 )

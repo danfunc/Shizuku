@@ -27,3 +27,6 @@ binding_parent_b
 binding_child_a
 binding_child_b
 binding_unpriv
+compat_h
+compat_c
+compat_gc
