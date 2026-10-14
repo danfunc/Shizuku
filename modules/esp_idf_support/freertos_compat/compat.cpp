@@ -13,6 +13,10 @@ extern "C" void shizuku_esp_ble_note_queue_receive(uint32_t, uint32_t, uint32_t)
     __attribute__((weak));
 extern "C" void shizuku_esp_ble_note_task_scheduled(uint32_t, uint32_t, uint32_t, uint32_t)
     __attribute__((weak));
+#if defined(SHIZUKU_ESP32_C6)
+extern "C" void shizuku_esp_ble_note_compat_progress(uint32_t, uint32_t, uint32_t)
+    __attribute__((weak));
+#endif
 
 namespace shizuku::freertos_compat {
 bool domain::task_create(void (*entry)(void *), const char *, uint32_t stack,
@@ -241,6 +245,10 @@ void domain::finish_current_task() {
 }
 void domain::run_scheduler(uint32_t grant_cycles) {
   if(!grant_cycles)return;
+#if defined(SHIZUKU_ESP32_C6)
+  if (shizuku_esp_ble_note_compat_progress)
+    shizuku_esp_ble_note_compat_progress(0u, 0u, 0u);
+#endif
   for(;;) {
     (void)p_.consume_reschedule_pending(); // ISR requests are applied at this grant boundary.
     const uint64_t now=p_.now_ticks();
@@ -283,7 +291,16 @@ void domain::run_scheduler(uint32_t grant_cycles) {
                                              clock_skew ? 1u : 0u);
       }
       best->status=state::running;
-      if(!p_.run_for(best->id,grant_cycles)) { best->status=state::suspended; return; }
+#if defined(SHIZUKU_ESP32_C6)
+      if (shizuku_esp_ble_note_compat_progress)
+        shizuku_esp_ble_note_compat_progress(1u, best->id, 0u);
+#endif
+      const bool grant_ok = p_.run_for(best->id,grant_cycles);
+#if defined(SHIZUKU_ESP32_C6)
+      if (shizuku_esp_ble_note_compat_progress)
+        shizuku_esp_ble_note_compat_progress(2u, best->id, grant_ok ? 1u : 0u);
+#endif
+      if(!grant_ok) { best->status=state::suspended; return; }
       if(best->status==state::running) best->status=state::ready;
       continue;
     }

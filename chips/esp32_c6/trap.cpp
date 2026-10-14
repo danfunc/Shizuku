@@ -50,6 +50,7 @@ extern "C" void shizuku_freertos_compat_isr_enter(void) __attribute__((weak));
 extern "C" void shizuku_freertos_compat_isr_exit(void) __attribute__((weak));
 extern "C" uint32_t shizuku_freertos_compat_current_task_id(void) __attribute__((weak));
 extern "C" void shizuku_esp_ble_note_irq_dispatch(uint32_t, uint32_t, uint32_t) __attribute__((weak));
+extern "C" void shizuku_esp_ble_note_irq_handler_boundary(uint32_t, uint32_t) __attribute__((weak));
 inline void reg_write(uint32_t address, uint32_t value) {
   *reinterpret_cast<volatile uint32_t *>(address) = value;
 }
@@ -204,7 +205,13 @@ extern "C" arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_f
         shizuku_esp_ble_note_irq_dispatch(entry.source, frame->mepc,
             shizuku_freertos_compat_current_task_id
                 ? shizuku_freertos_compat_current_task_id() : 0u);
+      if ((entry.source == 4u || entry.source == 7u) &&
+          shizuku_esp_ble_note_irq_handler_boundary)
+        shizuku_esp_ble_note_irq_handler_boundary(entry.source, 0u);
       entry.handler(entry.arg);
+      if ((entry.source == 4u || entry.source == 7u) &&
+          shizuku_esp_ble_note_irq_handler_boundary)
+        shizuku_esp_ble_note_irq_handler_boundary(entry.source, 1u);
       if (shizuku_freertos_compat_isr_exit) shizuku_freertos_compat_isr_exit();
       run_pending_switch();
       context = kernel.current_context();
