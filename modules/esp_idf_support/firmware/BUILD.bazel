@@ -8,6 +8,10 @@ config_setting(
     name = "esp_ble_prefer_1m_phy",
     define_values = {"SHIZUKU_ESP_BLE_PREFER_1M_PHY": "1"},
 )
+config_setting(
+    name = "esp_ota_enabled",
+    define_values = {"esp_ota": "on"},
+)
 
 exports_files(["main/early_diag.c"])
 
@@ -85,9 +89,40 @@ genrule(
     target_compatible_with = ["@platforms//cpu:riscv32"],
 )
 
+# Opt-in C6 OTA image and complete boot/partition/config evidence bundle.
+# Build with --define=esp_ota=on; the normal C6 BLE target stays unchanged.
+genrule(
+    name = "esp32c6_ble_ota",
+    srcs = ["//:shizuku_kernel", ":esp32c6_project",
+            "//modules/esp_idf_support/ble_ota:component_sources"],
+    outs = [
+        "shizuku_esp32c6_ble_ota.bin",
+        "shizuku_esp32c6_ble_ota.elf",
+        "shizuku_esp32c6_ble_ota.map",
+        "shizuku_esp32c6_ble_ota.sdkconfig",
+        "shizuku_esp32c6_ble_ota.bootloader.bin",
+        "shizuku_esp32c6_ble_ota.partition-table.bin",
+        "shizuku_esp32c6_ble_ota.partition-table.csv",
+        "shizuku_esp32c6_ble_ota.manifest.json",
+    ],
+    cmd = "ARCHIVE=; for f in $(locations //:shizuku_kernel); do case $$f in *libshizuku_kernel.a) ARCHIVE=$$f;; esac; done;" +
+          select({
+              ":esp_ota_enabled": "",
+              "//conditions:default": "echo 'ERROR: use --define=esp_ota=on' >&2; exit 2; ",
+          }) +
+          " $(location build_ota_profile.sh) $(location build.sh) $(location collect_ota_artifacts.py) $$ARCHIVE " +
+          "$(location shizuku_esp32c6_ble_ota.bin) $(location shizuku_esp32c6_ble_ota.elf) $(location shizuku_esp32c6_ble_ota.map) " +
+          "$(location shizuku_esp32c6_ble_ota.sdkconfig) $(location shizuku_esp32c6_ble_ota.bootloader.bin) " +
+          "$(location shizuku_esp32c6_ble_ota.partition-table.bin) $(location shizuku_esp32c6_ble_ota.partition-table.csv) " +
+          "$(location shizuku_esp32c6_ble_ota.manifest.json)",
+    tools = ["build.sh", "build_ota_profile.sh", "collect_ota_artifacts.py"],
+    tags = ["local", "no-sandbox"],
+    target_compatible_with = ["@platforms//cpu:riscv32"],
+)
+
 filegroup(
     name = "esp32c6_project",
-    srcs = glob(["CMakeLists.txt", "sdkconfig.defaults", "sdkconfig.defaults.esp32c5", "sdkconfig.defaults.esp32c5.ble", "sdkconfig.defaults.esp32c6.ble", "main/*"]) + [
+    srcs = glob(["CMakeLists.txt", "sdkconfig.defaults", "sdkconfig.defaults.esp32c5", "sdkconfig.defaults.esp32c5.ble", "sdkconfig.defaults.esp32c6.ble", "sdkconfig.defaults.esp32c6.ota", "partitions_esp32c6_ota.csv", "main/*"]) + [
         "//modules/esp_idf_support/radio:c5_intr_alloc.cpp",
         "//modules/esp_idf_support/radio:c6_intr_alloc.cpp",
         "//modules/esp_idf_support/radio:intr_alloc_impl.inc",
