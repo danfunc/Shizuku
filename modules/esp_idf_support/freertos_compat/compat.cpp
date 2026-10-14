@@ -13,6 +13,10 @@ extern "C" void shizuku_esp_ble_note_queue_receive(uint32_t, uint32_t, uint32_t)
     __attribute__((weak));
 extern "C" void shizuku_esp_ble_note_task_scheduled(uint32_t, uint32_t, uint32_t, uint32_t)
     __attribute__((weak));
+#if defined(SHIZUKU_ESP32_C6)
+extern "C" void shizuku_esp_ble_note_compat_progress(uint32_t, uint32_t, uint32_t)
+    __attribute__((weak));
+#endif
 
 namespace shizuku::freertos_compat {
 bool domain::task_create(void (*entry)(void *), const char *, uint32_t stack,
@@ -61,8 +65,11 @@ bool domain::task_delete(uint32_t id) {
   for (auto &t : tasks_) if (t.id == id && t.status != state::unused && t.status != state::done) {
     t.status = state::done; t.wake_deadline = UINT64_MAX;
     publish_owned_mutexes(id);
+    // task_finished() may drop the identity current_task() derives from the stack,
+    // so decide "self" first.
+    const bool is_self = id == p_.current_task();
     p_.task_finished(id);
-    if (id == p_.current_task()) p_.exit_thread();
+    if (is_self) p_.exit_thread();
     return true;
   }
   return false;
@@ -103,25 +110,32 @@ const task_control *domain::find_task(uint32_t id) const {
 bool domain::task_notify(uint32_t id, uint32_t index, uint32_t value, uint32_t action,
                          uint32_t *previous, bool from_isr, bool *higher) {
   if (index != 0 || from_isr != p_.in_isr()) return false;
+  const uint32_t irq = p_.irq_save();
   auto *t = find_task(id);
-  if (!t) return false;
+  if (!t) { p_.irq_restore(irq); return false; }
   if (previous) *previous = t->notification_value;
-  if (action == 4u && t->notification_pending) return false; // eSetValueWithoutOverwrite
+  if (action == 4u && t->notification_pending) { // eSetValueWithoutOverwrite
+    p_.irq_restore(irq);
+    return false;
+  }
   switch (action) {
     case 0: break; // eNoAction
     case 1: t->notification_value |= value; break; // eSetBits
     case 2: t->notification_value = t->notification_value + 1u; break; // eIncrement
     case 3: t->notification_value = value; break; // eSetValueWithOverwrite
     case 4: t->notification_value = value; break; // eSetValueWithoutOverwrite
-    default: return false;
+    default: p_.irq_restore(irq); return false;
   }
   t->notification_pending = true;
   bool woke = false;
   if (t->notification_waiting && t->status == state::blocked) {
     make_ready(id);
     woke = p_.wake(id);
+  } else if (t->notification_waiting) {
+    t->wake_pending = true; // waiter is between its check and block_current()
   }
   if (higher) *higher = woke;
+  p_.irq_restore(irq);
   if (woke && !from_isr) p_.yield();
   return true;
 }
@@ -131,24 +145,37 @@ uint32_t domain::task_notify_take(uint32_t index, bool clear_count, tick_t timeo
   auto *t = find_task(id);
   if (!t) return 0;
   const uint64_t end = timeout == kForever ? UINT64_MAX : p_.now_ticks() + timeout;
-  while (t->notification_value == 0) {
+  for (;;) {
+    const uint32_t irq = p_.irq_save();
+    if (t->notification_value != 0) {
+      const uint32_t value = t->notification_value;
+      if (clear_count) t->notification_value = 0;
+      else t->notification_value = t->notification_value - 1u;
+      t->notification_pending = false;
+      if (t->status != state::done) t->status = state::running;
+      t->notification_waiting = false;
+      t->wake_pending = false;
+      p_.irq_restore(irq);
+      return value;
+    }
     if (timeout == 0 || p_.now_ticks() >= end) {
       t->notification_waiting = false;
       if (t->status != state::done) t->status = state::running;
+      t->wake_pending = false;
+      p_.irq_restore(irq);
       return 0;
     }
     t->notification_waiting = true;
-    block_current(end);
+    const bool should_park = block_current(end);
+    if (!should_park) t->notification_waiting = false;
+    p_.irq_restore(irq);
+    if (!should_park) continue;
     p_.park_until(end);
+    const uint32_t wake_irq = p_.irq_save();
     make_ready(id);
     t->notification_waiting = false;
+    p_.irq_restore(wake_irq);
   }
-  const uint32_t value = t->notification_value;
-  if (clear_count) t->notification_value = 0;
-  else t->notification_value = t->notification_value - 1u;
-  t->notification_pending = false;
-  if (t->status != state::done) t->status = state::running;
-  return value;
 }
 bool domain::task_notify_wait(uint32_t index, uint32_t clear_entry, uint32_t clear_exit,
                               uint32_t *value, tick_t timeout) {
@@ -156,41 +183,60 @@ bool domain::task_notify_wait(uint32_t index, uint32_t clear_entry, uint32_t cle
   const uint32_t id = p_.current_task();
   auto *t = find_task(id);
   if (!t) return false;
+  const uint32_t entry_irq = p_.irq_save();
   if (!t->notification_pending) t->notification_value &= ~clear_entry;
+  p_.irq_restore(entry_irq);
   const uint64_t end = timeout == kForever ? UINT64_MAX : p_.now_ticks() + timeout;
-  while (!t->notification_pending) {
+  for (;;) {
+    const uint32_t irq = p_.irq_save();
+    if (t->notification_pending) {
+      if (value) *value = t->notification_value;
+      t->notification_value &= ~clear_exit;
+      t->notification_pending = false;
+      t->notification_waiting = false;
+      if (t->status != state::done) t->status = state::running;
+      t->wake_pending = false;
+      p_.irq_restore(irq);
+      return true;
+    }
     if (timeout == 0 || p_.now_ticks() >= end) {
       if (value) *value = t->notification_value;
       t->notification_waiting = false;
       if (t->status != state::done) t->status = state::running;
+      t->wake_pending = false;
+      p_.irq_restore(irq);
       return false;
     }
     t->notification_waiting = true;
-    block_current(end);
+    const bool should_park = block_current(end);
+    if (!should_park) t->notification_waiting = false;
+    p_.irq_restore(irq);
+    if (!should_park) continue;
     p_.park_until(end);
+    const uint32_t wake_irq = p_.irq_save();
     make_ready(id);
     t->notification_waiting = false;
+    p_.irq_restore(wake_irq);
   }
-  if (value) *value = t->notification_value;
-  t->notification_value &= ~clear_exit;
-  t->notification_pending = false;
-  if (t->status != state::done) t->status = state::running;
-  return true;
 }
 bool domain::task_notify_state_clear(uint32_t id, uint32_t index) {
   if (index != 0 || p_.in_isr()) return false;
+  const uint32_t irq = p_.irq_save();
   auto *t = find_task(id);
-  if (!t) return false;
+  if (!t) { p_.irq_restore(irq); return false; }
   const bool was_pending = t->notification_pending;
   t->notification_pending = false;
+  p_.irq_restore(irq);
   return was_pending;
 }
 uint32_t domain::task_notify_value_clear(uint32_t id, uint32_t index, uint32_t bits) {
   if (index != 0 || p_.in_isr()) return 0;
+  const uint32_t irq = p_.irq_save();
   auto *t = find_task(id);
-  if (!t) return 0;
+  if (!t) { p_.irq_restore(irq); return 0; }
   const uint32_t previous = t->notification_value;
   t->notification_value &= ~bits;
+  p_.irq_restore(irq);
   return previous;
 }
 uint64_t domain::tick_count() { poll_timers(); return p_.now_ticks(); }
@@ -205,20 +251,25 @@ bool domain::configure_backend(uint32_t handler, uint32_t method, uint32_t tick_
   if(!p_.configure_route(handler, method, tick_hz, this))return false;
   tick_hz_=tick_hz; return true;
 }
-void domain::block_current(uint64_t deadline) {
+bool domain::block_current(uint64_t deadline) {
   const uint32_t id=p_.current_task();
   if (id == 0) {
+    if (root_task_.wake_pending) { root_task_.wake_pending = false; return false; }
     root_task_.status = state::blocked;
     root_task_.wake_deadline = deadline;
     p_.block_task(id, deadline);
-    return;
+    return true;
   }
   for(auto &t:tasks_) if(t.id==id&&t.status!=state::done) {
+    // A wake delivered between waiter registration and this call found the task
+    // not BLOCKED; do not sleep through it. The caller re-evaluates its condition.
+    if(t.wake_pending){t.wake_pending=false;return false;}
     t.status=state::blocked; t.wake_deadline=deadline;
     // A blocked task is not eligible until make_ready() transitions it back;
     // add no extra delay here, especially for controller LL tasks woken by IRQ.
-    t.eligible_after_us=p_.now_us(); p_.block_task(id,deadline); return;
+    t.eligible_after_us=p_.now_us(); p_.block_task(id,deadline); return true;
   }
+  return true; // unknown task (e.g. host/root-less caller): nothing to skip, caller parks
 }
 void domain::make_ready(uint32_t id) {
   if (id == 0 && root_task_.status == state::blocked) {
@@ -233,6 +284,29 @@ void domain::make_ready(uint32_t id) {
     p_.make_ready(id); return;
   }
 }
+bool domain::has_waiter(const sync_object &o, uint32_t id, bool for_data) const {
+  const size_t side=for_data?1:0;
+  for(size_t i=0;i<o.waiter_count[side];i++) if(o.waiters[side][i].task==id) return true;
+  return false;
+}
+void domain::clear_wake_pending(uint32_t id) {
+  if (id == 0) { root_task_.wake_pending = false; return; }
+  for(auto &t:tasks_) if(t.id==id) { t.wake_pending=false; return; }
+}
+uint64_t domain::bounded_block_deadline(uint64_t end) {
+  if (end != UINT64_MAX) return end;
+  return p_.now_ticks() + kForeverRecheckTicks;
+}
+void domain::wake_waiter(uint32_t id) {
+  if (id == 0) {
+    if (root_task_.status == state::blocked) make_ready(id); else root_task_.wake_pending = true;
+    return;
+  }
+  for(auto &t:tasks_) if(t.id==id&&t.status!=state::done&&t.status!=state::unused) {
+    if(t.status==state::blocked) make_ready(id); else t.wake_pending=true;
+    return;
+  }
+}
 void domain::finish_current_task() {
   const uint32_t id=p_.current_task();
   for(auto &t:tasks_) if(t.id==id) { t.status=state::done; t.wake_deadline=UINT64_MAX; break; }
@@ -241,6 +315,10 @@ void domain::finish_current_task() {
 }
 void domain::run_scheduler(uint32_t grant_cycles) {
   if(!grant_cycles)return;
+#if defined(SHIZUKU_ESP32_C6)
+  if (shizuku_esp_ble_note_compat_progress)
+    shizuku_esp_ble_note_compat_progress(0u, 0u, 0u);
+#endif
   for(;;) {
     (void)p_.consume_reschedule_pending(); // ISR requests are applied at this grant boundary.
     const uint64_t now=p_.now_ticks();
@@ -283,7 +361,16 @@ void domain::run_scheduler(uint32_t grant_cycles) {
                                              clock_skew ? 1u : 0u);
       }
       best->status=state::running;
-      if(!p_.run_for(best->id,grant_cycles)) { best->status=state::suspended; return; }
+#if defined(SHIZUKU_ESP32_C6)
+      if (shizuku_esp_ble_note_compat_progress)
+        shizuku_esp_ble_note_compat_progress(1u, best->id, 0u);
+#endif
+      const bool grant_ok = p_.run_for(best->id,grant_cycles);
+#if defined(SHIZUKU_ESP32_C6)
+      if (shizuku_esp_ble_note_compat_progress)
+        shizuku_esp_ble_note_compat_progress(2u, best->id, grant_ok ? 1u : 0u);
+#endif
+      if(!grant_ok) { best->status=state::suspended; return; }
       if(best->status==state::running) best->status=state::ready;
       continue;
     }
@@ -442,7 +529,7 @@ bool domain::wake_one(sync_object &o, bool for_data) {
   size_t best=0;
   for(size_t i=1;i<o.waiter_count[side];i++) if(o.waiters[side][i].priority>o.waiters[side][best].priority || (o.waiters[side][i].priority==o.waiters[side][best].priority && o.waiters[side][i].sequence<o.waiters[side][best].sequence)) best=i;
   auto id=o.waiters[side][best].task; o.waiters[side][best]=o.waiters[side][--o.waiter_count[side]];
-  const bool higher=p_.wake(id); make_ready(id); return higher;
+  const bool higher=p_.wake(id); wake_waiter(id); return higher;
 }
 bool domain::wait(sync_object &o, bool data, tick_t timeout, bool from_isr) {
   if(from_isr != p_.in_isr()) return false;
@@ -582,17 +669,16 @@ bool domain::semaphore_take(int h,tick_t timeout,bool isr) {
   o->take_count = o->take_count + 1u;
   if(o->count){--o->count;publish_sync_object(h);return true;} if(timeout==0){publish_sync_object(h);return false;}
   uint64_t end=timeout==kForever?UINT64_MAX:p_.now_ticks()+timeout;
-  bool registered=false;
+  bool registered=false; const uint32_t me=p_.current_task();
   do {
     poll_timers();
-    if(o->count){--o->count;publish_sync_object(h);return true;}
+    if(o->count){if(registered)remove_waiter(*o,me,true);clear_wake_pending(me);--o->count;publish_sync_object(h);return true;}
     if(p_.now_ticks()>=end)break;
-    if(!registered){if(!add_waiter(*o,true))return false;registered=true;publish_sync_object(h);}
-    block_current(end); p_.park_until(end);
-    if(registered){remove_waiter(*o,p_.current_task(),true);publish_sync_object(h);}
-    registered=false;
+    if(!registered){if(!add_waiter(*o,true))return false;registered=true;publish_sync_object(h);continue;}
+    if(block_current(bounded_block_deadline(end))) p_.park_until(end);
+    registered=has_waiter(*o,me,true); // a give pops the waiter; a bounded recheck leaves it queued
   } while(true);
-  remove_waiter(*o,p_.current_task(),true); publish_sync_object(h); return false;
+  remove_waiter(*o,me,true); clear_wake_pending(me); publish_sync_object(h); return false;
 }
 bool domain::semaphore_give(int h,bool isr,bool *higher) { auto *o=get(h,object_kind::semaphore);if(!o||isr!=p_.in_isr()||o->count==o->limit)return false;++o->count;o->last_giver_task=p_.current_task();o->give_count=o->give_count+1u;const bool hp=wake_one(*o,true);if(higher&&hp)*higher=true;publish_sync_object(h);return true; }
 uint32_t domain::semaphore_count(int h) const { return h>=0&&size_t(h)<kMaxObjects&&objects_[h].used&&objects_[h].kind==object_kind::semaphore?objects_[h].count:0; }
@@ -619,15 +705,23 @@ bool domain::mutex_take(int h,tick_t timeout,bool isr,bool recursive_api) {
   uint64_t end=timeout==kForever?UINT64_MAX:p_.now_ticks()+timeout; bool registered=false;
   do {
     poll_timers();
-    if(o->owner==UINT32_MAX){o->owner=me;o->recursion=1;publish_sync_object(h);return true;}
+    if(o->owner==UINT32_MAX){if(registered)remove_waiter(*o,me,true);clear_wake_pending(me);o->owner=me;o->recursion=1;publish_sync_object(h);return true;}
     if(timeout==0||p_.now_ticks()>=end){publish_sync_object(h);break;}
-    if(!registered){if(!add_waiter(*o,true)){publish_sync_object(h);return false;}registered=true;refresh_mutex_priority(o->owner);publish_sync_object(h);}
+    if(!registered){
+      if(!add_waiter(*o,true)){publish_sync_object(h);return false;}
+      registered=true;refresh_mutex_priority(o->owner);publish_sync_object(h);
+      continue; // a give may have run between the owner check and registration: re-check before blocking
+    }
     const uint32_t owner = o->owner;
-    block_current(end); p_.park_until(end); if(registered)remove_waiter(*o,me,true); registered=false;
-    if (owner != UINT32_MAX) refresh_mutex_priority(owner);
-    publish_sync_object(h);
+    // Never sleep without a bound: a wake that is missed anyway (see wake_pending) is
+    // recovered by the scheduler at the next tick instead of waiting forever.
+    if(block_current(bounded_block_deadline(end))) p_.park_until(end);
+    registered=has_waiter(*o,me,true); // a give pops the waiter; a bounded recheck leaves it queued
+    if(!registered){if(owner!=UINT32_MAX)refresh_mutex_priority(owner);publish_sync_object(h);}
   } while(true);
-  remove_waiter(*o,me,true); publish_sync_object(h); return false;
+  remove_waiter(*o,me,true); clear_wake_pending(me);
+  if(o->owner!=UINT32_MAX)refresh_mutex_priority(o->owner);
+  publish_sync_object(h); return false;
 }
 bool domain::mutex_give(int h,bool isr) { auto *o=get(h,object_kind::mutex);if(!o||isr||p_.in_isr()||o->owner!=p_.current_task())return false;o->last_giver_task=p_.current_task();o->give_count=o->give_count+1u;if(--o->recursion==0){const uint32_t owner=o->owner;o->owner=UINT32_MAX;wake_one(*o,true);refresh_mutex_priority(owner);}publish_sync_object(h);return true; }
 uint32_t domain::mutex_owner(int h) const { return h>=0&&size_t(h)<kMaxObjects&&objects_[h].used&&objects_[h].kind==object_kind::mutex&&objects_[h].owner!=UINT32_MAX?objects_[h].owner:0; }

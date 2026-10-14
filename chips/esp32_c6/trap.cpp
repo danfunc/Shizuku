@@ -50,11 +50,17 @@ extern "C" void shizuku_freertos_compat_isr_enter(void) __attribute__((weak));
 extern "C" void shizuku_freertos_compat_isr_exit(void) __attribute__((weak));
 extern "C" uint32_t shizuku_freertos_compat_current_task_id(void) __attribute__((weak));
 extern "C" void shizuku_esp_ble_note_irq_dispatch(uint32_t, uint32_t, uint32_t) __attribute__((weak));
+extern "C" void shizuku_esp_ble_note_irq_handler_boundary(uint32_t, uint32_t) __attribute__((weak));
 inline void reg_write(uint32_t address, uint32_t value) {
   *reinterpret_cast<volatile uint32_t *>(address) = value;
 }
 inline uint32_t reg_read(uint32_t address) {
   return *reinterpret_cast<volatile uint32_t *>(address);
+}
+// CLEAR holds the bits written to it, so a set bit keeps its line clear; pulse and drop it.
+void plic_pulse_clear(uint32_t bit) {
+  reg_write(c6::PLIC_MXINT_CLEAR, reg_read(c6::PLIC_MXINT_CLEAR) | bit);
+  reg_write(c6::PLIC_MXINT_CLEAR, reg_read(c6::PLIC_MXINT_CLEAR) & ~bit);
 }
 uint64_t systimer_now() {
   reg_write(c6::SYSTIMER_UNIT0_OP, c6::UNIT0_OP_UPDATE);
@@ -195,7 +201,7 @@ extern "C" arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_f
       record_irq_hardware_state(entry);
       if ((reg_read(c6::PLIC_MXINT_TYPE) & (1u << cpu_irq)) &&
           (reg_read(c6::PLIC_MXINT_ENABLE) & (1u << cpu_irq)))
-        reg_write(c6::PLIC_MXINT_CLEAR, 1u << cpu_irq);
+        plic_pulse_clear(1u << cpu_irq);
       auto &kernel = shizuku::kernel_instance;
       auto *context = kernel.current_context();
       frame_to_context(*frame, *context);
@@ -204,7 +210,13 @@ extern "C" arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_f
         shizuku_esp_ble_note_irq_dispatch(entry.source, frame->mepc,
             shizuku_freertos_compat_current_task_id
                 ? shizuku_freertos_compat_current_task_id() : 0u);
+      if ((entry.source == 4u || entry.source == 7u) &&
+          shizuku_esp_ble_note_irq_handler_boundary)
+        shizuku_esp_ble_note_irq_handler_boundary(entry.source, 0u);
       entry.handler(entry.arg);
+      if ((entry.source == 4u || entry.source == 7u) &&
+          shizuku_esp_ble_note_irq_handler_boundary)
+        shizuku_esp_ble_note_irq_handler_boundary(entry.source, 1u);
       if (shizuku_freertos_compat_isr_exit) shizuku_freertos_compat_isr_exit();
       run_pending_switch();
       context = kernel.current_context();
@@ -268,7 +280,7 @@ int irq_register(uint32_t source, uint32_t cpu_irq, irq_handler_t handler, void 
   uint32_t types = reg_read(c6::PLIC_MXINT_TYPE);
   reg_write(c6::PLIC_MXINT_TYPE, edge ? types | bit : types & ~bit);
   reg_write(c6::plic_pri_reg(cpu_irq), level);
-  reg_write(c6::PLIC_MXINT_CLEAR, bit);
+  plic_pulse_clear(bit);
   if (enabled) {
     reg_write(c6::PLIC_MXINT_ENABLE, reg_read(c6::PLIC_MXINT_ENABLE) | bit);
     asm volatile("csrs mie, %0" :: "r"(bit) : "memory");

@@ -30,9 +30,15 @@ int shizuku_esp_ble_pre_core(void);
 void shizuku_esp_ble_post_core_ctors(void);
 extern void __libc_init_array(void);
 #endif
+#if CONFIG_IDF_TARGET_ESP32C6
+void shizuku_c6_mark_boot_phase(uint32_t);
+#endif
 
 __attribute__((noreturn)) void start_cpu0(void)
 {
+#if CONFIG_IDF_TARGET_ESP32C6
+    shizuku_c6_mark_boot_phase(0xC601u);
+#endif
     shizuku_c6_early_diag_begin();
     // IDF call_start_cpu0() already ran sys_rtc_init() and system_early_init()
     // before SYS_STARTUP_FN. The latter initializes the clock tree, CPU clock,

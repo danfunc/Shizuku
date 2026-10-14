@@ -1,0 +1,23 @@
+package(default_visibility = ["//visibility:public"])
+
+# Normal ESP-IDF FreeRTOS/NimBLE comparison image. This package has no parent
+# firmware BUILD dependency and links neither the Shizuku archive nor sources.
+genrule(
+    name = "esp32c6_idf_reference",
+    srcs = [
+        "CMakeLists.txt",
+        "idf-reference-c6-ble.defaults",
+        "main/CMakeLists.txt",
+        "main/main.c",
+        "build_idf_reference.sh",
+    ],
+    outs = [
+        "shizuku_esp32c6_idf_ref.bin",
+        "shizuku_esp32c6_idf_ref.elf",
+        "shizuku_esp32c6_idf_ref.map",
+    ],
+    cmd = "$(location build_idf_reference.sh) $(location shizuku_esp32c6_idf_ref.bin) esp-15.2.0_20251204",
+    tools = ["build_idf_reference.sh"],
+    tags = ["local", "no-sandbox"],
+    target_compatible_with = ["@platforms//cpu:riscv32"],
+)

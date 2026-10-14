@@ -29,6 +29,15 @@ class shizuku_port final : public port {
   uint32_t irq_save() override;
   void irq_restore(uint32_t state) override;
 
+  // Thread identity from the stack pointer. g_current_task_id is a global that the
+  // kernel does not switch with its threads, so while one thread is inside SLEEP_US
+  // (global rewritten to its lender) any other compat thread the kernel runs would
+  // be mis-identified (as id 0), taking mutexes it can never release.
+  // Each compat thread registers the stack it started on; current_task() maps sp back.
+#define SHIZUKU_PORT_STACK_ID 1
+  static void note_task_stack(uint32_t task_id, uintptr_t sp);
+  static bool task_for_stack(uintptr_t sp, uint32_t *task_id);
+  static void set_stack_probe(uintptr_t (*probe)()); // test seam; null = real sp
   static void set_clock(uint64_t (*clock_us)());
   static void set_host_syscall_hook(host_syscall_hook hook);
   static void enter_isr();

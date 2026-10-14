@@ -14,4 +14,7 @@
 
 # ESP-IDF と工具の導入物 (worktree ローカル)
 /.local/
+/compile_commands.json
+/.rbuild/
+/.rbuild-out/
 rbuild.toml

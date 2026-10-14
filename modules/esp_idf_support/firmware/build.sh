@@ -43,6 +43,17 @@ case "$PROFILE" in
                        "-DSHIZUKU_ESP_BLE_PREFER_1M_PHY=$BLE_PREFER_1M_PHY"
                        "-DSHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG=1"
                        "-DSHIZUKU_ESP_BLE_ENABLE_SCHED_DIAG_IRQ_MASK=1")
+    if test "$TARGET" = esp32c6; then
+      BLE_COMPAT_GRANT_CYCLES=${SHIZUKU_BLE_COMPAT_GRANT_CYCLES:-1600}
+      if [[ ! "$BLE_COMPAT_GRANT_CYCLES" =~ ^[1-9][0-9]*$ ]] ||
+         (( ${#BLE_COMPAT_GRANT_CYCLES} > 10 )); then
+        fail "SHIZUKU_BLE_COMPAT_GRANT_CYCLES must be a positive uint32_t"
+      fi
+      if (( BLE_COMPAT_GRANT_CYCLES > 4294967295 )); then
+        fail "SHIZUKU_BLE_COMPAT_GRANT_CYCLES must be a positive uint32_t"
+      fi
+      IDF_PROFILE_ARGS+=("-DSHIZUKU_BLE_COMPAT_GRANT_CYCLES=$BLE_COMPAT_GRANT_CYCLES")
+    fi
     ;;
   *) fail "未対応の firmware profile: $PROFILE" ;;
 esac

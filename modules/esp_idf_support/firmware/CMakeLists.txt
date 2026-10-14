@@ -22,7 +22,14 @@ if(IDF_TARGET STREQUAL "esp32c5")
   endif()
 else()
   if(SHIZUKU_ESP_BLE OR SHIZUKU_C5_BLE)
-    set(SDKCONFIG_DEFAULTS "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults.esp32c6.ble")
+    if("$ENV{SHIZUKU_ESP_OTA}" STREQUAL "1")
+      set(SHIZUKU_ESP_OTA_PROFILE ON)
+      set(SDKCONFIG_DEFAULTS
+          "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults.esp32c6.ble;${CMAKE_CURRENT_LIST_DIR}/esp32c6_ota_defaults.conf")
+      list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../ble_ota")
+    else()
+      set(SDKCONFIG_DEFAULTS "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults.esp32c6.ble")
+    endif()
   else()
     set(SDKCONFIG_DEFAULTS "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults")
   endif()
@@ -39,4 +46,17 @@ project(shizuku_${IDF_TARGET})
 
 if(NOT "${IDF_VER}" MATCHES "^v6\\.1")
   message(FATAL_ERROR "ESP-IDF v6.1 が必要。検出: '${IDF_VER}'")
+endif()
+
+if(SHIZUKU_ESP_OTA_PROFILE)
+  idf_component_get_property(shizuku_main_lib main COMPONENT_LIB)
+  idf_component_get_property(shizuku_ota_lib ble_ota COMPONENT_LIB)
+  if(NOT shizuku_main_lib OR NOT shizuku_ota_lib)
+    message(FATAL_ERROR "Opt-in BLE OTA components were not registered")
+  endif()
+  target_link_libraries(${shizuku_main_lib} INTERFACE ${shizuku_ota_lib})
+  target_link_options(${shizuku_main_lib} INTERFACE
+      "-Wl,--undefined=shizuku_esp_ota_register_service"
+      "-Wl,--undefined=shizuku_esp_ota_gap_event"
+      "-Wl,--undefined=shizuku_esp_ota_mark_running_app_valid")
 endif()
