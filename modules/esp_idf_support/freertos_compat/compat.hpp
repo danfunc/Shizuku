@@ -10,6 +10,8 @@
 namespace shizuku::freertos_compat {
 using tick_t = uint32_t;
 constexpr tick_t kForever = UINT32_MAX;
+// Forever waits on mutex/semaphore are re-evaluated by the scheduler at least this often.
+constexpr uint64_t kForeverRecheckTicks = 1;
 #if defined(SHIZUKU_FREERTOS_COMPAT_TINY)
 // C5 controller-init profile bounds static tables to fit alongside the BT blob.
 // It keeps headroom for 8 PLAIN task slots and 24 synchronization objects.
@@ -66,6 +68,9 @@ struct task_control {
   uint32_t notification_value = 0;
   bool notification_pending = false;
   bool notification_waiting = false;
+  // A resource wake that arrived while the task was registered as a waiter but
+  // not yet BLOCKED; consumed by block_current() so the wake is not lost.
+  bool wake_pending = false;
 };
 struct sync_object {
   object_kind kind{};
@@ -120,7 +125,7 @@ class domain {
   uint32_t current_task() const;
   bool isr_context();
   bool configure_backend(uint32_t handler_object, uint32_t method_id, uint32_t tick_hz=100);
-  void block_current(uint64_t deadline);
+  bool block_current(uint64_t deadline);
   void make_ready(uint32_t task);
   void run_scheduler(uint32_t grant_cycles);
   void set_scheduler_idle_poll_us(uint32_t poll_us);
@@ -186,6 +191,10 @@ class domain {
   bool add_waiter(sync_object &o, bool waiting_for_data);
   bool remove_waiter(sync_object &o, uint32_t task, bool waiting_for_data);
   void refresh_mutex_priority(uint32_t task);
+  void wake_waiter(uint32_t task);
+  uint64_t bounded_block_deadline(uint64_t end);
+  bool has_waiter(const sync_object &o, uint32_t task, bool waiting_for_data) const;
+  void clear_wake_pending(uint32_t task);
   void publish_sync_object(int handle);
   void publish_owned_mutexes(uint32_t task);
   task_control *find_task(uint32_t task);

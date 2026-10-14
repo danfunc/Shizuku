@@ -65,8 +65,11 @@ bool domain::task_delete(uint32_t id) {
   for (auto &t : tasks_) if (t.id == id && t.status != state::unused && t.status != state::done) {
     t.status = state::done; t.wake_deadline = UINT64_MAX;
     publish_owned_mutexes(id);
+    // task_finished() may drop the identity current_task() derives from the stack,
+    // so decide "self" first.
+    const bool is_self = id == p_.current_task();
     p_.task_finished(id);
-    if (id == p_.current_task()) p_.exit_thread();
+    if (is_self) p_.exit_thread();
     return true;
   }
   return false;
@@ -124,6 +127,8 @@ bool domain::task_notify(uint32_t id, uint32_t index, uint32_t value, uint32_t a
   if (t->notification_waiting && t->status == state::blocked) {
     make_ready(id);
     woke = p_.wake(id);
+  } else if (t->notification_waiting) {
+    t->wake_pending = true; // waiter is between its check and block_current()
   }
   if (higher) *higher = woke;
   if (woke && !from_isr) p_.yield();
@@ -142,8 +147,7 @@ uint32_t domain::task_notify_take(uint32_t index, bool clear_count, tick_t timeo
       return 0;
     }
     t->notification_waiting = true;
-    block_current(end);
-    p_.park_until(end);
+    if (block_current(end)) p_.park_until(end);
     make_ready(id);
     t->notification_waiting = false;
   }
@@ -170,8 +174,7 @@ bool domain::task_notify_wait(uint32_t index, uint32_t clear_entry, uint32_t cle
       return false;
     }
     t->notification_waiting = true;
-    block_current(end);
-    p_.park_until(end);
+    if (block_current(end)) p_.park_until(end);
     make_ready(id);
     t->notification_waiting = false;
   }
@@ -209,20 +212,25 @@ bool domain::configure_backend(uint32_t handler, uint32_t method, uint32_t tick_
   if(!p_.configure_route(handler, method, tick_hz, this))return false;
   tick_hz_=tick_hz; return true;
 }
-void domain::block_current(uint64_t deadline) {
+bool domain::block_current(uint64_t deadline) {
   const uint32_t id=p_.current_task();
   if (id == 0) {
+    if (root_task_.wake_pending) { root_task_.wake_pending = false; return false; }
     root_task_.status = state::blocked;
     root_task_.wake_deadline = deadline;
     p_.block_task(id, deadline);
-    return;
+    return true;
   }
   for(auto &t:tasks_) if(t.id==id&&t.status!=state::done) {
+    // A wake delivered between waiter registration and this call found the task
+    // not BLOCKED; do not sleep through it. The caller re-evaluates its condition.
+    if(t.wake_pending){t.wake_pending=false;return false;}
     t.status=state::blocked; t.wake_deadline=deadline;
     // A blocked task is not eligible until make_ready() transitions it back;
     // add no extra delay here, especially for controller LL tasks woken by IRQ.
-    t.eligible_after_us=p_.now_us(); p_.block_task(id,deadline); return;
+    t.eligible_after_us=p_.now_us(); p_.block_task(id,deadline); return true;
   }
+  return true; // unknown task (e.g. host/root-less caller): nothing to skip, caller parks
 }
 void domain::make_ready(uint32_t id) {
   if (id == 0 && root_task_.status == state::blocked) {
@@ -235,6 +243,29 @@ void domain::make_ready(uint32_t id) {
     t.status=state::ready; t.wake_deadline=UINT64_MAX;
     t.ready_since_us=p_.now_us(); t.ready_since_valid=true;
     p_.make_ready(id); return;
+  }
+}
+bool domain::has_waiter(const sync_object &o, uint32_t id, bool for_data) const {
+  const size_t side=for_data?1:0;
+  for(size_t i=0;i<o.waiter_count[side];i++) if(o.waiters[side][i].task==id) return true;
+  return false;
+}
+void domain::clear_wake_pending(uint32_t id) {
+  if (id == 0) { root_task_.wake_pending = false; return; }
+  for(auto &t:tasks_) if(t.id==id) { t.wake_pending=false; return; }
+}
+uint64_t domain::bounded_block_deadline(uint64_t end) {
+  if (end != UINT64_MAX) return end;
+  return p_.now_ticks() + kForeverRecheckTicks;
+}
+void domain::wake_waiter(uint32_t id) {
+  if (id == 0) {
+    if (root_task_.status == state::blocked) make_ready(id); else root_task_.wake_pending = true;
+    return;
+  }
+  for(auto &t:tasks_) if(t.id==id&&t.status!=state::done&&t.status!=state::unused) {
+    if(t.status==state::blocked) make_ready(id); else t.wake_pending=true;
+    return;
   }
 }
 void domain::finish_current_task() {
@@ -459,7 +490,7 @@ bool domain::wake_one(sync_object &o, bool for_data) {
   size_t best=0;
   for(size_t i=1;i<o.waiter_count[side];i++) if(o.waiters[side][i].priority>o.waiters[side][best].priority || (o.waiters[side][i].priority==o.waiters[side][best].priority && o.waiters[side][i].sequence<o.waiters[side][best].sequence)) best=i;
   auto id=o.waiters[side][best].task; o.waiters[side][best]=o.waiters[side][--o.waiter_count[side]];
-  const bool higher=p_.wake(id); make_ready(id); return higher;
+  const bool higher=p_.wake(id); wake_waiter(id); return higher;
 }
 bool domain::wait(sync_object &o, bool data, tick_t timeout, bool from_isr) {
   if(from_isr != p_.in_isr()) return false;
@@ -599,17 +630,16 @@ bool domain::semaphore_take(int h,tick_t timeout,bool isr) {
   o->take_count = o->take_count + 1u;
   if(o->count){--o->count;publish_sync_object(h);return true;} if(timeout==0){publish_sync_object(h);return false;}
   uint64_t end=timeout==kForever?UINT64_MAX:p_.now_ticks()+timeout;
-  bool registered=false;
+  bool registered=false; const uint32_t me=p_.current_task();
   do {
     poll_timers();
-    if(o->count){--o->count;publish_sync_object(h);return true;}
+    if(o->count){if(registered)remove_waiter(*o,me,true);clear_wake_pending(me);--o->count;publish_sync_object(h);return true;}
     if(p_.now_ticks()>=end)break;
-    if(!registered){if(!add_waiter(*o,true))return false;registered=true;publish_sync_object(h);}
-    block_current(end); p_.park_until(end);
-    if(registered){remove_waiter(*o,p_.current_task(),true);publish_sync_object(h);}
-    registered=false;
+    if(!registered){if(!add_waiter(*o,true))return false;registered=true;publish_sync_object(h);continue;}
+    if(block_current(bounded_block_deadline(end))) p_.park_until(end);
+    registered=has_waiter(*o,me,true); // a give pops the waiter; a bounded recheck leaves it queued
   } while(true);
-  remove_waiter(*o,p_.current_task(),true); publish_sync_object(h); return false;
+  remove_waiter(*o,me,true); clear_wake_pending(me); publish_sync_object(h); return false;
 }
 bool domain::semaphore_give(int h,bool isr,bool *higher) { auto *o=get(h,object_kind::semaphore);if(!o||isr!=p_.in_isr()||o->count==o->limit)return false;++o->count;o->last_giver_task=p_.current_task();o->give_count=o->give_count+1u;const bool hp=wake_one(*o,true);if(higher&&hp)*higher=true;publish_sync_object(h);return true; }
 uint32_t domain::semaphore_count(int h) const { return h>=0&&size_t(h)<kMaxObjects&&objects_[h].used&&objects_[h].kind==object_kind::semaphore?objects_[h].count:0; }
@@ -636,15 +666,23 @@ bool domain::mutex_take(int h,tick_t timeout,bool isr,bool recursive_api) {
   uint64_t end=timeout==kForever?UINT64_MAX:p_.now_ticks()+timeout; bool registered=false;
   do {
     poll_timers();
-    if(o->owner==UINT32_MAX){o->owner=me;o->recursion=1;publish_sync_object(h);return true;}
+    if(o->owner==UINT32_MAX){if(registered)remove_waiter(*o,me,true);clear_wake_pending(me);o->owner=me;o->recursion=1;publish_sync_object(h);return true;}
     if(timeout==0||p_.now_ticks()>=end){publish_sync_object(h);break;}
-    if(!registered){if(!add_waiter(*o,true)){publish_sync_object(h);return false;}registered=true;refresh_mutex_priority(o->owner);publish_sync_object(h);}
+    if(!registered){
+      if(!add_waiter(*o,true)){publish_sync_object(h);return false;}
+      registered=true;refresh_mutex_priority(o->owner);publish_sync_object(h);
+      continue; // a give may have run between the owner check and registration: re-check before blocking
+    }
     const uint32_t owner = o->owner;
-    block_current(end); p_.park_until(end); if(registered)remove_waiter(*o,me,true); registered=false;
-    if (owner != UINT32_MAX) refresh_mutex_priority(owner);
-    publish_sync_object(h);
+    // Never sleep without a bound: a wake that is missed anyway (see wake_pending) is
+    // recovered by the scheduler at the next tick instead of waiting forever.
+    if(block_current(bounded_block_deadline(end))) p_.park_until(end);
+    registered=has_waiter(*o,me,true); // a give pops the waiter; a bounded recheck leaves it queued
+    if(!registered){if(owner!=UINT32_MAX)refresh_mutex_priority(owner);publish_sync_object(h);}
   } while(true);
-  remove_waiter(*o,me,true); publish_sync_object(h); return false;
+  remove_waiter(*o,me,true); clear_wake_pending(me);
+  if(o->owner!=UINT32_MAX)refresh_mutex_priority(o->owner);
+  publish_sync_object(h); return false;
 }
 bool domain::mutex_give(int h,bool isr) { auto *o=get(h,object_kind::mutex);if(!o||isr||p_.in_isr()||o->owner!=p_.current_task())return false;o->last_giver_task=p_.current_task();o->give_count=o->give_count+1u;if(--o->recursion==0){const uint32_t owner=o->owner;o->owner=UINT32_MAX;wake_one(*o,true);refresh_mutex_priority(owner);}publish_sync_object(h);return true; }
 uint32_t domain::mutex_owner(int h) const { return h>=0&&size_t(h)<kMaxObjects&&objects_[h].used&&objects_[h].kind==object_kind::mutex&&objects_[h].owner!=UINT32_MAX?objects_[h].owner:0; }

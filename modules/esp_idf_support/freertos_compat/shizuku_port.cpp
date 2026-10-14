@@ -3,6 +3,12 @@
 
 extern "C" void shizuku_esp_ble_note_task_started(uint32_t task_id) __attribute__((weak));
 extern "C" void shizuku_esp_ble_pend_compat_context_switch(void) __attribute__((weak));
+#if defined(SHIZUKU_ESP32_C6)
+extern "C" void shizuku_esp_ble_note_plain_spawn(uint32_t, uint32_t) __attribute__((weak));
+extern "C" void shizuku_esp_ble_note_run_for_result(uint32_t, uint32_t, uint32_t) __attribute__((weak));
+extern "C" void shizuku_c6_note_plain_task_stack_start(uint32_t, uintptr_t) __attribute__((weak));
+extern "C" void shizuku_c6_note_plain_task_stack_probe(uint32_t) __attribute__((weak));
+#endif
 extern "C" void shizuku_esp_ble_irq_mask_begin(uint32_t, uint32_t, uint32_t) __attribute__((weak));
 extern "C" void shizuku_esp_ble_irq_mask_end(uint32_t) __attribute__((weak));
 
@@ -13,19 +19,74 @@ volatile uint32_t g_current_task_id=0;
 volatile uint32_t g_isr_depth=0;
 volatile uint32_t g_grant_parent_id=0;
 volatile uint32_t g_grant_depth=0;
-volatile uint32_t g_sleep_parent_ids[16]{};
+// Diagnostic counter only; volatile non-atomic, not used for skip decisions.
 volatile uint32_t g_sleep_depth=0;
+#if defined(SHIZUKU_ESP32_C6)
+uint32_t g_run_for_probe_count=0;
+#endif
 uint64_t (*g_clock_us)()=nullptr;
+struct stack_entry { uintptr_t top; uint32_t id; };
+stack_entry g_task_stacks[shizuku::freertos_compat::kMaxTasks]{};
+bool g_stacks_active=false;
+constexpr uintptr_t kStackTopSlack=256;
+uintptr_t (*g_stack_probe)()=nullptr;
+uint32_t resolve_current_task();
+uintptr_t current_sp() {
+  if(g_stack_probe)return g_stack_probe();
+#if defined(__riscv)
+  uintptr_t sp=0; asm volatile("mv %0, sp":"=r"(sp)); return sp;
+#else
+  return 0;
+#endif
+}
 std::atomic<bool> g_reschedule_pending{false};
 shizuku::freertos_compat::shizuku_port::host_syscall_hook g_host_syscall_hook=nullptr;
 }
 
-extern "C" uint32_t shizuku_freertos_compat_current_task_id(void) {
+namespace {
+uint32_t resolve_current_task() {
+  // Interrupts do not run on a compat thread's stack: keep the pre-existing meaning.
+  if(g_isr_depth)return g_current_task_id;
+  const uintptr_t sp=current_sp();
+  if(sp&&g_stacks_active) {
+    uint32_t id=0;
+    if(shizuku::freertos_compat::shizuku_port::task_for_stack(sp,&id))return id;
+    return 0; // not on any compat thread's stack: the root/lender context
+  }
   return g_current_task_id;
+}
+}
+extern "C" uint32_t shizuku_freertos_compat_current_task_id(void) {
+  return resolve_current_task();
 }
 
 namespace shizuku::freertos_compat {
 namespace { domain *g_handler_domain=nullptr; }
+void shizuku_port::set_stack_probe(uintptr_t (*probe)()) {
+  g_stack_probe=probe;
+  if(!probe){for(auto &e:g_task_stacks)e={};g_stacks_active=false;} // test reset
+}
+void shizuku_port::note_task_stack(uint32_t id,uintptr_t sp) {
+  if(!sp)return;
+  // sp is sampled a few frames below the real top and callers run slightly above it
+  // (e.g. after a non-inlined helper returns): window = (sp+slack-4096, sp+slack].
+  const uintptr_t top=sp+kStackTopSlack;
+  stack_entry *slot=nullptr;
+  for(auto &e:g_task_stacks) {
+    if(e.top&&e.id==id)e={}; // re-registration of the same task
+    if(!e.top&&!slot)slot=&e;
+  }
+  if(!slot)return;
+  *slot={top,id}; g_stacks_active=true;
+}
+bool shizuku_port::task_for_stack(uintptr_t sp,uint32_t *id) {
+  const stack_entry *best=nullptr;
+  for(const auto &e:g_task_stacks)
+    if(e.top&&sp<=e.top&&e.top-sp<kKernelThreadStackBytes&&(!best||e.top<best->top))best=&e;
+  if(!best)return false;
+  if(id)*id=best->id;
+  return true;
+}
 bool shizuku_port::configure_route(uint32_t h,uint32_t m,uint32_t hz,void *d) {
   if(!hz||!d||!g_clock_us)return false;
   if(!h) {
@@ -77,14 +138,13 @@ uint64_t shizuku_port::now_us() {
   task_start request{kReadClock,0,0,0,nullptr,nullptr};
   return call_handler(&request);
 }
-uint32_t shizuku_port::current_task() { return g_current_task_id; }
+uint32_t shizuku_port::current_task() { return resolve_current_task(); }
 bool shizuku_port::in_isr() { return g_isr_depth!=0; }
 void shizuku_port::yield() {
   if(in_isr())return;
-  const uint32_t task=g_current_task_id;
-  const bool lender_context=(g_grant_depth!=0)||(g_sleep_depth!=0);
-  const uint32_t parent=g_grant_depth?g_grant_parent_id:
-      (g_sleep_depth?g_sleep_parent_ids[g_sleep_depth-1]:task);
+  const uint32_t task=current_task();
+  const bool lender_context=(g_grant_depth!=0);
+  const uint32_t parent=lender_context?g_grant_parent_id:task;
   if(lender_context)g_current_task_id=parent;
   call(shizuku::object_api::YIELD);
   g_current_task_id=task;
@@ -138,6 +198,15 @@ bool shizuku_port::spawn(void (*entry)(void *),void *arg,uint32_t stack,uint32_t
   }
   if(error||!spawned){packet={};return false;}
   if(handler_object_)packet.id=static_cast<uint32_t>(spawned);
+#if defined(SHIZUKU_ESP32_C6)
+  else {
+    // The dispatcher ID names the PLAIN object; task APIs need the kernel
+    // thread ID returned by SPAWN (RUN_FOR indexes the kernel thread table).
+    packet.id=static_cast<uint32_t>(spawned);
+    if (shizuku_esp_ble_note_plain_spawn)
+      shizuku_esp_ble_note_plain_spawn(object_id, packet.id);
+  }
+#endif
   *id=packet.id; return true;
 }
 void shizuku_port::plain_task_entry(void *raw) {
@@ -147,7 +216,17 @@ void shizuku_port::plain_task_entry(void *raw) {
     return;
   }
   const uint32_t previous=g_current_task_id;
+  note_task_stack(packet->id,current_sp());
   g_current_task_id=packet->id;
+#if defined(SHIZUKU_ESP32_C6)
+  if (shizuku_c6_note_plain_task_stack_start) {
+    uintptr_t actual_sp=0;
+#if defined(__riscv)
+    asm volatile("mv %0, sp" : "=r"(actual_sp));
+#endif
+    shizuku_c6_note_plain_task_stack_start(packet->id, actual_sp);
+  }
+#endif
   if (shizuku_esp_ble_note_task_started) shizuku_esp_ble_note_task_started(packet->id);
   packet->entry(packet->arg);
   if(g_handler_domain)g_handler_domain->finish_current_task();
@@ -158,26 +237,34 @@ bool shizuku_port::run_for(uint32_t task,uint32_t cycles) {
   const uint32_t previous=g_current_task_id,previous_parent=g_grant_parent_id,previous_depth=g_grant_depth;
   g_current_task_id=task; g_grant_parent_id=previous; g_grant_depth=previous_depth+1;
   uintptr_t result=0; const auto error=call(shizuku::object_api::RUN_FOR,task,cycles,0,&result);
+#if defined(SHIZUKU_ESP32_C6)
+  if (shizuku_esp_ble_note_run_for_result)
+    shizuku_esp_ble_note_run_for_result(task, static_cast<uint32_t>(error),
+                                        static_cast<uint32_t>(result));
+  if (((++g_run_for_probe_count) & 1023u) == 0u &&
+      shizuku_c6_note_plain_task_stack_probe)
+    shizuku_c6_note_plain_task_stack_probe(task);
+#endif
   g_current_task_id=previous;g_grant_parent_id=previous_parent;g_grant_depth=previous_depth;return error==0;
 }
 void shizuku_port::sleep_us(uint64_t us) {
   if(in_isr())return;
-  const uint32_t task=g_current_task_id;
-  const uint32_t parent=g_grant_depth?g_grant_parent_id:task;
-  const uint32_t depth=g_sleep_depth;
-  if(depth>=16){yield();return;}
-  g_sleep_parent_ids[depth]=parent;g_sleep_depth=depth+1;
-  if(g_grant_depth)g_current_task_id=parent;
+  const uint32_t task=current_task();
+  const bool lender_context=(g_grant_depth!=0);
+  const uint32_t parent=lender_context?g_grant_parent_id:task;
+  if(lender_context)g_current_task_id=parent;
+  // Diagnostic depth tracking (non-atomic counter; not used for clamping or skipping).
+  g_sleep_depth=g_sleep_depth+1;
   call(shizuku::object_api::SLEEP_US,static_cast<uintptr_t>(us));
+  if(g_sleep_depth)g_sleep_depth=g_sleep_depth-1;
   g_current_task_id=task;
-  g_sleep_depth=depth;
 }
 void shizuku_port::exit_thread() {
   if(g_grant_depth)g_current_task_id=g_grant_parent_id;
-  else if(g_sleep_depth)g_current_task_id=g_sleep_parent_ids[g_sleep_depth-1];
   call(shizuku::object_api::EXIT_THREAD);
 }
 void shizuku_port::task_finished(uint32_t id) {
+  for(auto &e:g_task_stacks)if(e.top&&e.id==id)e={};
   for(auto &packet:starts_)if(packet.operation==kStartTask&&packet.id==id){packet={};return;}
 }
 uint32_t shizuku_port::irq_save() {
@@ -207,13 +294,14 @@ void shizuku_port::irq_restore(uint32_t state) {
 #endif
 }
 
+static void note_task_stack_for_dispatch(uint32_t id) { shizuku_port::note_task_stack(id,current_sp()); }
 extern "C" uintptr_t shizuku_freertos_compat_dispatch(uintptr_t raw) {
   auto *packet=reinterpret_cast<shizuku_port::task_start *>(raw);
   if(!packet)return 0;
   if(packet->operation==shizuku_port::kReadClock)return g_clock_us?g_clock_us():0;
   if(packet->operation==shizuku_port::kHandshake)return shizuku_port::kHandshakeReply;
   if(packet->operation==shizuku_port::kStartTask) {
-    const uint32_t previous=g_current_task_id; g_current_task_id=packet->id;
+    const uint32_t previous=g_current_task_id; note_task_stack_for_dispatch(packet->id); g_current_task_id=packet->id;
     if (shizuku_esp_ble_note_task_started) shizuku_esp_ble_note_task_started(packet->id);
     if(packet->entry)packet->entry(packet->arg);
     // The dispatch method is spawned as a Shizuku task; return through the
