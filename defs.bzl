@@ -345,6 +345,8 @@ def _shizuku_firmware_binary_impl(ctx):
     args.add(out_bin.path)
     args.add("esp-15.2.0_20251204")
     args.add(ctx.attr.target)
+    if ctx.attr.build_dir:
+        args.add(ctx.attr.build_dir)
 
     ctx.actions.run(
         outputs = [out_bin],
@@ -366,8 +368,9 @@ _shizuku_firmware_binary = rule(
     attrs = {
         "archive": attr.label(mandatory = True, allow_single_file = True),
         "target": attr.string(default = "esp32c6"),
+        "build_dir": attr.string(default = ""),
         "esp32c6_project": attr.label(default = "@shizuku//modules/esp_idf_support/firmware:esp32c6_project"),
-        "build_sh": attr.label(default = "@shizuku//modules/esp_idf_support/firmware:build.sh", executable = True, cfg = "exec"),
+        "build_sh": attr.label(default = "@shizuku//modules/esp_idf_support/firmware:build_sh", executable = True, cfg = "exec"),
         "_allowlist_function_transition": attr.label(
             default = "@bazel_tools//tools/allowlists/function_transition_allowlist",
         ),
@@ -454,15 +457,13 @@ def _shizuku_sketch_entry_impl(ctx):
 
 extern void %s(void);
 extern void %s(void);
-
-// 注: 現行カーネルには純粋な C ABI の yield 関数 (例: shizuku_yield) は未実装。
-// 実在する C++ API は shizuku::services::yield() のみであるため、
-// 将来の SDK/kernel C ABI yield 接続用フックを予約しつつ、無限ループを確実に反復する。
+extern "C" void shizuku_yield(void);
 
 extern "C" void %s(void) {
     %s();
     for (;;) {
         %s();
+        shizuku_yield();
     }
 }
 """ % (

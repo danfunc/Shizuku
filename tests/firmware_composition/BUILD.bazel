@@ -11,23 +11,32 @@ shizuku_object(
     deps = ["//:internal_headers"],
 )
 
-# 2. 独立した shizuku_sketch_object
+# 2. 独立した shizuku_sketch_object (2個のスケッチ共存検証)
 shizuku_sketch_object(
     name = "sample_sketch_obj",
     srcs = ["sample_sketch.cpp"],
 )
 
-# 3. 複数オブジェクト（object + sketch_object）を合成したファームウェア
+shizuku_sketch_object(
+    name = "sample_sketch_obj_second",
+    srcs = ["sample_sketch_second.cpp"],
+    setup_fn = "setup_second",
+    loop_fn = "loop_second",
+)
+
+# 3. 複数オブジェクト（object + 2 sketches）を合成したファームウェア
 shizuku_firmware(
     name = "sample_fw",
     target = "esp32c6",
     objects = [
         ":sample_obj",
         ":sample_sketch_obj",
+        ":sample_sketch_obj_second",
     ],
     parents = {
         "sample_obj": "root",
         "sample_sketch_obj": "sample_obj",
+        "sample_sketch_obj_second": "sample_obj",
     },
     privileged_names = [
         "sample_obj",

@@ -62,9 +62,18 @@ elif [ -n "${SHIZUKU_IDF_BUILD_DIR:-}" ]; then
 else
   BUILD_DIR=$(mktemp -d "$OUT.idf.XXXXXX")
 fi
-# ★sdkconfig / sdkconfig.old は BUILD_DIR 配下へ出す (SRC は Bazel の入力ツリーなので汚さない)。
 cd "$SRC"
-idf.py -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" -DSHIZUKU_KERNEL_ARCHIVE="$ARCHIVE" set-target "$TARGET" > "$BUILD_DIR.set-target.log" 2>&1 || fail "idf.py set-target 失敗 ($BUILD_DIR.set-target.log)"
+RUN_SET_TARGET=1
+if [ -f "$BUILD_DIR/CMakeCache.txt" ]; then
+  CACHED_TARGET=$(grep -E "^IDF_TARGET:STRING=" "$BUILD_DIR/CMakeCache.txt" | cut -d= -f2 || true)
+  if [ "$CACHED_TARGET" = "$TARGET" ]; then
+    RUN_SET_TARGET=0
+  fi
+fi
+
+if [ "$RUN_SET_TARGET" -eq 1 ]; then
+  idf.py -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" -DSHIZUKU_KERNEL_ARCHIVE="$ARCHIVE" set-target "$TARGET" > "$BUILD_DIR.set-target.log" 2>&1 || fail "idf.py set-target 失敗 ($BUILD_DIR.set-target.log)"
+fi
 idf.py -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" -DSHIZUKU_KERNEL_ARCHIVE="$ARCHIVE" -DIDF_TARGET="$TARGET" build || fail "idf.py build 失敗"
 cp "$BUILD_DIR/shizuku_$TARGET.bin" "$OUT"
 echo "OK($TARGET): $IDF_VER / $GCC_BANNER -> $OUT"

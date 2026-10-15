@@ -160,6 +160,20 @@ public:
     return m_objects[object_id].parent_handler_object;
   }
 
+  bool set_parent_handler(uint32_t child_id, uint32_t parent_id) {
+    if (child_id >= OBJECT_COUNT_T || !m_objects[child_id].created) return false;
+    if (parent_id >= OBJECT_COUNT_T || !m_objects[parent_id].created) return false;
+    m_objects[child_id].parent_handler_object = parent_id;
+    m_objects[child_id].parent_handler_entry = (uintptr_t)m_objects[parent_id].methods[0];
+    return true;
+  }
+
+  bool set_object_name(uint32_t object_id, const char *name) {
+    if (object_id >= OBJECT_COUNT_T || !m_objects[object_id].created) return false;
+    m_object_name[object_id] = name;
+    return true;
+  }
+
 private:
   // The compatibility probe inspects a suspended thread's private ledger
   // shape without exposing that inspection through the object API.

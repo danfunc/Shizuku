@@ -1,0 +1,39 @@
+# Shizuku-objfw rbuild job definitions
+excludes = ["compile_commands.json"]
+
+[jobs.build_esp32c5]
+worker = "main-lxc"
+backend = "bazel"
+args = ["build", "--config=esp32c5", "--jobs=auto", "--action_env=CMAKE_BUILD_PARALLEL_LEVEL=24", "--action_env=IDF_PATH=/home/ishigakiyua/.local/esp-idf-c5-v6.1", "--action_env=IDF_TOOLS_PATH=/home/ishigakiyua/.local/idf-tools-c5-v6.1", "//modules/esp_idf_support/firmware:esp32c5"]
+artifacts = ["bazel-bin/modules/esp_idf_support/firmware/shizuku_esp32c5.bin"]
+
+[jobs.build_esp32c5.env]
+CMAKE_BUILD_PARALLEL_LEVEL = "24"
+IDF_PATH = "/home/ishigakiyua/.local/esp-idf-c5-v6.1"
+IDF_TOOLS_PATH = "/home/ishigakiyua/.local/idf-tools-c5-v6.1"
+
+[jobs.build_esp32c6]
+worker = "main-lxc"
+backend = "bazel"
+args = ["build", "--config=esp32c6", "--jobs=auto", "--action_env=CMAKE_BUILD_PARALLEL_LEVEL=24", "--action_env=IDF_PATH=/home/ishigakiyua/.local/esp-idf-c5-v6.1", "--action_env=IDF_TOOLS_PATH=/home/ishigakiyua/.local/idf-tools-c5-v6.1", "//modules/esp_idf_support/firmware:esp32c6"]
+artifacts = ["bazel-bin/modules/esp_idf_support/firmware/shizuku_esp32c6.bin"]
+
+[jobs.build_esp32c6.env]
+CMAKE_BUILD_PARALLEL_LEVEL = "24"
+IDF_PATH = "/home/ishigakiyua/.local/esp-idf-c5-v6.1"
+IDF_TOOLS_PATH = "/home/ishigakiyua/.local/idf-tools-c5-v6.1"
+
+[jobs.build_esp32c6_ble]
+worker = "main-lxc"
+backend = "bazel"
+args = ["build", "--config=esp32c6_ble", "--jobs=auto", "--action_env=CMAKE_BUILD_PARALLEL_LEVEL=24", "--action_env=IDF_PATH=/home/ishigakiyua/.local/esp-idf-c5-v6.1", "--action_env=IDF_TOOLS_PATH=/home/ishigakiyua/.local/idf-tools-c5-v6.1", "//modules/esp_idf_support/firmware:esp32c6_ble"]
+artifacts = [
+    "bazel-bin/modules/esp_idf_support/firmware/shizuku_esp32c6_ble.bin",
+    "bazel-bin/modules/esp_idf_support/firmware/shizuku_esp32c6_ble.elf",
+    "bazel-bin/modules/esp_idf_support/firmware/shizuku_esp32c6_ble.map",
+]
+
+[jobs.build_esp32c6_ble.env]
+CMAKE_BUILD_PARALLEL_LEVEL = "24"
+IDF_PATH = "/home/ishigakiyua/.local/esp-idf-c5-v6.1"
+IDF_TOOLS_PATH = "/home/ishigakiyua/.local/idf-tools-c5-v6.1"

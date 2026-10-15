@@ -1,55 +1,64 @@
 # Handoff: Object Firmware Composition API (ESP32-C6 Slice)
 
-- **Job ID**: `1f4f09e3-6bdb-4365-a483-a51a04906bb8`
-- **Parent Job**: `ad6a55a4-cfe5-4ab5-bbde-85892fc248c3`
-- **Followup / Caller Session**: `ad6a55a4-cfe5-4ab5-bbde-85892fc248c3`
-- **Base Commit**: `10534ff74ad63bfe155fe55dca89635e9ce61434`
+- **Job ID**: `c619f1a0-afae-4cef-8e8d-6b14c96417c8`
+- **Parent Job**: `c619f1a0-afae-4cef-8e8d-6b14c96417c8`
+- **Followup / Caller Session**: `c619f1a0-afae-4cef-8e8d-6b14c96417c8`
+- **Base Commit**: `a21a72d15e65986262aedb92a20024e7b6a8e807`
 - **Branch**: `feat/object-firmware-composition`
 
 ---
 
 ## 1. 実装到達点 (Confirmed & Implemented)
 
-1. **`defs.bzl` の再構成と厳格な境界契約**:
-   - `ShizukuObjectInfo` provider: `object_name`, `entry_point`, `cc_info` のみを保持。`shizuku_object` 側の `parent`/`privileged` を完全削除。
-   - `shizuku_object(name, srcs, hdrs, deps, ...)`: firmware/ID/parent 未定の純粋 compile unit。
-   - `shizuku_firmware(name, target, objects, parents, privileged_names, ...)`:
-     - Manifest ownership を firmware 側に完全移行。
-     - オブジェクト上限を予約スロット（0: KERNEL_OBJECT, 1: ROOT_OBJECT）を引いた **62** 個に設定。
-     - 親解決: デフォルトまたは `"root"` の親 ID は runtime の `ROOT_OBJECT = 1` にマッピング（legacy symbol `shizuku_object_id_root = 0` とは分離）。
-     - 静的検証 (Fail-closed): 重複名、予約名 (`root`, `count`, `kernel`, `kernel_object`)、親の不在、自己親 (`self-parent`)、循環階層 (`cycle`)、未知ターゲット (`unknown target`) を機械的に拒否。
-     - トップレベルバイナリ (`_shizuku_firmware_binary`): incoming transition を持たせ、ホスト環境 (macOS arm64 等) から `.bazelrc` なしでビルドした際の incompatibility skip を完全解消。
-   - `shizuku_sketch_object` / `shizuku_sketch`:
-     - `setup()` 1回呼出し + `loop()` 無限反復のエントリラッパー `<name>_main()` を生成。
-     - 単独ファームウェアだけでなく provider 付き object として他の `shizuku_firmware` の `objects` へ渡せるよう分離。
-2. **新 API テストパッケージの分離**:
-   - `/Users/ishigakiyua/github/Shizuku-objfw/tests/firmware_composition/` を新設し、既存 `tests/composition_link/` の境界を保護。
-   - `test_fail_closed.sh`: unique `/private/tmp` fixture を使用した検証スクリプトを用意。
-3. **設計文書の更新**:
-   - `docs/design/object_firmware_composition.typ` に Section 4（実装確定方針と境界契約）を追記し、PDF を再生成。
+1. **SDK非依存 公開 C ABI `shizuku_yield()` の実装**:
+   - `internal_headers/shizuku/kernel_services.hpp` に宣言。
+   - `source/kernel/services.cpp` に `object_api::YIELD` (index 8) を直接呼び出す RISC-V (`ecall`) / ARM (`svc 0`) 実装を配備。
+   - `defs.bzl` の `_shizuku_sketch_entry_impl` 内で `loop(); shizuku_yield();` を呼び出すよう接続。架空シンボルを排除。
+2. **SDK `build.sh` のインクリメンタルビルド対応**:
+   - `modules/esp_idf_support/firmware/build.sh` において `BUILD_DIR/CMakeCache.txt` 内の `IDF_TARGET:STRING` を検査し、ターゲットが一致していれば `idf.py set-target` をスキップ。
+   - `defs.bzl` の `_shizuku_firmware_binary` で `build_dir` 属性をサポート。
+   - `modules/esp_idf_support/firmware/BUILD.bazel` で `build.sh` を `sh_binary` として公開。
+3. **C6 Runtime Manifest Glue の実装**:
+   - `modules/esp_idf_support/c6/early_boot.cpp` に弱シンボル参照による `shizuku_composition_manifest` 処理を実装。
+   - 本番の `ARCH::syscall(CREATE_OBJECT, ...)` 経路でマニフェスト内の全オブジェクトを生成・検証。
+   - `set_object_name` および `set_parent_handler` により名前と親関係を設定。
+4. **複数 Sketch の衝突回避実証**:
+   - `tests/firmware_composition/` に `sample_sketch_second.cpp` を追加（`setup_fn = "setup_second"`, `loop_fn = "loop_second"`）。
+   - `sample_fw` に2つのスケッチを含めて合成し、`sample_fw_composition_gen_manifest.c` で `sample_sketch_obj` と `sample_sketch_obj_second` が別名エントリとして衝突なく生成されることを確認。
+   - 単一アーカイブ `libsample_fw_archive.a` がビルド成功し、`riscv32-esp-elf-nm` で両方のエントリシンボル（`sample_sketch_obj_main`, `sample_sketch_obj_second_main`）および一意な ID シンボルが存在することを確認。
+5. **Fail-Closed Negative Tests の実アサーション完了**:
+   - `tests/firmware_composition/test_fail_closed.sh` により 2件の Positive テストと 7件の Negative テストが全て PASS（終了コード 0）。
+6. **リモート rbuild Baseline 実証**:
+   - `rbuild --worktree objfw job build_esp32c6` (exit 0, hash: `7a53781826125bb06fcda19295bbd5e9b517e418d16478eada52944e001ebbd4`)
+   - `rbuild --worktree objfw job build_esp32c5` (exit 0, hash: `cae16ab68d96b4cf066ba35810787def412d9b58e35ccc23ab18dccc723b4975`)
+   - 同一コミット・同一 worktree (`objfw`)・同一ワーカー (`main-lxc`) で C6/C5 の実証を達成。
 
 ---
 
 ## 2. 未達事項・技術境界 (Unresolved & Boundaries)
 
-1. **純粋 C ABI の yield 関数**:
-   - 現行カーネルには C++ の `shizuku::services::yield()` のみ実在し、外部から C ABI で直接呼べる `shizuku_yield(void)` は存在しない。架空シンボルによるリンクエラーを防ぐため未実装とし、次期カーネル C ABI 拡張へ引き継ぐ。
-2. **SDK build.sh の `idf.py set-target` キャッシュ挙動**:
-   - 第 5 引数による常設 builddir のパス受け入れは実装済みだが、`idf.py set-target` が既存の CMake キャッシュをクリアする挙動があるため、設定済みの場合は `set-target` をスキップするガードが今後必要。
-3. **C6 実機 `.bin` の最終リンク**:
-   - ID 担当（job `05c743b4-bd45-4625-bd43-c6f418ae440b`）が `tools/gen_object_ids.py` および `tools/object_ids.c.in`、root `BUILD.bazel` の移行を進行中。root BUILD のビルド整合性が回復次第、最終リンクを実施。
+1. **外部 Consumer での最終 `.bin` リンク**:
+   - 外部 Consumer (`/private/tmp/scratch_shizuku_consumer`) において `bazel build //:ext_sketch_archive` は exit 0 で成功し、11MB の単一 `.a` を出力。
+   - トップレベル `//:ext_sketch` はホスト環境に `IDF_PATH` が未 export のため `build.sh` 内で安全に exit 1 で停止（アーカイブ先行生成済み）。
 
 ---
 
 ## 3. 再現・検証コマンド (Exact Commands)
 
 ```bash
-# 1. 新規テストパッケージのメタデータ生成確認
-bazel build //tests/firmware_composition:sample_fw_composition_gen
-bazel build //tests/firmware_composition:direct_sketch_fw_composition_gen
+# 1. 新規テストパッケージの全件アサーション実行 (Positive 2件 + Negative 7件)
+bash tests/firmware_composition/test_fail_closed.sh
 
-# 2. 外部 scratch consumer 検証 (no .bazelrc)
+# 2. 複数スケッチを含む合成アーカイブのビルドとシンボル確認
+bazel build //tests/firmware_composition:sample_fw_archive
+/private/var/tmp/_bazel_ishigakiyua/eaa378ed3d2ea7b6b83ae02c66d7e36c/external/shizuku++_repo_rules+riscv32_esp_elf_gcc/bin/riscv32-esp-elf-nm bazel-bin/tests/firmware_composition/libsample_fw_archive.a | grep -E "(sample_sketch_obj.*main|shizuku_object_id_)"
+
+# 3. 外部 scratch consumer 検証 (no .bazelrc)
 cd /private/tmp/scratch_shizuku_consumer
 bazel build //:ext_sketch_archive
-riscv32-esp-elf-nm bazel-bin/libext_sketch_archive.a | grep -E "(ext_sketch_main|shizuku_object_id)"
+bazel build //:ext_sketch  # IDF_PATH未設定で安全にexit 1
+
+# 4. リモート rbuild baseline 検証
+rbuild --worktree objfw job build_esp32c6
+rbuild --worktree objfw job build_esp32c5
 ```
