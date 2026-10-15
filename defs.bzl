@@ -1,10 +1,11 @@
 """Shizuku Object & Firmware Composition API (defs.bzl)
 
 提供ルール・マクロ:
-- ShizukuObjectInfo: オブジェクトメタデータ provider
-- shizuku_object: firmware/ID 未定の cc_library compile unit
-- shizuku_firmware: 合成時 ID 採番・親子・権限・chip 決定、単一 .a および最終 .bin 生成
-- shizuku_sketch: setup()/loop() 入口生成糖衣 + firmware 短縮形
+- ShizukuObjectInfo: オブジェクトメタデータ provider (object_name, entry_point, cc_info)
+- shizuku_object: firmware/ID/parent 未定の純粋 cc_library compile unit
+- shizuku_sketch_object: setup()/loop() 入口ラッパーを持つ shizuku_object
+- shizuku_firmware: 合成時 ID 採番・親子・権限・chip 決定、単一 .a および .bin 生成
+- shizuku_sketch: 単一スケッチからファームウェアまで直行する糖衣マクロ
 """
 
 load("@rules_cc//cc:defs.bzl", "cc_library")
@@ -18,8 +19,6 @@ ShizukuObjectInfo = provider(
     fields = {
         "object_name": "Unique name of the object (string)",
         "entry_point": "Entry function symbol name (string, e.g. <name>_main)",
-        "parent": "Parent object name (string or None)",
-        "privileged": "Boolean flag indicating privileged execution",
         "cc_info": "CcInfo provider containing compiled object files and include paths",
     },
 )
@@ -32,8 +31,6 @@ def _shizuku_object_marker_impl(ctx):
     info = ShizukuObjectInfo(
         object_name = ctx.attr.object_name,
         entry_point = ctx.attr.entry_point,
-        parent = ctx.attr.parent if ctx.attr.parent else None,
-        privileged = ctx.attr.privileged,
         cc_info = cc_info,
     )
     return [
@@ -47,8 +44,6 @@ _shizuku_object_marker = rule(
     attrs = {
         "object_name": attr.string(mandatory = True),
         "entry_point": attr.string(mandatory = True),
-        "parent": attr.string(),
-        "privileged": attr.bool(default = False),
         "dep": attr.label(mandatory = True, providers = [CcInfo]),
     },
 )
@@ -59,19 +54,17 @@ def shizuku_object(
         hdrs = [],
         deps = [],
         object_name = None,
-        parent = None,
-        privileged = False,
         entry_point = None,
         **kwargs):
-    """firmware/ID 未定の cc_library compile unit。
+    """firmware/ID/parent/permission 未定の cc_library compile unit。
 
     同 chip/toolchain であれば合成依存なく再コンパイル不要。
+    親オブジェクトや権限メタデータは firmware 合成側が所有する。
     """
     impl_name = name + "_impl"
     actual_obj_name = object_name if object_name else name
     ep = entry_point if entry_point else (actual_obj_name + "_main")
 
-    # ユーザーが明示的に指定した deps に加え、個別ID宣言ヘッダへの依存を許容
     cc_library(
         name = impl_name,
         srcs = srcs,
@@ -84,8 +77,6 @@ def shizuku_object(
         name = name,
         object_name = actual_obj_name,
         entry_point = ep,
-        parent = parent,
-        privileged = privileged,
         dep = ":" + impl_name,
         visibility = kwargs.get("visibility", ["//visibility:public"]),
         tags = kwargs.get("tags", []),
@@ -127,6 +118,11 @@ _firmware_transition = transition(
 )
 
 def _shizuku_composition_gen_impl(ctx):
+    # 0. ターゲット検証 (Fail-closed)
+    target = ctx.attr.target
+    if target not in ["esp32c6", "esp32c5"]:
+        fail("Unknown target: '%s'. Supported targets are 'esp32c6', 'esp32c5'." % target)
+
     # 1. オブジェクト検証 (Fail-closed)
     objects = ctx.attr.objects
     names = []
@@ -144,15 +140,33 @@ def _shizuku_composition_gen_impl(ctx):
         seen[name] = obj.label
         names.append(name)
 
-    if len(names) > 64:
-        fail("Object count exceeds capacity limit (64): got %d" % len(names))
+    # 予約スロット (0: KERNEL_OBJECT, 1: ROOT_OBJECT) を引いた上限 62
+    if len(names) > 62:
+        fail("Object count exceeds capacity limit (62): got %d" % len(names))
 
-    for obj in objects:
-        info = obj[ShizukuObjectInfo]
-        if info.parent and info.parent != "root" and info.parent not in seen:
-            fail("Missing parent object '%s' for object '%s'" % (info.parent, info.object_name))
+    # 2. 親子関係 (parents) と循環検証 (Fail-closed)
+    parents_dict = ctx.attr.parents
+    for child, parent in parents_dict.items():
+        if child not in seen:
+            fail("Cannot set parent for unknown child object '%s'" % child)
+        if parent == child:
+            fail("Self-parenting cycle detected for object '%s'" % child)
+        if parent != "root" and parent not in seen:
+            fail("Missing parent object '%s' for object '%s'" % (parent, child))
 
-    # 2. Composition ID 定義ソースの生成 (tools/gen_object_ids.py 呼び出し)
+        # サイクル検出 (DFS)
+        curr = parent
+        visited = [child]
+        for _ in range(len(names) + 2):
+            if curr == "root" or curr not in parents_dict:
+                break
+            if curr in visited:
+                fail("Cycle detected in parent hierarchy for object '%s' (cycle path: %s -> %s)" % (child, " -> ".join(visited), curr))
+            visited.append(curr)
+            curr = parents_dict[curr]
+
+    # 3. Composition ID 定義ソースの生成 (tools/gen_object_ids.py 呼び出し)
+    # canonical exported C ABI symbol を含む .c ファイルを出力
     ids_out = ctx.actions.declare_file(ctx.label.name + "_composition_ids.c")
     args = ctx.actions.args()
     args.add("--mode", "extern")
@@ -172,7 +186,8 @@ def _shizuku_composition_gen_impl(ctx):
         progress_message = "Generating composition object IDs for %s" % ctx.label,
     )
 
-    # 3. Manifest ソースの生成 (ランタイム初期入力テーブル)
+    # 4. Manifest ソースの生成 (ランタイム初期入力テーブル)
+    # ★不変条件: manifest root parent_id は runtime ROOT_OBJECT = 1。legacy symbol root = 0 とは分離。
     manifest_out = ctx.actions.declare_file(ctx.label.name + "_manifest.c")
     manifest_lines = [
         "// Generated composition manifest for " + ctx.label.name,
@@ -194,18 +209,34 @@ def _shizuku_composition_gen_impl(ctx):
     manifest_lines.append("")
     manifest_lines.append("const shizuku_object_manifest_entry_t shizuku_composition_manifest[] = {")
 
-    # ID は gen_object_ids.py と同じく index 2 から (0=KERNEL, 1=ROOT)
+    # ID 割り当てマップ (name -> id): index 2 から
+    id_map = {}
     curr_id = 2
+    for name in names:
+        id_map[name] = curr_id
+        curr_id += 1
+
+    privileged_set = {p: True for p in ctx.attr.privileged_names}
+
     for obj in objects:
         info = obj[ShizukuObjectInfo]
+        obj_name = info.object_name
+        parent_name = parents_dict.get(obj_name, "root")
+        if parent_name == "root":
+            resolved_parent_id = 1  # runtime ROOT_OBJECT = 1
+        else:
+            resolved_parent_id = id_map[parent_name]
+
+        is_priv = obj_name in privileged_set
+
         manifest_lines.append("    {")
-        manifest_lines.append('        .name = "%s",' % info.object_name)
-        manifest_lines.append("        .id = %d," % curr_id)
+        manifest_lines.append('        .name = "%s",' % obj_name)
+        manifest_lines.append("        .id = %d," % id_map[obj_name])
         manifest_lines.append("        .entry = &%s," % info.entry_point)
-        manifest_lines.append("        .parent_id = 0,")
-        manifest_lines.append("        .privileged = %s," % ("true" if info.privileged else "false"))
+        manifest_lines.append("        .parent_id = %d," % resolved_parent_id)
+        manifest_lines.append("        .privileged = %s," % ("true" if is_priv else "false"))
         manifest_lines.append("    },")
-        curr_id += 1
+
     manifest_lines.append("};")
     manifest_lines.append("const uint32_t shizuku_composition_manifest_count = %d;" % len(objects))
     manifest_lines.append("")
@@ -223,6 +254,9 @@ _shizuku_composition_gen = rule(
     implementation = _shizuku_composition_gen_impl,
     attrs = {
         "objects": attr.label_list(mandatory = True),
+        "target": attr.string(default = "esp32c6"),
+        "parents": attr.string_dict(default = {}),
+        "privileged_names": attr.string_list(default = []),
         "gen_ids_tool": attr.label(default = "@shizuku//tools:gen_object_ids.py", executable = True, allow_single_file = True, cfg = "exec"),
         "source_template": attr.label(default = "@shizuku//tools:object_ids.c.in", allow_single_file = True),
     },
@@ -298,9 +332,60 @@ _shizuku_firmware_archive_bundle = rule(
 )
 
 # ==============================================================================
-# 5. shizuku_firmware マクロ
+# 5. Top-level Firmware Binary Rule (with Transition to prevent host-default skip)
 # ==============================================================================
-def shizuku_firmware(name, target = "esp32c6", objects = [], kernel = None, **kwargs):
+def _shizuku_firmware_binary_impl(ctx):
+    out_bin = ctx.actions.declare_file(ctx.label.name + ".bin")
+    archive = ctx.file.archive
+    project_files = ctx.files.esp32c6_project
+    build_sh = ctx.executable.build_sh
+
+    args = ctx.actions.args()
+    args.add(archive.path)
+    args.add(out_bin.path)
+    args.add("esp-15.2.0_20251204")
+    args.add(ctx.attr.target)
+
+    ctx.actions.run(
+        outputs = [out_bin],
+        inputs = [archive] + project_files,
+        executable = build_sh,
+        arguments = [args],
+        mnemonic = "IdfFinalLink",
+        progress_message = "Linking ESP-IDF firmware binary for %s" % ctx.label,
+        execution_requirements = {
+            "local": "1",
+            "no-sandbox": "1",
+        },
+    )
+
+    return [DefaultInfo(files = depset([out_bin]))]
+
+_shizuku_firmware_binary = rule(
+    implementation = _shizuku_firmware_binary_impl,
+    attrs = {
+        "archive": attr.label(mandatory = True, allow_single_file = True),
+        "target": attr.string(default = "esp32c6"),
+        "esp32c6_project": attr.label(default = "@shizuku//modules/esp_idf_support/firmware:esp32c6_project"),
+        "build_sh": attr.label(default = "@shizuku//modules/esp_idf_support/firmware:build.sh", executable = True, cfg = "exec"),
+        "_allowlist_function_transition": attr.label(
+            default = "@bazel_tools//tools/allowlists/function_transition_allowlist",
+        ),
+    },
+    cfg = _firmware_transition,
+)
+
+# ==============================================================================
+# 6. shizuku_firmware マクロ
+# ==============================================================================
+def shizuku_firmware(
+        name,
+        target = "esp32c6",
+        objects = [],
+        parents = {},
+        privileged_names = [],
+        kernel = None,
+        **kwargs):
     """合成時ID採番・親子/権限・chip、単一の .a および最終リンクバイナリを生成する。"""
     gen_name = name + "_composition_gen"
     meta_name = name + "_composition_meta"
@@ -314,10 +399,13 @@ def shizuku_firmware(name, target = "esp32c6", objects = [], kernel = None, **kw
         else:
             kernel = "@shizuku//:kernel"
 
-    # 1. ID ソースと Manifest ソースを生成
+    # 1. ID ソースと Manifest ソースを生成 (親解決・サイクル検査・権限設定)
     _shizuku_composition_gen(
         name = gen_name,
         objects = objects,
+        target = target,
+        parents = parents,
+        privileged_names = privileged_names,
         tags = kwargs.get("tags", []),
     )
 
@@ -340,20 +428,13 @@ def shizuku_firmware(name, target = "esp32c6", objects = [], kernel = None, **kw
         visibility = kwargs.get("visibility", ["//visibility:public"]),
     )
 
-    # 4. 最終リンクバイナリ (C6 の場合は IDF build.sh を呼ぶ genrule)
+    # 4. トップレベル最終バイナリ (transition 付きルールでラップして host-default skip を防止)
     if target in ["esp32c6", "esp32c5"]:
-        native.genrule(
+        _shizuku_firmware_binary(
             name = name,
-            srcs = [
-                ":" + archive_name,
-                "@shizuku//modules/esp_idf_support/firmware:esp32c6_project",
-            ],
-            outs = [name + ".bin"],
-            cmd = "ARCHIVE=; for f in $(locations :" + archive_name + "); do case $$f in *.a) ARCHIVE=$$f;; esac; done; " +
-                  "$(location @shizuku//modules/esp_idf_support/firmware:build.sh) $$ARCHIVE $@ esp-15.2.0_20251204 " + target,
-            tools = ["@shizuku//modules/esp_idf_support/firmware:build.sh"],
-            tags = ["local", "no-sandbox"],
-            target_compatible_with = ["@platforms//cpu:riscv32"],
+            archive = ":" + archive_name,
+            target = target,
+            tags = kwargs.get("tags", []),
             visibility = kwargs.get("visibility", ["//visibility:public"]),
         )
     else:
@@ -364,21 +445,32 @@ def shizuku_firmware(name, target = "esp32c6", objects = [], kernel = None, **kw
         )
 
 # ==============================================================================
-# 6. shizuku_sketch
+# 7. shizuku_sketch & shizuku_sketch_object
 # ==============================================================================
 def _shizuku_sketch_entry_impl(ctx):
     out = ctx.actions.declare_file(ctx.label.name + "_entry.cpp")
-    content = """// Auto-generated sketch entry wrapper
-extern void setup(void);
-extern void loop(void);
+    content = """// Auto-generated sketch entry wrapper for %(name)s
+#include <cstdint>
 
-extern "C" void %s_main(void) {
-    setup();
+extern void %(setup)s(void);
+extern void %(loop)s(void);
+
+// 注: 現行カーネルには純粋な C ABI の yield 関数 (例: shizuku_yield) は未実装。
+// 実在する C++ API は shizuku::services::yield() のみであるため、
+// 将来の SDK/kernel C ABI yield 接続用フックを予約しつつ、無限ループを確実に反復する。
+
+extern "C" void %(entry)s(void) {
+    %(setup)s();
     for (;;) {
-        loop();
+        %(loop)s();
     }
 }
-""" % ctx.attr.sketch_name
+""" % {
+        "name": ctx.attr.sketch_name,
+        "entry": ctx.attr.entry_point,
+        "setup": ctx.attr.setup_fn,
+        "loop": ctx.attr.loop_fn,
+    }
     ctx.actions.write(output = out, content = content)
     return [DefaultInfo(files = depset([out]))]
 
@@ -386,26 +478,66 @@ _shizuku_sketch_entry = rule(
     implementation = _shizuku_sketch_entry_impl,
     attrs = {
         "sketch_name": attr.string(mandatory = True),
+        "entry_point": attr.string(mandatory = True),
+        "setup_fn": attr.string(default = "setup"),
+        "loop_fn": attr.string(default = "loop"),
     },
 )
 
-def shizuku_sketch(name, srcs = [], hdrs = [], deps = [], target = "esp32c6", **kwargs):
-    """setup()/loop() 入口生成 object 糖衣 + firmware 短縮形。"""
+def shizuku_sketch_object(
+        name,
+        srcs = [],
+        hdrs = [],
+        deps = [],
+        setup_fn = "setup",
+        loop_fn = "loop",
+        entry_point = None,
+        **kwargs):
+    """setup()/loop() ラッパーを持つ shizuku_object ターゲットを生成する。
+
+    他の shizuku_firmware の objects 属性にそのまま渡すことができる。
+    複数 sketch 共存時のシンボル衝突を防ぐため、setup_fn / loop_fn の別名を指定可能。
+    """
     entry_gen_name = name + "_entry_gen"
-    obj_name = name + "_sketch_obj"
+    ep = entry_point if entry_point else (name + "_main")
 
     _shizuku_sketch_entry(
         name = entry_gen_name,
         sketch_name = name,
+        entry_point = ep,
+        setup_fn = setup_fn,
+        loop_fn = loop_fn,
         tags = kwargs.get("tags", []),
     )
 
     shizuku_object(
-        name = obj_name,
+        name = name,
         srcs = srcs + [":" + entry_gen_name],
         hdrs = hdrs,
         deps = deps + ["@shizuku//:internal_headers"],
-        entry_point = name + "_main",
+        entry_point = ep,
+        **kwargs
+    )
+
+def shizuku_sketch(
+        name,
+        srcs = [],
+        hdrs = [],
+        deps = [],
+        target = "esp32c6",
+        setup_fn = "setup",
+        loop_fn = "loop",
+        **kwargs):
+    """単一スケッチから shizuku_object と shizuku_firmware を 1 行で作成する糖衣マクロ。"""
+    obj_name = name + "_obj"
+
+    shizuku_sketch_object(
+        name = obj_name,
+        srcs = srcs,
+        hdrs = hdrs,
+        deps = deps,
+        setup_fn = setup_fn,
+        loop_fn = loop_fn,
         tags = kwargs.get("tags", []),
     )
 

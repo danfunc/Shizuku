@@ -1,0 +1,42 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//:defs.bzl", "shizuku_firmware", "shizuku_object", "shizuku_sketch", "shizuku_sketch_object")
+
+package(default_visibility = ["//visibility:public"])
+
+# 1. 独立した shizuku_object
+shizuku_object(
+    name = "sample_obj",
+    srcs = ["sample_object.cpp"],
+    hdrs = ["sample_object.hpp"],
+    deps = ["//:internal_headers"],
+)
+
+# 2. 独立した shizuku_sketch_object
+shizuku_sketch_object(
+    name = "sample_sketch_obj",
+    srcs = ["sample_sketch.cpp"],
+)
+
+# 3. 複数オブジェクト（object + sketch_object）を合成したファームウェア
+shizuku_firmware(
+    name = "sample_fw",
+    target = "esp32c6",
+    objects = [
+        ":sample_obj",
+        ":sample_sketch_obj",
+    ],
+    parents = {
+        "sample_obj": "root",
+        "sample_sketch_obj": "sample_obj",
+    },
+    privileged_names = [
+        "sample_obj",
+    ],
+)
+
+# 4. 単一スケッチ直行ファームウェア
+shizuku_sketch(
+    name = "direct_sketch_fw",
+    srcs = ["sample_sketch.cpp"],
+    target = "esp32c6",
+)
