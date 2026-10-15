@@ -75,5 +75,10 @@ if [ "$RUN_SET_TARGET" -eq 1 ]; then
   idf.py -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" -DSHIZUKU_KERNEL_ARCHIVE="$ARCHIVE" set-target "$TARGET" > "$BUILD_DIR.set-target.log" 2>&1 || fail "idf.py set-target 失敗 ($BUILD_DIR.set-target.log)"
 fi
 idf.py -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" -DSHIZUKU_KERNEL_ARCHIVE="$ARCHIVE" -DIDF_TARGET="$TARGET" build || fail "idf.py build 失敗"
+test -f "$BUILD_DIR/shizuku_$TARGET.bin" || fail "ビルド出力 .bin が存在しない: $BUILD_DIR/shizuku_$TARGET.bin"
+test -f "$BUILD_DIR/shizuku_$TARGET.elf" || fail "ビルド出力 .elf が存在しない: $BUILD_DIR/shizuku_$TARGET.elf"
+test -f "$BUILD_DIR/shizuku_$TARGET.map" || fail "ビルド出力 .map が存在しない: $BUILD_DIR/shizuku_$TARGET.map"
 cp "$BUILD_DIR/shizuku_$TARGET.bin" "$OUT"
+cp "$BUILD_DIR/shizuku_$TARGET.elf" "${OUT%.bin}.elf"
+cp "$BUILD_DIR/shizuku_$TARGET.map" "${OUT%.bin}.map"
 echo "OK($TARGET): $IDF_VER / $GCC_BANNER -> $OUT"

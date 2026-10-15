@@ -166,7 +166,7 @@ cc_library(
     includes = ["internal_headers"],
     visibility = ["//visibility:public"],
     deps = [
-        "//:internal_headers",
+        "//:core_headers",
     ] + select({
         ":esp32_c6": ["//chips/esp32_c6:headers", "//boards/esp32_c6:headers"],
         ":esp32_c5": ["//chips/esp32_c5:headers", "//boards/esp32_c5:headers"],

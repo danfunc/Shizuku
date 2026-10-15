@@ -65,9 +65,20 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+# クリーンな合成用ヘッダ (object_ids 依存を持たない)
+cc_library(
+    name = "core_headers",
+    hdrs = glob(
+        ["internal_headers/**/*.hpp", "internal_headers/**/*.h"],
+        exclude = ["internal_headers/shizuku/apps/**"],
+    ),
+    includes = ["internal_headers"],
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "internal_headers",
-    hdrs = glob(["internal_headers/**/*.hpp"]),
+    hdrs = glob(["internal_headers/**/*.hpp", "internal_headers/**/*.h"]),
     includes = ["internal_headers"],
     visibility = ["//visibility:public"],
     deps = [":object_ids"],
@@ -99,6 +110,19 @@ KERNEL_SRCS = [
     "source/kernel/init.cpp",
     "source/kernel/thread.cpp",
 ]
+
+cc_library(
+    name = "firmware_loader",
+    srcs = ["source/kernel/firmware_loader.cpp"],
+    hdrs = [
+        "internal_headers/shizuku/firmware_loader.h",
+        "internal_headers/shizuku/firmware_loader.hpp",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":core_headers",
+    ],
+)
 
 # カーネル = 機構だけの層。★資源を持たない (スレッドの記憶も貸してもらう) ので、
 # 実体としてはライブラリ以外になりようがない。
@@ -236,6 +260,32 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":internal_headers",
+        "//configs:config",
+        "//arch/riscv:pmp",
+        "//chips/esp32_c6:headers",
+        "//boards/esp32_c6:headers",
+    ],
+)
+
+# ESP32-C6 向けのクリーンな合成用カーネルコア (selftests/runner/legacy global IDs なし)
+cc_library(
+    name = "shizuku_kernel_c6_core",
+    srcs = KERNEL_SRCS + KERNEL_OBJECT_SRCS + [
+        "source/kernel/firmware_loader.cpp",
+        "source/kernel/firmware_loader_syscall.cpp",
+        "source/kernel/services.cpp",
+        "source/memory_manager/freestanding.cpp",
+        "//modules/esp_idf_support/c6:early_boot.cpp",
+        "//modules/esp_idf_support/c6:link_stubs.cpp",
+        "//chips/esp32_c6:trap.cpp",
+        "//boards/esp32_c6:board_esp32_c6.cpp",
+        "//boards/esp32_c6:board_esp32_c6_stubs.cpp",
+        "//chips/esp32_c6:c6_vectors.S",
+    ],
+    target_compatible_with = ["@platforms//cpu:riscv32"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":core_headers",
         "//configs:config",
         "//arch/riscv:pmp",
         "//chips/esp32_c6:headers",

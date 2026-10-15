@@ -37,3 +37,53 @@ artifacts = [
 CMAKE_BUILD_PARALLEL_LEVEL = "24"
 IDF_PATH = "/home/ishigakiyua/.local/esp-idf-c5-v6.1"
 IDF_TOOLS_PATH = "/home/ishigakiyua/.local/idf-tools-c5-v6.1"
+
+[jobs.build_esp32c6_composition]
+worker = "main-lxc"
+backend = "bazel"
+args = ["build", "--config=esp32c6", "--jobs=auto", "--action_env=CMAKE_BUILD_PARALLEL_LEVEL=24", "--action_env=IDF_PATH=/home/ishigakiyua/.local/esp-idf-c5-v6.1", "--action_env=IDF_TOOLS_PATH=/home/ishigakiyua/.local/idf-tools-c5-v6.1", "//tests/firmware_composition:sample_fw"]
+artifacts = [
+    "bazel-bin/tests/firmware_composition/sample_fw.bin",
+    "bazel-bin/tests/firmware_composition/sample_fw.elf",
+    "bazel-bin/tests/firmware_composition/sample_fw.map",
+    "bazel-bin/tests/firmware_composition/libsample_fw_archive.a",
+]
+
+[jobs.build_esp32c6_composition.env]
+CMAKE_BUILD_PARALLEL_LEVEL = "24"
+IDF_PATH = "/home/ishigakiyua/.local/esp-idf-c5-v6.1"
+IDF_TOOLS_PATH = "/home/ishigakiyua/.local/idf-tools-c5-v6.1"
+
+[jobs.build_esp32c6_direct_sketch]
+worker = "main-lxc"
+backend = "bazel"
+args = ["build", "--config=esp32c6", "--jobs=auto", "--action_env=CMAKE_BUILD_PARALLEL_LEVEL=24", "--action_env=IDF_PATH=/home/ishigakiyua/.local/esp-idf-c5-v6.1", "--action_env=IDF_TOOLS_PATH=/home/ishigakiyua/.local/idf-tools-c5-v6.1", "//tests/firmware_composition:direct_sketch_fw"]
+artifacts = [
+    "bazel-bin/tests/firmware_composition/direct_sketch_fw.bin",
+    "bazel-bin/tests/firmware_composition/direct_sketch_fw.elf",
+    "bazel-bin/tests/firmware_composition/direct_sketch_fw.map",
+]
+
+[jobs.build_esp32c6_direct_sketch.env]
+CMAKE_BUILD_PARALLEL_LEVEL = "24"
+IDF_PATH = "/home/ishigakiyua/.local/esp-idf-c5-v6.1"
+IDF_TOOLS_PATH = "/home/ishigakiyua/.local/idf-tools-c5-v6.1"
+
+[jobs.test_manifest_loader]
+worker = "main-lxc"
+backend = "bazel"
+args = [
+    "test",
+    "--platforms=@platforms//host",
+    "--cxxopt=-std=c++23",
+    "--cxxopt=-UNDEBUG",
+    "--jobs=auto",
+    "//tests/firmware_composition:test_manifest_loader",
+]
+artifacts = [
+    "bazel-testlogs/tests/firmware_composition/test_manifest_loader/test.log",
+]
+
+[jobs.test_manifest_loader.env]
+CMAKE_BUILD_PARALLEL_LEVEL = "24"
+

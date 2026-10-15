@@ -152,3 +152,16 @@ Previous Commits:
   - 本 handoff (`.handoff/object-firmware-composition.md`) は本セッション専有である。
   - 本セッションは C6 側 handoff や C6 RAM ファイル等には一切干渉しない。
   - root `BUILD.bazel` の編集は完了し、排他ロックを解放済みである。
+
+## 最新の上層監査記録
+
+2026-10-15 の再開後の受入判定、archive の ID 多重定義の実測、Git の拒否、未回収ジョブは [object-firmware-composition-sol.md](object-firmware-composition-sol.md) を参照する。この本文の旧ジョブ状態や成功申告より、時刻付きの上層監査結果を優先する。C6 firmware / 外部 sketch の `.bin` / RAM map / RP `.uf2` は、上層の最終受入が付くまで未達として扱う。
+
+### 2026-10-16 追記 (C6 合成修正パスの現状)
+
+- ホスト検証テスト `//tests/firmware_composition:test_manifest_loader` (46 assertions) はソース配置完了・未実行 (pending)。テスト合格の主張は行わない。
+- root-only loader は暫定状態 (interim state) であり、入れ子親権限 (nested parent authority) は未完了・仕様策定待ち。直接 `:foo` sketch-provider 再利用も未完了。
+- C5 境界の保護: `source/kernel/firmware_loader.cpp` を `shizuku_kernel_c6_core` のみに隔離し共有 `KERNEL_SRCS` から除去。追加されていた C5 core ターゲットを削除し `defs.bzl` の C5 既定カーネルをレガシー `shizuku_kernel_c5` に復元。
+- ビルド環境と成果物整合性: `defs.bzl` の `_shizuku_firmware_binary_impl` に `use_default_shell_env = True` を設定し、`build.sh` で `.elf` および `.map` の存在を必須化。
+- ソース準備状況は部分的 (partial) であり、rbuild によるホストテストおよびファームウェアバイナリ生成待ち。
+- リモートジョブ定義および実行要求は `.handoff/rbuild-requests.md` に集約済み。

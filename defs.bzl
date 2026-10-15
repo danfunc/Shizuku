@@ -61,15 +61,19 @@ def shizuku_object(
     同 chip/toolchain であれば合成依存なく再コンパイル不要。
     親オブジェクトや権限メタデータは firmware 合成側が所有する。
     """
+    if "@shizuku//:internal_headers" in deps or "//:internal_headers" in deps:
+        fail("shizuku_object cannot depend on legacy internal_headers (defines global IDs); use //:core_headers")
+
     impl_name = name + "_impl"
     actual_obj_name = object_name if object_name else name
     ep = entry_point if entry_point else (actual_obj_name + "_main")
+    object_deps = deps if "@shizuku//:core_headers" in deps or "//:core_headers" in deps else deps + ["@shizuku//:core_headers"]
 
     cc_library(
         name = impl_name,
         srcs = srcs,
         hdrs = hdrs,
-        deps = deps,
+        deps = object_deps,
         **kwargs
     )
 
@@ -240,6 +244,13 @@ def _shizuku_composition_gen_impl(ctx):
     manifest_lines.append("};")
     manifest_lines.append("const uint32_t shizuku_composition_manifest_count = %d;" % len(objects))
     manifest_lines.append("")
+    manifest_lines.append("// C ABI firmware entry called from SDK boot")
+    manifest_lines.append("extern bool shizuku_firmware_load_and_start(const shizuku_object_manifest_entry_t *manifest, uint32_t count);")
+    manifest_lines.append("")
+    manifest_lines.append("bool shizuku_firmware_entry(void) {")
+    manifest_lines.append("    return shizuku_firmware_load_and_start(shizuku_composition_manifest, shizuku_composition_manifest_count);")
+    manifest_lines.append("}")
+    manifest_lines.append("")
 
     ctx.actions.write(
         output = manifest_out,
@@ -269,8 +280,8 @@ def _shizuku_firmware_archive_bundle_impl(ctx):
     out_archive = ctx.actions.declare_file("lib" + ctx.label.name + ".a")
 
     all_deps = [ctx.attr.kernel, ctx.attr.metadata] + ctx.attr.objects
-    archives = []
-    direct_objs = []
+    archives_dict = {}
+    direct_objs_dict = {}
 
     for dep in all_deps:
         if CcInfo in dep:
@@ -278,19 +289,22 @@ def _shizuku_firmware_archive_bundle_impl(ctx):
             for li in cc_info.linking_context.linker_inputs.to_list():
                 for lib in li.libraries:
                     if lib.static_library:
-                        archives.append(lib.static_library)
-                    if lib.pic_objects:
-                        direct_objs.extend(lib.pic_objects)
-                    elif lib.objects:
-                        direct_objs.extend(lib.objects)
+                        # Dedup archives by artifact path
+                        archives_dict[lib.static_library.path] = lib.static_library
+                    else:
+                        # Never add both static_library and its own objects into MRI archive
+                        objs = lib.pic_objects if lib.pic_objects else lib.objects
+                        if objs:
+                            for o in objs:
+                                direct_objs_dict[o.path] = o
 
     mri_lines = [
         "CREATE " + out_archive.path,
     ]
-    for a in archives:
-        mri_lines.append("ADDLIB " + a.path)
-    for o in direct_objs:
-        mri_lines.append("ADDMOD " + o.path)
+    for p in archives_dict:
+        mri_lines.append("ADDLIB " + p)
+    for p in direct_objs_dict:
+        mri_lines.append("ADDMOD " + p)
     mri_lines.append("SAVE")
     mri_lines.append("END")
 
@@ -305,7 +319,7 @@ def _shizuku_firmware_archive_bundle_impl(ctx):
 
     ctx.actions.run_shell(
         outputs = [out_archive],
-        inputs = depset(archives + direct_objs + [mri_file], transitive = [cc_toolchain.all_files]),
+        inputs = depset(list(archives_dict.values()) + list(direct_objs_dict.values()) + [mri_file], transitive = [cc_toolchain.all_files]),
         command = "$1 -M < $2",
         arguments = [ar_tool, mri_file.path],
         mnemonic = "MergeFirmwareArchive",
@@ -336,6 +350,8 @@ _shizuku_firmware_archive_bundle = rule(
 # ==============================================================================
 def _shizuku_firmware_binary_impl(ctx):
     out_bin = ctx.actions.declare_file(ctx.label.name + ".bin")
+    out_elf = ctx.actions.declare_file(ctx.label.name + ".elf")
+    out_map = ctx.actions.declare_file(ctx.label.name + ".map")
     archive = ctx.file.archive
     project_files = ctx.files.esp32c6_project
     build_sh = ctx.executable.build_sh
@@ -349,19 +365,20 @@ def _shizuku_firmware_binary_impl(ctx):
         args.add(ctx.attr.build_dir)
 
     ctx.actions.run(
-        outputs = [out_bin],
+        outputs = [out_bin, out_elf, out_map],
         inputs = [archive] + project_files,
         executable = build_sh,
         arguments = [args],
         mnemonic = "IdfFinalLink",
         progress_message = "Linking ESP-IDF firmware binary for %s" % ctx.label,
+        use_default_shell_env = True,
         execution_requirements = {
             "local": "1",
             "no-sandbox": "1",
         },
     )
 
-    return [DefaultInfo(files = depset([out_bin]))]
+    return [DefaultInfo(files = depset([out_bin, out_elf, out_map]))]
 
 _shizuku_firmware_binary = rule(
     implementation = _shizuku_firmware_binary_impl,
@@ -396,7 +413,7 @@ def shizuku_firmware(
 
     if kernel == None:
         if target == "esp32c6":
-            kernel = "@shizuku//:shizuku_kernel"
+            kernel = "@shizuku//:shizuku_kernel_c6_core"
         elif target == "esp32c5":
             kernel = "@shizuku//:shizuku_kernel_c5"
         else:
@@ -412,11 +429,10 @@ def shizuku_firmware(
         tags = kwargs.get("tags", []),
     )
 
-    # 2. 生成ソースをコンパイル
+    # 2. 生成ソースをコンパイル (stdint/stdbool のみを使用し、legacy global ID を引かないよう internal_headers 依存を排除)
     cc_library(
         name = meta_name,
         srcs = [":" + gen_name],
-        deps = ["@shizuku//:internal_headers"],
         tags = kwargs.get("tags", []),
     )
 
@@ -517,7 +533,7 @@ def shizuku_sketch_object(
         name = name,
         srcs = srcs + [":" + entry_gen_name],
         hdrs = hdrs,
-        deps = deps + ["@shizuku//:internal_headers"],
+        deps = deps + ["@shizuku//:core_headers"],
         entry_point = ep,
         **kwargs
     )
@@ -531,7 +547,17 @@ def shizuku_sketch(
         setup_fn = "setup",
         loop_fn = "loop",
         **kwargs):
-    """単一スケッチから shizuku_object と shizuku_firmware を 1 行で作成する糖衣マクロ。"""
+    """単一スケッチから shizuku_object と shizuku_firmware を 1 行で作成する糖衣マクロ。
+
+    生成されるターゲット:
+    - {name}: 最終ファームウェアバイナリ (shizuku_firmware)
+    - {name}_obj: 単体スケッチオブジェクト (shizuku_sketch_object)
+
+    【未達事項・技術境界 (Incomplete)】:
+    別の shizuku_firmware の objects 属性に本ターゲット (':foo') を直接指定して再利用
+    することは未確立（incomplete）。他ファームウェアでのオブジェクト再利用には、
+    明示的に ':foo_obj' を指定する必要がある。
+    """
     obj_name = name + "_obj"
 
     shizuku_sketch_object(
