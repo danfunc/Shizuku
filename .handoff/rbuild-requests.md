@@ -208,3 +208,60 @@ For each future job, report the exact invoked command, process exit, raw log loc
 
 The build-free fixture at `tests/external_composition/` models a separate MODULE consumer with a relative `../..` Shizuku override and two C6 firmware targets that share one object compile target. Its Python source regression and `nm` text checker tests passed in the local static-only invocation recorded in `.handoff/external-composition-source.md`; this does not establish Bazel module resolution, object compile-once behavior, or actual archive symbol uniqueness. No rbuild job for the nested MODULE is configured. The named-job execution root and synchronized snapshot behavior for this nested consumer remain unknown; do not add an external-module rbuild invocation until that root/cwd contract is confirmed. Real archive inspection remains pending after Opus's C6 builds and a verified input/worktree match.
 
+---
+
+## 10. Retry Execution After C6 build.sh Project Directory Fix (2026-10-16)
+
+### Failed Initial Run Evidence
+- **Job 1**: `build_esp32c6_composition` (`//tests/firmware_composition:sample_fw`)
+  - **Result**: Exit 1 (recorded in `.handoff/rbuild_build_esp32c6_composition_20261016.log` and `.handoff/rbuild_build_esp32c6_composition_20261016.exit`).
+  - **Failure Point**: Action `[43 / 44] Linking ESP-IDF firmware binary for @@//tests/firmware_composition:sample_fw` failed during `idf.py set-target`.
+  - **Root Cause**: `_shizuku_firmware_binary_impl` sets `executable = ctx.executable.build_sh` (exec-transition tool). In Bazel exec transitions, the executable wrapper resides under `bazel-out/<config>-exec-.../bin/modules/esp_idf_support/firmware/build_sh`. `build.sh` resolved project directory via `SRC=$(cd -P "$(dirname "$0")" && pwd)`, which pointed to `bazel-out/.../bin/...` where `CMakeLists.txt`, `main/`, and `sdkconfig.defaults` do not exist.
+- **Job 2**: `build_esp32c6_direct_sketch` (`//tests/firmware_composition:direct_sketch_fw`)
+  - **Result**: Exit 1 (recorded in `.handoff/rbuild_build_esp32c6_direct_sketch_20261016.log` and `.handoff/rbuild_build_esp32c6_direct_sketch_20261016.exit`).
+  - **Failure Point**: Action `[12 / 13] Linking ESP-IDF firmware binary for @@//tests/firmware_composition:direct_sketch_fw` failed during `idf.py set-target`.
+  - **Root Cause**: Identical exec/bin missing-source-project/set-target failure. Both failure logs/exits were read and verified by Sol.
+
+### Source Corrections Applied
+1. **`modules/esp_idf_support/firmware/build.sh`**:
+   - Accepts optional 6th argument `PROJECT_DIR` (with fallback to environment variables `SHIZUKU_IDF_PROJECT_DIR` and `IDF_PROJECT_PATH`, and legacy fallback to `$(cd -P "$(dirname "$0")" && pwd)`).
+   - Validates `test -f "$SRC/CMakeLists.txt"` and `test -d "$SRC/main"` before `cd "$SRC"`, failing immediately with clear diagnostics if missing.
+   - Preserves C5/C6 target handling, GCC banner verification, and deterministic `BUILD_DIR` handling.
+2. **`defs.bzl` (`_shizuku_firmware_binary_impl`)**:
+   - Locates top-level `CMakeLists.txt` in `ctx.files.esp32c6_project` and derives `project_dir`.
+   - Passes `ctx.attr.build_dir if ctx.attr.build_dir else ""` as positional argument 5, and `project_dir` as positional argument 6 to `build.sh`.
+3. **Verification**:
+   - Build-free mock regression test `tests/firmware_composition/test_c6_build_sh_mock.py` executed: 8/8 tests passed (exit 0), logged in `.handoff/c6-build-sh-mock-20261016.log`.
+   - Simulates exec directory invocation without project dir argument (fails cleanly with expected diagnostic) and with explicit project dir / env fallback (succeeds, changes working directory to project dir, copies `.bin`, `.elf`, `.map`).
+
+### MagicDNS Retry Commands (Unexecuted & Pending for Opus)
+The following commands are for Opus to execute on the remote worker via MagicDNS. Do NOT run locally.
+
+```bash
+# 1. Multi-object composition firmware (retry after build.sh project dir fix)
+rbuild --worktree objfw job build_esp32c6_composition
+
+# 2. Single-sketch direct macro firmware (retry after build.sh project dir fix)
+rbuild --worktree objfw job build_esp32c6_direct_sketch
+```
+
+### Remote Routing Caveat & Verification Requirement
+- **Known Forwarding Bug**: In both failed runs (`.handoff/rbuild_build_esp32c6_composition_20261016.log:1,4` and `.handoff/rbuild_build_esp32c6_direct_sketch_20261016.log:1,4`), `rbuild job` connected with `worktree='main'` and locked at `/home/ishigakiyua/rbuild-work/macbook/Shizuku-objfw/main` despite the client invocation passing `--worktree objfw`.
+- **Out of Scope**: This remote worktree routing issue is an established forwarding bug in `rbuild job` passing `--worktree` to child processes on the remote worker and is out of scope for repository source changes.
+- **Verification Rule**: Do not claim `objfw` was used or that `main` is cold. When reviewing results, Opus must inspect the actual remote worktree path and verify the synchronized input snapshot directly against the committed checkpoint state before accepting build artifacts.
+
+---
+
+## 11. Latest Superseding Acceptance Table (2026-10-16 Checkpoint)
+
+This table reflects the current accepted state across all workstreams and supersedes previous historical status tables:
+
+| Workstream / Item | State | Evidence / Status / Remaining Gate |
+|---|---|---|
+| 1. Host Manifest Loader Test (`test_manifest_loader`) | PASS 1/1 (Artifact collection exit 1) | Target build and test passed (1/1) in `.handoff/rbuild_test_manifest_loader_20261016.log`; original rbuild exited 1 on escaping `test.log` artifact. `rbuild.toml` artifact config corrected in `a8bce91`; retry not yet run. |
+| 2. RP2040 Firmware Source Checkpoint | Staged in `33752f5` (Build PENDING) | Pure Python static regression tests 16/16 passed (`tests/rp2040_firmware/test_rp2040_firmware.sh`); real CMake/Pico SDK compilation, ELF, MAP, and UF2 generation remain pending. |
+| 3. External Consumer Fixtures (`tests/external_composition/`) | Staged in `a8bce91` (Remote rbuild root unresolved) | Standalone fixture & text symbol checker pure Python 7/7 passed; real nested Bazel MODULE resolution, archive deduplication, compile-once behavior, and external rbuild execution root remain unresolved. |
+| 4. C6 / C5 `build.sh` Project Dir Fix | Reviewed & Accepted (Real rbuild retries PENDING) | Positional argument 6 project directory handling in `defs.bzl` and `modules/esp_idf_support/firmware/build.sh`; mock regression suite 8/8 passed (`.handoff/c6-build-sh-mock-20261016.log`). Real rbuild jobs `build_esp32c6_composition` and `build_esp32c6_direct_sketch` remain PENDING. |
+| 5. Firmware Composition Incompleteness Markers | Incomplete by Design | Root-only interim loader limitation (`parent_id == 1` only; non-root authority derivation incomplete); direct public sketch provider reuse (`shizuku_sketch(':foo')` in `objects`) incomplete; consumers must reference `:foo_obj` explicitly. |
+| 6. Remote Invocations | Unexecuted / Pending | Existing latest MagicDNS commands (`rbuild --worktree objfw job build_esp32c6_composition`, `build_esp32c6_direct_sketch`) remain unchanged and pending for Opus. |
+

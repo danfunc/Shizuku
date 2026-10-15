@@ -1,6 +1,6 @@
 #!/bin/bash
 # Bazel (//modules/esp_idf_support/firmware:esp32c6) から呼ぶ薄いラッパ: idf.py build を走らせて .bin を出す。
-#   使い方: build.sh <libshizuku_kernel.a> <出力 .bin> <期待する GCC 版文字列>
+#   使い方: build.sh <libshizuku_kernel.a> <出力 .bin> <期待する GCC 版文字列> [TARGET] [BUILD_DIR] [PROJECT_DIR]
 # ★環境が違えば黙って別物を作らず、理由を出して失敗する (IDF 版 / コンパイラ版の食い違い)。
 # fail は subshell で exit 1 する。`|| fail` は最後のコマンドなので set -e が効いて止まる。
 set -euo pipefail
@@ -27,7 +27,16 @@ export IDF_PATH IDF_TOOLS_PATH
 WANT_GCC=$3
 TARGET=${4:-esp32c6}
 case "$TARGET" in esp32c6|esp32c5) ;; *) fail "未対応の IDF target: $TARGET" ;; esac
-SRC=$(cd -P "$(dirname "$0")" && pwd)
+
+PROJECT_DIR_ARG="${6:-${SHIZUKU_IDF_PROJECT_DIR:-${IDF_PROJECT_PATH:-}}}"
+if [ -n "$PROJECT_DIR_ARG" ]; then
+  SRC=$(abspath "$PROJECT_DIR_ARG")
+else
+  SRC=$(cd -P "$(dirname "$0")" && pwd)
+fi
+
+test -f "$SRC/CMakeLists.txt" || fail "IDF project directory does not contain CMakeLists.txt: $SRC"
+test -d "$SRC/main" || fail "IDF project directory does not contain main/: $SRC"
 
 test -s "$ARCHIVE" || fail "カーネルのアーカイブが無い/空: $ARCHIVE"
 test -f "$IDF_PATH/export.sh" || fail "IDF_PATH が ESP-IDF を指していない (--action_env=IDF_PATH が要る)"

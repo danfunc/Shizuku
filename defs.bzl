@@ -387,13 +387,24 @@ def _shizuku_firmware_binary_impl(ctx):
     project_files = ctx.files.esp32c6_project
     build_sh = ctx.executable.build_sh
 
+    # Locate top-level CMakeLists.txt to derive project directory for build.sh
+    project_cmakelists = [
+        f for f in project_files
+        if f.basename == "CMakeLists.txt" and f.dirname.endswith("modules/esp_idf_support/firmware")
+    ]
+    if not project_cmakelists:
+        project_cmakelists = [f for f in project_files if f.basename == "CMakeLists.txt"]
+    if not project_cmakelists:
+        fail("No CMakeLists.txt found in esp32c6_project files for %s" % ctx.label)
+    project_dir = project_cmakelists[0].dirname
+
     args = ctx.actions.args()
     args.add(archive.path)
     args.add(out_bin.path)
     args.add("esp-15.2.0_20251204")
     args.add(ctx.attr.target)
-    if ctx.attr.build_dir:
-        args.add(ctx.attr.build_dir)
+    args.add(ctx.attr.build_dir if ctx.attr.build_dir else "")
+    args.add(project_dir)
 
     ctx.actions.run(
         outputs = [out_bin, out_elf, out_map],
