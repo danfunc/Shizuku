@@ -47,15 +47,10 @@ namespace {
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
-constexpr uintptr_t OBJECT_WRITER = object_id::unpriv_writer;
-constexpr uintptr_t OBJECT_READER = object_id::unpriv_reader;
-constexpr uintptr_t OBJECT_SINK = object_id::unpriv_sink;
-constexpr uintptr_t OBJECT_TRESPASSER = object_id::flash_trespasser;
-#if defined(SHIZUKU_RP2040)
-// RP2040 PMSAv6 cannot represent an exact 300-byte window. The file starts at
-// a 4 KiB boundary, so 512 bytes is an exact MPU region for this test.
-constexpr uint32_t PAYLOAD_BYTES = 512;
-#else
+inline constexpr const uintptr_t &OBJECT_WRITER = object_id::unpriv_writer;
+inline constexpr const uintptr_t &OBJECT_READER = object_id::unpriv_reader;
+inline constexpr const uintptr_t &OBJECT_SINK = object_id::unpriv_sink;
+inline constexpr const uintptr_t &OBJECT_TRESPASSER = object_id::flash_trespasser;
 constexpr uint32_t PAYLOAD_BYTES = 300; // ページ 1 枚を跨がせる
 #endif
 

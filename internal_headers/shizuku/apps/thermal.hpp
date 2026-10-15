@@ -19,7 +19,7 @@
 namespace shizuku {
 namespace apps {
 
-constexpr uintptr_t THERMAL_OBJECT = object_id::thermal;
+inline constexpr const uintptr_t &THERMAL_OBJECT = object_id::thermal;
 
 enum struct thermal_method : uintptr_t {
   MAIN = 0,

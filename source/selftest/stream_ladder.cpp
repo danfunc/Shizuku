@@ -32,8 +32,8 @@ static_assert(sizeof(stream::handle<uint32_t>) == sizeof(uintptr_t),
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
-constexpr uintptr_t OBJECT_PRODUCER = object_id::stream_producer;
-constexpr uintptr_t OBJECT_CONSUMER = object_id::stream_consumer;
+inline constexpr const uintptr_t &OBJECT_PRODUCER = object_id::stream_producer;
+inline constexpr const uintptr_t &OBJECT_CONSUMER = object_id::stream_consumer;
 constexpr uintptr_t METHOD_MAIN = 0;
 constexpr uint32_t RECORDS = 4000;
 constexpr uint32_t CAPACITY = 64; // ★わざと小さくして、押し戻しを必ず起こさせる

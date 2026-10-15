@@ -1,0 +1,7 @@
+#include <stdint.h>
+
+// Canonical exported C ABI symbols.
+// ID の実体は各 firmware 合成単位で 1 回のみ純粋な C シンボルとして定義する。
+const uintptr_t shizuku_object_id_root = 0;
+@SHIZUKU_OBJECT_ID_C_SYMBOLS@
+const uintptr_t shizuku_object_id_count = @SHIZUKU_OBJECT_ID_COUNT@;

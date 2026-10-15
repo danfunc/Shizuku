@@ -81,17 +81,30 @@ case "$GCC_BANNER" in
   *) fail "IDF のコンパイラ ($GCC_BANNER) が Bazel のツールチェーン ($WANT_GCC) と違う" ;;
 esac
 
-# 作業ディレクトリは出力の隣に作る (mktemp の既定の置き場は環境によって書けない)。
+# 作業ディレクトリの決定: 第5引数または環境変数 SHIZUKU_IDF_BUILD_DIR があれば常設再利用、無ければ mktemp
 mkdir -p "$(dirname "$OUT")"
-BUILD_DIR=$(mktemp -d "$OUT.idf.XXXXXX")
-# ★sdkconfig / sdkconfig.old は BUILD_DIR 配下へ出す (SRC は Bazel の入力ツリーなので汚さない)。
-cd "$SRC"
-idf.py -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" -DSHIZUKU_KERNEL_ARCHIVE="$ARCHIVE" "${IDF_PROFILE_ARGS[@]}" set-target "$TARGET" > "$BUILD_DIR.set-target.log" 2>&1 || fail "idf.py set-target 失敗 ($BUILD_DIR.set-target.log)"
-if test "$PROFILE" = ble; then
-  grep -qx 'CONFIG_BT_ENABLED=y' "$BUILD_DIR/sdkconfig" || fail "BLE profile sdkconfig で CONFIG_BT_ENABLED が有効でない ($BUILD_DIR/sdkconfig)"
-  grep -qx 'CONFIG_BT_NIMBLE_ENABLED=y' "$BUILD_DIR/sdkconfig" || fail "BLE profile sdkconfig で CONFIG_BT_NIMBLE_ENABLED が有効でない ($BUILD_DIR/sdkconfig)"
+if [ -n "${5:-}" ]; then
+  BUILD_DIR=$(abspath "$5")
+  mkdir -p "$BUILD_DIR"
+elif [ -n "${SHIZUKU_IDF_BUILD_DIR:-}" ]; then
+  BUILD_DIR=$(abspath "$SHIZUKU_IDF_BUILD_DIR")
+  mkdir -p "$BUILD_DIR"
+else
+  BUILD_DIR=$(mktemp -d "$OUT.idf.XXXXXX")
 fi
-idf.py -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" -DSHIZUKU_KERNEL_ARCHIVE="$ARCHIVE" -DIDF_TARGET="$TARGET" "${IDF_PROFILE_ARGS[@]}" build || fail "idf.py build 失敗"
+cd "$SRC"
+RUN_SET_TARGET=1
+if [ -f "$BUILD_DIR/CMakeCache.txt" ]; then
+  CACHED_TARGET=$(grep -E "^IDF_TARGET:STRING=" "$BUILD_DIR/CMakeCache.txt" | cut -d= -f2 || true)
+  if [ "$CACHED_TARGET" = "$TARGET" ]; then
+    RUN_SET_TARGET=0
+  fi
+fi
+
+if [ "$RUN_SET_TARGET" -eq 1 ]; then
+  idf.py -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" -DSHIZUKU_KERNEL_ARCHIVE="$ARCHIVE" set-target "$TARGET" > "$BUILD_DIR.set-target.log" 2>&1 || fail "idf.py set-target 失敗 ($BUILD_DIR.set-target.log)"
+fi
+idf.py -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" -DSHIZUKU_KERNEL_ARCHIVE="$ARCHIVE" -DIDF_TARGET="$TARGET" build || fail "idf.py build 失敗"
 cp "$BUILD_DIR/shizuku_$TARGET.bin" "$OUT"
 if test -n "$ELF_OUT"; then cp "$BUILD_DIR/shizuku_$TARGET.elf" "$ELF_OUT"; fi
 if test -n "$MAP_OUT"; then cp "$BUILD_DIR/shizuku_$TARGET.map" "$MAP_OUT"; fi

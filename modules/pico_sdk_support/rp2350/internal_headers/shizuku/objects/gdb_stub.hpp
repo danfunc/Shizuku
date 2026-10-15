@@ -37,11 +37,11 @@ namespace objects {
 //      ★今はまだ server も特権のまま — CDC を直に叩いているため (D42 残の
 //        「CDC をストリームとして扱う」が入ると、ここが本当に非特権にできる)。
 //        **構造だけ先に分けてある**。確かめていないことを「できる」と書かない。
-constexpr uintptr_t GDB_SERVER_OBJECT = object_id::gdb_stub;
+inline constexpr const uintptr_t &GDB_SERVER_OBJECT = object_id::gdb_stub;
 // 自コアのデバッグハードウェアを面倒見る側。コアの数だけスレッドを起こす。
-constexpr uintptr_t GDB_AGENT_OBJECT = object_id::gdb_agent;
+inline constexpr const uintptr_t &GDB_AGENT_OBJECT = object_id::gdb_agent;
 // 覗かれる側。★デバッグのために特別なことは何もしていない普通のオブジェクト。
-constexpr uintptr_t DEBUGGEE_OBJECT = object_id::debuggee;
+inline constexpr const uintptr_t &DEBUGGEE_OBJECT = object_id::debuggee;
 
 // 覗かれる側 (debuggee) と stub を起こす。0 = 成功。
 // ★external_target を渡すと、合成の debuggee を作らずそのスレッドを対象にする

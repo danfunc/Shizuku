@@ -27,9 +27,9 @@ namespace {
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
-constexpr uintptr_t OBJECT_UNPRIV_PROBE = object_id::unpriv_probe;
-constexpr uintptr_t OBJECT_PRIV_PROBE = object_id::priv_probe;
-constexpr uintptr_t OBJECT_TRESPASSER = object_id::trespasser;
+inline constexpr const uintptr_t &OBJECT_UNPRIV_PROBE = object_id::unpriv_probe;
+inline constexpr const uintptr_t &OBJECT_PRIV_PROBE = object_id::priv_probe;
+inline constexpr const uintptr_t &OBJECT_TRESPASSER = object_id::trespasser;
 constexpr uintptr_t METHOD_MAIN = 0;
 
 // 自分の CONTROL を読んで返すだけ。触るのはレジスタと自分のスタックのみ。
