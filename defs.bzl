@@ -449,28 +449,30 @@ def shizuku_firmware(
 # ==============================================================================
 def _shizuku_sketch_entry_impl(ctx):
     out = ctx.actions.declare_file(ctx.label.name + "_entry.cpp")
-    content = """// Auto-generated sketch entry wrapper for %(name)s
+    content = """// Auto-generated sketch entry wrapper for %s
 #include <cstdint>
 
-extern void %(setup)s(void);
-extern void %(loop)s(void);
+extern void %s(void);
+extern void %s(void);
 
 // 注: 現行カーネルには純粋な C ABI の yield 関数 (例: shizuku_yield) は未実装。
 // 実在する C++ API は shizuku::services::yield() のみであるため、
 // 将来の SDK/kernel C ABI yield 接続用フックを予約しつつ、無限ループを確実に反復する。
 
-extern "C" void %(entry)s(void) {
-    %(setup)s();
+extern "C" void %s(void) {
+    %s();
     for (;;) {
-        %(loop)s();
+        %s();
     }
 }
-""" % {
-        "name": ctx.attr.sketch_name,
-        "entry": ctx.attr.entry_point,
-        "setup": ctx.attr.setup_fn,
-        "loop": ctx.attr.loop_fn,
-    }
+""" % (
+        ctx.attr.sketch_name,
+        ctx.attr.setup_fn,
+        ctx.attr.loop_fn,
+        ctx.attr.entry_point,
+        ctx.attr.setup_fn,
+        ctx.attr.loop_fn,
+    )
     ctx.actions.write(output = out, content = content)
     return [DefaultInfo(files = depset([out]))]
 
