@@ -171,3 +171,40 @@ When remote rbuild execution is subsequently performed by the runner, the return
    - Firmware binaries and debug artifacts: SHA-256 for `.bin`, `.elf`, `.map`, and archive (`libsample_fw_archive.a`).
    - Test execution: SHA-256 for test log (`test.log`) with assertion pass counts.
 
+---
+
+## 9. Current Request Correction and Opus Run Gate (2026-10-16)
+
+This section is the current operator instruction and supersedes the command, transport, host, and worktree selections recorded in Sections 3–4 above. Those earlier values remain a dated historical snapshot; do not use them for a current invocation.
+
+### Confirmed latest state
+
+- The previous host test log `.handoff/rbuild_test_manifest_loader_20261016.log:27-33` records a successful Bazel build (10 actions), `PASSED`, and 1/1 test pass, followed by rbuild artifact collection failure because `bazel-testlogs/tests/firmware_composition/test_manifest_loader/test.log` escaped the worktree. `.handoff/rbuild_test_manifest_loader_20261016.exit` contains `1`. The test passed; the rbuild job did not complete successfully.
+- `rbuild.toml` no longer requests that escaping `test.log` artifact. This config correction has not been rerun.
+- Opus explicitly confirmed that 32 GB has been freed on the worker and ESP-IDF work may resume. The old `objfw` Bazel output base has been deleted, so the next firmware invocation is expected to be a cold build. This is an operator-provided state, not a measurement made in this checkout.
+- Previous remote output displayed a `main` worktree/path where the request expected `objfw` (the output included `main` and a remote `.../main` path). Before accepting any new result, verify the selected `objfw` worktree and the synchronized input snapshot. A command line containing `--worktree objfw` alone does not prove the worker actually used the requested worktree or the intended source snapshot.
+- Current worker selection is `main-lxc` from `rbuild.toml`; the user's rbuild configuration resolves the worker through MagicDNS. The worker SDK installation path and current toolchain availability have not been independently measured here.
+
+### Current pending commands
+
+The following commands are for Opus to execute through the configured rbuild worker. All are **unexecuted and pending**. They use the configured `main-lxc` worker and `objfw` worktree; no transport, remote host, or IP is specified here.
+
+```bash
+rbuild --worktree objfw job build_esp32c6_composition
+rbuild --worktree objfw job build_esp32c6_direct_sketch
+```
+
+Targets and expected artifacts remain those listed in Section 5. The intended verification includes checking unique global ID definitions in the composition archive, reviewing the produced maps, and recording exact command, exit, log path, input snapshot identity, and SHA-256 for each produced artifact. No build, archive, map, or device proof is claimed by this request update.
+
+### Current host-test status
+
+The existing `test_manifest_loader` host test has source/log evidence of 1/1 passing as noted above, but its rbuild invocation exited 1 during artifact collection. The artifact list correction in `rbuild.toml` is pending a future rbuild retry if Opus chooses to verify the corrected job configuration. Do not rerun Bazel locally. Any retry command must use the configured worker/worktree form `rbuild --worktree objfw job test_manifest_loader` and be reported as unexecuted until it is actually run.
+
+### Operator report gate
+
+For each future job, report the exact invoked command, process exit, raw log location, selected worker and actual worktree path, source snapshot/HEAD identity, produced artifact paths and SHA-256, and any test pass count. If the observed worker path again says `main` rather than `objfw`, stop acceptance at that gate and report the mismatch before claiming a matching-source build.
+
+### External consumer fixture status
+
+The build-free fixture at `tests/external_composition/` models a separate MODULE consumer with a relative `../..` Shizuku override and two C6 firmware targets that share one object compile target. Its Python source regression and `nm` text checker tests passed in the local static-only invocation recorded in `.handoff/external-composition-source.md`; this does not establish Bazel module resolution, object compile-once behavior, or actual archive symbol uniqueness. No rbuild job for the nested MODULE is configured. The named-job execution root and synchronized snapshot behavior for this nested consumer remain unknown; do not add an external-module rbuild invocation until that root/cwd contract is confirmed. Real archive inspection remains pending after Opus's C6 builds and a verified input/worktree match.
+

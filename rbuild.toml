@@ -80,9 +80,7 @@ args = [
     "--jobs=auto",
     "//tests/firmware_composition:test_manifest_loader",
 ]
-artifacts = [
-    "bazel-testlogs/tests/firmware_composition/test_manifest_loader/test.log",
-]
+artifacts = []
 
 [jobs.test_manifest_loader.env]
 CMAKE_BUILD_PARALLEL_LEVEL = "24"
