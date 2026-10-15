@@ -13,6 +13,7 @@ sh_test(
         "composition_beta.list",
         "//tools:gen_object_ids.py",
         "//tools:object_ids.cpp.in",
+        "//tools:object_ids.hpp.in",
         "//:c6_test_headers",
     ],
 )

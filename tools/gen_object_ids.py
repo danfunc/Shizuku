@@ -12,6 +12,33 @@ import tempfile
 
 VALID_IDENTIFIER_PATTERN = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
 
+# テンプレート定義 (root, count) と衝突する予約シンボル
+RESERVED_SYMBOLS = {"root", "count"}
+
+# C99/C11/C23 および C++11/14/17/20/23 のキーワード
+C_CPP_KEYWORDS = {
+    # C keywords
+    "auto", "break", "case", "char", "const", "continue", "default", "do",
+    "double", "else", "enum", "extern", "float", "for", "goto", "if",
+    "inline", "int", "long", "register", "restrict", "return", "short",
+    "signed", "sizeof", "static", "struct", "switch", "typedef", "union",
+    "unsigned", "void", "volatile", "while", "_Alignas", "_Alignof",
+    "_Atomic", "_Bool", "_Complex", "_Generic", "_Imaginary", "_Noreturn",
+    "_Static_assert", "_Thread_local",
+    # C++ keywords
+    "alignas", "alignof", "and", "and_eq", "asm", "atomic_cancel",
+    "atomic_commit", "atomic_noexcept", "bitand", "bitor", "bool", "catch",
+    "char8_t", "char16_t", "char32_t", "class", "compl", "concept",
+    "consteval", "constexpr", "constinit", "const_cast", "co_await",
+    "co_return", "co_yield", "decltype", "delete", "dynamic_cast",
+    "explicit", "export", "false", "friend", "mutable", "namespace",
+    "new", "noexcept", "not", "not_eq", "nullptr", "operator", "or",
+    "or_eq", "private", "protected", "public", "reflexpr",
+    "reinterpret_cast", "requires", "static_assert", "static_cast",
+    "template", "this", "thread_local", "throw", "true", "try",
+    "typeid", "typename", "using", "virtual", "wchar_t", "xor", "xor_eq",
+}
+
 
 def read_names(path):
     names = []
@@ -81,6 +108,10 @@ def main():
     for name, source in all_names:
         if not VALID_IDENTIFIER_PATTERN.match(name):
             sys.exit("エラー: オブジェクト名 '%s' (%s) は無効な C 識別子です。" % (name, source))
+        if name in RESERVED_SYMBOLS:
+            sys.exit("エラー: オブジェクト名 '%s' (%s) は予約シンボルです。" % (name, source))
+        if name in C_CPP_KEYWORDS:
+            sys.exit("エラー: オブジェクト名 '%s' (%s) は C/C++ キーワードのため使用できません。" % (name, source))
         if name in seen:
             sys.exit("オブジェクト名 '%s' が二重に宣言された "
                      "(%s と %s)" % (name, seen[name], source))
