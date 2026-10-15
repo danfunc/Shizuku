@@ -6,6 +6,10 @@
 #include <cstdint>
 #include "arch/riscv/rv32.hpp"
 
+#ifndef SHIZUKU_RAM_TEXT
+#define SHIZUKU_RAM_TEXT __attribute__((section(".iram1.text")))
+#endif
+
 namespace shizuku::chips::esp32_c6 {
 
 // C6 の割込み方式 (PLIC + 256B 整列 32 スロットの vector table)。

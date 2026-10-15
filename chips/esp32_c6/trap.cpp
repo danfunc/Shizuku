@@ -97,7 +97,7 @@ void run_pending_switch() {
   kernel.pendsv_dispatch(kernel.current_context());
 }
 }
-extern "C" arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_frame_t *frame) {
+extern "C" SHIZUKU_RAM_TEXT arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_frame_t *frame) {
   const uint32_t previous_mstatus = active_mstatus;
   active_mstatus = frame->mstatus;
   shizuku_c6_trap_depth = shizuku_c6_trap_depth + 1;
