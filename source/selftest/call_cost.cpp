@@ -35,8 +35,8 @@ namespace {
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
-const uintptr_t OBJECT_COST_LEAF = object_id::cost_leaf;
-const uintptr_t OBJECT_COST_NEST = object_id::cost_nest;
+inline constexpr const uintptr_t &OBJECT_COST_LEAF = object_id::cost_leaf;
+inline constexpr const uintptr_t &OBJECT_COST_NEST = object_id::cost_nest;
 constexpr uintptr_t METHOD_MAIN = 0;
 
 // ★isb で挟む。挟まないとコンパイラとパイプラインが読み出しを前後へ動かせるので、

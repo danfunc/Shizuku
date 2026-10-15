@@ -1,8 +1,0 @@
-#include <cstdint>
-
-// ID の実体は canonical exported C ABI symbol として各 firmware 合成単位で 1 回のみ定義する。
-extern "C" {
-extern const uintptr_t shizuku_object_id_root = 0;
-@SHIZUKU_OBJECT_ID_C_SYMBOLS@
-extern const uintptr_t shizuku_object_id_count = @SHIZUKU_OBJECT_ID_COUNT@;
-}

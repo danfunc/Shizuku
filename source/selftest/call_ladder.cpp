@@ -52,12 +52,12 @@ namespace {
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
-const uintptr_t OBJECT_LEAF = object_id::leaf;
-const uintptr_t OBJECT_NEST = object_id::nest;
-const uintptr_t OBJECT_DEEP = object_id::deep;
-const uintptr_t OBJECT_NAMER = object_id::namer;
+inline constexpr const uintptr_t &OBJECT_LEAF = object_id::leaf;
+inline constexpr const uintptr_t &OBJECT_NEST = object_id::nest;
+inline constexpr const uintptr_t &OBJECT_DEEP = object_id::deep;
+inline constexpr const uintptr_t &OBJECT_NAMER = object_id::namer;
 // 居ないことが確かな番号 (割り当ての最後より後ろ)。
-const uintptr_t OBJECT_COUNT_PROBE = object_id::count;
+inline constexpr const uintptr_t &OBJECT_COUNT_PROBE = object_id::count;
 constexpr uintptr_t METHOD_MAIN = 0;
 
 void check(const char *name, bool ok, unsigned long got, unsigned long want) {

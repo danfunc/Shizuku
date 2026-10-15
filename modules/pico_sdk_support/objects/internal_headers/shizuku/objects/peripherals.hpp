@@ -21,15 +21,15 @@ namespace objects {
 
 // オブジェクト ID (合成側が決める)。**埋まっている番号の表は
 // shizuku/objects/flash_fs.hpp に集約してある** — 散らすと衝突に気づけない。
-const uintptr_t GPIO_OBJECT = object_id::gpio;
-const uintptr_t SPI_OBJECT = object_id::spi;
-const uintptr_t I2C_OBJECT = object_id::i2c;
+inline constexpr const uintptr_t &GPIO_OBJECT = object_id::gpio;
+inline constexpr const uintptr_t &SPI_OBJECT = object_id::spi;
+inline constexpr const uintptr_t &I2C_OBJECT = object_id::i2c;
 // ボード上の LED。**どのピンに繋がっているか (あるいは GPIO ですらないか) を
 // 隠す**のがこのオブジェクトの仕事: pico2 は GPIO 25、pico2_w は CYW43 チップの
 // WL_GPIO0 で、後者は GPIO を叩いても光らない。呼ぶ側はどちらか知らなくてよい。
-const uintptr_t LED_OBJECT = object_id::led;
+inline constexpr const uintptr_t &LED_OBJECT = object_id::led;
 // SoC 内蔵の温度センサ (ADC ch4)。★ADC の立ち上げは RESETS を触るので特権側の仕事。
-const uintptr_t TEMPERATURE_OBJECT = object_id::temperature;
+inline constexpr const uintptr_t &TEMPERATURE_OBJECT = object_id::temperature;
 
 // メソッド番号。0 は main (生成側が据え、自分で残りを export する)。
 enum struct gpio_method : uintptr_t {

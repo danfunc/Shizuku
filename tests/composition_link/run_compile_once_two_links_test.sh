@@ -23,17 +23,127 @@ mkdir -p "${WORK_DIR}"
 echo "[INFO] Working directory: ${WORK_DIR}"
 echo "[INFO] Repository root: ${REPO_ROOT}"
 
+CC="${CC:-clang}"
 CXX="${CXX:-clang++}"
-# C++23 を標準採用 (constexpr 緩和、属性拡張、シンボル解決の最新規格)
+# C17 および C++23 を標準採用
+CFLAGS=("-std=c17" "-Wall" "-Wextra" "-I${REPO_ROOT}")
 CXXFLAGS=("-std=c++23" "-Wall" "-Wextra" "-I${REPO_ROOT}")
 
-# 1. 合成 Alpha および Beta の ID 定義ソースを生成 (argv 配列実行)
+# ヘルパー関数: fail-closed な動的初期化セクション不在検査
+assert_zero_dynamic_init() {
+  local obj_file="$1"
+  local label="$2"
+
+  echo "  [INSPECT] Checking dynamic initialization in ${label} (${obj_file})"
+
+  if [ ! -f "${obj_file}" ]; then
+    echo "[ASSERT FAILED] Target object file does not exist: ${obj_file}" >&2
+    return 1
+  fi
+
+  # 1. nm によるコンストラクタマーカーシンボルの検査
+  local nm_symbols
+  if ! nm_symbols=$(nm "${obj_file}" 2>/dev/null); then
+    echo "[ASSERT FAILED] nm command failed on ${obj_file}" >&2
+    return 1
+  fi
+
+  if echo "${nm_symbols}" | grep -E "(_GLOBAL__sub_I|__static_initialization|___cxx_global_var_init)" > /dev/null; then
+    echo "[ASSERT FAILED] ${label} contains dynamic initialization functions in nm symbols!" >&2
+    return 1
+  fi
+
+  # 2. オブジェクトファイル形式の判定とセクション検査
+  local file_info
+  if ! file_info=$(file -b "${obj_file}" 2>/dev/null); then
+    echo "[ASSERT FAILED] file command failed on ${obj_file}" >&2
+    return 1
+  fi
+
+  local inspected=0
+
+  if echo "${file_info}" | grep -E -i "Mach-O" > /dev/null; then
+    # Mach-O 形式: otool -l を使用
+    if ! command -v otool >/dev/null 2>&1; then
+      echo "[ASSERT FAILED] Object is Mach-O but otool is not available!" >&2
+      return 1
+    fi
+
+    local otool_out
+    if ! otool_out=$(otool -l "${obj_file}" 2>/dev/null); then
+      echo "[ASSERT FAILED] otool -l failed on ${obj_file}" >&2
+      return 1
+    fi
+
+    # セクション情報が正常に取得できていることを確認 (Section / sectname の存在)
+    if ! echo "${otool_out}" | grep -E "sectname" > /dev/null; then
+      echo "[ASSERT FAILED] otool -l output contains no sections for ${obj_file}" >&2
+      return 1
+    fi
+
+    if echo "${otool_out}" | grep -E -i "sectname[[:space:]]+(__mod_init_func|__mod_term_func|__StaticInit)" > /dev/null; then
+      echo "[ASSERT FAILED] ${label} contains Mach-O init section (__mod_init_func/__StaticInit)!" >&2
+      return 1
+    fi
+
+    inspected=1
+
+  elif echo "${file_info}" | grep -E -i "ELF" > /dev/null; then
+    # ELF 形式: readelf または llvm-readelf を使用
+    local elf_tool=""
+    if command -v readelf >/dev/null 2>&1; then
+      elf_tool="readelf"
+    elif command -v llvm-readelf >/dev/null 2>&1; then
+      elf_tool="llvm-readelf"
+    fi
+
+    if [ -z "${elf_tool}" ]; then
+      echo "[ASSERT FAILED] Object is ELF but neither readelf nor llvm-readelf is available!" >&2
+      return 1
+    fi
+
+    local readelf_out
+    if ! readelf_out=$("${elf_tool}" -S "${obj_file}" 2>/dev/null); then
+      echo "[ASSERT FAILED] ${elf_tool} -S failed on ${obj_file}" >&2
+      return 1
+    fi
+
+    # セクションヘッダが正常に取得できていることを確認
+    if ! echo "${readelf_out}" | grep -E "Section Headers:" > /dev/null; then
+      echo "[ASSERT FAILED] ${elf_tool} output contains no Section Headers for ${obj_file}" >&2
+      return 1
+    fi
+
+    if echo "${readelf_out}" | grep -E "(\.init_array|\.ctors)" > /dev/null; then
+      echo "[ASSERT FAILED] ${label} contains ELF init section (.init_array/.ctors)!" >&2
+      return 1
+    fi
+
+    inspected=1
+
+  else
+    echo "[ASSERT FAILED] Unknown or unsupported object file format: ${file_info}" >&2
+    return 1
+  fi
+
+  if [ "${inspected}" -ne 1 ]; then
+    echo "[ASSERT FAILED] Section inspection was not completed for ${label} (inspected=${inspected})!" >&2
+    return 1
+  fi
+
+  echo "  [ASSERT PASSED] ${label} has zero dynamic initialization functions and zero ctor sections (inspected via ${file_info})"
+  return 0
+}
+
+# 1. 合成 Alpha および Beta の ID 定義ソース (.c) とヘッダー (.hpp) を生成 (純粋 C template 使用)
 echo "[STEP 1] Generating composition ID definitions via gen_object_ids.py"
 GEN_CMD_ALPHA=(
   python3 "${REPO_ROOT}/tools/gen_object_ids.py"
   --mode extern
-  --source-template "${REPO_ROOT}/tools/object_ids.cpp.in"
-  --source-out "${WORK_DIR}/composition_alpha.cpp"
+  --template "${REPO_ROOT}/tools/object_ids.hpp.in"
+  --out "${WORK_DIR}/composition_alpha.hpp"
+  --source-template "${REPO_ROOT}/tools/object_ids.c.in"
+  --source-out "${WORK_DIR}/composition_alpha.c"
   "${SCRIPT_DIR}/composition_alpha.list"
 )
 "${GEN_CMD_ALPHA[@]}"
@@ -41,8 +151,10 @@ GEN_CMD_ALPHA=(
 GEN_CMD_BETA=(
   python3 "${REPO_ROOT}/tools/gen_object_ids.py"
   --mode extern
-  --source-template "${REPO_ROOT}/tools/object_ids.cpp.in"
-  --source-out "${WORK_DIR}/composition_beta.cpp"
+  --template "${REPO_ROOT}/tools/object_ids.hpp.in"
+  --out "${WORK_DIR}/composition_beta.hpp"
+  --source-template "${REPO_ROOT}/tools/object_ids.c.in"
+  --source-out "${WORK_DIR}/composition_beta.c"
   "${SCRIPT_DIR}/composition_beta.list"
 )
 "${GEN_CMD_BETA[@]}"
@@ -78,7 +190,7 @@ if ! echo "${NM_SAMPLE}" | grep -E "[[:space:]]+U[[:space:]]+.*target_service" >
   exit 1
 fi
 # sample_object.o 内に ID の実体定義シンボル (T, D, R, S) が存在しないことを assert
-if echo "${NM_SAMPLE}" | grep -E "[[:space:]]+[TDRS][[:space:]]+.*(sample_service|target_service)" > /dev/null; then
+if echo "${NM_SAMPLE}" | grep -E "[[:space:]]+[TDRS][[:space:]]+.*(shizuku_object_id_sample_service|shizuku_object_id_target_service)" > /dev/null; then
   echo "[ASSERT FAILED] sample_object.o unexpectedly defines sample_service or target_service directly!" >&2
   exit 1
 fi
@@ -86,18 +198,52 @@ echo "  [ASSERT PASSED] sample_object.o references symbols strictly as undefined
 
 # 2.2 consumer 側 (sample_object.o) の動的初期化 (ctor / init_array / __mod_init_func) 不在を機械 assert
 echo "[STEP 2.2] Asserting zero runtime dynamic constructors in consumer sample_object.o"
-NM_SAMPLE_ALL=$(nm "${WORK_DIR}/sample_object.o")
-if echo "${NM_SAMPLE_ALL}" | grep -E "(_GLOBAL__sub_I|__static_initialization)" > /dev/null; then
-  echo "[ASSERT FAILED] consumer sample_object.o contains dynamic initialization functions!" >&2
+assert_zero_dynamic_init "${WORK_DIR}/sample_object.o" "consumer sample_object.o"
+
+# 2.3 Negative fixture の検証 (旧値コピー global consumer で動的初期化が発生し、checker が検出・失敗することの実証)
+echo "[STEP 2.3] Negative fixture: verifying that value-copy global consumer produces dynamic init and checker fails closed"
+cat << 'EOF' > "${WORK_DIR}/test_negative_value_copy.cpp"
+#include <cstdint>
+extern "C" const uintptr_t shizuku_object_id_sample_service;
+namespace shizuku::object_id {
+  inline constexpr const uintptr_t &sample_service = shizuku_object_id_sample_service;
+}
+
+// 旧値コピー global consumer: extern const シンボルの値でグローバル変数を初期化するため動的初期化ルーチンが必須となる
+const uintptr_t GLOBAL_VALUE_COPY = shizuku::object_id::sample_service;
+
+uintptr_t get_negative_val() {
+  return GLOBAL_VALUE_COPY;
+}
+EOF
+
+COMPILE_NEGATIVE_CMD=(
+  "${CXX}"
+  "${CXXFLAGS[@]}"
+  -c "${WORK_DIR}/test_negative_value_copy.cpp"
+  -o "${WORK_DIR}/test_negative_value_copy.o"
+)
+"${COMPILE_NEGATIVE_CMD[@]}"
+
+# negative fixture の object に ctor/init section が実際に存在することを確認
+NM_NEG=$(nm "${WORK_DIR}/test_negative_value_copy.o" 2>/dev/null || true)
+if ! echo "${NM_NEG}" | grep -E "(_GLOBAL__sub_I|___cxx_global_var_init)" > /dev/null; then
+  echo "[ASSERT FAILED] Negative fixture object unexpectedly did NOT generate dynamic init symbols!" >&2
   exit 1
 fi
-if command -v otool >/dev/null 2>&1; then
-  if otool -l "${WORK_DIR}/sample_object.o" | grep -i "__mod_init_func" > /dev/null; then
-    echo "[ASSERT FAILED] consumer sample_object.o contains __mod_init_func section!" >&2
-    exit 1
-  fi
+
+# assert_zero_dynamic_init をサブシェルで実行し、必ず失敗 (非ゼロ終了) することを assert
+set +e
+( assert_zero_dynamic_init "${WORK_DIR}/test_negative_value_copy.o" "negative fixture object" ) > "${WORK_DIR}/negative_check.log" 2>&1
+CHECK_STATUS=$?
+set -e
+
+if [ "${CHECK_STATUS}" -eq 0 ]; then
+  echo "[ASSERT FAILED] assert_zero_dynamic_init unexpectedly succeeded on negative fixture containing dynamic init!" >&2
+  cat "${WORK_DIR}/negative_check.log" >&2
+  exit 1
 fi
-echo "  [ASSERT PASSED] consumer sample_object.o has zero dynamic initialization functions or ctor sections"
+echo "  [ASSERT PASSED] Negative fixture correctly failed dynamic init check (exit code ${CHECK_STATUS})"
 
 # 3. test_runner.cpp をコンパイル
 echo "[STEP 3] Compiling test_runner.cpp"
@@ -109,12 +255,12 @@ COMPILE_RUNNER_CMD=(
 )
 "${COMPILE_RUNNER_CMD[@]}"
 
-# 4. 合成 Alpha 定義をコンパイル
-echo "[STEP 4] Compiling composition_alpha.cpp"
+# 4. 合成 Alpha 定義を「純粋 C コンパイラ」でコンパイル
+echo "[STEP 4] Compiling composition_alpha.c via C compiler (${CC})"
 COMPILE_ALPHA_CMD=(
-  "${CXX}"
-  "${CXXFLAGS[@]}"
-  -c "${WORK_DIR}/composition_alpha.cpp"
+  "${CC}"
+  "${CFLAGS[@]}"
+  -c "${WORK_DIR}/composition_alpha.c"
   -o "${WORK_DIR}/composition_alpha.o"
 )
 "${COMPILE_ALPHA_CMD[@]}"
@@ -135,19 +281,37 @@ if ! echo "${NM_ALPHA}" | grep -E ".*sample_service" > /dev/null; then
   exit 1
 fi
 
-# 動的初期化関数の不在を assert (Constant Initialization の証明)
-if echo "${NM_ALPHA}" | grep -E "(_GLOBAL__sub_I|__static_initialization)" > /dev/null; then
-  echo "[ASSERT FAILED] composition_alpha.o contains dynamic initialization functions!" >&2
-  exit 1
-fi
-# Mach-O の場合: __mod_init_func セクション不在を assert
-if command -v otool >/dev/null 2>&1; then
-  if otool -l "${WORK_DIR}/composition_alpha.o" | grep -i "__mod_init_func" > /dev/null; then
-    echo "[ASSERT FAILED] composition_alpha.o contains __mod_init_func section!" >&2
-    exit 1
-  fi
-fi
-echo "  [ASSERT PASSED] composition_alpha.o defines symbols statically with zero runtime constructors"
+assert_zero_dynamic_init "${WORK_DIR}/composition_alpha.o" "definition composition_alpha.o"
+
+# 4.2 C 言語 consumer からの header include / compile & link 実証
+echo "[STEP 4.2] Verifying pure C compilation and linkage with object_ids header"
+mkdir -p "${WORK_DIR}/shizuku"
+cp "${WORK_DIR}/composition_alpha.hpp" "${WORK_DIR}/shizuku/object_ids.hpp"
+cat << 'EOF' > "${WORK_DIR}/test_c_consumer.c"
+#include <assert.h>
+#include <stdint.h>
+#include "shizuku/object_ids.hpp"
+
+int main(void) {
+  assert(shizuku_object_id_root == 0);
+  assert(shizuku_object_id_sample_service == 2);
+  assert(shizuku_object_id_target_service == 3);
+  assert(shizuku_object_id_count == 5);
+  return 0;
+}
+EOF
+
+COMPILE_C_CONSUMER_CMD=(
+  "${CC}"
+  "${CFLAGS[@]}"
+  -I"${WORK_DIR}"
+  "${WORK_DIR}/test_c_consumer.c"
+  "${WORK_DIR}/composition_alpha.o"
+  -o "${WORK_DIR}/test_c_consumer_bin"
+)
+"${COMPILE_C_CONSUMER_CMD[@]}"
+"${WORK_DIR}/test_c_consumer_bin"
+echo "  [ASSERT PASSED] Pure C consumer successfully compiled and linked with C ABI definitions"
 
 # 5. リンク 1: sample_object.o + composition_alpha.o + test_runner.o -> test_alpha
 echo "[STEP 5] Linking test_alpha (Link #1)"
@@ -169,12 +333,12 @@ if [ "${HASH_ORIGINAL}" != "${HASH_CHECK_1}" ]; then
 fi
 echo "  [HASH VERIFIED] sample_object.o hash unchanged: ${HASH_CHECK_1}"
 
-# 7. 合成 Beta 定義をコンパイル
-echo "[STEP 6] Compiling composition_beta.cpp"
+# 7. 合成 Beta 定義を「純粋 C コンパイラ」でコンパイル
+echo "[STEP 6] Compiling composition_beta.c via C compiler (${CC})"
 COMPILE_BETA_CMD=(
-  "${CXX}"
-  "${CXXFLAGS[@]}"
-  -c "${WORK_DIR}/composition_beta.cpp"
+  "${CC}"
+  "${CFLAGS[@]}"
+  -c "${WORK_DIR}/composition_beta.c"
   -o "${WORK_DIR}/composition_beta.o"
 )
 "${COMPILE_BETA_CMD[@]}"
@@ -220,7 +384,7 @@ GEN_CMD_CONSTEXPR=(
 cat << 'EOF' > "${WORK_DIR}/test_constexpr_consumer.cpp"
 #include <cassert>
 #include <cstdint>
-// 生成されたヘッダーのみをインクルード (ソース定義 .cpp のリンクなし)
+// 生成されたヘッダーのみをインクルード (ソース定義 .c/.cpp のリンクなし)
 #include "constexpr_object_ids.hpp"
 
 int main() {

@@ -35,7 +35,7 @@ namespace objects {
 // ★番号は書かない。ビルドシステムが振る (cmake/shizukuObjects.cmake, D28)。
 //   以前はここに「埋まっている番号の表」を手で書いていたが、それは今日 2 回
 //   事故った — 表を見て空きを探す作業そのものが事故の原因だった。
-const uintptr_t FLASH_FS_OBJECT = object_id::flashfs;
+inline constexpr const uintptr_t &FLASH_FS_OBJECT = object_id::flashfs;
 
 // メソッド番号。0 は main (生成側が据え、自分で残りを export する)。
 enum struct flash_fs_method : uintptr_t {

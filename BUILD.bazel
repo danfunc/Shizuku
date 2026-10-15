@@ -13,20 +13,20 @@ genrule(
     name = "object_ids_gen",
     srcs = [
         "//tools:object_ids.hpp.in",
-        "//tools:object_ids.cpp.in",
+        "//tools:object_ids.c.in",
         "source/apps/objects.list",
         "source/selftest/objects.list",
         "//modules/pico_sdk_support:objects.list",
     ],
     outs = [
         "generated_object_ids/shizuku/object_ids.hpp",
-        "generated_object_ids/shizuku/object_ids.cpp",
+        "generated_object_ids/shizuku/object_ids.c",
     ],
     cmd = "python3 $(location //tools:gen_object_ids.py)" +
           " --template $(location //tools:object_ids.hpp.in)" +
           " --out $(location generated_object_ids/shizuku/object_ids.hpp)" +
-          " --source-template $(location //tools:object_ids.cpp.in)" +
-          " --source-out $(location generated_object_ids/shizuku/object_ids.cpp)" +
+          " --source-template $(location //tools:object_ids.c.in)" +
+          " --source-out $(location generated_object_ids/shizuku/object_ids.c)" +
           " --mode extern" +
           " --limit 64" +
           " $(location source/apps/objects.list)" +
@@ -41,8 +41,8 @@ filegroup(
 )
 
 filegroup(
-    name = "object_ids_cpp_file",
-    srcs = [":generated_object_ids/shizuku/object_ids.cpp"],
+    name = "object_ids_c_file",
+    srcs = [":generated_object_ids/shizuku/object_ids.c"],
 )
 
 alias(
@@ -52,7 +52,7 @@ alias(
 
 cc_library(
     name = "object_ids",
-    srcs = [":object_ids_cpp_file"],
+    srcs = [":object_ids_c_file"],
     hdrs = [":object_ids_hpp_file"],
     includes = ["generated_object_ids"],
     visibility = ["//visibility:public"],
@@ -193,7 +193,7 @@ cc_library(
 cc_library(
     name = "shizuku_kernel_c5",
     srcs = KERNEL_SRCS + KERNEL_OBJECT_SRCS + C6_SELFTEST_SRCS + [
-        ":object_ids_cpp_file",
+        ":object_ids_c_file",
         "source/memory_manager/freestanding.cpp",
         "//modules/esp_idf_support/c5:early_boot.cpp",
         "//modules/esp_idf_support/c5:link_stubs.cpp",
@@ -221,7 +221,7 @@ cc_library(
 cc_library(
     name = "shizuku_kernel",
     srcs = KERNEL_SRCS + KERNEL_OBJECT_SRCS + C6_SELFTEST_SRCS + [
-        ":object_ids_cpp_file",
+        ":object_ids_c_file",
         "source/memory_manager/freestanding.cpp",
         "//modules/esp_idf_support/c6:early_boot.cpp",
         "//modules/esp_idf_support/c6:link_stubs.cpp",

@@ -16,11 +16,11 @@ namespace {
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
-const uintptr_t OBJ_PARENT_A = object_id::binding_parent_a;
-const uintptr_t OBJ_PARENT_B = object_id::binding_parent_b;
-const uintptr_t OBJ_CHILD_A  = object_id::binding_child_a;
-const uintptr_t OBJ_CHILD_B  = object_id::binding_child_b;
-const uintptr_t OBJ_UNPRIV   = object_id::binding_unpriv;
+inline constexpr const uintptr_t &OBJ_PARENT_A = object_id::binding_parent_a;
+inline constexpr const uintptr_t &OBJ_PARENT_B = object_id::binding_parent_b;
+inline constexpr const uintptr_t &OBJ_CHILD_A  = object_id::binding_child_a;
+inline constexpr const uintptr_t &OBJ_CHILD_B  = object_id::binding_child_b;
+inline constexpr const uintptr_t &OBJ_UNPRIV   = object_id::binding_unpriv;
 
 constexpr uintptr_t CMD_SETUP           = 0x01;
 constexpr uintptr_t CMD_COMPUTE         = 0x10;

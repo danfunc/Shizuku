@@ -121,7 +121,7 @@ def main():
             header_lines.append("constexpr uintptr_t %s = %d;" % (name, index))
         else:
             header_lines.append("inline constexpr const uintptr_t &%s = shizuku_object_id_%s;" % (name, name))
-        c_symbol_lines.append("extern const uintptr_t shizuku_object_id_%s = %d;" % (name, index))
+        c_symbol_lines.append("const uintptr_t shizuku_object_id_%s = %d;" % (name, index))
         index += 1
 
     if args.limit and index > args.limit:

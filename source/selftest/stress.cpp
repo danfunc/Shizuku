@@ -59,8 +59,8 @@ void replay_fails() {
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
-const uintptr_t OBJECT_BLINK = object_id::blink;
-const uintptr_t OBJECT_LOAD = object_id::load;
+inline constexpr const uintptr_t &OBJECT_BLINK = object_id::blink;
+inline constexpr const uintptr_t &OBJECT_LOAD = object_id::load;
 constexpr uintptr_t METHOD_MAIN = 0;
 
 // 点滅の周期。人が見て分かる速さで、かつ測定の分解能も確保できるところ。

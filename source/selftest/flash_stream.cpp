@@ -33,10 +33,10 @@ namespace {
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
-const uintptr_t OBJECT_WRITER = object_id::unpriv_writer;
-const uintptr_t OBJECT_READER = object_id::unpriv_reader;
-const uintptr_t OBJECT_SINK = object_id::unpriv_sink;
-const uintptr_t OBJECT_TRESPASSER = object_id::flash_trespasser;
+inline constexpr const uintptr_t &OBJECT_WRITER = object_id::unpriv_writer;
+inline constexpr const uintptr_t &OBJECT_READER = object_id::unpriv_reader;
+inline constexpr const uintptr_t &OBJECT_SINK = object_id::unpriv_sink;
+inline constexpr const uintptr_t &OBJECT_TRESPASSER = object_id::flash_trespasser;
 constexpr uint32_t PAYLOAD_BYTES = 300; // ページ 1 枚を跨がせる
 
 struct api_result {

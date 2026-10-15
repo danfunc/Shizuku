@@ -19,7 +19,7 @@ namespace {
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
-const uintptr_t OBJECT_TARGET = object_id::debug_target;
+inline constexpr const uintptr_t &OBJECT_TARGET = object_id::debug_target;
 constexpr uintptr_t METHOD_MAIN = 0;
 
 volatile uint32_t g_rounds = 0;

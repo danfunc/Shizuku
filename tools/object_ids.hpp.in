@@ -1,12 +1,12 @@
 #ifndef SHIZUKU_OBJECT_IDS_HPP
 #define SHIZUKU_OBJECT_IDS_HPP
-#include <cstdint>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// Canonical exported C ABI symbol 宣言
+// Canonical exported C ABI symbol 宣言 (C / C++ 共通)
 extern const uintptr_t shizuku_object_id_root;
 @SHIZUKU_OBJECT_ID_C_DECLS@
 extern const uintptr_t shizuku_object_id_count;
@@ -17,7 +17,7 @@ extern const uintptr_t shizuku_object_id_count;
 namespace shizuku {
 namespace object_id {
 
-// C++ 旧 namespace 参照を値実体にせず、初期化不要な inline constexpr 参照 alias として解決
+// C++ 参照 alias (定数参照バインディング、初期化コード不要)
 inline constexpr const uintptr_t &root = shizuku_object_id_root;
 @SHIZUKU_OBJECT_ID_BODY@
 inline constexpr const uintptr_t &count = shizuku_object_id_count;
