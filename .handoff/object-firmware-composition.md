@@ -78,7 +78,27 @@ Previous Commits:
 
 ---
 
-## 3. テスト証跡と各 assert (実在ログに基づく客観的証拠)
+## 3. 予約 ID (root=0 / index=2) の整合性と意味論の解明
+
+実コード調査に基づく事実関係:
+- `tools/gen_object_ids.py:98`: 自動生成 ID の index は `2` から開始 (`index = 2 # 0 は KERNEL_OBJECT, 1 はブートスレッド (ROOT_OBJECT) で予約`)。
+- `internal_headers/shizuku/templates/kernel_object.hpp:53-54`:
+  - `KERNEL_OBJECT_ID = 0;` (システムコールハンドラ)
+  - `ROOT_OBJECT = 1;` (ブートスレッドが名乗るオブジェクト)
+- `tools/object_ids.c.in:5`: レガシー公開シンボル `shizuku_object_id_root` は `0` と定義されている (`const uintptr_t shizuku_object_id_root = 0;`)。
+- `defs.bzl:190, 226`: ファームウェア合成マニフェスト (`shizuku_firmware`) では、parent `root` はランタイム `ROOT_OBJECT = 1` に解決され、レガシーシンボル `root = 0` とは明示的に分離されている。
+
+解釈と結論:
+- **名前ごとの index 不一致（per-name index disagreement）は存在しない**:
+  - ID 0 と 1 は予約済みであり、自動生成される各オブジェクト（`sample_service` 等）の ID は一貫して 2 から開始している。
+- **命名・セマンティクスの曖昧さ（naming/semantic ambiguity）の所在**:
+  - レガシー公開シンボル名 `shizuku_object_id_root` は値 `0`（カーネルオブジェクト / システムコールハンドラ `KERNEL_OBJECT_ID = 0`）を指している。
+  - 一方、ランタイム上の `ROOT_OBJECT`（ブートスレッド）は `1` であり、ファームウェアマニフェストの parent `root` は `ROOT_OBJECT = 1` を使用している。
+- 既存の ID 値およびランタイム動作・親子/権限仕様は一切変更せず維持する。
+
+---
+
+## 4. テスト証跡と各 assert (実在ログに基づく客観的証拠)
 
 - **Bazel テストログ保存先**:
   `/Users/ishigakiyua/.gemini/antigravity/brain/30a1c09a-6026-4e22-acc4-946d69ebff46/bazel_test.log`
@@ -104,7 +124,7 @@ Previous Commits:
 
 ---
 
-## 4. リモート rbuild / ファームウェアビルドに関する記録
+## 5. リモート rbuild / ファームウェアビルドに関する記録
 
 - **指定された実行環境 (指示構成)**:
   - 設定ファイル: `~/github/Shizuku/rbuild.toml` (read-only)
@@ -121,7 +141,7 @@ Previous Commits:
 
 ---
 
-## 5. 並行セッション (C6 担当) との連携および排他境界
+## 6. 並行セッション (C6 担当) との連携および排他境界
 
 - **C6 担当ジョブ情報**:
   - Job ID: `48b04e75-95e6-4644-aee2-cea9b50df463`
