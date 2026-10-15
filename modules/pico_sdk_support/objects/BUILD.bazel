@@ -7,6 +7,16 @@ load("//configs:flash_layout.bzl", "flash_layout_config")
 
 package(default_visibility = ["//visibility:public"])
 
+# Export object headers from this package. The parent package cannot glob across
+# this subpackage boundary, so RP firmware input closure must reference this label.
+filegroup(
+    name = "internal_headers",
+    srcs = glob([
+        "internal_headers/**/*.hpp",
+        "internal_headers/**/*.h",
+    ]),
+)
+
 # W ボード以外では作らない (CYW43 / BTstack が要る)。
 _CYW43_ONLY = select({
     "//configs:cyw43": [],

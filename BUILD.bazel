@@ -65,6 +65,12 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+filegroup(
+    name = "repo_internal_headers",
+    srcs = glob(["internal_headers/**/*.hpp", "internal_headers/**/*.h"]),
+    visibility = ["//visibility:public"],
+)
+
 # クリーンな合成用ヘッダ (object_ids 依存を持たない)
 cc_library(
     name = "core_headers",
@@ -290,5 +296,26 @@ cc_library(
         "//arch/riscv:pmp",
         "//chips/esp32_c6:headers",
         "//boards/esp32_c6:headers",
+    ],
+)
+
+# RP2040 向けのクリーンな合成用カーネルコア (selftests/runner/legacy global IDs なし)
+cc_library(
+    name = "shizuku_kernel_rp2040_core",
+    srcs = KERNEL_SRCS + KERNEL_OBJECT_SRCS + [
+        "source/kernel/firmware_loader.cpp",
+        "source/kernel/firmware_loader_syscall.cpp",
+        "source/kernel/services.cpp",
+        "source/memory_manager/freestanding.cpp",
+        "//modules/pico_sdk_support/firmware:rp2040_kernel_bootstrap.cpp",
+    ],
+    target_compatible_with = ["@pico-sdk//bazel/constraint:rp2040"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":core_headers",
+        "//configs:config",
+        "//arch/armv6m:ctx",
+        "//chips/rp2040:headers",
+        "//boards/rp2040_pico_w:headers",
     ],
 )

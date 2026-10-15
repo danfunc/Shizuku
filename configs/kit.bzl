@@ -15,7 +15,7 @@ _CONFIG_COMMON = {
     "${SHIZUKU_MEMORY_MANAGER}": "shizuku::memory_managers::pico_sdk",
 }
 
-def config_substitutions(arch, chip, board):
+def config_substitutions(arch, chip, board, sdk_free = False):
     """config_template.hpp.in の置換表。ARCH / CHIP / BOARD の 3 軸を注入する。
 
     ARCH (ISA), CHIP (SoC の定義), BOARD (ボード実装) はそれぞれ別の軸で、
@@ -54,6 +54,21 @@ def config_substitutions(arch, chip, board):
             "${SHIZUKU_BOARD}": board,
         }
     if arch == "armv6m":
+        if sdk_free:
+            return _CONFIG_COMMON | {
+                "${SHIZUKU_MEMORY_MANAGER}": "shizuku::memory_managers::freestanding",
+                "${INCLUDE_HEADERS_INSTRUCTION}": "\n".join([
+                    '#include "arch/armv6m/armv6m.hpp"',
+                    '#include "chips/rp2040/chip.hpp"',
+                    '#include "boards/rp2040_pico_w/rp2040_pico_w.hpp"',
+                    '#include "shizuku/memory_managers/freestanding.hpp"',
+                    '#include "shizuku/app_entry.hpp"',
+                ]),
+                "${SHIZUKU_ARCH}": arch,
+                "${SHIZUKU_ARCH_TYPE}": "shizuku::archs::armv6m<shizuku::chips::rp2040::chip::kMpuRegionCount, shizuku::chips::rp2040::chip::kNvicPriorityBits>",
+                "${SHIZUKU_CHIP}": chip,
+                "${SHIZUKU_BOARD}": board,
+            }
         return _CONFIG_COMMON | {
             "${INCLUDE_HEADERS_INSTRUCTION}": "\n".join([
                 '#include "arch/armv6m/armv6m.hpp"',

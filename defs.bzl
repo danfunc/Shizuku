@@ -89,12 +89,16 @@ def shizuku_object(
 # ==============================================================================
 # 3. Composition Transition & Metadata Generator
 # ==============================================================================
+_PICO_BOARD_SETTING = str(Label("@pico-sdk//bazel/config:PICO_BOARD"))
+
 def _firmware_transition_impl(settings, attr):
     target = attr.target
     if target == "esp32c6":
         return {
             "//command_line_option:platforms": str(Label("@shizuku//toolchains/rv32_esp:esp32c6")),
             str(Label("@shizuku//configs:board")): "esp32_c6",
+            str(Label("@shizuku//configs:rp2040_cmake_profile")): False,
+            _PICO_BOARD_SETTING: settings[_PICO_BOARD_SETTING],
             "//command_line_option:cxxopt": ["-std=c++23"],
             "//command_line_option:copt": ["-Og", "-g3", "-DSHIZUKU_C6_SKELETON_PERMITTED=1"],
             "//command_line_option:strip": "never",
@@ -103,18 +107,37 @@ def _firmware_transition_impl(settings, attr):
         return {
             "//command_line_option:platforms": str(Label("@shizuku//toolchains/rv32_esp:esp32c6")),
             str(Label("@shizuku//configs:board")): "esp32_c5",
+            str(Label("@shizuku//configs:rp2040_cmake_profile")): False,
+            _PICO_BOARD_SETTING: settings[_PICO_BOARD_SETTING],
             "//command_line_option:cxxopt": ["-std=c++23"],
             "//command_line_option:copt": ["-Og", "-g3", "-DSHIZUKU_C5_SKELETON_PERMITTED=1"],
             "//command_line_option:strip": "never",
         }
-    return {}
+    elif target == "rp2040":
+        return {
+            "//command_line_option:platforms": str(Label("@pico-sdk//bazel/platform:rp2040")),
+            str(Label("@shizuku//configs:board")): "rp2040_pico",
+            str(Label("@shizuku//configs:rp2040_cmake_profile")): True,
+            _PICO_BOARD_SETTING: "pico",
+            "//command_line_option:cxxopt": ["-std=c++23"],
+            "//command_line_option:copt": ["-Og", "-g3", "-DSHIZUKU_RP2040=1"],
+            "//command_line_option:strip": "never",
+        }
+    elif target == "rp2350":
+        fail("Target 'rp2350' is unsupported (RP2350 support is a follow-up; only 'rp2040' is supported).")
+    else:
+        fail("Unknown target: '%s'. Supported targets are 'esp32c6', 'esp32c5', 'rp2040' ('rp2350' is unsupported)." % target)
 
 _firmware_transition = transition(
     implementation = _firmware_transition_impl,
-    inputs = [],
+    inputs = [
+        _PICO_BOARD_SETTING,
+    ],
     outputs = [
         "//command_line_option:platforms",
         str(Label("@shizuku//configs:board")),
+        str(Label("@shizuku//configs:rp2040_cmake_profile")),
+        _PICO_BOARD_SETTING,
         "//command_line_option:cxxopt",
         "//command_line_option:copt",
         "//command_line_option:strip",
@@ -124,8 +147,10 @@ _firmware_transition = transition(
 def _shizuku_composition_gen_impl(ctx):
     # 0. ターゲット検証 (Fail-closed)
     target = ctx.attr.target
-    if target not in ["esp32c6", "esp32c5"]:
-        fail("Unknown target: '%s'. Supported targets are 'esp32c6', 'esp32c5'." % target)
+    if target == "rp2350":
+        fail("Target 'rp2350' is unsupported (RP2350 support is a follow-up; only 'rp2040' is supported).")
+    if target not in ["esp32c6", "esp32c5", "rp2040"]:
+        fail("Unknown target: '%s'. Supported targets are 'esp32c6', 'esp32c5', 'rp2040' ('rp2350' is unsupported)." % target)
 
     # 1. オブジェクト検証 (Fail-closed)
     objects = ctx.attr.objects
@@ -279,7 +304,12 @@ _shizuku_composition_gen = rule(
 def _shizuku_firmware_archive_bundle_impl(ctx):
     out_archive = ctx.actions.declare_file("lib" + ctx.label.name + ".a")
 
-    all_deps = [ctx.attr.kernel, ctx.attr.metadata] + ctx.attr.objects
+    all_deps = [ctx.attr.metadata] + ctx.attr.objects
+    if ctx.attr.kernel:
+        all_deps.append(ctx.attr.kernel)
+    if ctx.attr.kernel_object:
+        all_deps.append(ctx.attr.kernel_object)
+
     archives_dict = {}
     direct_objs_dict = {}
 
@@ -289,7 +319,7 @@ def _shizuku_firmware_archive_bundle_impl(ctx):
             for li in cc_info.linking_context.linker_inputs.to_list():
                 for lib in li.libraries:
                     if lib.static_library:
-                        # Dedup archives by artifact path
+                        # Dedup archives by artifact path only
                         archives_dict[lib.static_library.path] = lib.static_library
                     else:
                         # Never add both static_library and its own objects into MRI archive
@@ -333,7 +363,8 @@ def _shizuku_firmware_archive_bundle_impl(ctx):
 _shizuku_firmware_archive_bundle = rule(
     implementation = _shizuku_firmware_archive_bundle_impl,
     attrs = {
-        "kernel": attr.label(mandatory = True, providers = [CcInfo]),
+        "kernel": attr.label(mandatory = False, providers = [CcInfo]),
+        "kernel_object": attr.label(mandatory = False, providers = [CcInfo]),
         "objects": attr.label_list(mandatory = True, providers = [CcInfo]),
         "metadata": attr.label(mandatory = True, providers = [CcInfo]),
         "target": attr.string(default = "esp32c6"),
@@ -346,7 +377,7 @@ _shizuku_firmware_archive_bundle = rule(
 )
 
 # ==============================================================================
-# 5. Top-level Firmware Binary Rule (with Transition to prevent host-default skip)
+# 5. Top-level Firmware Binary Rules (with Transition to prevent host-default skip)
 # ==============================================================================
 def _shizuku_firmware_binary_impl(ctx):
     out_bin = ctx.actions.declare_file(ctx.label.name + ".bin")
@@ -395,6 +426,91 @@ _shizuku_firmware_binary = rule(
     cfg = _firmware_transition,
 )
 
+def _rp_firmware_binary_impl(ctx):
+    # Enforce board == "pico" MVP fail-closed
+    if ctx.attr.board != "pico":
+        fail("Unsupported board '%s' for RP2040 firmware. Only 'pico' is supported." % ctx.attr.board)
+
+    out_uf2 = ctx.actions.declare_file(ctx.label.name + ".uf2")
+    out_elf = ctx.actions.declare_file(ctx.label.name + ".elf")
+    out_map = ctx.actions.declare_file(ctx.label.name + ".map")
+    archive = ctx.file.archive
+    config_header = ctx.file.config_header
+    project_files = ctx.files.rp2040_project
+    build_sh = ctx.executable.build_sh
+
+    args = ctx.actions.args()
+    args.add(archive.path)
+    args.add(out_uf2.path)
+    args.add(out_elf.path)
+    args.add(out_map.path)
+    args.add(ctx.attr.pico_sdk_path)
+    args.add(ctx.attr.target)
+    args.add(ctx.attr.board)
+    args.add(ctx.attr.build_dir)
+    args.add(config_header.path)
+
+    # Dependency closure: declare CMake project, extra sources, headers, and linker script
+    inputs = depset(
+        direct = [archive, config_header] + project_files + ctx.files.extra_sources + ctx.files.linker_script,
+        transitive = [
+            dep[DefaultInfo].files for dep in ctx.attr.extra_headers if DefaultInfo in dep
+        ] + [
+            dep[CcInfo].compilation_context.headers for dep in ctx.attr.extra_headers if CcInfo in dep
+        ],
+    )
+
+    ctx.actions.run(
+        outputs = [out_uf2, out_elf, out_map],
+        inputs = inputs,
+        executable = build_sh,
+        arguments = [args],
+        mnemonic = "PicoSdkFinalLink",
+        progress_message = "Linking RP2040 Pico SDK UF2/ELF/MAP firmware for %s" % ctx.label,
+        use_default_shell_env = True,
+    )
+
+    return [DefaultInfo(files = depset([out_uf2, out_elf, out_map]))]
+
+_rp_firmware_binary = rule(
+    implementation = _rp_firmware_binary_impl,
+    attrs = {
+        "archive": attr.label(mandatory = True, allow_single_file = True),
+        "target": attr.string(default = "rp2040"),
+        "board": attr.string(default = "pico"),
+        "pico_sdk_path": attr.string(default = ""),
+        "build_dir": attr.string(default = ""),
+        "config_header": attr.label(default = "@shizuku//configs:config_hpp", allow_single_file = True),
+        "rp2040_project": attr.label(default = "@shizuku//modules/pico_sdk_support/firmware:rp2040_project"),
+        "extra_sources": attr.label_list(
+            default = [
+                "@shizuku//modules/pico_sdk_support/rp2040:arch_glue_src",
+                "@shizuku//boards/rp2040_pico_w:board_src",
+                "@shizuku//modules/pico_sdk_support/objects:usb_cdc.cpp",
+            ],
+            allow_files = True,
+        ),
+        "extra_headers": attr.label_list(
+            default = [
+                "@shizuku//:repo_internal_headers",
+                "@shizuku//modules/pico_sdk_support:objects_internal_headers",
+                "@shizuku//chips/rp2040:headers",
+                "@shizuku//boards/rp2040_pico_w:headers",
+                "@shizuku//arch/armv6m:headers",
+            ],
+        ),
+        "linker_script": attr.label(
+            default = "@shizuku//modules/pico_sdk_support/firmware:rp2040_flash_limit.ld",
+            allow_single_file = True,
+        ),
+        "build_sh": attr.label(default = "@shizuku//modules/pico_sdk_support/firmware:build_sh", executable = True, cfg = "exec"),
+        "_allowlist_function_transition": attr.label(
+            default = "@bazel_tools//tools/allowlists/function_transition_allowlist",
+        ),
+    },
+    cfg = _firmware_transition,
+)
+
 # ==============================================================================
 # 6. shizuku_firmware マクロ
 # ==============================================================================
@@ -405,8 +521,22 @@ def shizuku_firmware(
         parents = {},
         privileged_names = [],
         kernel = None,
+        kernel_object = None,
+        board = "pico",
+        pico_sdk_path = "",
+        build_dir = "",
+        config_header = "@shizuku//configs:config_hpp",
         **kwargs):
     """合成時ID採番・親子/権限・chip、単一の .a および最終リンクバイナリを生成する。"""
+    if target == "rp2350":
+        fail("Target 'rp2350' is unsupported (RP2350 is a follow-up and must not be declared supported; only 'rp2040' is supported).")
+    if target not in ["esp32c6", "esp32c5", "rp2040"]:
+        fail("Unknown target: '%s'. Supported targets are 'esp32c6', 'esp32c5', 'rp2040' ('rp2350' is unsupported)." % target)
+
+    if target == "rp2040":
+        if board != "pico":
+            fail("Unsupported board '%s' for RP2040 firmware. Only 'pico' is currently supported (pico_w is not yet supported for standalone composition)." % board)
+
     gen_name = name + "_composition_gen"
     meta_name = name + "_composition_meta"
     archive_name = name + "_archive"
@@ -416,6 +546,8 @@ def shizuku_firmware(
             kernel = "@shizuku//:shizuku_kernel_c6_core"
         elif target == "esp32c5":
             kernel = "@shizuku//:shizuku_kernel_c5"
+        elif target == "rp2040":
+            kernel = "@shizuku//:shizuku_kernel_rp2040_core"
         else:
             kernel = "@shizuku//:kernel"
 
@@ -441,6 +573,7 @@ def shizuku_firmware(
         name = archive_name,
         target = target,
         kernel = kernel,
+        kernel_object = kernel_object,
         objects = objects,
         metadata = ":" + meta_name,
         tags = kwargs.get("tags", []),
@@ -453,6 +586,19 @@ def shizuku_firmware(
             name = name,
             archive = ":" + archive_name,
             target = target,
+            build_dir = build_dir,
+            tags = kwargs.get("tags", []),
+            visibility = kwargs.get("visibility", ["//visibility:public"]),
+        )
+    elif target == "rp2040":
+        _rp_firmware_binary(
+            name = name,
+            archive = ":" + archive_name,
+            target = target,
+            board = board,
+            pico_sdk_path = pico_sdk_path,
+            build_dir = build_dir,
+            config_header = config_header,
             tags = kwargs.get("tags", []),
             visibility = kwargs.get("visibility", ["//visibility:public"]),
         )
@@ -544,8 +690,14 @@ def shizuku_sketch(
         hdrs = [],
         deps = [],
         target = "esp32c6",
+        board = "pico",
         setup_fn = "setup",
         loop_fn = "loop",
+        kernel = None,
+        kernel_object = None,
+        pico_sdk_path = "",
+        build_dir = "",
+        config_header = "@shizuku//configs:config_hpp",
         **kwargs):
     """単一スケッチから shizuku_object と shizuku_firmware を 1 行で作成する糖衣マクロ。
 
@@ -558,6 +710,10 @@ def shizuku_sketch(
     することは未確立（incomplete）。他ファームウェアでのオブジェクト再利用には、
     明示的に ':foo_obj' を指定する必要がある。
     """
+    if target == "rp2040":
+        if board != "pico":
+            fail("Unsupported board '%s' for RP2040 sketch. Only 'pico' is currently supported (pico_w is not yet supported for standalone composition)." % board)
+
     obj_name = name + "_obj"
 
     shizuku_sketch_object(
@@ -573,6 +729,16 @@ def shizuku_sketch(
     shizuku_firmware(
         name = name,
         target = target,
+        board = board,
         objects = [":" + obj_name],
+        kernel = kernel,
+        kernel_object = kernel_object,
+        pico_sdk_path = pico_sdk_path,
+        build_dir = build_dir,
+        config_header = config_header,
         **kwargs
     )
+
+shizuku_composition_gen = _shizuku_composition_gen
+shizuku_firmware_archive_bundle = _shizuku_firmware_archive_bundle
+rp_firmware_binary = _rp_firmware_binary
