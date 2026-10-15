@@ -33,9 +33,9 @@ namespace {
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
-constexpr uintptr_t OBJ_H = object_id::compat_h;   // 互換役の HANDLER
-constexpr uintptr_t OBJ_C = object_id::compat_c;   // H の子
-constexpr uintptr_t OBJ_GC = object_id::compat_gc; // 「H が子の要求で作った」孫
+const uintptr_t OBJ_H = object_id::compat_h;   // 互換役の HANDLER
+const uintptr_t OBJ_C = object_id::compat_c;   // H の子
+const uintptr_t OBJ_GC = object_id::compat_gc; // 「H が子の要求で作った」孫
 
 constexpr uintptr_t CMD_SETUP = 0x01;
 constexpr uintptr_t CMD_RECREATE = 0x02;

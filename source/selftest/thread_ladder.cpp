@@ -18,9 +18,9 @@ namespace {
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
-constexpr uintptr_t OBJECT_WORKER = object_id::worker; // 譲り合う相手
-constexpr uintptr_t OBJECT_HOG = object_id::hog; // 実行権を返さない相手
-constexpr uintptr_t OBJECT_SLEEPER = object_id::sleeper;
+const uintptr_t OBJECT_WORKER = object_id::worker; // 譲り合う相手
+const uintptr_t OBJECT_HOG = object_id::hog; // 実行権を返さない相手
+const uintptr_t OBJECT_SLEEPER = object_id::sleeper;
 constexpr uintptr_t METHOD_MAIN = 0;
 
 volatile uint32_t g_worker_rounds = 0;

@@ -10,9 +10,9 @@ namespace shizuku {
 namespace object_id {
 
 // 0 はブートスレッドが名乗るオブジェクト。以降は宣言順。
-constexpr uintptr_t root = 0;
+extern const uintptr_t root;
 @SHIZUKU_OBJECT_ID_BODY@
-constexpr uintptr_t count = @SHIZUKU_OBJECT_ID_COUNT@;
+extern const uintptr_t count;
 
 } // namespace object_id
 } // namespace shizuku

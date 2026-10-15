@@ -17,7 +17,7 @@ namespace {
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
-constexpr uintptr_t OBJECT_COUNTER = object_id::counter;
+const uintptr_t OBJECT_COUNTER = object_id::counter;
 constexpr uintptr_t METHOD_MAIN = 0;
 constexpr uintptr_t WORKERS = 4;
 constexpr uintptr_t ROUNDS = 200;

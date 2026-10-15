@@ -1,0 +1,17 @@
+#include <cstdint>
+
+namespace shizuku {
+namespace object_id {
+
+extern const uintptr_t root = 0;
+@SHIZUKU_OBJECT_ID_BODY@
+extern const uintptr_t count = @SHIZUKU_OBJECT_ID_COUNT@;
+
+} // namespace object_id
+} // namespace shizuku
+
+extern "C" {
+extern const uintptr_t shizuku_object_id_root = 0;
+@SHIZUKU_OBJECT_ID_C_SYMBOLS@
+extern const uintptr_t shizuku_object_id_count = @SHIZUKU_OBJECT_ID_COUNT@;
+}

@@ -1,0 +1,18 @@
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+sh_test(
+    name = "compile_once_two_links_test",
+    srcs = ["run_compile_once_two_links_test.sh"],
+    data = [
+        "sample_object.hpp",
+        "sample_object.cpp",
+        "test_runner.cpp",
+        "composition_alpha.list",
+        "composition_beta.list",
+        "//tools:gen_object_ids.py",
+        "//tools:object_ids.cpp.in",
+        "//:c6_test_headers",
+    ],
+)
