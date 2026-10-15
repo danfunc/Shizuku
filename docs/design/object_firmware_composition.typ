@@ -1,64 +1,84 @@
-#set document(title: "Shizuku Object Firmware Composition Design", author: "Antigravity Implementer")
-#set page(paper: "a4", margin: (x: 2cm, y: 2.5cm))
-#set text(font: "Helvetica", size: 10pt)
+#set document(title: "Shizuku Object Firmware Composition Design Note", author: "Antigravity Implementer")
+#set page(paper: "a4", margin: (x: 2cm, y: 2.2cm))
+#set text(font: "Helvetica", size: 9.5pt)
 
-= Shizuku Object Firmware Composition 設計仕様書
+= Shizuku Object Firmware Composition 設計メモ
 
-状態: 実装設計正本
-日付: 2026-10-15
-対象リポジトリ: `Shizuku-objfw` (`feat/object-firmware-composition`)
+状態: 実装設計メモ（既定設計・実装済・未達の整理） \
+日付: 2026-10-15 \
+対象リポジトリ: `Shizuku-objfw` (`feat/object-firmware-composition`) \
+基点 HEAD: `d8c1333` / 関連 commits: `35067dd`, `10534ff`, `d1386ee`
 
-== 1. 背景と課題 (現状分析)
+== 1. 目的と基本原則
 
-=== 1.1 現行の固定 ID 生成の課題
-現行のビルド構成 (`BUILD.bazel:12-28`) では、オブジェクト ID の一覧表 `generated_object_ids/shizuku/object_ids.hpp` が
-単一の `genrule` (`name = "object_ids_hpp"`) によって生成されている。
-生成には以下の 3 つのリストが静的に渡されている:
-- `source/apps/objects.list`
-- `source/selftest/objects.list`
-- `//modules/pico_sdk_support:objects.list`
+=== 1.1 解決する構造的課題 (現状分析)
+1. *全再コンパイルの連鎖*:
+   旧構成では単一 `genrule` (`name = "object_ids_hpp"`) が `internal_headers` に含まれる `generated_object_ids/shizuku/object_ids.hpp` を生成していた。オブジェクト 1 件の追加・変更で全翻訳単位 (TU) の再コンパイルが誘発されていた。
+2. *即値埋め込みによるキャッシュ阻害*:
+   旧ツール (`tools/gen_object_ids.py`) が `constexpr uintptr_t <name> = <id>;` として生成していたため、オブジェクトの `.o` 内に ID 即値が直接埋め込まれ、合成 (composition) ごとに再コンパイルが必要であった。
+3. *外部合成の不能*:
+   外部リポジトリ (XNO や scratch スケッチ) から `bazel_dep` 経由でオブジェクトを供給し、動的に合成してファームウェア化する仕組みが欠如していた。
+4. *ビルド設定の外部流出*:
+   利用側が `.bazelrc` に多数のプラットフォーム設定や transition フラグを複製しないとビルドできない状態であった。
 
-この構成には以下の重大な構造的制約が存在する:
-1. *全再コンパイルの連鎖*: `object_ids.hpp` は `internal_headers` (`BUILD.bazel:44-50`) に含まれ、カーネル、カーネルオブジェクト、全自己テスト、周辺ドライバがすべてこれを include している。オブジェクトを 1 つ追加・変更すると全 TU の再コンパイルが走る。
-2. *即値埋め込みによるキャッシュ阻害*: `tools/gen_object_ids.py:42` により `constexpr uintptr_t <name> = <id>;` として生成されるため、オブジェクトのオブジェクトファイル (`.o`) 内に ID 即値が直接埋め込まれ、合成 (composition) ごとに別個のコンパイルが必要となる。
-3. *外部合成の不能*: 外部リポジトリ (XNO や scratch スケッチ) から `bazel_dep` で利用する場合、固定の `objects.list` に含まれない独自のオブジェクトを動的に合成してファームウェアを作成することができない。
-4. *ビルド設定の外部流出*: RP2350 ターゲットでは `.bazelrc` に書かれた `--platforms=@pico-sdk//bazel/platform:rp2350` や `--@pico-sdk//bazel/config:PICO_BOARD=pico2_w` など数十行の設定に依存しており、外部リポジトリが `.bazelrc` を複製しないとビルドできない。
+=== 1.2 確定前提・不変条件 (確定設計)
+本設計では以下の不変条件を厳格に保持する（再確認不要の確定事項）:
+- *Starlark が正本*:
+  合成ロジックおよび API 境界は `defs.bzl` を正本とする。
+- *API 基本単位*:
+  - `shizuku_object(name, srcs, deps)`: firmware/ID 未定の `cc_library` + 型付き marker provider (`ShizukuObjectInfo`)。親子関係や特権を持たず、合成非依存。
+  - `shizuku_firmware(name, target, objects, ...)`: firmware 合成時に ID / 親子 / 権限 / chip 設定を決定。マージされた単一 `.a` を出力し、各 SDK の CMake 最終リンクへ渡す。selftest / apps も本 API の利用側へ移行予定。
+  - `shizuku_sketch(name, srcs, ...)`: `setup()` / `loop()` を呼ぶ entry と 1 object を作る糖衣 + firmware 生成短縮形。スケッチ公開 label を後から他 firmware の `objects` へ渡せることを設計目標とする。
+- *SDK 境界と CMake*:
+  pico-sdk を CMake 内へ移すのは設計目標（未実装）。SDK 非依存 Bazel `.a` と常設 CMake dir 再利用を目標とする。C6 先行 → 外部利用確認 → RP2350 移行の順序を遵守。
+- *ビルド設定の隠蔽 (受入条件)*:
+  利用側の `platform/board/C++23/-Og/-g3` 等は transition でマクロ側固定とし、利用側 `.bazelrc` の丸写し・コピーを不要とする。
+- *シンボルと canonical C ABI*:
+  - 型は既存の `uintptr_t` を維持。
+  - canonical exported C ABI は `shizuku_object_id_<name>` (<stdint.h> の純粋 C 宣言)。firmware ごとに生成される `.c` (`tools/object_ids.c.in`) が唯一の実体定義。
+  - C++ 側 `shizuku::object_id::<name>` は初期化不要の参照エイリアス (`inline constexpr const uintptr_t &`) による段階的互換。静的初期化 (.init_array / ctor) を完全に排除。
+  - 旧 global 固定 ID 生成 (`object_ids.hpp`) は移行中であり段階的廃止。
+  - レガシー公開シンボル `shizuku_object_id_root = 0` (KERNEL_OBJECT_ID = 0) は互換エイリアスであり、ランタイムのブートスレッド `ROOT_OBJECT = 1` と明確に分離。
+- *スロット上限と権限所有*:
+  - 上限 64 スロット。0=KERNEL_OBJECT, 1=ROOT_OBJECT で予約済みのため、userobjects 最大数は 62。
+  - 親子関係 (`parents`) および特権フラグ (`privileged_names`) は `shizuku_firmware` が一元所有。
+  - ランタイムの `CREATE_OBJECT` 検査規則は維持され、manifest はブート時の初期入力テーブル。
+  - XNO は objects 供給元として位置付ける。
+- *スケッチ実行規約*:
+  `setup()` を 1 回呼び出し、`loop()` を反復。反復間に yield を挟む規約。return 終了は不可。
+- *RAM マクロ*:
+  `chips/` の `SHIZUKU_RAM_TEXT` 等は SDK ヘッダ非依存とし、リンカスクリプトのセクションディレクティブ (`.iram1.text` 等) のみで制御。SDK 固有ヘッダが必要なコードは SDK component 側へ配置。
 
-=== 1.2 確定前提・不変条件との照合
-本設計では以下の不変条件を厳格に保持する:
-- *不変条件 1 (pico-sdk)*: pico-sdk は公式 Bazel (BCR 2.2.0) から CMake に戻し、SDK 内に閉じる。Shizuku は Bazel で SDK 非依存 `.a` を出力し、SDK CMake が最終リンクを行う。
-- *不変条件 2 (API 基本単位)*:
-  - `shizuku_object(name, srcs, deps)`: firmware/ID 未定の `cc_library` + 型付き marker provider。合成非依存。
-  - `shizuku_firmware(name, target, objects=[...])`: 合成時に ID / 親子 / 権限 / chip を決定し、単一 `.a` を生成して SDK CMake (IDF / pico-sdk) が最終リンク。
-  - `shizuku_sketch(name, srcs)`: `setup()` / `loop()` を呼ぶ entry と 1 object を作る糖衣 + firmware 短縮形。
-  - 利用者の `platform/board/PICO_*/C++23/-Og/-g3` は transition で macro 側固定、利用側 `.bazelrc` コピー不要。
-- *不変条件 3 (ID 解決)*: ID は合成時採番。object は名前ベース `extern const` symbol 参照、合成ごとの `.c` 定義をリンクで解決。同 chip/toolchain なら composition を越えて object の compile action を完全に再利用。
-- *不変条件 4 (RAM 配置)*: `chips/` の `SHIZUKU_RAM_TEXT` 等で `.iram1.*` セクションを明示し、SDK header 非依存とする。
-- *不変条件 5 (検証順序と権限)*: C6 縦貫 → 自レビュー → RP → 統合検証。親子関係を権限根拠とし、C ABI を維持する。
+== 2. アーキテクチャ設計とインターフェース仕様
 
-== 2. アーキテクチャ設計
-
-=== 2.1 シンボル解決と ID 採番 (合成非依存 compile action)
-オブジェクトはヘッダ `shizuku/object_id.hpp` において名前ベースのシンボルを `extern const` として宣言する:
-```cpp
-namespace shizuku::object_id {
-  extern const uintptr_t my_obj;
+=== 2.1 シンボル解決とコード生成 (合成非依存 compile action)
+オブジェクトは `<stdint.h>` ベースのヘッダ `shizuku/object_id.hpp` または個別宣言マクロ `SHIZUKU_DECLARE_OBJECT_ID` を参照する:
+```c
+// canonical exported C ABI
+#include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern const uintptr_t shizuku_object_id_my_obj;
+#ifdef __cplusplus
 }
+namespace shizuku::object_id {
+  inline constexpr const uintptr_t &my_obj = shizuku_object_id_my_obj;
+}
+#endif
 ```
-`shizuku_firmware` の合成ルール (`shizuku_firmware_composition`) は、指定された `objects` のリストを受け取り、以下を行う:
+`shizuku_firmware` の合成アクションは、指定された `objects` を受け取り以下を行う:
 1. *重複検証*: オブジェクト名の重複を検査 (`duplicate object error`)。
-2. *親子関係検証*: 指定された親オブジェクトが存在するか検証 (`missing/invalid parent error`)。
-3. *上限検査*: 合成オブジェクト総数が上限 (既定 64) を超過していないか検査 (`capacity exceeded error`)。
-4. *シンボル定義コード生成*:
+2. *親子関係検証*: 循環依存、自己親、存在しない親の指定を fail-closed で検査。
+3. *上限検査*: userobjects 総数が最大 62 を超過していないか検査 (`capacity exceeded error`)。
+4. *唯一実体コード生成 (`shizuku_composition_ids.c`)*:
    ```c
-   // 生成された合成テーブル: shizuku_composition_ids.c
    #include <stdint.h>
-   const uintptr_t shizuku_object_id_root = 0;
+   const uintptr_t shizuku_object_id_root = 0; // legacy alias (KERNEL_OBJECT_ID)
    const uintptr_t shizuku_object_id_my_obj = 2;
    // ...
    ```
-   また、C++ 名前空間エイリアス用の定義も提供する。
-この方式により、各 `shizuku_object` のコンパイルアクションは合成時の ID 割当に全く影響されず、異なるファームウェア合成間で同一の `.o` をキャッシュから再利用できる。
+各 `shizuku_object` のコンパイルアクションは ID 即値に依存せず未定義シンボル参照 (`U`) を残すため、異なるファームウェア合成間でも同一の `.o` をキャッシュから再利用可能となる。
 
 === 2.2 Starlark Provider とルール定義 (`defs.bzl`)
 
@@ -69,26 +89,25 @@ ShizukuObjectInfo = provider(
     fields = {
         "object_name": "Unique name of the object",
         "entry_point": "Entry function symbol (default: <name>_main)",
-        "parent": "Parent object name or None",
-        "privileged": "Boolean flag indicating privileged execution",
         "cc_info": "CcInfo provider containing compiled objects and headers",
     },
 )
 ```
+※ 親子関係 (`parent`) および特権フラグ (`privileged`) はオブジェクト単体では決定せず、`shizuku_firmware` が一元的に所有・管理する。
 
-==== `shizuku_object` ルール / マクロ
+==== `shizuku_object` マクロ
 ```python
-def shizuku_object(name, srcs = [], hdrs = [], deps = [], parent = None, privileged = False, **kwargs):
+def shizuku_object(name, srcs = [], hdrs = [], deps = [], **kwargs):
     # cc_library を生成し、ShizukuObjectInfo を付与したルールでラップ
     ...
 ```
 
 ==== `shizuku_firmware` マクロ / ルール
-`target` 引数 (`esp32c6`, `rp2350` 等) を受け取り、以下を行う:
-1. Incoming transition を適用し、ターゲットアーキテクチャのプラットフォーム、C++23、-Og、-g3 を強制設定。
-2. 依存オブジェクト、カーネル、カーネルオブジェクトを結合して単一のアーカイブ (`libshizuku_firmware.a`) を生成。
-3. ESP32-C6 の場合は `modules/esp_idf_support/firmware/build.sh` (または専用ラッパー) を通じて `idf.py` リンクを実行し、`.bin` を出力。
-4. RP2350 の場合は pico-sdk CMake プロジェクト (常設 build dir を再利用) を通じて最終リンクを実行し、`.uf2` を出力。
+`target` 引数 (`esp32c6` 先行、`rp2350` 予定) を受け取り、以下を行う:
+1. Incoming transition を適用し、ターゲットアーキテクチャのプラットフォーム、C++23、-Og、-g3、strip=never を設定。
+2. 依存オブジェクト、カーネル、合成 ID 定義 `.c` を結合して単一のアーカイブ (`libshizuku_firmware.a`) を生成。
+3. ESP32-C6 の場合は `modules/esp_idf_support/firmware/build.sh` を通じて `idf.py` リンクを実行し、`.bin` を出力。
+4. RP2350 (将来手順) の場合は pico-sdk CMake プロジェクトを通じて最終リンクを実行し、`.uf2` を出力。
 
 ==== `shizuku_sketch` マクロ
 ```python
@@ -98,58 +117,65 @@ def shizuku_sketch(name, srcs = [], deps = [], target = "esp32c6", **kwargs):
     ...
 ```
 
-=== 2.3 RAM 常駐 API (`SHIZUKU_RAM_TEXT`)
-`chips/esp32_c6/chip.hpp` および `chips/rp2350/chip.hpp` において:
-- ESP32-C6: `#define SHIZUKU_RAM_TEXT __attribute__((section(".iram1.text"))))`
-- RP2350: `#define SHIZUKU_RAM_TEXT __attribute__((section(".time_critical.text"))))`
+=== 2.3 セクション配置 (`SHIZUKU_RAM_TEXT`)
+- ESP32-C6: `#define SHIZUKU_RAM_TEXT __attribute__((section(".iram1.text")))`
+- RP2350: `#define SHIZUKU_RAM_TEXT __attribute__((section(".time_critical.text")))`
 - ホストテスト / 共通: `#define SHIZUKU_RAM_TEXT`
 
-SDK のヘッダ (`esp_attr.h` や `pico/platform.h`) を include することなく、リンカスクリプトのセクション配置ディレクティブのみで RAM 常駐を実現する。
-実リンク後の ELF および `.map` ファイルにおいて、該当シンボルが `.iram1` (C6) または `.time_critical` (RP) に配置されていることを `nm` および `grep` で検証する。
+SDK ヘッダ (`esp_attr.h` や `pico/platform.h`) を include せず、リンカスクリプトのセクション指定のみで RAM 常駐を指定する。
 
-== 3. 外部 Scratch 利用仕様 (目的 B)
+== 3. 現状の到達点 (客観的検証済事実)
 
-外部 scratch リポジトリ (`/private/tmp/scratch_*`) においては、
-- `MODULE.bazel`:
-  ```python
-  bazel_dep(name = "shizuku")
-  local_path_override(
-      module_name = "shizuku",
-      path = "/Users/ishigakiyua/github/Shizuku-objfw",
-  )
-  ```
-- `.bazelrc`: *作成不要 (0 バイト / 存在しない)*
-- `BUILD.bazel`:
-  ```python
-  load("@shizuku//:defs.bzl", "shizuku_sketch")
+客観的なテストログおよびコミット履歴で実証済みの到達点は以下の通りである:
 
-  shizuku_sketch(
-      name = "my_sketch",
-      srcs = ["sketch.cpp"],
-  )
-  ```
-これらにより、コマンド `bazel build //:my_sketch_archive` だけで、
-一切の `.bazelrc` 追加設定なしに実バイナリ (`.a`) が生成される。
+1. *ID 表現基盤とリンク時解決 (commit `35067dd`)*:
+   - 純 C ソース (`tools/object_ids.c.in`)、`<stdint.h>`、canonical C ABI (`shizuku_object_id_<name>`) への一本化。
+   - コンシューマ側 43 件の既存 global 値コピーを `inline constexpr const uintptr_t &` 参照エイリアスへ完全置換。
+   - ホスト Bazel テスト (`//tests/composition_link:compile_once_two_links_test`):
+     - `sample_object.o` のハッシュ不変 (`709fb0d432df84ef57ecd9d8853f7a4b712dd4706fe19eaf6e5a8e6ab2675618`)。
+     - 動的初期化関数不在 assert (Mach-O: `otool -l`, ELF: `readelf -S`, `nm`)。
+     - 純 C コンシューマ (`test_c_consumer.c`, C17) による全 ID 一致 assert。
+     - 2 つの異なる ID 割当リンク (Alpha: sample=2/target=3, Beta: sample=4/target=5) の成功。
+2. *C6 API スケルトンとマニフェスト管理 (commits `10534ff`, `d1386ee`)*:
+   - `defs.bzl` における `ShizukuObjectInfo` provider、transition、manifest 親子 cyclecheck、自己親禁止、上限 62 検査の実装。
+   - SDK `build.sh` への第 5 引数 (固定 builddir 指定) の追加。
 
-== 4. 実装確定方針と境界契約 (2026-10-15 追記)
+== 4. 未達・未検証事項と今後の受入条件 (明示的境界)
 
-=== 4.1 Canonical C ABI シンボルと唯一実体
-ID 定義の実体は、合成ごとに生成される C ソース (`shizuku_composition_ids.c`) 内に `const uintptr_t shizuku_object_id_<name> = <id>;` として 1 回のみ配置される。C++ 側の `shizuku::object_id::<name>` は初期化不要な `inline constexpr const uintptr_t&` 参照エイリアスとして解決し、動的初期化 (static ctor) を完全に排除する。グローバルな ID 生成 (`object_ids.hpp` の単一 genrule) は段階的に廃止し、自己テストおよび apps も個別の `shizuku_object` へ移行する。
+以下の事項は現時点で「未達」または「未検証」であり、完了扱いにしてはならない:
 
-=== 4.2 Firmware Manifest Ownership と Runtime ROOT_OBJECT 分離
-オブジェクトの親子関係 (`parents`) および特権フラグ (`privileged_names`) は、`shizuku_object` ではなく `shizuku_firmware` が一元的に所有し、静的な検証 (循環参照・自己親・存在しない親の fail-closed 検査) を行う。
-ランタイムの初期入力テーブル (`shizuku_composition_manifest[]`) において、ルート親の ID はランタイムの `ROOT_OBJECT = 1` (ブートスレッド・root ハンドラ) を基準とし、レガシーな C ABI シンボル `shizuku_object_id_root = 0` (KERNEL_OBJECT) とは明確に分離する。オブジェクト上限は予約スロット 2 つ (0, 1) を引いた 62 個とする。
+1. *ランタイム起動 Glue および Yield 接続 (未達)*:
+   - C6 manifest から `CREATE_OBJECT` および sketch entry を起動する本番 glue コードは未実装。
+   - C6 sketch loop 間の yield は未接続。
+   - *事実関係*: リポジトリ内に `shizuku::services::yield()` という名前空間は存在しない（旧記述の誤り）。実在する `shizuku::kernel_services::yield()` (`source/kernel/services.cpp:34`) は privileged internal (`ARCH::current_priv()`) かつ ARM (`#if defined(__arm__)`, L6) 実装限定であり、C6 (RISC-V) 向けの public yield API は存在しない。
+2. *常設 builddir の incremental reuse 実証 (未検証)*:
+   - SDK `build.sh` 側で毎回 `idf.py set-target` が実行されており `CMakeCache.txt` がクリアされるため、真の incremental 再利用は実証されていない。
+   - global 旧 ID 定義の混入防止および ODR 境界の完全分離は未完成。
+3. *外部 `.bazelrc` なしビルド (検証中 / 受入条件)*:
+   - 外部 scratch リポジトリから `.bazelrc` コピー不要で `shizuku_sketch` / `shizuku_firmware` がビルドできることは受入条件である。
+   - 現状: 検証ジョブ `f2e769f2-4068-4df3-8536-232bba681b84` が実行中。直前の検証 `48b04e75` は `defs.bzl:468` の辞書フォーマットエラーで exit 1 となっており、未達。
+4. *新 API による実機バイナリ生成と RAM 配置 (未達)*:
+   - 新 API 経由での C6 `.bin` 成功、`.map` による RAM 配置確認、RP2350 `.uf2` 成功はすべて未達。
+   - 既存 `.rbuild-out` に存在する C6/C5 バイナリは現 HEAD のビルド入力・ログとの対応が未検証の旧 snapshot であり、新 API の成功証拠ではない。
+   - `chips/` の RAM マクロ 3 ファイル (`chips/esp32_c6/chip.hpp`, `chips/esp32_c6/trap.cpp`, `chips/rp2350/chip.hpp`) の差分は未コミットであり、`.map` 検証も未実施。
+5. *RP2350 移行 (未着手)*:
+   - pico-sdk の CMake 移行および RP2350 向け `shizuku_firmware` リンクは未着手。C6 の受入完了後に着手予定。
 
-=== 4.3 スケッチ実行規約と Yield 境界
-`shizuku_sketch` / `shizuku_sketch_object` は、単独ファームウェア生成だけでなく provider 付き object として複数オブジェクト合成に渡すことができる。エントリラッパー関数は `<name>_main()` の固有識別子を用い、`setup()` を 1 度呼び出した後 `loop()` を無限反復する。現行カーネルには純粋な C ABI の yield 関数 (例: `shizuku_yield`) は未実装であり、実在する API は C++ の `shizuku::services::yield()` のみであるため、架空の C シンボルを定義せず、C ABI yield 接続は未達・次期課題として扱う。
+== 5. 検証手順案 (提案 / Future Work)
 
-=== 4.4 Transition Flags と外部 Scratch
-`shizuku_firmware` は incoming transition により、`platforms=@shizuku//toolchains/rv32_esp:esp32c6`、`board=esp32_c6`、`-std=c++23`、`-Og`、`-g3`、`-DSHIZUKU_C6_SKELETON_PERMITTED=1`、`strip=never` を強制する。トップレベルのバイナリ生成ルールに transition を持たせることで、ホスト側 (macOS arm64 等) のデフォルト設定による incompatibility skip を防止する。IDF 環境変数 (`IDF_PATH`, `IDF_TOOLS_PATH`) は Starlark rule attr または repository_rule 経由での注入が望ましいが、現状は Bazel の `--action_env` 依存が残っており、今後の外部モジュール完全透過化における論点である。
+以下のコマンドは将来の検証手順案であり、現時点での実行・成功を主張するものではない。
 
-=== 4.5 SDK Builddir と set-target 注意点
-`build.sh` において第 5 引数または環境変数 `SHIZUKU_IDF_BUILD_DIR` による常設 builddir の再利用を可能としたが、ESP-IDF の `idf.py set-target` は既存の `CMakeCache.txt` をクリア・再構成する挙動を示すため、キャッシュ無効化を防ぐには既存 config との照合による `set-target` スキップが必要となる。また、caller (Bazel 側) から第 5 引数が未接続の経路では毎回 `mktemp -d` が使われるため、完全な incremental link の主張は行わず部分対応にとどめる。
+=== 案 1: 外部 scratch における no-.bazelrc ビルド検証
+```bash
+# 外部ディレクトリ作成と MODULE.bazel / BUILD.bazel 配置後 (案)
+# .bazelrc は作成しない (0 バイト / 不在)
+bazel build //:my_sketch_archive
+# 期待値: transition により RV32 target / C++23 で .a が生成されること
+```
 
-=== 4.6 現状の到達点と未達事項
-- 到達: Starlark provider、`shizuku_object`、`shizuku_firmware` (C6 transition, manifest ownership, limit 62, 単一 `.a` マージ)、外部 scratch での `.bazelrc` なしアーカイブ生成・nm シンボル検証。
-- 未達: C6 実機 `.bin` の最終リンクおよび runtime `CREATE_OBJECT` ハンドラ連携 (ID 担当による root BUILD / templates 移行完了後の協調待ち)。
-
+=== 案 2: RAM セクション配置の .map 検証
+```bash
+# ESP-IDF 最終リンク後の .map 検査 (案)
+grep -E "shizuku_.*\.iram1" build/shizuku_esp32c6.map
+# 期待値: SHIZUKU_RAM_TEXT を付与したシンボルが .iram1.text に配置されていること
+```
