@@ -84,6 +84,21 @@ if echo "${NM_SAMPLE}" | grep -E "[[:space:]]+[TDRS][[:space:]]+.*(sample_servic
 fi
 echo "  [ASSERT PASSED] sample_object.o references symbols strictly as undefined (U)"
 
+# 2.2 consumer 側 (sample_object.o) の動的初期化 (ctor / init_array / __mod_init_func) 不在を機械 assert
+echo "[STEP 2.2] Asserting zero runtime dynamic constructors in consumer sample_object.o"
+NM_SAMPLE_ALL=$(nm "${WORK_DIR}/sample_object.o")
+if echo "${NM_SAMPLE_ALL}" | grep -E "(_GLOBAL__sub_I|__static_initialization)" > /dev/null; then
+  echo "[ASSERT FAILED] consumer sample_object.o contains dynamic initialization functions!" >&2
+  exit 1
+fi
+if command -v otool >/dev/null 2>&1; then
+  if otool -l "${WORK_DIR}/sample_object.o" | grep -i "__mod_init_func" > /dev/null; then
+    echo "[ASSERT FAILED] consumer sample_object.o contains __mod_init_func section!" >&2
+    exit 1
+  fi
+fi
+echo "  [ASSERT PASSED] consumer sample_object.o has zero dynamic initialization functions or ctor sections"
+
 # 3. test_runner.cpp をコンパイル
 echo "[STEP 3] Compiling test_runner.cpp"
 COMPILE_RUNNER_CMD=(

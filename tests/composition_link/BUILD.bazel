@@ -17,3 +17,26 @@ sh_test(
         "//:c6_test_headers",
     ],
 )
+
+load("//:defs.bzl", "shizuku_object", "shizuku_firmware", "shizuku_sketch")
+
+shizuku_object(
+    name = "test_sample_object",
+    srcs = ["sample_object.cpp"],
+    hdrs = ["sample_object.hpp"],
+    deps = ["//:internal_headers"],
+)
+
+shizuku_firmware(
+    name = "test_c6_firmware",
+    target = "esp32c6",
+    objects = [":test_sample_object"],
+)
+
+shizuku_sketch(
+    name = "test_c6_sketch",
+    srcs = ["sample_sketch.cpp"],
+    target = "esp32c6",
+)
+
+

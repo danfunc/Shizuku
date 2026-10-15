@@ -93,7 +93,7 @@ def main():
 
     seen = {}
     header_lines = []
-    source_lines = []
+    c_decl_lines = []
     c_symbol_lines = []
     index = 2  # 0 は KERNEL_OBJECT, 1 はブートスレッド (ROOT_OBJECT) で予約
 
@@ -116,11 +116,11 @@ def main():
             sys.exit("オブジェクト名 '%s' が二重に宣言された "
                      "(%s と %s)" % (name, seen[name], source))
         seen[name] = source
+        c_decl_lines.append("extern const uintptr_t shizuku_object_id_%s;" % name)
         if args.mode == "constexpr":
             header_lines.append("constexpr uintptr_t %s = %d;" % (name, index))
         else:
-            header_lines.append("extern const uintptr_t %s;" % name)
-        source_lines.append("extern const uintptr_t %s = %d;" % (name, index))
+            header_lines.append("inline constexpr const uintptr_t &%s = shizuku_object_id_%s;" % (name, name))
         c_symbol_lines.append("extern const uintptr_t shizuku_object_id_%s = %d;" % (name, index))
         index += 1
 
@@ -131,6 +131,7 @@ def main():
     if args.template and args.out:
         with open(args.template, encoding="utf-8") as handle:
             text = handle.read()
+        text = text.replace("@SHIZUKU_OBJECT_ID_C_DECLS@", "\n".join(c_decl_lines))
         text = text.replace("@SHIZUKU_OBJECT_ID_BODY@", "\n".join(header_lines))
         text = text.replace("@SHIZUKU_OBJECT_ID_COUNT@", str(index))
         atomic_write(args.out, text)
@@ -139,8 +140,8 @@ def main():
     if args.source_template and args.source_out:
         with open(args.source_template, encoding="utf-8") as handle:
             src_text = handle.read()
-        src_text = src_text.replace("@SHIZUKU_OBJECT_ID_BODY@", "\n".join(source_lines))
         src_text = src_text.replace("@SHIZUKU_OBJECT_ID_C_SYMBOLS@", "\n".join(c_symbol_lines))
+        src_text = src_text.replace("@SHIZUKU_OBJECT_ID_BODY@", "")
         src_text = src_text.replace("@SHIZUKU_OBJECT_ID_COUNT@", str(index))
         atomic_write(args.source_out, src_text)
 

@@ -4,15 +4,14 @@
 #include <cstdlib>
 #include "tests/composition_link/sample_object.hpp"
 
-// 全体カウントと C ABI シンボルの宣言
-namespace shizuku::object_id {
-extern const uintptr_t count;
-}
-
 extern "C" {
 extern const uintptr_t shizuku_object_id_sample_service;
 extern const uintptr_t shizuku_object_id_target_service;
 extern const uintptr_t shizuku_object_id_count;
+}
+
+namespace shizuku::object_id {
+inline constexpr const uintptr_t &count = shizuku_object_id_count;
 }
 
 int main(int argc, char **argv) {
