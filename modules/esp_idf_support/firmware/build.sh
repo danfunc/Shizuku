@@ -1,6 +1,6 @@
 #!/bin/bash
 # Bazel (//modules/esp_idf_support/firmware:esp32c6) から呼ぶ薄いラッパ: idf.py build を走らせて .bin を出す。
-#   使い方: build.sh <libshizuku_kernel.a> <出力 .bin> <期待する GCC 版文字列>
+#   使い方: build.sh <libshizuku_kernel.a> <出力 .bin> <期待する GCC 版文字列> [TARGET] [BUILD_DIR] [PROJECT_DIR]
 # ★環境が違えば黙って別物を作らず、理由を出して失敗する (IDF 版 / コンパイラ版の食い違い)。
 # fail は subshell で exit 1 する。`|| fail` は最後のコマンドなので set -e が効いて止まる。
 set -euo pipefail
@@ -33,31 +33,16 @@ TARGET=${4:-esp32c6}
 PROFILE=${5:-}
 BLE_PREFER_1M_PHY=${SHIZUKU_ESP_BLE_PREFER_1M_PHY:-${SHIZUKU_C5_BLE_PREFER_1M_PHY:-0}}
 case "$TARGET" in esp32c6|esp32c5) ;; *) fail "未対応の IDF target: $TARGET" ;; esac
-IDF_PROFILE_ARGS=()
-case "$PROFILE" in
-  "") ;;
-  ble)
-    case "$BLE_PREFER_1M_PHY" in 0|1) ;; *) fail "SHIZUKU_C5_BLE_PREFER_1M_PHY は 0 または 1" ;; esac
-    export SHIZUKU_ESP_BLE=1
-    IDF_PROFILE_ARGS+=("-DSHIZUKU_ESP_BLE=ON"
-                       "-DSHIZUKU_ESP_BLE_PREFER_1M_PHY=$BLE_PREFER_1M_PHY"
-                       "-DSHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG=1"
-                       "-DSHIZUKU_ESP_BLE_ENABLE_SCHED_DIAG_IRQ_MASK=1")
-    if test "$TARGET" = esp32c6; then
-      BLE_COMPAT_GRANT_CYCLES=${SHIZUKU_BLE_COMPAT_GRANT_CYCLES:-1600}
-      if [[ ! "$BLE_COMPAT_GRANT_CYCLES" =~ ^[1-9][0-9]*$ ]] ||
-         (( ${#BLE_COMPAT_GRANT_CYCLES} > 10 )); then
-        fail "SHIZUKU_BLE_COMPAT_GRANT_CYCLES must be a positive uint32_t"
-      fi
-      if (( BLE_COMPAT_GRANT_CYCLES > 4294967295 )); then
-        fail "SHIZUKU_BLE_COMPAT_GRANT_CYCLES must be a positive uint32_t"
-      fi
-      IDF_PROFILE_ARGS+=("-DSHIZUKU_BLE_COMPAT_GRANT_CYCLES=$BLE_COMPAT_GRANT_CYCLES")
-    fi
-    ;;
-  *) fail "未対応の firmware profile: $PROFILE" ;;
-esac
-SRC=$(cd -P "$(dirname "$0")" && pwd)
+
+PROJECT_DIR_ARG="${6:-${SHIZUKU_IDF_PROJECT_DIR:-${IDF_PROJECT_PATH:-}}}"
+if [ -n "$PROJECT_DIR_ARG" ]; then
+  SRC=$(abspath "$PROJECT_DIR_ARG")
+else
+  SRC=$(cd -P "$(dirname "$0")" && pwd)
+fi
+
+test -f "$SRC/CMakeLists.txt" || fail "IDF project directory does not contain CMakeLists.txt: $SRC"
+test -d "$SRC/main" || fail "IDF project directory does not contain main/: $SRC"
 
 test -s "$ARCHIVE" || fail "カーネルのアーカイブが無い/空: $ARCHIVE"
 test -f "$IDF_PATH/export.sh" || fail "IDF_PATH が ESP-IDF を指していない (--action_env=IDF_PATH が要る)"
@@ -105,7 +90,10 @@ if [ "$RUN_SET_TARGET" -eq 1 ]; then
   idf.py -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" -DSHIZUKU_KERNEL_ARCHIVE="$ARCHIVE" set-target "$TARGET" > "$BUILD_DIR.set-target.log" 2>&1 || fail "idf.py set-target 失敗 ($BUILD_DIR.set-target.log)"
 fi
 idf.py -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" -DSHIZUKU_KERNEL_ARCHIVE="$ARCHIVE" -DIDF_TARGET="$TARGET" build || fail "idf.py build 失敗"
+test -f "$BUILD_DIR/shizuku_$TARGET.bin" || fail "ビルド出力 .bin が存在しない: $BUILD_DIR/shizuku_$TARGET.bin"
+test -f "$BUILD_DIR/shizuku_$TARGET.elf" || fail "ビルド出力 .elf が存在しない: $BUILD_DIR/shizuku_$TARGET.elf"
+test -f "$BUILD_DIR/shizuku_$TARGET.map" || fail "ビルド出力 .map が存在しない: $BUILD_DIR/shizuku_$TARGET.map"
 cp "$BUILD_DIR/shizuku_$TARGET.bin" "$OUT"
-if test -n "$ELF_OUT"; then cp "$BUILD_DIR/shizuku_$TARGET.elf" "$ELF_OUT"; fi
-if test -n "$MAP_OUT"; then cp "$BUILD_DIR/shizuku_$TARGET.map" "$MAP_OUT"; fi
+cp "$BUILD_DIR/shizuku_$TARGET.elf" "${OUT%.bin}.elf"
+cp "$BUILD_DIR/shizuku_$TARGET.map" "${OUT%.bin}.map"
 echo "OK($TARGET): $IDF_VER / $GCC_BANNER -> $OUT"

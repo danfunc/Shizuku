@@ -32,6 +32,18 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+filegroup(
+    name = "objects_internal_headers",
+    srcs = glob([
+        "internal_headers/**/*.hpp",
+        "internal_headers/**/*.h",
+        "tusb_config.h",
+    ], allow_empty = True) + [
+        "//modules/pico_sdk_support/objects:internal_headers",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 # 構成 (config.hpp) が include するヘッダ。★実装とは分けて公開する — config は
 # カーネルより前に要るので、ここがカーネルに依存すると循環する。
 cc_library(

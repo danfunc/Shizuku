@@ -6,6 +6,10 @@
 //   SDK ヘッダと同じ翻訳単位で使うと定義が展開されて壊れる。
 #include <cstdint>
 
+#ifndef SHIZUKU_RAM_TEXT
+#define SHIZUKU_RAM_TEXT __attribute__((section(".time_critical.text")))
+#endif
+
 namespace shizuku::chips::rp2040 {
 struct chip {
   // RP2040 は Cortex-M0+ x2

@@ -47,17 +47,10 @@ uintptr_t c6_combined_handler(uintptr_t a0, uintptr_t a1, uintptr_t a2,
   }
 }
 
-// Composition manifest declarations (weakly linked)
+// Composition firmware entry and legacy selftest runner declarations (weakly linked)
 extern "C" {
-struct shizuku_object_manifest_entry_t {
-    const char *name;
-    uintptr_t id;
-    void (*entry)(void);
-    uintptr_t parent_id;
-    bool privileged;
-};
-[[gnu::weak]] extern const shizuku_object_manifest_entry_t shizuku_composition_manifest[];
-[[gnu::weak]] extern const uint32_t shizuku_composition_manifest_count;
+[[gnu::weak]] extern bool shizuku_firmware_entry(void);
+[[gnu::weak]] extern void shizuku_c6_run_selftests(void);
 }
 
 [[noreturn]] void thread0() {
@@ -69,30 +62,25 @@ struct shizuku_object_manifest_entry_t {
   if (result.error == 0 && result.value == 0xC6000002 && !shizuku::ARCH::in_interrupt())
     shizuku_c6_thread0_diag[1] = 0xC6000002;
 
-  // 2. BLE profile enters the shared ESP-IDF NimBLE stage after the kernel is live.
-#if defined(SHIZUKU_ESP_BLE)
-  shizuku_esp_ble_stage1_start();
-#else
-  // 2. 実 boot 経路での selftest runner 実行 (RAM record への集中記録)
-  shizuku_c6_run_selftests();
-#endif
-
-  // 3. Composition Manifest が存在する場合、本番 CREATE_OBJECT 経路で全オブジェクトを生成・検証
-  if (&shizuku_composition_manifest_count != nullptr &&
-      shizuku_composition_manifest != nullptr &&
-      shizuku_composition_manifest_count > 0) {
-    for (uint32_t i = 0; i < shizuku_composition_manifest_count; ++i) {
-      const auto &item = shizuku_composition_manifest[i];
-      if (item.id >= 2 && item.entry != nullptr) {
-        uintptr_t flags = item.privileged ? shizuku::PROTECTION_PRIVILEGED : 0;
-        shizuku::ARCH::syscall(static_cast<uintptr_t>(shizuku::object_api::CREATE_OBJECT),
-                               item.id, reinterpret_cast<uintptr_t>(item.entry), flags);
-        shizuku::kernel_object_instance.set_object_name(item.id, item.name);
-        if (item.parent_id != 1 && item.parent_id != 0) {
-          shizuku::kernel_object_instance.set_parent_handler(item.id, item.parent_id);
-        }
-      }
+  // 2. Composition Firmware Entry がリンクされている場合はそれを起動
+  if (&shizuku_firmware_entry != nullptr) {
+    bool ok = shizuku_firmware_entry();
+    if (!ok) {
+      // ローダー失敗: 診断マーカーを記録して halt
+      shizuku_c6_thread0_diag[3] = 0xDEAD0001;
+      for (;;) { asm volatile("fence rw,rw" ::: "memory"); }
     }
+    // 成功: 協調ディスパッチループへ
+    for (;;) {
+      shizuku_c6_thread0_diag[2] = shizuku_c6_thread0_diag[2] + 1;
+      shizuku::ARCH::syscall(static_cast<uintptr_t>(shizuku::object_api::YIELD));
+      asm volatile("fence rw,rw" ::: "memory");
+    }
+  }
+
+  // 3. レガシー単体 selftest 経路 (shizuku_firmware_entry が無く、かつ runner がリンクされている場合のみ実行)
+  if (&shizuku_c6_run_selftests != nullptr) {
+    shizuku_c6_run_selftests();
   }
 
   // 4. 段2 thread1 スポーン (GRANT スイッチ試験用)

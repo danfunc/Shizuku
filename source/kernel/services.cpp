@@ -61,11 +61,5 @@ void irq_restore(irq_state state) {
 
 // Genuine SDK-independent public C ABI for object_api::YIELD (index 8)
 extern "C" void shizuku_yield(void) {
-#if defined(__riscv)
-  register uintptr_t a0 asm("a0") = 8; // object_api::YIELD
-  asm volatile("ecall" : "+r"(a0) :: "memory");
-#elif defined(__arm__)
-  register uintptr_t r0 asm("r0") = 8; // object_api::YIELD
-  asm volatile("svc 0" : "+r"(r0) :: "memory");
-#endif
+  shizuku::ARCH::syscall(static_cast<uintptr_t>(shizuku::object_api::YIELD));
 }

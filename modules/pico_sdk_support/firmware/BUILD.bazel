@@ -1,0 +1,27 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "build.sh",
+    "CMakeLists.txt",
+    "shizuku_rp2040_boot.cpp",
+    "rp2040_kernel_bootstrap.cpp",
+    "rp2040_flash_limit.ld",
+])
+
+sh_binary(
+    name = "build_sh",
+    srcs = ["build.sh"],
+)
+
+filegroup(
+    name = "rp2040_project",
+    srcs = glob([
+        "CMakeLists.txt",
+        "*.cpp",
+        "*.hpp",
+        "*.ld",
+        "build.sh",
+    ], allow_empty = True),
+)
