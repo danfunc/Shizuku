@@ -6,6 +6,7 @@
 #include "chips/esp32_c6/rv32_c6.hpp"
 #include "boards/esp32_c6/esp32_c6.hpp"
 #include "chips/esp32_c6/stage05_trace.h"
+#include "chips/esp32_c6/fastcall.h"
 
 using arch = shizuku::archs::rv32_c6;
 using board = shizuku::boards::esp32_c6;
@@ -73,6 +74,50 @@ static_assert(offsetof(shizuku_c6_stage05_record_t, total_perturbation) == 60);
 static_assert(offsetof(shizuku_c6_stage05_record_t, total_raw_min) == 64);
 static_assert(offsetof(shizuku_c6_stage05_record_t, total_net_min) == 72);
 static_assert(offsetof(shizuku_c6_stage05_record_t, intervals) == 80);
+
+// 段1: fastcall データ構造・幾何・アサーションマスクの静的検証
+static_assert(sizeof(shizuku_c6_fastcall_descriptor_t) == 20,
+              "shizuku_c6_fastcall_descriptor_t must be exactly 20 bytes (5 uint32_t words)");
+static_assert(offsetof(shizuku_c6_fastcall_descriptor_t, entry_pc) == 0);
+static_assert(offsetof(shizuku_c6_fastcall_descriptor_t, caller_sp) == 4);
+static_assert(offsetof(shizuku_c6_fastcall_descriptor_t, caller_pc) == 8);
+static_assert(offsetof(shizuku_c6_fastcall_descriptor_t, depth) == 12);
+static_assert(offsetof(shizuku_c6_fastcall_descriptor_t, call_count) == 16);
+
+static_assert(SHIZUKU_C6_FASTCALL_DESC_ENTRY_PC == 0);
+static_assert(SHIZUKU_C6_FASTCALL_DESC_CALLER_SP == 4);
+static_assert(SHIZUKU_C6_FASTCALL_DESC_CALLER_PC == 8);
+static_assert(SHIZUKU_C6_FASTCALL_DESC_DEPTH == 12);
+static_assert(SHIZUKU_C6_FASTCALL_DESC_CALL_COUNT == 16);
+static_assert(SHIZUKU_C6_FASTCALL_DESC_SIZE == 20);
+
+static_assert(sizeof(shizuku_c6_fastcall_record_t) == 80,
+              "shizuku_c6_fastcall_record_t must be exactly 80 bytes (20 uint32_t words)");
+static_assert(SHIZUKU_C6_FASTCALL_MAGIC == 0x46433152u,
+              "Fastcall 1 magic must be 'FC1R' (0x46433152)");
+static_assert(offsetof(shizuku_c6_fastcall_record_t, magic) == 0);
+static_assert(offsetof(shizuku_c6_fastcall_record_t, version) == 4);
+static_assert(offsetof(shizuku_c6_fastcall_record_t, status) == 8);
+static_assert(offsetof(shizuku_c6_fastcall_record_t, error_code) == 12);
+static_assert(offsetof(shizuku_c6_fastcall_record_t, rounds_requested) == 16);
+static_assert(offsetof(shizuku_c6_fastcall_record_t, rounds_completed) == 20);
+static_assert(offsetof(shizuku_c6_fastcall_record_t, placement_mode) == 24);
+static_assert(offsetof(shizuku_c6_fastcall_record_t, systimer_ticks) == 32);
+static_assert(offsetof(shizuku_c6_fastcall_record_t, cpu_cycle_delta) == 36);
+static_assert(offsetof(shizuku_c6_fastcall_record_t, cpu_mhz) == 40);
+static_assert(offsetof(shizuku_c6_fastcall_record_t, clock_verified) == 44);
+static_assert(offsetof(shizuku_c6_fastcall_record_t, calibrated_overhead) == 48);
+static_assert(offsetof(shizuku_c6_fastcall_record_t, raw_min) == 52);
+static_assert(offsetof(shizuku_c6_fastcall_record_t, raw_mean) == 56);
+static_assert(offsetof(shizuku_c6_fastcall_record_t, net_min) == 60);
+static_assert(offsetof(shizuku_c6_fastcall_record_t, net_mean) == 64);
+static_assert(offsetof(shizuku_c6_fastcall_record_t, max_trap1_cycles) == 68);
+static_assert(offsetof(shizuku_c6_fastcall_record_t, max_trap2_cycles) == 72);
+static_assert(offsetof(shizuku_c6_fastcall_record_t, assert_pass_mask) == 76);
+static_assert(SHIZUKU_C6_FASTCALL_ASSERT_CALLEE_GP_TP_ZERO == (1u << 4));
+static_assert(SHIZUKU_C6_FASTCALL_ASSERT_CALLEE_NONARG_ZERO == (1u << 5));
+static_assert(SHIZUKU_C6_FASTCALL_ASSERT_ALL_MASK == 0x3Fu,
+              "Fastcall assert all mask must cover all 6 assertions (0x3F)");
 
 static void test_rv32_c6_frame_abi() {
   arch::exception_frame_t frame{};

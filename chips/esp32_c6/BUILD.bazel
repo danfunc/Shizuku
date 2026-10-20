@@ -10,6 +10,9 @@ exports_files([
     "rv32_c6.hpp",
     "trap.cpp",
     "c6_vectors.S",
+    "c6_fastcall.S",
+    "fastcall.h",
+    "fastcall_bench.cpp",
     "selftest_adapter.cpp",
     "selftest_record.h",
     "stage05_trace.h",
@@ -30,8 +33,10 @@ exports_files([
 
 cc_library(
     name = "headers",
+    textual_hdrs = ["c6_fastcall.S"],
     hdrs = [
         "chip.hpp",
+        "fastcall.h",
         "rv32_c6.hpp",
         "selftest_record.h",
         "stage05_trace.h",

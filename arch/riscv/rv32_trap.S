@@ -9,6 +9,11 @@
 .global shizuku_rv32_trap_entry
 .type shizuku_rv32_trap_entry,@function
 shizuku_rv32_trap_entry:
+#if defined(SHIZUKU_EXP_FASTCALL) && SHIZUKU_EXP_FASTCALL
+  j shizuku_c6_fastcall_trap_check
+.global shizuku_rv32_trap_entry_legacy
+shizuku_rv32_trap_entry_legacy:
+#endif
   // The interrupted stack is trusted and writable (no U-mode stack switch here).
   // Saving before the kernel-stack swap preserves V2's thread-frame geometry.
   addi sp, sp, -RV32_FRAME_BYTES

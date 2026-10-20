@@ -128,10 +128,11 @@ C5_SELFTEST_SRCS = [
     "source/selftest/thread_ladder.cpp",
 ]
 
-# C6 M-only で成立可能な selftest (5 つのサブセット + call_cost + stage0.5 trace)
+# C6 M-only で成立可能な selftest (5 つのサブセット + call_cost + stage0.5 trace + fastcall candidate)
 C6_SELFTEST_SRCS = C5_SELFTEST_SRCS + [
     "source/selftest/call_cost.cpp",
     "//chips/esp32_c6:stage05_trace.cpp",
+    "//chips/esp32_c6:fastcall_bench.cpp",
 ]
 
 cc_library(

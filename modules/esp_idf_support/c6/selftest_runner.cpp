@@ -1,4 +1,7 @@
 #include "chips/esp32_c6/selftest_record.h"
+#if defined(SHIZUKU_EXP_FASTCALL) && SHIZUKU_EXP_FASTCALL
+#include "chips/esp32_c6/fastcall.h"
+#endif
 
 namespace shizuku {
 namespace selftest {
@@ -18,6 +21,13 @@ extern "C" void shizuku_c6_run_selftests(void) {
     shizuku::selftest::passed = 0;
     shizuku::selftest::failed = 0;
     shizuku_c6_selftest_record_init();
+
+#if defined(SHIZUKU_EXP_FASTCALL) && SHIZUKU_EXP_FASTCALL
+    // Fastcall candidate selftest & 128-round bench executed before legacy call_ladder.
+    // Results are recorded in shizuku_c6_fastcall_record in RAM and diag ring even if
+    // subsequent legacy call_ladder encounters E005.
+    shizuku_c6_run_fastcall_selftests();
+#endif
 
     // 1. call_ladder
     shizuku::selftest::call_ladder();

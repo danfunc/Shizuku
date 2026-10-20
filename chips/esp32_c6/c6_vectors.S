@@ -13,3 +13,6 @@ shizuku_c6_vectors:
 .endr
 .option pop
 #include "arch/riscv/rv32_trap.S"
+#if defined(SHIZUKU_EXP_FASTCALL) && SHIZUKU_EXP_FASTCALL
+#include "chips/esp32_c6/c6_fastcall.S"
+#endif
