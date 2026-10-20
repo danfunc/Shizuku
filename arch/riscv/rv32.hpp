@@ -258,6 +258,10 @@ public:
   }
   static void pend_context_switch() { IntMode::pend_context_switch(); }
 
+  // サイクルカウンタの制御・読取りは IntMode (チップ側) に委ねる。
+  static bool cycle_counter_enable() { return IntMode::cycle_counter_enable(); }
+  static uint32_t cycle_counter_read() { return IntMode::cycle_counter_read(); }
+
   // デバッグおよびフォールト状態は IntMode に委ねる
   static uint32_t debug_reason_take() { return IntMode::debug_reason_take(); }
   static void debug_step(bool on) { IntMode::debug_step(on); }

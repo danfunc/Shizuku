@@ -55,6 +55,10 @@ static_assert(shizuku::chips::esp32_c6::chip::kPmpEntries == 16 &&
               "C6 PMP parameters: 16 entries, 4-byte granule");
 static_assert(std::is_same_v<arch::pmp_codec_t, shizuku::ports::riscv::pmp_codec<4>>,
               "C6 PMP codec must be pmp_codec<4> (current behavior)");
+static_assert(shizuku::chips::esp32_c6::plic_vector_mode::HAS_CYCLE_COUNTER,
+              "C6 plic_vector_mode must enable HAS_CYCLE_COUNTER for V0 baseline measurement");
+static_assert(arch::HAS_CYCLE_COUNTER,
+              "rv32_c6 arch specialization must forward HAS_CYCLE_COUNTER = true");
 
 static void test_rv32_c6_frame_abi() {
   arch::exception_frame_t frame{};

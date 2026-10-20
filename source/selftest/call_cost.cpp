@@ -24,8 +24,10 @@
 #include "shizuku/object_api.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/selftest.hpp"
+#if !defined(__riscv)
 #include "shizuku/service_profile.hpp"
 #include "shizuku/kernel_services.hpp"
+#endif
 
 namespace shizuku {
 namespace selftest {
@@ -39,14 +41,21 @@ constexpr uintptr_t OBJECT_COST_LEAF = object_id::cost_leaf;
 constexpr uintptr_t OBJECT_COST_NEST = object_id::cost_nest;
 constexpr uintptr_t METHOD_MAIN = 0;
 
-// ★isb で挟む。挟まないとコンパイラとパイプラインが読み出しを前後へ動かせるので、
-//   測っている区間が実際の区間とずれる。isb 自身の費用は (1) にも同じだけ乗るので
+// ★fence/isb で挟む。挟まないとコンパイラとパイプラインが読み出しを前後へ動かせるので、
+//   測っている区間が実際の区間とずれる。バリア自身の費用は (1) にも同じだけ乗るので
 //   引き算で消える。
 template <typename A> inline uint32_t cycles_now() {
+#if defined(__riscv)
+  __asm__ volatile("fence" ::: "memory");
+  const uint32_t cycles = A::cycle_counter_read();
+  __asm__ volatile("fence" ::: "memory");
+  return cycles;
+#else
   __asm__ volatile("isb" ::: "memory");
   const uint32_t cycles = A::cycle_counter_read();
   __asm__ volatile("isb" ::: "memory");
   return cycles;
+#endif
 }
 
 // ---- 測る相手 ---------------------------------------------------------------
@@ -128,6 +137,39 @@ struct stat_t {
   uint32_t min;
   uint32_t mean;
 };
+static_assert(std::is_same_v<decltype(stat_t::min), uint32_t> &&
+              std::is_same_v<decltype(stat_t::mean), uint32_t>,
+              "stat_t must have uint32_t min and mean for raw/net reporting");
+
+#if defined(__riscv)
+extern "C" {
+struct shizuku_c6_call_cost_record_t {
+  uint32_t magic;           // 0x434F5354 ("COST")
+  uint32_t version;         // 1
+  uint32_t rounds;          // 2048
+  uint32_t baseline_min;    // op_nothing
+  uint32_t baseline_mean;
+  uint32_t direct_raw_min;  // direct call
+  uint32_t direct_raw_mean;
+  uint32_t direct_net_min;
+  uint32_t direct_net_mean;
+  uint32_t svc_raw_min;     // svc round trip
+  uint32_t svc_raw_mean;
+  uint32_t svc_net_min;
+  uint32_t svc_net_mean;
+  uint32_t call1_raw_min;   // method call (1 hop)
+  uint32_t call1_raw_mean;
+  uint32_t call1_net_min;
+  uint32_t call1_net_mean;
+  uint32_t call2_raw_min;   // method call (2 hops)
+  uint32_t call2_raw_mean;
+  uint32_t call2_net_min;
+  uint32_t call2_net_mean;
+  uint32_t checked_ok;      // 1 if checked returns 42, else 0
+};
+volatile shizuku_c6_call_cost_record_t shizuku_c6_call_cost_record = {};
+}
+#endif
 
 // ★op は関数ポインタで呼ぶ。(1) も同じ経路を通るので、ポインタ経由の分は
 //   差し引きで消える。インライン展開の差で不公平が出るのも防げる。
@@ -156,17 +198,29 @@ __attribute__((noinline)) stat_t measure(op_t requested, uint32_t rounds) {
   return {best, (uint32_t)(total / rounds)};
 }
 
-// 引き算した結果を「サイクル / ナノ秒」で 1 行にする。
-void report(const char *name, stat_t raw, uint32_t baseline,
+// 引き算した結果を「サイクル」で 1 行にする。
+void report(const char *name, stat_t raw, stat_t baseline,
             uint32_t cycles_per_us) {
-  const uint32_t net = raw.min > baseline ? raw.min - baseline : 0;
-  const uint32_t net_mean = raw.mean > baseline ? raw.mean - baseline : 0;
-  // ns = cycle * 1000 / (cycles/µs)。整数のまま計算する (FP を測定路に持ち込まない)。
-  const uint32_t ns = cycles_per_us ? (net * 1000u) / cycles_per_us : 0;
+  const uint32_t net_min = raw.min > baseline.min ? raw.min - baseline.min : 0;
+#if defined(__riscv)
+  // C6 / RISC-V: CPU周波数160MHz仮定のns換算をせず、cycles中心でraw/net min/meanを明示出力
+  // net mean は raw.mean - baseline.mean (underflow は 0 clamp、RAM record と完全一致)
+  const uint32_t net_mean = raw.mean > baseline.mean ? raw.mean - baseline.mean : 0;
+  (void)cycles_per_us;
   BOARD::diag_printf(
-      "[COST] %-22s min %5lu cyc (%4lu ns)  mean %5lu cyc  [raw min %lu]\n",
-      name, (unsigned long)net, (unsigned long)ns, (unsigned long)net_mean,
-      (unsigned long)raw.min);
+      "[COST] %-22s net min %5lu cyc  mean %5lu cyc  [raw min %lu, mean %lu]\n",
+      name, (unsigned long)net_min, (unsigned long)net_mean,
+      (unsigned long)raw.min, (unsigned long)raw.mean);
+#else
+  // 既存 ARM 他 arch: 従来通り baseline.min を引く挙動を維持
+  const uint32_t net_mean = raw.mean > baseline.min ? raw.mean - baseline.min : 0;
+  // ns = cycle * 1000 / (cycles/µs)。整数のまま計算する (FP を測定路に持ち込まない)。
+  const uint32_t ns = cycles_per_us ? (net_min * 1000u) / cycles_per_us : 0;
+  BOARD::diag_printf(
+      "[COST] %-22s min %5lu cyc (%4lu ns)  mean %5lu cyc  [raw min %lu, mean %lu]\n",
+      name, (unsigned long)net_min, (unsigned long)ns, (unsigned long)net_mean,
+      (unsigned long)raw.min, (unsigned long)raw.mean);
+#endif
 }
 
 
@@ -183,9 +237,18 @@ template <typename A> void bench() {
   }
   ++passed;
 
+#if defined(__riscv)
+  // C6 / RISC-V: BOARD::cycles_per_us() は SYSTIMER (16MHz) 基準であり、CPU周波数 (160MHz) と乖離するため、
+  // CPUサイクル周波数に見える表記を避け、単位を明確に systimer ticks/us と表示 (cycles中心方針、160MHz仮定なし)
+  const uint32_t systimer_ticks_per_us = BOARD::cycles_per_us();
+  BOARD::diag_printf("[COST] systimer = %lu ticks/us (cycles-based; CPU clock unassumed)\n",
+                     (unsigned long)systimer_ticks_per_us);
+  const uint32_t cycles_per_us = 0;
+#else
   const uint32_t cycles_per_us = BOARD::cycles_per_us();
   BOARD::diag_printf("[COST] clk_sys = %lu cycles/us\n",
                      (unsigned long)cycles_per_us);
+#endif
 
   struct entry_t {
     uintptr_t object;
@@ -197,8 +260,8 @@ template <typename A> void bench() {
         api(object_api::CREATE_OBJECT, entry.object, (uintptr_t)entry.main);
     if (created.error != (uintptr_t)object_error::OK) {
       BOARD::diag_printf("[COST] FAIL create object %lu: error %lu\n",
-                         (unsigned long)entry.object,
-                         (unsigned long)created.error);
+                          (unsigned long)entry.object,
+                          (unsigned long)created.error);
       ++failed;
       return;
     }
@@ -207,6 +270,7 @@ template <typename A> void bench() {
   // ★ウォームアップは measure の中で行う (呼び出し経路そのものを温めるため)。
 
   constexpr uint32_t ROUNDS = 2048;
+  static_assert(ROUNDS >= 128, "call_cost sample rounds must be >= 128");
   const stat_t nothing = measure<A>(op_nothing, ROUNDS);
   const stat_t direct = measure<A>(op_direct, ROUNDS);
   const stat_t svc = measure<A>(op_svc, ROUNDS);
@@ -215,10 +279,10 @@ template <typename A> void bench() {
 
   BOARD::diag_printf("[COST] harness baseline = %lu cyc (subtracted below)\n",
                      (unsigned long)nothing.min);
-  report("direct call", direct, nothing.min, cycles_per_us);
-  report("svc round trip", svc, nothing.min, cycles_per_us);
-  report("method call (1 hop)", call1, nothing.min, cycles_per_us);
-  report("method call (2 hops)", call2, nothing.min, cycles_per_us);
+  report("direct call", direct, nothing, cycles_per_us);
+  report("svc round trip", svc, nothing, cycles_per_us);
+  report("method call (1 hop)", call1, nothing, cycles_per_us);
+  report("method call (2 hops)", call2, nothing, cycles_per_us);
 
   const auto net = [&](stat_t value) -> uint32_t {
     return value.min > nothing.min ? value.min - nothing.min : 0;
@@ -228,6 +292,36 @@ template <typename A> void bench() {
   cost_svc = net(svc);
   cost_call1 = net(call1);
   cost_call2 = net(call2);
+
+#if defined(__riscv)
+  const auto net_min = [&](stat_t value) -> uint32_t {
+    return value.min > nothing.min ? value.min - nothing.min : 0;
+  };
+  const auto net_mean = [&](stat_t value) -> uint32_t {
+    return value.mean > nothing.mean ? value.mean - nothing.mean : 0;
+  };
+  shizuku_c6_call_cost_record.magic = 0x434F5354u;
+  shizuku_c6_call_cost_record.version = 1;
+  shizuku_c6_call_cost_record.rounds = ROUNDS;
+  shizuku_c6_call_cost_record.baseline_min = nothing.min;
+  shizuku_c6_call_cost_record.baseline_mean = nothing.mean;
+  shizuku_c6_call_cost_record.direct_raw_min = direct.min;
+  shizuku_c6_call_cost_record.direct_raw_mean = direct.mean;
+  shizuku_c6_call_cost_record.direct_net_min = net_min(direct);
+  shizuku_c6_call_cost_record.direct_net_mean = net_mean(direct);
+  shizuku_c6_call_cost_record.svc_raw_min = svc.min;
+  shizuku_c6_call_cost_record.svc_raw_mean = svc.mean;
+  shizuku_c6_call_cost_record.svc_net_min = net_min(svc);
+  shizuku_c6_call_cost_record.svc_net_mean = net_mean(svc);
+  shizuku_c6_call_cost_record.call1_raw_min = call1.min;
+  shizuku_c6_call_cost_record.call1_raw_mean = call1.mean;
+  shizuku_c6_call_cost_record.call1_net_min = net_min(call1);
+  shizuku_c6_call_cost_record.call1_net_mean = net_mean(call1);
+  shizuku_c6_call_cost_record.call2_raw_min = call2.min;
+  shizuku_c6_call_cost_record.call2_raw_mean = call2.mean;
+  shizuku_c6_call_cost_record.call2_net_min = net_min(call2);
+  shizuku_c6_call_cost_record.call2_net_mean = net_mean(call2);
+#endif
 
   // 1 段あたりの限界費用。1 段目には呼び出し元側の svc が 1 回だけ余分に入るので、
   // 差を取ると「純粋にもう 1 段積む費用」が出る。
@@ -239,9 +333,16 @@ template <typename A> void bench() {
   const api_result checked = call_method(OBJECT_COST_LEAF, 41);
   if (checked.error == (uintptr_t)object_error::OK && checked.value == 42) {
     ++passed;
+#if defined(__riscv)
+    shizuku_c6_call_cost_record.checked_ok = 1;
+#endif
     BOARD::diag_printf("[COST] PASS method call still returns 42\n");
   } else {
     ++failed;
+    record_fail("COST method call still returns 42", checked.value, 42);
+#if defined(__riscv)
+    shizuku_c6_call_cost_record.checked_ok = 0;
+#endif
     BOARD::diag_printf("[COST] FAIL method call: error %lu value %lu\n",
                        (unsigned long)checked.error,
                        (unsigned long)checked.value);
@@ -252,16 +353,18 @@ template <typename A> void bench() {
 } // namespace
 
 void call_cost() {
+#if !defined(__riscv)
   service_profile::reset();
 #if SHIZUKU_KERNEL_SERVICE_PROFILE
   BOARD::diag_printf("[V3GW] COST includes compiled hooks; use normal build for untraced comparison\n");
+#endif
 #endif
   if constexpr (ARCH::HAS_CYCLE_COUNTER) {
     bench<ARCH>();
   } else {
     BOARD::diag_printf("[COST] SKIP no DWT cycle counter on this arch\n");
   }
-#if SHIZUKU_KERNEL_SERVICE_PROFILE
+#if !defined(__riscv) && SHIZUKU_KERNEL_SERVICE_PROFILE
   // M0+ has no DWT, but still sample the same syscall path using the us timer.
   if constexpr (!ARCH::HAS_CYCLE_COUNTER)
     for(unsigned i=0;i<128;++i) ARCH::syscall((uintptr_t)object_api::GET_CURRENT_OBJECT);

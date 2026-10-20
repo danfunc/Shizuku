@@ -612,6 +612,40 @@ bool plic_vector_mode::current_priv() {
     (active_mstatus & RV32_MSTATUS_MPP) == RV32_MSTATUS_MPP;
 }
 
+bool plic_vector_mode::cycle_counter_enable() {
+#if defined(__riscv)
+  // ESP32-C6 HP core (RISC-V) M-mode performance counter:
+  // CSR 0x7E0 (mpcer): イベント有効化 (bit 0: CPU cycles)
+  // CSR 0x7E1 (mpcmr): モード設定 (bit 0: count in M-mode)
+  // CSR 0x7E2 (mpccr): サイクルカウンタ値
+  asm volatile("csrw 0x7e0, %0" :: "r"(1u) : "memory");
+  asm volatile("csrw 0x7e1, %0" :: "r"(1u) : "memory");
+  asm volatile("fence" ::: "memory");
+
+  // 進行検出: カウンタが実際に進んでいることを確認して true を返す (ARMv8-M DWT 実装と同等の規律)
+  uint32_t first = 0;
+  asm volatile("fence\n csrr %0, 0x7e2\n fence" : "=r"(first) :: "memory");
+  for (uint32_t spin = 0; spin < 64; ++spin) {
+    asm volatile("nop" ::: "memory");
+  }
+  uint32_t second = 0;
+  asm volatile("fence\n csrr %0, 0x7e2\n fence" : "=r"(second) :: "memory");
+  return second != first;
+#else
+  return false;
+#endif
+}
+
+uint32_t plic_vector_mode::cycle_counter_read() {
+#if defined(__riscv)
+  uint32_t cycles = 0;
+  asm volatile("csrr %0, 0x7e2" : "=r"(cycles));
+  return cycles;
+#else
+  return 0;
+#endif
+}
+
 void set_irq_dispatch_hooks(irq_dispatch_hooks hooks) {
   g_irq_dispatch_hooks = hooks;
 }
