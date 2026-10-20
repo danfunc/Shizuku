@@ -440,6 +440,12 @@ void call_ladder() {
 
     CL_PROG(807);
   // スタックを掘り切る。panic でも無音ロックアップでもなく NO_STACK が返ること。
+#if defined(SHIZUKU_SELFTEST_SKIP_DEEP_STACK) && SHIZUKU_SELFTEST_SKIP_DEEP_STACK
+  {
+    CL_PROG(808);
+    BOARD::diag_printf("[SELFTEST] SKIP stack exhaustion (SHIZUKU_SELFTEST_SKIP_DEEP_STACK)\n");
+  }
+#else
   {
     CL_PROG(808);
     const api_result result = call_method(OBJECT_DEEP, 0);
@@ -459,6 +465,7 @@ void call_ladder() {
     BOARD::diag_printf("[SELFTEST] max nesting before NO_STACK: %lu\n",
                        (unsigned long)g_deep_max);
   }
+#endif
 
     CL_PROG(810);
   // ---- 名乗り (System Object が起動するまでの暫定の宿) --------------------
