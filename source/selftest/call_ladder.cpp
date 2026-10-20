@@ -139,6 +139,52 @@ uintptr_t nest(uintptr_t remaining, uintptr_t, uintptr_t, uintptr_t) {
   return result.value + remaining;
 }
 
+// ---- 異なる object identity の多段呼出し (ROOT -> A -> B -> C) と caller ledger プローブ
+uintptr_t g_chain_a_self = 0;
+uintptr_t g_chain_a_caller = 0;
+uintptr_t g_chain_b_self = 0;
+uintptr_t g_chain_b_caller = 0;
+uintptr_t g_chain_c_self = 0;
+uintptr_t g_chain_c_caller = 0;
+
+uint32_t g_chain_c_ledger_size = 0;
+uint8_t g_chain_c_via[6] = {};
+uint32_t g_chain_c_obj[6] = {};
+
+uintptr_t chain_c(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+  // C 入口: システムコールを一切撃つ前に生の ledger を直接観測
+  const uint32_t tid = kernel_instance.current_thread_id();
+  g_chain_c_ledger_size = kernel_instance.ledger_size(tid);
+  for (uint32_t i = 0; i < 6 && i < g_chain_c_ledger_size; ++i) {
+    const auto *entry = kernel_instance.ledger_entry(tid, i);
+    if (entry) {
+      g_chain_c_via[i] = entry->via;
+      g_chain_c_obj[i] = entry->object;
+    }
+  }
+  g_chain_c_self = api(object_api::GET_CURRENT_OBJECT).value;
+  g_chain_c_caller = api(object_api::GET_CALLER_OBJECT).value;
+  return argument + 10;
+}
+
+uintptr_t chain_b(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+  g_chain_b_self = api(object_api::GET_CURRENT_OBJECT).value;
+  g_chain_b_caller = api(object_api::GET_CALLER_OBJECT).value;
+  const api_result res = call_method(OBJECT_DEEP, argument + 1);
+  if (res.error != (uintptr_t)object_error::OK)
+    return 0xDEADB000u | (uint32_t)res.error;
+  return res.value + 1;
+}
+
+uintptr_t chain_a(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+  g_chain_a_self = api(object_api::GET_CURRENT_OBJECT).value;
+  g_chain_a_caller = api(object_api::GET_CALLER_OBJECT).value;
+  const api_result res = call_method(OBJECT_NEST, argument + 1);
+  if (res.error != (uintptr_t)object_error::OK)
+    return 0xDEADA000u | (uint32_t)res.error;
+  return res.value + 1;
+}
+
 // ---- 異常系: スタックを掘り切ってもエラーで返ること --------------------------
 uint32_t g_deep_max = 0;
 #if defined(SHIZUKU_DEEP_DIAG)
@@ -265,6 +311,115 @@ void call_ladder() {
     CL_PROG(803);
     check("nested: depth grows by 2 per level", depth_bad == 0,
           (unsigned long)depth_bad, 0);
+  }
+
+  // 異なる object identity の多段呼出し (ROOT -> A -> B -> C) と caller ledger プローブ
+  {
+    const api_result rep_a =
+        api(object_api::CREATE_OBJECT, OBJECT_LEAF, (uintptr_t)&chain_a, OBJECT_REPLACE);
+    check("chain caller: replace A", rep_a.error == (uintptr_t)object_error::OK,
+          (unsigned long)rep_a.error, 0);
+
+    const api_result rep_b =
+        api(object_api::CREATE_OBJECT, OBJECT_NEST, (uintptr_t)&chain_b, OBJECT_REPLACE);
+    check("chain caller: replace B", rep_b.error == (uintptr_t)object_error::OK,
+          (unsigned long)rep_b.error, 0);
+
+    const api_result rep_c =
+        api(object_api::CREATE_OBJECT, OBJECT_DEEP, (uintptr_t)&chain_c, OBJECT_REPLACE);
+    check("chain caller: replace C", rep_c.error == (uintptr_t)object_error::OK,
+          (unsigned long)rep_c.error, 0);
+
+    const bool rep_a_ok = (rep_a.error == (uintptr_t)object_error::OK);
+    const bool rep_b_ok = (rep_b.error == (uintptr_t)object_error::OK);
+    const bool rep_c_ok = (rep_c.error == (uintptr_t)object_error::OK);
+
+    if (rep_a_ok && rep_b_ok && rep_c_ok) {
+      const api_result result = call_method(OBJECT_LEAF, 10);
+      check("chain caller: value", result.value == 24,
+            (unsigned long)result.value, 24);
+      check("chain caller: A caller is ROOT",
+            g_chain_a_caller == KERNEL_OBJECT::ROOT_OBJECT,
+            (unsigned long)g_chain_a_caller,
+            (unsigned long)KERNEL_OBJECT::ROOT_OBJECT);
+      check("chain caller: B caller is A",
+            g_chain_b_caller == OBJECT_LEAF,
+            (unsigned long)g_chain_b_caller,
+            (unsigned long)OBJECT_LEAF);
+      check("chain caller: C caller is B",
+            g_chain_c_caller == OBJECT_NEST,
+            (unsigned long)g_chain_c_caller,
+            (unsigned long)OBJECT_NEST);
+
+      check("chain caller: A self is A",
+            g_chain_a_self == OBJECT_LEAF,
+            (unsigned long)g_chain_a_self,
+            (unsigned long)OBJECT_LEAF);
+      check("chain caller: B self is B",
+            g_chain_b_self == OBJECT_NEST,
+            (unsigned long)g_chain_b_self,
+            (unsigned long)OBJECT_NEST);
+      check("chain caller: C self is C",
+            g_chain_c_self == OBJECT_DEEP,
+            (unsigned long)g_chain_c_self,
+            (unsigned long)OBJECT_DEEP);
+
+      // C 入口での生 ledger 検証 (from_top 0..5)
+      check("chain caller: C entry ledger size",
+            g_chain_c_ledger_size == 6,
+            (unsigned long)g_chain_c_ledger_size, 6);
+      check("chain caller: C entry via[0] is CALL",
+            g_chain_c_via[0] == KERNEL::LEDGER_CALL,
+            (unsigned long)g_chain_c_via[0], (unsigned long)KERNEL::LEDGER_CALL);
+      check("chain caller: C entry obj[0] is C",
+            g_chain_c_obj[0] == OBJECT_DEEP,
+            (unsigned long)g_chain_c_obj[0], (unsigned long)OBJECT_DEEP);
+      check("chain caller: C entry via[1] is DISPATCH",
+            g_chain_c_via[1] == KERNEL::LEDGER_DISPATCH,
+            (unsigned long)g_chain_c_via[1], (unsigned long)KERNEL::LEDGER_DISPATCH);
+      check("chain caller: C entry via[2] is CALL",
+            g_chain_c_via[2] == KERNEL::LEDGER_CALL,
+            (unsigned long)g_chain_c_via[2], (unsigned long)KERNEL::LEDGER_CALL);
+      check("chain caller: C entry obj[2] is B",
+            g_chain_c_obj[2] == OBJECT_NEST,
+            (unsigned long)g_chain_c_obj[2], (unsigned long)OBJECT_NEST);
+      check("chain caller: C entry via[3] is DISPATCH",
+            g_chain_c_via[3] == KERNEL::LEDGER_DISPATCH,
+            (unsigned long)g_chain_c_via[3], (unsigned long)KERNEL::LEDGER_DISPATCH);
+      check("chain caller: C entry via[4] is CALL",
+            g_chain_c_via[4] == KERNEL::LEDGER_CALL,
+            (unsigned long)g_chain_c_via[4], (unsigned long)KERNEL::LEDGER_CALL);
+      check("chain caller: C entry obj[4] is A",
+            g_chain_c_obj[4] == OBJECT_LEAF,
+            (unsigned long)g_chain_c_obj[4], (unsigned long)OBJECT_LEAF);
+      check("chain caller: C entry via[5] is DISPATCH",
+            g_chain_c_via[5] == KERNEL::LEDGER_DISPATCH,
+            (unsigned long)g_chain_c_via[5], (unsigned long)KERNEL::LEDGER_DISPATCH);
+
+      check("chain caller: depth restored",
+            kernel_instance.current_depth() == 0,
+            (unsigned long)kernel_instance.current_depth(), 0);
+    }
+
+    // 各オブジェクトの置換成功状態を保持し、終了時には成功した置換だけ元handlerへ戻す
+    if (rep_a_ok) {
+      const api_result rst_a =
+          api(object_api::CREATE_OBJECT, OBJECT_LEAF, (uintptr_t)&leaf, OBJECT_REPLACE);
+      check("chain caller: restore A", rst_a.error == (uintptr_t)object_error::OK,
+            (unsigned long)rst_a.error, 0);
+    }
+    if (rep_b_ok) {
+      const api_result rst_b =
+          api(object_api::CREATE_OBJECT, OBJECT_NEST, (uintptr_t)&nest, OBJECT_REPLACE);
+      check("chain caller: restore B", rst_b.error == (uintptr_t)object_error::OK,
+            (unsigned long)rst_b.error, 0);
+    }
+    if (rep_c_ok) {
+      const api_result rst_c =
+          api(object_api::CREATE_OBJECT, OBJECT_DEEP, (uintptr_t)&deep, OBJECT_REPLACE);
+      check("chain caller: restore C", rst_c.error == (uintptr_t)object_error::OK,
+            (unsigned long)rst_c.error, 0);
+    }
   }
 
     CL_PROG(804);
