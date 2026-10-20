@@ -15,7 +15,7 @@
 //      (5) 2 段ネスト     — (4) の 1 段あたりの限界費用を出すため
 //    (1) を引かないと、測定の費用が全部に上乗せされたまま比較することになる。
 //
-//  ★DWT CYCCNT を使う。**数えているのはコアのクロック**なので、クロックを変えても
+//  ★サイクルカウンタ (ARM では DWT CYCCNT、RISC-V では PCCR / cycle) を使う。**数えているのはコアのクロック**なので、クロックを変えても
 //    サイクル数は変わらない (µs へ直すときだけ board にクロックを訊く)。
 //  ★★min を採る。系は動いたまま (SysTick / USB / 2 コア目) 測っているので、
 //    平均には割り込みが混ざる。**割り込みの入らなかった 1 回**が知りたい値なので
@@ -26,6 +26,11 @@
 #include "shizuku/selftest.hpp"
 #include "shizuku/service_profile.hpp"
 #include "shizuku/kernel_services.hpp"
+#if defined(SHIZUKU_C6_STAGE05_TRACE) && SHIZUKU_C6_STAGE05_TRACE
+#include "chips/esp32_c6/stage05_trace.h"
+#include "chips/esp32_c6/systimer.hpp"
+#include "chips/esp32_c6/trap_api.hpp"
+#endif
 
 namespace shizuku {
 namespace selftest {
@@ -39,13 +44,19 @@ constexpr uintptr_t OBJECT_COST_LEAF = object_id::cost_leaf;
 constexpr uintptr_t OBJECT_COST_NEST = object_id::cost_nest;
 constexpr uintptr_t METHOD_MAIN = 0;
 
-// ★isb で挟む。挟まないとコンパイラとパイプラインが読み出しを前後へ動かせるので、
-//   測っている区間が実際の区間とずれる。isb 自身の費用は (1) にも同じだけ乗るので
+// ★同期バリア (ARM では isb, RISC-V では fence) で挟む。挟まないとコンパイラとパイプラインが読み出しを前後へ動かせるので、
+//   測っている区間が実際の区間とずれる。バリア自身の費用は (1) にも同じだけ乗るので
 //   引き算で消える。
 template <typename A> inline uint32_t cycles_now() {
+#if defined(__riscv)
+  __asm__ volatile("fence" ::: "memory");
+  const uint32_t cycles = A::cycle_counter_read();
+  __asm__ volatile("fence" ::: "memory");
+#else
   __asm__ volatile("isb" ::: "memory");
   const uint32_t cycles = A::cycle_counter_read();
   __asm__ volatile("isb" ::: "memory");
+#endif
   return cycles;
 }
 
@@ -128,6 +139,9 @@ struct stat_t {
   uint32_t min;
   uint32_t mean;
 };
+static_assert(std::is_same_v<decltype(stat_t::min), uint32_t> &&
+              std::is_same_v<decltype(stat_t::mean), uint32_t>,
+              "stat_t must have uint32_t min and mean for raw/net reporting");
 
 // ★op は関数ポインタで呼ぶ。(1) も同じ経路を通るので、ポインタ経由の分は
 //   差し引きで消える。インライン展開の差で不公平が出るのも防げる。
@@ -156,28 +170,72 @@ __attribute__((noinline)) stat_t measure(op_t requested, uint32_t rounds) {
   return {best, (uint32_t)(total / rounds)};
 }
 
-// 引き算した結果を「サイクル / ナノ秒」で 1 行にする。
-void report(const char *name, stat_t raw, uint32_t baseline,
+// 引き算した結果を「サイクル / ナノ秒」で 1 行にする (raw/net の min/mean を併記)。
+void report(const char *name, stat_t raw, stat_t baseline,
             uint32_t cycles_per_us) {
-  const uint32_t net = raw.min > baseline ? raw.min - baseline : 0;
-  const uint32_t net_mean = raw.mean > baseline ? raw.mean - baseline : 0;
+  const uint32_t net = raw.min > baseline.min ? raw.min - baseline.min : 0;
+  const uint32_t net_mean =
+      raw.mean > baseline.mean ? raw.mean - baseline.mean : 0;
   // ns = cycle * 1000 / (cycles/µs)。整数のまま計算する (FP を測定路に持ち込まない)。
   const uint32_t ns = cycles_per_us ? (net * 1000u) / cycles_per_us : 0;
   BOARD::diag_printf(
-      "[COST] %-22s min %5lu cyc (%4lu ns)  mean %5lu cyc  [raw min %lu]\n",
+      "[COST] %-22s net min %5lu cyc (%4lu ns)  net mean %5lu cyc  [raw min %lu  raw mean %lu]\n",
       name, (unsigned long)net, (unsigned long)ns, (unsigned long)net_mean,
-      (unsigned long)raw.min);
+      (unsigned long)raw.min, (unsigned long)raw.mean);
 }
+
+#if defined(SHIZUKU_C6_STAGE05_TRACE) && SHIZUKU_C6_STAGE05_TRACE
+static void verify_c6_stage05_clock() {
+  // SYSTIMER unit 0 runs at 16 MHz from XTAL
+  // Wait for 16,000 SYSTIMER ticks (= 1,000 us = 1 ms) to independently compute HP CPU core frequency
+  const uint64_t s_start = shizuku::chips::esp32_c6::systimer_now();
+  uint32_t c_start = 0;
+#if defined(__riscv)
+  asm volatile("fence\n csrr %0, 0x7E2\n fence" : "=r"(c_start) :: "memory");
+#endif
+
+  while ((shizuku::chips::esp32_c6::systimer_now() - s_start) < 16000ULL) {
+    asm volatile("" ::: "memory");
+  }
+
+  const uint64_t s_end = shizuku::chips::esp32_c6::systimer_now();
+  uint32_t c_end = 0;
+#if defined(__riscv)
+  asm volatile("fence\n csrr %0, 0x7E2\n fence" : "=r"(c_end) :: "memory");
+#endif
+
+  const uint32_t s_delta = (uint32_t)(s_end - s_start);
+  const uint32_t c_delta = c_end - c_start;
+
+  shizuku_c6_stage05_record.systimer_ticks = s_delta;
+  shizuku_c6_stage05_record.cpu_cycle_delta = c_delta;
+
+  if (s_delta > 0 && c_delta > 0) {
+    // MHz = (c_delta * 16) / s_delta
+    const uint32_t mhz = (uint32_t)(((uint64_t)c_delta * 16ULL + (s_delta / 2)) / s_delta);
+    shizuku_c6_stage05_record.cpu_mhz = mhz;
+    // ESP32-C6 CPU clock is typically 80, 120, or 160 MHz
+    if (mhz >= 40 && mhz <= 240) {
+      shizuku_c6_stage05_record.clock_verified = 1u;
+    } else {
+      shizuku_c6_stage05_record.clock_verified = 0u;
+    }
+  } else {
+    shizuku_c6_stage05_record.cpu_mhz = 0;
+    shizuku_c6_stage05_record.clock_verified = 0u;
+  }
+}
+#endif
 
 
 // ★ARCH::HAS_CYCLE_COUNTER が false の arch ではこのテンプレートは実体化されない。
-//   CYCCNT の番地も有効化手順も arch 側にあり、ここには DWT を知るコードが無い。
+//   カウンタの番地も有効化手順も arch 側にあり、ここにはハードウェア固有レジスタを知るコードが無い。
 template <typename A> void bench() {
   BOARD::diag_printf("[COST] call cost bench start\n");
   if (!A::cycle_counter_enable()) {
     // ★測れないなら測れないと言う。0 を報告して数字があるように見せない。
-    BOARD::diag_printf("[COST] FAIL DWT CYCCNT is not counting - no numbers\n");
-    record_fail("COST DWT CYCCNT is not counting", 0, 1);
+    BOARD::diag_printf("[COST] FAIL cycle counter is not counting - no numbers\n");
+    record_fail("COST cycle counter is not counting", 0, 1);
     ++failed;
     return;
   }
@@ -207,6 +265,7 @@ template <typename A> void bench() {
   // ★ウォームアップは measure の中で行う (呼び出し経路そのものを温めるため)。
 
   constexpr uint32_t ROUNDS = 2048;
+  static_assert(ROUNDS >= 128, "call_cost sample rounds must be >= 128");
   const stat_t nothing = measure<A>(op_nothing, ROUNDS);
   const stat_t direct = measure<A>(op_direct, ROUNDS);
   const stat_t svc = measure<A>(op_svc, ROUNDS);
@@ -215,10 +274,10 @@ template <typename A> void bench() {
 
   BOARD::diag_printf("[COST] harness baseline = %lu cyc (subtracted below)\n",
                      (unsigned long)nothing.min);
-  report("direct call", direct, nothing.min, cycles_per_us);
-  report("svc round trip", svc, nothing.min, cycles_per_us);
-  report("method call (1 hop)", call1, nothing.min, cycles_per_us);
-  report("method call (2 hops)", call2, nothing.min, cycles_per_us);
+  report("direct call", direct, nothing, cycles_per_us);
+  report("svc round trip", svc, nothing, cycles_per_us);
+  report("method call (1 hop)", call1, nothing, cycles_per_us);
+  report("method call (2 hops)", call2, nothing, cycles_per_us);
 
   const auto net = [&](stat_t value) -> uint32_t {
     return value.min > nothing.min ? value.min - nothing.min : 0;
@@ -246,23 +305,135 @@ template <typename A> void bench() {
                        (unsigned long)checked.error,
                        (unsigned long)checked.value);
   }
+
+#if defined(SHIZUKU_C6_STAGE05_TRACE) && SHIZUKU_C6_STAGE05_TRACE
+  BOARD::diag_printf("[STAGE0.5] Starting stage 0.5 interval decomposition\n");
+  shizuku_c6_stage05_init(
+#if defined(SHIZUKU_C6_STAGE05_IRAM) && SHIZUKU_C6_STAGE05_IRAM
+      1u
+#else
+      0u
+#endif
+  );
+  verify_c6_stage05_clock();
+  shizuku_c6_stage05_calibrate_hooks();
+
+  // 校正中間値の診断出力
+  BOARD::diag_printf("[STAGE0.5] Hook Calibration Details:\n");
+  BOARD::diag_printf("[STAGE0.5]   csrr overhead      : min %lu cyc, mean %lu cyc\n",
+                     (unsigned long)shizuku_c6_stage05_calib_diag.csrr_min,
+                     (unsigned long)shizuku_c6_stage05_calib_diag.csrr_mean);
+  BOARD::diag_printf("[STAGE0.5]   hook_trap_entry    : net min %lu cyc (mean %lu cyc) [raw min %lu, mean %lu]\n",
+                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_te_net_min,
+                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_te_net_mean,
+                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_te_raw_min,
+                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_te_raw_mean);
+  BOARD::diag_printf("[STAGE0.5]   hook_svc_dispatch  : net min %lu cyc (mean %lu cyc) [raw min %lu, mean %lu]\n",
+                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_sd_net_min,
+                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_sd_net_mean,
+                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_sd_raw_min,
+                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_sd_raw_mean);
+  BOARD::diag_printf("[STAGE0.5]   hook_handler       : net min %lu cyc (mean %lu cyc) [raw min %lu, mean %lu]\n",
+                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_hd_net_min,
+                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_hd_net_mean,
+                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_hd_raw_min,
+                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_hd_raw_mean);
+  BOARD::diag_printf("[STAGE0.5]   hook_return_prep   : net min %lu cyc (mean %lu cyc) [raw min %lu, mean %lu]\n",
+                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_rp_net_min,
+                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_rp_net_mean,
+                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_rp_raw_min,
+                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_rp_raw_mean);
+
+  // ウォームアップ
+  for (uint32_t warm = 0; warm < 16; ++warm) {
+    g_sink = op_svc(g_argument);
+  }
+
+  shizuku_c6_stage05_active = 1u;
+  constexpr uint32_t S05_ROUNDS = SHIZUKU_C6_STAGE05_ROUNDS;
+  for (uint32_t r = 0; r < S05_ROUNDS; ++r) {
+    shizuku_c6_stage05_current_sample.t0_caller_pre = cycles_now<A>();
+    g_sink = op_svc(g_argument);
+    shizuku_c6_stage05_current_sample.t7_caller_post = cycles_now<A>();
+    shizuku_c6_stage05_current_sample.t6_ret_restore_begin = shizuku_c6_stage05_t6;
+    shizuku_c6_stage05_record_sample((const shizuku_c6_stage05_sample_t *)&shizuku_c6_stage05_current_sample);
+  }
+  shizuku_c6_stage05_active = 0u;
+
+  shizuku_c6_stage05_finish();
+
+  static const char *const kNamesFrom[SHIZUKU_C6_STAGE05_INTERVAL_COUNT] = {
+      "caller_pre", "t1_trap_entry", "t2_c_dispatch", "t3_svc_dispatch",
+      "t5_return_prep", "t6_restore_begin", "t4_handler", "t1_ret_trap_entry",
+      "t2_ret_c_dispatch", "t3_ret_svc_dispatch", "t5_ret_return_prep", "t6_ret_restore_begin"
+  };
+  static const char *const kNamesTo[SHIZUKU_C6_STAGE05_INTERVAL_COUNT] = {
+      "t1_trap_entry", "t2_c_dispatch", "t3_svc_dispatch", "t5_return_prep",
+      "t6_restore_begin", "t4_handler", "t1_ret_trap_entry", "t2_ret_c_dispatch",
+      "t3_ret_svc_dispatch", "t5_ret_return_prep", "t6_ret_restore_begin", "caller_post"
+  };
+
+  BOARD::diag_printf("[STAGE0.5] === C6 Stage 0.5 Interval Breakdown ===\n");
+  BOARD::diag_printf("[STAGE0.5] Status: %s (code=%lu)\n",
+                     shizuku_c6_stage05_record.status == SHIZUKU_C6_STAGE05_STATUS_PASSED ? "PASSED" : "FAILED",
+                     (unsigned long)shizuku_c6_stage05_record.error_code);
+  BOARD::diag_printf("[STAGE0.5] Placement: %s\n",
+                     shizuku_c6_stage05_record.placement_mode == 1 ? "IRAM" : "FLASH");
+  BOARD::diag_printf("[STAGE0.5] HP CPU Clock: %lu MHz (%s, delta_cyc=%lu, delta_systimer=%lu)\n",
+                     (unsigned long)shizuku_c6_stage05_record.cpu_mhz,
+                     shizuku_c6_stage05_record.clock_verified ? "VERIFIED" : "UNKNOWN",
+                     (unsigned long)shizuku_c6_stage05_record.cpu_cycle_delta,
+                     (unsigned long)shizuku_c6_stage05_record.systimer_ticks);
+  BOARD::diag_printf("[STAGE0.5] Hook Calibration: single raw min %lu cyc (mean %lu cyc), total perturbation %lu cyc\n",
+                     (unsigned long)shizuku_c6_stage05_record.hook_single_raw_min,
+                     (unsigned long)shizuku_c6_stage05_record.hook_single_raw_mean,
+                     (unsigned long)shizuku_c6_stage05_record.total_perturbation);
+  BOARD::diag_printf("[STAGE0.5] Valid Samples: %lu / %lu\n",
+                     (unsigned long)shizuku_c6_stage05_record.rounds_completed,
+                     (unsigned long)shizuku_c6_stage05_record.rounds_requested);
+  BOARD::diag_printf("[STAGE0.5] Total Roundtrip: raw min %lu cyc (mean %lu cyc)  net min %lu cyc (mean %lu cyc)\n",
+                     (unsigned long)shizuku_c6_stage05_record.total_raw_min,
+                     (unsigned long)shizuku_c6_stage05_record.total_raw_mean,
+                     (unsigned long)shizuku_c6_stage05_record.total_net_min,
+                     (unsigned long)shizuku_c6_stage05_record.total_net_mean);
+  for (uint32_t i = 0; i < SHIZUKU_C6_STAGE05_INTERVAL_COUNT; ++i) {
+    BOARD::diag_printf("[STAGE0.5]   [%2lu] %-17s -> %-17s : raw min %5lu cyc (mean %5lu)  net min %5lu cyc (mean %5lu)\n",
+                       (unsigned long)i,
+                       kNamesFrom[i],
+                       kNamesTo[i],
+                       (unsigned long)shizuku_c6_stage05_record.intervals[i].raw_min,
+                       (unsigned long)shizuku_c6_stage05_record.intervals[i].raw_mean,
+                       (unsigned long)shizuku_c6_stage05_record.intervals[i].net_min,
+                       (unsigned long)shizuku_c6_stage05_record.intervals[i].net_mean);
+  }
+  BOARD::diag_printf("[STAGE0.5] === End Stage 0.5 Interval Breakdown ===\n");
+
+  if (shizuku_c6_stage05_record.status == SHIZUKU_C6_STAGE05_STATUS_PASSED) {
+    ++passed;
+    BOARD::diag_printf("[STAGE0.5] PASS stage 0.5 interval breakdown complete and valid\n");
+  } else {
+    ++failed;
+    BOARD::diag_printf("[STAGE0.5] FAIL stage 0.5 interval breakdown failed (code %lu)\n",
+                       (unsigned long)shizuku_c6_stage05_record.error_code);
+  }
+#endif
   BOARD::diag_printf("[COST] call cost bench done\n");
 }
 
 } // namespace
 
 void call_cost() {
+#if SHIZUKU_KERNEL_SERVICE_PROFILE && !defined(__riscv)
   service_profile::reset();
-#if SHIZUKU_KERNEL_SERVICE_PROFILE
   BOARD::diag_printf("[V3GW] COST includes compiled hooks; use normal build for untraced comparison\n");
 #endif
   if constexpr (ARCH::HAS_CYCLE_COUNTER) {
     bench<ARCH>();
   } else {
-    BOARD::diag_printf("[COST] SKIP no DWT cycle counter on this arch\n");
+    BOARD::diag_printf("[COST] SKIP no cycle counter on this arch\n");
   }
-#if SHIZUKU_KERNEL_SERVICE_PROFILE
-  // M0+ has no DWT, but still sample the same syscall path using the us timer.
+#if SHIZUKU_KERNEL_SERVICE_PROFILE && !defined(__riscv)
+  // HAS_CYCLE_COUNTER が false の arch (M0+ 等) でも、us timer を使って同じ syscall 経路をサンプリングする。
   if constexpr (!ARCH::HAS_CYCLE_COUNTER)
     for(unsigned i=0;i<128;++i) ARCH::syscall((uintptr_t)object_api::GET_CURRENT_OBJECT);
   const auto v=service_profile::read();

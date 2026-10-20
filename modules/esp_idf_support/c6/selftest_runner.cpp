@@ -9,6 +9,7 @@ void handler_binding_probe();
 void thread_ladder();
 void memory_ladder();
 void stream_ladder();
+void call_cost();
 }
 }
 
@@ -47,6 +48,11 @@ extern "C" void shizuku_c6_run_selftests(void) {
     shizuku_c6_selftest_record.passed = shizuku::selftest::passed;
     shizuku_c6_selftest_record.failed = shizuku::selftest::failed;
     shizuku_c6_selftest_record_ladder_done(SHIZUKU_C6_LADDER_STREAM, 0x5008u);
+
+    // 6. call_cost (段0: 既存 call_cost の有効化)
+    shizuku::selftest::call_cost();
+    shizuku_c6_selftest_record.passed = shizuku::selftest::passed;
+    shizuku_c6_selftest_record.failed = shizuku::selftest::failed;
 
     shizuku_c6_selftest_record_finish();
 }

@@ -67,7 +67,20 @@ template <> void KERNEL::set_object_handler(uintptr_t entry_pc,
 #if defined(SHIZUKU_DEEP_DIAG)
 extern "C" { volatile uint32_t shizuku_push_diag[6]; volatile uint32_t shizuku_push_diag_n; }
 #endif
+
+#if defined(SHIZUKU_C6_STAGE05_IRAM) && SHIZUKU_C6_STAGE05_IRAM
+#define SHIZUKU_STAGE05_HOTPATH_ATTR __attribute__((section(".iram1.text")))
+#else
+#define SHIZUKU_STAGE05_HOTPATH_ATTR
+#endif
+
+#if defined(SHIZUKU_C6_STAGE05_TRACE) && SHIZUKU_C6_STAGE05_TRACE
+extern "C" volatile uint32_t shizuku_c6_stage05_is_return;
+extern "C" void shizuku_c6_stage05_hook_svc_dispatch(uint32_t is_return);
+#endif
+
 template <>
+SHIZUKU_STAGE05_HOTPATH_ATTR
 bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                              KERNEL::FRAME **frame) {
   const uint32_t frame_bytes = ARCH::exc_frame_bytes(*context);
@@ -148,6 +161,7 @@ bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
 }
 
 template <>
+SHIZUKU_STAGE05_HOTPATH_ATTR
 bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                             KERNEL::FRAME **frame) {
   if (thread.call_stack.top == 0)
@@ -209,11 +223,14 @@ static constexpr bool is_context_unprivileged(const C *ctx) {
   }
 }
 
-template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
+template <> SHIZUKU_STAGE05_HOTPATH_ATTR void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(410);
 #endif
   THREAD &thread = current_thread();
+#if defined(SHIZUKU_C6_STAGE05_TRACE) && SHIZUKU_C6_STAGE05_TRACE
+  shizuku_c6_stage05_hook_svc_dispatch(shizuku_c6_stage05_is_return);
+#endif
   FRAME *frame = context->sp;
   // Only this privileged internal gate bypasses parent routing. The public
   // objectland raw-SVC path below, including colliding numbers, is unchanged.

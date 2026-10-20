@@ -2,6 +2,7 @@
 #include "arch/riscv/trap_route.hpp"
 #include "chips/esp32_c6/systimer.hpp"
 #include "chips/esp32_c6/trap_api.hpp"
+#include "chips/esp32_c6/stage05_trace.h"
 
 using arch = shizuku::ARCH;
 static_assert((sizeof(shizuku::KERNEL::call_frame_header) + RV32_FRAME_BYTES) % 16 == 0,
@@ -19,7 +20,7 @@ void shizuku_c6_vectors();
 extern char _bss_end;
 }
 namespace {
-uint32_t active_mstatus;
+volatile uint32_t active_mstatus;
 volatile uint32_t pend_flag;
 uint64_t armed_target;
 namespace c6 = shizuku::ports::c6;
@@ -67,7 +68,7 @@ void install_traps() {
   const auto vector = reinterpret_cast<uintptr_t>(&shizuku_c6_vectors) | 1u;
   asm volatile("csrw mscratch, %0\n csrw mtvec, %1" :: "r"(top), "r"(vector) : "memory");
 }
-void frame_to_context(arch::exception_frame_t &f, arch::context_t &c) {
+SHIZUKU_STAGE05_ATTR void frame_to_context(arch::exception_frame_t &f, arch::context_t &c) {
   c.sp = &f;
 #define COPY(n) c.s##n = f.s##n;
   COPY(0) COPY(1) COPY(2) COPY(3) COPY(4) COPY(5)
@@ -75,7 +76,7 @@ void frame_to_context(arch::exception_frame_t &f, arch::context_t &c) {
 #undef COPY
   c.privileged = (f.mstatus & RV32_MSTATUS_MPP) == RV32_MSTATUS_MPP;
 }
-void context_to_frame(arch::context_t &c) {
+SHIZUKU_STAGE05_ATTR void context_to_frame(arch::context_t &c) {
   auto &f = *c.sp;
 #define COPY(n) f.s##n = c.s##n;
   COPY(0) COPY(1) COPY(2) COPY(3) COPY(4) COPY(5)
@@ -97,7 +98,7 @@ void run_pending_switch() {
   kernel.pendsv_dispatch(kernel.current_context());
 }
 }
-extern "C" arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_frame_t *frame) {
+extern "C" SHIZUKU_STAGE05_ATTR arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_frame_t *frame) {
   const uint32_t previous_mstatus = active_mstatus;
   active_mstatus = frame->mstatus;
   shizuku_c6_trap_depth = shizuku_c6_trap_depth + 1;
@@ -109,6 +110,11 @@ extern "C" arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_f
     // ECALL from inside the kernel must never overwrite the current thread.
     if (shizuku_c6_trap_depth != 1) stop(0xE003);
     if ((frame->mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) stop(0xE004);
+#if defined(SHIZUKU_C6_STAGE05_TRACE) && SHIZUKU_C6_STAGE05_TRACE
+    const bool is_return = (frame->a0 == 2 && frame->a4 == 0xA55A);
+    shizuku_c6_stage05_is_return = is_return ? 1u : 0u;
+    shizuku_c6_stage05_hook_trap_entry(frame->reserved0, is_return ? 1u : 0u);
+#endif
     auto &kernel = shizuku::kernel_instance;
     auto *context = kernel.current_context();
     frame_to_context(*frame, *context);
@@ -117,6 +123,9 @@ extern "C" arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_f
     run_pending_switch();
     context = kernel.current_context();
     context_to_frame(*context);
+#if defined(SHIZUKU_C6_STAGE05_TRACE) && SHIZUKU_C6_STAGE05_TRACE
+    shizuku_c6_stage05_hook_return_prep(is_return ? 1u : 0u);
+#endif
     result = context->sp;
   }, [&] {
     // MIE is clear inside traps, so IRQs cannot nest: depth is exactly 1.
@@ -178,6 +187,52 @@ void plic_vector_mode::enter_thread_mode(uintptr_t top, uintptr_t limit, void (*
   arch::prepare_thread_entry(*context, top, reinterpret_cast<uintptr_t>(entry), arch::return_stub(), 0);
   context_to_frame(*context);
   shizuku_rv32_first_return(context->sp);
+}
+bool plic_vector_mode::cycle_counter_enable() {
+  // 段0不変条件: 呼出し文脈は M-only pilot に限定される (chips/esp32_c6/trap.cpp:86-88)。
+  // U-mode 呼出し元に対する動作は未サポート・未検証 (unknown / unsupported; 段1 PMP/trusted U stack ゲート後に対処)。
+  // ESP-IDF (SOC_CPU_HAS_CSR_PC=1, cpu_ll.h) および ESP32-C6 TRM Version 1.2 Chapter 1 (page 42, 53-54):
+  // C6 custom performance counter (PCCR) M-mode only (CSR 0x7E2 mpccr).
+  // mpcer (CSR 0x7E0): bit 0 = 1 (CYCLE: クロックサイクルイベント選択)
+  // mpcmr (CSR 0x7E1): bit 0 = 1 (COUNT_EN: カウンタ有効化, bit 1 COUNT_SAT = 0: 32bit 最大値でラップ)
+  // mcounteren (CSR 0x306) は下位特権 (U/S) への標準カウンタ公開制御であり、M-mode 0x7E2 では不要のため追加しない。
+  // chip 層不変条件に従い busy-wait は行わない。設定レジスタの読み戻しと、ストレートラインの二重読出しで
+  // counter advancement を確認し、進まなければ fail-closed。
+#if defined(__riscv)
+  uint32_t pcer = 0;
+  uint32_t pcmr = 0;
+  uint32_t c1 = 0;
+  uint32_t c2 = 0;
+  asm volatile(
+      "li t0, 1\n"
+      "csrw 0x7E0, t0\n"
+      "csrw 0x7E1, t0\n"
+      "fence rw,rw\n"
+      "csrr %0, 0x7E0\n"
+      "csrr %1, 0x7E1\n"
+      "csrr %2, 0x7E2\n"
+      "fence rw,rw\n"
+      "csrr %3, 0x7E2\n"
+      : "=r"(pcer), "=r"(pcmr), "=r"(c1), "=r"(c2)
+      :
+      : "t0", "memory");
+  if ((pcer & 1u) == 0 || (pcmr & 1u) == 0) {
+    return false;
+  }
+  return c2 != c1;
+#else
+  return false;
+#endif
+}
+uint32_t plic_vector_mode::cycle_counter_read() {
+  // mpccr (CSR 0x7E2): 32-bit Machine Performance Counter Count Register (M-mode only)
+#if defined(__riscv)
+  uint32_t cycles;
+  asm volatile("csrr %0, 0x7E2" : "=r"(cycles));
+  return cycles;
+#else
+  return 0;
+#endif
 }
 bool plic_vector_mode::in_interrupt() { return shizuku_c6_irq_depth != 0; }
 bool plic_vector_mode::current_priv() {

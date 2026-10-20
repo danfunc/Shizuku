@@ -14,10 +14,15 @@ namespace shizuku::chips::esp32_c6 {
 struct plic_vector_mode {
   // M-only pilot の policy 値 (従来値のまま。generic arch からは IntMode 経由で参照)。
   static constexpr uint32_t CALL_HEADROOM = 256;
-  // ESP32-C6 TRM / RISC-V 特権仕様で U-mode からの rdcycle (mcounteren.CY) は未検証のため false。
-  static constexpr bool HAS_CYCLE_COUNTER = false;
+  // ESP32-C6 TRM Version 1.2 Chapter 1 (page 42, 53-54) & ESP-IDF (SOC_CPU_HAS_CSR_PC=1):
+  // mpcer(0x7E0)/mpcmr(0x7E1) による custom PCCR (mpccr=0x7E2) サイクルカウンタを有効化。
+  // M-mode 専用 (段0 candidate: M-only)。非特権 U-mode 0x802 は未検証・未実装のため不使用。
+  static constexpr bool HAS_CYCLE_COUNTER = true;
   static constexpr uint32_t TIMER_MAX_CYCLES = 0xFFFFFFFF;
   static constexpr uint32_t TIMER_MIN_CYCLES = 100;
+
+  static bool cycle_counter_enable();
+  static uint32_t cycle_counter_read();
 
   static bool in_interrupt();
   static bool current_priv();
