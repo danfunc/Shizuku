@@ -10,8 +10,9 @@
 //       (5, 6, 16) であっても dispatch frame を積んで親ハンドラへ配送されること。
 //    4. mode == svc_mode::thread (YIELD = 8) や未移行 mode::handler (16) が
 //       現行どおり actor (Root KOBJ dispatch frame) 経路に残ること。
-//    5. 非特権 origin からの直接 GET で特権が昇格しないこと、および非特権から
-//       特権専用 API (GRANT_REGION = 23) への呼出しが NOT_PRIVILEGED で即時拒絶されること。
+//    5. 非特権 origin からの直接 GET で特権が昇格しないこと、および
+//       mode == svc_mode::thread API (GRANT_REGION = 23) は trap で早期拒絶されず、
+//       非特権のまま actor ハンドラへ配送されること。
 
 #define SHIZUKU_C6_SKELETON_PERMITTED 1
 #include "chips/esp32_c6/chip.hpp"
@@ -272,13 +273,33 @@ static void run_dispatcher_tests() {
   assert(ctx->privileged == false); // Privilege NOT elevated!
   printf("  5a. unprivileged origin calling GET: privilege NOT elevated (privileged=false): PASS\n");
 
-  // 5b. Unprivileged calling privileged-only API (GRANT_REGION = 23)
+  // 5b. Unprivileged calling mode=thread API (GRANT_REGION = 23, privileged_only)
+  // Must NOT be rejected early in trap path: passed through to root actor handler
+  // with depth == 1, same API ID and arguments, and caller privilege unchanged in saved context.
+  // Note: the ultimate NOT_PRIVILEGED decision is enforced downstream by KERNEL_OBJECT::grant_region
+  // (tested in source/selftest/unprivileged.cpp:111).
   frame->a0 = (uintptr_t)object_api::GRANT_REGION;
+  frame->a1 = 0x1234;
+  frame->a2 = 0x1000;
+  frame->a3 = 0x2000;
   kernel_instance.svc_dispatch(ctx);
-  assert(frame->a0 == (uintptr_t)object_error::NOT_PRIVILEGED);
+  assert(kernel_instance.current_depth() == 1);
+  assert(ARCH::frame_pc(*ctx->sp) == ROOT_HANDLER_ENTRY);
+  assert(ARCH::arg(*ctx->sp, 0) == (uintptr_t)object_api::GRANT_REGION);
+  assert(ARCH::arg(*ctx->sp, 1) == 0x1234);
+  assert(ARCH::arg(*ctx->sp, 2) == 0x1000);
+  assert(ARCH::arg(*ctx->sp, 3) == 0x2000);
+  const auto *header = (const KERNEL::call_frame_header *)thread.call_stack.top;
+  assert(header->saved.privileged == false); // Caller privilege preserved as unprivileged!
+
+  // Return from actor handler via primitive::RETURN (with RETURN_STUB_MARKER),
+  // verifying caller's unprivileged context is restored upon frame pop.
+  ctx->sp->a0 = (uintptr_t)primitive::RETURN;
+  ctx->sp->a4 = RETURN_STUB_MARKER;
+  kernel_instance.svc_dispatch(ctx);
   assert(kernel_instance.current_depth() == 0);
-  assert(ctx->privileged == false);
-  printf("  5b. unprivileged calling privileged-only API rejected with NOT_PRIVILEGED: PASS\n");
+  assert(ctx->privileged == false); // Restored caller context is unprivileged!
+  printf("  5b. unprivileged mode=thread API (GRANT_REGION): passed to actor handler (depth=1, saved priv=false, restored priv=false): PASS\n");
 
   printf("[TEST] All V1 kernel dispatcher host tests PASSED successfully!\n");
 }

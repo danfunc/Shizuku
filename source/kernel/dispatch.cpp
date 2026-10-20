@@ -376,20 +376,25 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
   const bool to_root = (target_object == m_object_svc_handler_object);
 
   // 段 V1: 宛先が信頼された root KernelObject かつ mode == svc_mode::handler の
-  // 同期・有界 native API (GET_CURRENT_OBJECT, GET_CALLER_OBJECT) は、
-  // dispatch frame を積まずに trap 内で直接処理する。
-  // 専用親ハンドラ宛て (to_root == false) の raw SVC は、属性値と同じ番号であっても
-  // ここを素通りし、下の既存親ハンドラ dispatch 経路へ同一番号のまま配送される。
+  // 同期・有界 native API (現 candidate は GET_CURRENT_OBJECT, GET_CALLER_OBJECT) に
+  // 限定して trap 内で直接処理し、dispatch frame を積まずに即時復帰する。
+  //
+  // 重要 (Luna レビュー指摘 1):
+  // 移行対象外の mode == svc_mode::thread (GRANT_REGION, YIELD, CALL_METHOD 等) や
+  // 未移行の mode::handler (MEMORY_OWNER 等) は、trap 内で先行して属性・権限検査を行わず、
+  // 既存の KOBJ actor dispatch 経路へそのまま通す (先行拒絶の禁止)。
+  // また、専用親ハンドラ宛て (to_root == false) の raw SVC は全 ID で親ハンドラへ無加工配送される。
   if (to_root) {
     const uintptr_t id = ARCH::arg(*frame, 0);
-    const auto *attr = svc_attribute_for(id);
-    if (attr != nullptr) {
-      const bool privileged = !is_context_unprivileged(context);
-      if (!svc_permission_allows(id, privileged)) {
-        ARCH::set_result(*frame, (uintptr_t)object_error::NOT_PRIVILEGED, 0);
-        return;
-      }
-      if (attr->mode == svc_mode::handler) {
+    if (id == (uintptr_t)object_api::GET_CURRENT_OBJECT ||
+        id == (uintptr_t)object_api::GET_CALLER_OBJECT) {
+      const auto *attr = svc_attribute_for(id);
+      if (attr != nullptr && attr->mode == svc_mode::handler) {
+        const bool privileged = !is_context_unprivileged(context);
+        if (!svc_permission_allows(id, privileged)) {
+          ARCH::set_result(*frame, (uintptr_t)object_error::NOT_PRIVILEGED, 0);
+          return;
+        }
         if (id == (uintptr_t)object_api::GET_CURRENT_OBJECT) {
           ARCH::set_result(*frame, (uintptr_t)object_error::OK,
                            current_object(current_thread_id()));
