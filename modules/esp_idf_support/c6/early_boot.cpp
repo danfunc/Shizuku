@@ -1,11 +1,66 @@
 // Stage-2 / Stage-3 bootstrap for ESP32-C6. No IDF OS shim, heap or serial observer.
 #include "shizuku/kernel.hpp"
 #include "shizuku/kernel_object.hpp"
+#include "chips/esp32_c6/chip.hpp"
+#include "chips/esp32_c6/trap_api.hpp"
 #include "chips/esp32_c6/selftest_record.h"
+
+#ifndef SHIZUKU_IRQ_DELAY_US
+#define SHIZUKU_IRQ_DELAY_US 0
+#endif
+static_assert(SHIZUKU_IRQ_DELAY_US >= 0 && SHIZUKU_IRQ_DELAY_US <= 100,
+              "C6 IRQ handler delay must be 0..100 us");
+
+extern "C" void shizuku_freertos_compat_isr_enter(void) __attribute__((weak));
+extern "C" void shizuku_freertos_compat_isr_exit(void) __attribute__((weak));
+extern "C" uint32_t shizuku_freertos_compat_current_task_id(void) __attribute__((weak));
+extern "C" void shizuku_esp_ble_note_irq_dispatch(uint32_t, uint32_t, uint32_t) __attribute__((weak));
+extern "C" void shizuku_esp_ble_note_irq_handler_boundary(uint32_t, uint32_t) __attribute__((weak));
+
+extern "C" void shizuku_esp_ble_pend_compat_context_switch(void) {
+  shizuku::chips::esp32_c6::plic_vector_mode::pend_context_switch();
+}
+
+namespace {
+struct c6_idf_ble_freertos_policy {
+  static void on_enter(uint32_t source, uint32_t mepc) {
+    if (shizuku_freertos_compat_isr_enter) shizuku_freertos_compat_isr_enter();
+    if (shizuku_esp_ble_note_irq_dispatch) {
+      shizuku_esp_ble_note_irq_dispatch(
+          source, mepc,
+          shizuku_freertos_compat_current_task_id
+              ? shizuku_freertos_compat_current_task_id()
+              : 0u);
+    }
+    if ((source == 4u || source == 7u) &&
+        shizuku_esp_ble_note_irq_handler_boundary) {
+      shizuku_esp_ble_note_irq_handler_boundary(source, 0u);
+    }
+#if SHIZUKU_IRQ_DELAY_US > 0
+    if (source == 4u || source == 7u) {
+      const uint64_t delay_start = shizuku::chips::esp32_c6::systimer_now();
+      const uint64_t delay_ticks =
+          static_cast<uint64_t>(SHIZUKU_IRQ_DELAY_US) * 16u;
+      while (shizuku::chips::esp32_c6::systimer_now() - delay_start < delay_ticks) {
+      }
+    }
+#endif
+  }
+
+  static void on_exit(uint32_t source) {
+    if ((source == 4u || source == 7u) &&
+        shizuku_esp_ble_note_irq_handler_boundary) {
+      shizuku_esp_ble_note_irq_handler_boundary(source, 1u);
+    }
+    if (shizuku_freertos_compat_isr_exit) shizuku_freertos_compat_isr_exit();
+  }
+};
+} // namespace
 
 #if defined(SHIZUKU_ESP_BLE)
 extern "C" [[noreturn]] void shizuku_esp_ble_stage1_start(void);
 #endif
+extern "C" void shizuku_c6_mark_boot_phase(uint32_t);
 
 extern "C" {
 // entered, ECALL round-trip, live counter, observed error, observed value.
@@ -54,6 +109,7 @@ extern "C" {
 }
 
 [[noreturn]] void thread0() {
+  shizuku_c6_mark_boot_phase(0xC603u);
   // 1. 段2 diagnostic 初期化 & ECALL round-trip 検証
   shizuku_c6_thread0_diag[0] = 0xC6000001;
   auto result = shizuku::ARCH::syscall(0xC6);
@@ -62,21 +118,14 @@ extern "C" {
   if (result.error == 0 && result.value == 0xC6000002 && !shizuku::ARCH::in_interrupt())
     shizuku_c6_thread0_diag[1] = 0xC6000002;
 
-  // 2. Composition Firmware Entry がリンクされている場合はそれを起動
-  if (&shizuku_firmware_entry != nullptr) {
-    bool ok = shizuku_firmware_entry();
-    if (!ok) {
-      // ローダー失敗: 診断マーカーを記録して halt
-      shizuku_c6_thread0_diag[3] = 0xDEAD0001;
-      for (;;) { asm volatile("fence rw,rw" ::: "memory"); }
-    }
-    // 成功: 協調ディスパッチループへ
-    for (;;) {
-      shizuku_c6_thread0_diag[2] = shizuku_c6_thread0_diag[2] + 1;
-      shizuku::ARCH::syscall(static_cast<uintptr_t>(shizuku::object_api::YIELD));
-      asm volatile("fence rw,rw" ::: "memory");
-    }
-  }
+  // 2. BLE profile enters the shared ESP-IDF NimBLE stage after the kernel is live.
+#if defined(SHIZUKU_ESP_BLE)
+  shizuku_c6_mark_boot_phase(0xC610u);
+  shizuku_esp_ble_stage1_start();
+#else
+  // 2. 実 boot 経路での selftest runner 実行 (RAM record への集中記録)
+  shizuku_c6_run_selftests();
+#endif
 
   // 3. レガシー単体 selftest 経路 (shizuku_firmware_entry が無く、かつ runner がリンクされている場合のみ実行)
   if (&shizuku_c6_run_selftests != nullptr) {
@@ -115,10 +164,13 @@ extern "C" {
 } // namespace
 
 extern "C" [[noreturn]] void shizuku_c6_early_boot() {
+  shizuku::chips::esp32_c6::set_irq_dispatch_hooks(
+      shizuku::chips::esp32_c6::make_irq_dispatch_hooks<c6_idf_ble_freertos_policy>());
   auto &kernel = shizuku::kernel_instance;
   kernel.init();
   shizuku::kernel_object_instance.init();
   kernel.set_object_handler(reinterpret_cast<uintptr_t>(&c6_combined_handler), 0);
+  shizuku_c6_mark_boot_phase(0xC602u);
   const auto boot = shizuku::kernel_object_instance.lend_boot_stack();
   kernel.bootstrap(thread0, boot.base, boot.bytes, boot.ledger, boot.ledger_capacity);
   __builtin_unreachable();

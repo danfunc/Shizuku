@@ -1,9 +1,21 @@
 package(default_visibility = ["//visibility:public"])
 
-exports_files([
-    "main/early_diag.c",
-    "build.sh",
-])
+config_setting(
+    name = "c5_ble_prefer_1m_phy",
+    define_values = {"SHIZUKU_C5_BLE_PREFER_1M_PHY": "1"},
+)
+config_setting(
+    name = "esp_ble_prefer_1m_phy",
+    define_values = {"SHIZUKU_ESP_BLE_PREFER_1M_PHY": "1"},
+)
+config_setting(
+    name = "esp_ota_enabled",
+    define_values = {"esp_ota": "on"},
+)
+config_setting(
+    name = "esp_ota_test_writes_enabled",
+    define_values = {"esp_ota_test_writes": "on"},
+)
 
 sh_binary(
     name = "build_sh",

@@ -9,11 +9,20 @@
 .global shizuku_rv32_trap_entry
 .type shizuku_rv32_trap_entry,@function
 shizuku_rv32_trap_entry:
+#if defined(SHIZUKU_EXP_FASTCALL) && SHIZUKU_EXP_FASTCALL
+  j shizuku_c6_fastcall_trap_check
+.global shizuku_rv32_trap_entry_legacy
+shizuku_rv32_trap_entry_legacy:
+#endif
   // The interrupted stack is trusted and writable (no U-mode stack switch here).
   // Saving before the kernel-stack swap preserves V2's thread-frame geometry.
   addi sp, sp, -RV32_FRAME_BYTES
   sw ra, RV32_F_RA(sp)
   sw t0, RV32_F_T0(sp)
+#if defined(SHIZUKU_C6_STAGE05_TRACE) && SHIZUKU_C6_STAGE05_TRACE
+  csrr t0, 0x7E2
+  sw t0, RV32_F_RESERVED0(sp)
+#endif
   sw t1, RV32_F_T1(sp)
   sw t2, RV32_F_T2(sp)
   sw a0, RV32_F_A0(sp)
@@ -72,6 +81,15 @@ shizuku_rv32_restore:
   csrw mepc, t0
   lw t0, RV32_F_MSTATUS(sp)
   csrw mstatus, t0
+#if defined(SHIZUKU_C6_STAGE05_TRACE) && SHIZUKU_C6_STAGE05_TRACE
+  lui t1, %hi(shizuku_c6_stage05_active)
+  lw t1, %lo(shizuku_c6_stage05_active)(t1)
+  beqz t1, 2f
+  csrr t0, 0x7E2
+  lui t1, %hi(shizuku_c6_stage05_t6)
+  sw t0, %lo(shizuku_c6_stage05_t6)(t1)
+2:
+#endif
   lw ra, RV32_F_RA(sp)
   lw t0, RV32_F_T0(sp)
   lw t1, RV32_F_T1(sp)

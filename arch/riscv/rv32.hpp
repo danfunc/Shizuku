@@ -221,7 +221,7 @@ public:
     asm volatile("ecall"
                  : "+r"(r_a0), "+r"(r_a1)
                  : "r"(r_a2), "r"(r_a3), "r"(r_a4)
-                 : "memory");
+                 : "ra", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "a5", "a6", "a7", "memory");
     return {r_a0, r_a1};
   }
 #else
@@ -248,6 +248,22 @@ public:
     frame->mstatus = context.privileged ? RV32_MSTATUS_MPP : 0;
     // MPIE stays clear until the interrupt matrix and timer are owned.
     context.sp = frame;
+  }
+
+  // サイクルカウンタ処理は IntMode (チップ側) に委ねる。
+  static bool cycle_counter_enable() {
+    if constexpr (HAS_CYCLE_COUNTER) {
+      return IntMode::cycle_counter_enable();
+    } else {
+      return false;
+    }
+  }
+  static uint32_t cycle_counter_read() {
+    if constexpr (HAS_CYCLE_COUNTER) {
+      return IntMode::cycle_counter_read();
+    } else {
+      return 0;
+    }
   }
 
   // タイマ・割込み方式の処理は IntMode (チップ側) に委ねる。

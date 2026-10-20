@@ -18,6 +18,10 @@
 extern "C" void shizuku_boot_trace_phase(uint32_t);
 #endif
 
+#if defined(SHIZUKU_C6_STAGE05_TRACE) && SHIZUKU_C6_STAGE05_TRACE
+extern "C" void shizuku_c6_stage05_hook_handler(void);
+#endif
+
 namespace shizuku {
 
 KERNEL_OBJECT kernel_object_instance;
@@ -1615,6 +1619,9 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
     forward_child_exit(a1, a2, a3);
     return 0;
   case object_api::GET_CURRENT_OBJECT:
+#if defined(SHIZUKU_C6_STAGE05_TRACE) && SHIZUKU_C6_STAGE05_TRACE
+    shizuku_c6_stage05_hook_handler();
+#endif
     value = current_object(kernel_instance.current_thread_id());
     break;
   case object_api::GET_CALLER_OBJECT:

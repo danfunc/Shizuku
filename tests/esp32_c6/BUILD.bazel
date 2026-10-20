@@ -18,7 +18,10 @@ sh_test(
 
 cc_test(
     name = "c6_concepts_test",
-    srcs = ["//chips/esp32_c6:test_c6_concepts.cpp"],
+    srcs = [
+        "//chips/esp32_c6:test_c6_concepts.cpp",
+        "//chips/esp32_c6:stage05_trace.cpp",
+    ],
     copts = ["-std=c++20"],
     deps = [
         "//boards/esp32_c6:headers",
@@ -66,6 +69,7 @@ sh_test(
         "//chips/esp32_c6:test_trap_static.py",
         "//chips/esp32_c6:trap.cpp",
         "//chips/esp32_c6:trap_api.hpp",
+        "//chips/esp32_c6:stop_capture.hpp",
         "//modules/esp_idf_support/c6:early_boot.cpp",
         "//modules/esp_idf_support/firmware:main/early_diag.c",
         "//:c6_test_headers",
@@ -80,6 +84,16 @@ cc_test(
     copts = ["-std=c++20"],
     deps = [
         "//arch/riscv:pmp",
+        "//chips/esp32_c6:headers",
+        "//:internal_headers",
+    ],
+)
+
+cc_test(
+    name = "stop_capture_test",
+    srcs = ["//chips/esp32_c6:stop_capture_test.cpp"],
+    copts = ["-std=c++20"],
+    deps = [
         "//chips/esp32_c6:headers",
         "//:internal_headers",
     ],

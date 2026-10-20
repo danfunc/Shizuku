@@ -33,16 +33,31 @@ TARGET=${4:-esp32c6}
 PROFILE=${5:-}
 BLE_PREFER_1M_PHY=${SHIZUKU_ESP_BLE_PREFER_1M_PHY:-${SHIZUKU_C5_BLE_PREFER_1M_PHY:-0}}
 case "$TARGET" in esp32c6|esp32c5) ;; *) fail "未対応の IDF target: $TARGET" ;; esac
-
-PROJECT_DIR_ARG="${6:-${SHIZUKU_IDF_PROJECT_DIR:-${IDF_PROJECT_PATH:-}}}"
-if [ -n "$PROJECT_DIR_ARG" ]; then
-  SRC=$(abspath "$PROJECT_DIR_ARG")
-else
-  SRC=$(cd -P "$(dirname "$0")" && pwd)
-fi
-
-test -f "$SRC/CMakeLists.txt" || fail "IDF project directory does not contain CMakeLists.txt: $SRC"
-test -d "$SRC/main" || fail "IDF project directory does not contain main/: $SRC"
+IDF_PROFILE_ARGS=()
+case "$PROFILE" in
+  "") ;;
+  ble)
+    case "$BLE_PREFER_1M_PHY" in 0|1) ;; *) fail "SHIZUKU_C5_BLE_PREFER_1M_PHY は 0 または 1" ;; esac
+    export SHIZUKU_ESP_BLE=1
+    IDF_PROFILE_ARGS+=("-DSHIZUKU_ESP_BLE=ON"
+                       "-DSHIZUKU_ESP_BLE_PREFER_1M_PHY=$BLE_PREFER_1M_PHY"
+                       "-DSHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG=1"
+                       "-DSHIZUKU_ESP_BLE_ENABLE_SCHED_DIAG_IRQ_MASK=1")
+    if test "$TARGET" = esp32c6; then
+      BLE_COMPAT_GRANT_CYCLES=${SHIZUKU_BLE_COMPAT_GRANT_CYCLES:-1600}
+      if [[ ! "$BLE_COMPAT_GRANT_CYCLES" =~ ^[1-9][0-9]*$ ]] ||
+         (( ${#BLE_COMPAT_GRANT_CYCLES} > 10 )); then
+        fail "SHIZUKU_BLE_COMPAT_GRANT_CYCLES must be a positive uint32_t"
+      fi
+      if (( BLE_COMPAT_GRANT_CYCLES > 4294967295 )); then
+        fail "SHIZUKU_BLE_COMPAT_GRANT_CYCLES must be a positive uint32_t"
+      fi
+      IDF_PROFILE_ARGS+=("-DSHIZUKU_BLE_COMPAT_GRANT_CYCLES=$BLE_COMPAT_GRANT_CYCLES")
+    fi
+    ;;
+  *) fail "未対応の firmware profile: $PROFILE" ;;
+esac
+SRC=$(cd -P "$(dirname "$0")" && pwd)
 
 test -s "$ARCHIVE" || fail "カーネルのアーカイブが無い/空: $ARCHIVE"
 test -f "$IDF_PATH/export.sh" || fail "IDF_PATH が ESP-IDF を指していない (--action_env=IDF_PATH が要る)"

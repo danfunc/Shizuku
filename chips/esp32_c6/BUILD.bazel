@@ -8,10 +8,16 @@ package(default_visibility = ["//visibility:public"])
 exports_files([
     "chip.hpp",
     "rv32_c6.hpp",
+    "pmp_c6.hpp",
     "trap.cpp",
     "c6_vectors.S",
+    "c6_fastcall.S",
+    "fastcall.h",
+    "fastcall_bench.cpp",
     "selftest_adapter.cpp",
     "selftest_record.h",
+    "stop_capture.hpp",
+    "stop_capture_test.cpp",
     "systimer.hpp",
     "trap_api.hpp",
     "test_c6_concepts.cpp",
@@ -28,13 +34,18 @@ exports_files([
 
 cc_library(
     name = "headers",
+    textual_hdrs = ["c6_fastcall.S"],
     hdrs = [
         "chip.hpp",
+        "fastcall.h",
         "rv32_c6.hpp",
+        "pmp_c6.hpp",
         "selftest_record.h",
+        "stop_capture.hpp",
         "systimer.hpp",
         "trap_api.hpp",
     ],
+    defines = ["SHIZUKU_EXP_C6_STAGE1=1"],
     includes = ["."],
     deps = [
         "//arch/riscv:pmp",
@@ -49,6 +60,15 @@ cc_library(
 cc_library(
     name = "systimer",
     hdrs = ["systimer.hpp"],
+    includes = ["."],
+    deps = [
+        "//arch/riscv:pmp",
+    ],
+)
+
+cc_library(
+    name = "pmp_c6",
+    hdrs = ["pmp_c6.hpp"],
     includes = ["."],
     deps = [
         "//arch/riscv:pmp",

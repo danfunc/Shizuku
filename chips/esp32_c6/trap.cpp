@@ -2,8 +2,12 @@
 #include "arch/riscv/trap_route.hpp"
 #include "chips/esp32_c6/systimer.hpp"
 #include "chips/esp32_c6/trap_api.hpp"
+#include "chips/esp32_c6/stop_capture.hpp"
+
+#include <cstddef>
 
 using arch = shizuku::ARCH;
+namespace stop_capture = shizuku::chips::esp32_c6::stop_capture;
 static_assert((sizeof(shizuku::KERNEL::call_frame_header) + RV32_FRAME_BYTES) % 16 == 0,
               "V2 call-frame geometry must preserve the RV32 16-byte stack ABI");
 extern "C" {
@@ -12,6 +16,20 @@ volatile uint32_t shizuku_c6_irq_depth;
 volatile uint32_t shizuku_c6_trap_depth;
 // status, cause, PC, mtval, ECALL count; JTAG-readable even on fatal traps.
 volatile uint32_t shizuku_c6_trap_diag[5];
+// Durable failure snapshot. It is invalidated at the next explicit boot marker
+// and committed by writing magic last.
+__attribute__((used, aligned(16), section(".noinit")))
+volatile stop_capture::capture_record shizuku_c6_stop_capture;
+// [0..7] magic/version/probe_count/first_bad_task/address/expected/actual/flags;
+// then nine six-word records {task_id, stack_base, stack_top, entry_sp, checks, flags}.
+__attribute__((used, aligned(16), section(".noinit")))
+volatile uint32_t shizuku_c6_stack_diag[8u + 9u * 6u];
+__attribute__((used, aligned(4), section(".noinit")))
+volatile uint32_t shizuku_c6_boot_marker;
+__attribute__((used, aligned(4), section(".noinit")))
+volatile uint32_t shizuku_c6_boot_generation;
+__attribute__((used, aligned(4), section(".noinit")))
+volatile uint32_t shizuku_c6_boot_marker_magic;
 // SYSTIMER IRQ count, max IRQ depth, pend/switch count, last oneshot ticks,
 // last IRQ mcause, last mie readback during init/IRQ setup, pend_context_switch calls.
 volatile uint32_t shizuku_c6_timer_diag[7];
@@ -43,14 +61,175 @@ extern char _bss_end;
 }
 namespace {
 uint32_t active_mstatus;
+volatile arch::exception_frame_t *active_frame;
+volatile arch::context_t *active_context;
+volatile uint32_t active_stop_phase;
+volatile uint32_t stop_capture_busy;
 volatile uint32_t pend_flag;
 uint64_t armed_target;
+uint32_t trap_probe_interval_count;
 namespace c6 = shizuku::ports::c6;
-extern "C" void shizuku_freertos_compat_isr_enter(void) __attribute__((weak));
-extern "C" void shizuku_freertos_compat_isr_exit(void) __attribute__((weak));
-extern "C" uint32_t shizuku_freertos_compat_current_task_id(void) __attribute__((weak));
-extern "C" void shizuku_esp_ble_note_irq_dispatch(uint32_t, uint32_t, uint32_t) __attribute__((weak));
-extern "C" void shizuku_esp_ble_note_irq_handler_boundary(uint32_t, uint32_t) __attribute__((weak));
+constexpr stop_capture::ram_range kC6Dram{0x40800000u, 0x40860000u};
+constexpr uint32_t kBootMarkerMagic = 0x424D3643u; // "C6MB"
+constexpr uint32_t kStackDiagMagic = 0x43533643u; // "C6SC"
+constexpr uint32_t kStackDiagVersion = 1u;
+constexpr uint32_t kKernelStackTaskId = 0u;
+constexpr uint32_t kUnassignedStackTaskId = UINT32_MAX;
+constexpr size_t kStackDiagHeaderWords = 8u;
+constexpr size_t kStackDiagRecordWords = 6u;
+constexpr size_t kStackDiagRecordCount = 9u;
+constexpr uint32_t kStackCanary[4] = {
+    0xC6A55A3Cu, 0x51ACCAFEu, 0x0F3CC3F0u, 0xA55AC66Au};
+constexpr uint32_t kStackProbeInterval = 1024u;
+static_assert(sizeof(shizuku_c6_kernel_stack) == 4096u,
+              "C6 trap stack must remain 4096 bytes");
+shizuku::chips::esp32_c6::irq_dispatch_hooks g_irq_dispatch_hooks{nullptr, nullptr};
+size_t stack_record_offset(size_t slot) {
+  return kStackDiagHeaderWords + slot * kStackDiagRecordWords;
+}
+void stack_diag_init() {
+  shizuku_c6_stack_diag[0] = 0u;
+  shizuku_c6_stack_diag[1] = kStackDiagVersion;
+  for (size_t i = 2; i < 8; ++i) shizuku_c6_stack_diag[i] = 0u;
+  for (size_t slot = 0; slot < kStackDiagRecordCount; ++slot) {
+    const size_t base = stack_record_offset(slot);
+    shizuku_c6_stack_diag[base] = kUnassignedStackTaskId;
+    for (size_t i = 1; i < kStackDiagRecordWords; ++i)
+      shizuku_c6_stack_diag[base + i] = 0u;
+  }
+  shizuku_c6_stack_diag[0] = kStackDiagMagic;
+}
+void record_stack_fault(uint32_t task_id, uintptr_t address,
+                        uint32_t expected, uint32_t actual, uint32_t flags) {
+  if (shizuku_c6_stack_diag[7] != 0u) return;
+  shizuku_c6_stack_diag[3] = task_id;
+  shizuku_c6_stack_diag[4] = static_cast<uint32_t>(address);
+  shizuku_c6_stack_diag[5] = expected;
+  shizuku_c6_stack_diag[6] = actual;
+  shizuku_c6_stack_diag[7] = flags;
+}
+void write_stack_canary(uint32_t task_id, uintptr_t stack_base,
+                        uintptr_t stack_top, uintptr_t entry_sp) {
+  if (!stop_capture::range_contains(kC6Dram, stack_base, 4096u, 8u) ||
+      stack_top != stack_base + 4096u || entry_sp < stack_base + 16u ||
+      entry_sp > stack_top || entry_sp % 16u != 0u) {
+    record_stack_fault(task_id, stack_base, 4096u,
+                       static_cast<uint32_t>(entry_sp), 2u);
+    return;
+  }
+  size_t slot = kStackDiagRecordCount;
+  for (size_t i = 1; i < kStackDiagRecordCount; ++i) {
+    const size_t base = stack_record_offset(i);
+    if (shizuku_c6_stack_diag[base] == task_id) {
+      slot = i;
+      break;
+    }
+    if (slot == kStackDiagRecordCount &&
+        shizuku_c6_stack_diag[base] == kUnassignedStackTaskId)
+      slot = i;
+  }
+  if (slot == kStackDiagRecordCount) {
+    record_stack_fault(task_id, stack_base, kStackDiagRecordCount - 1u,
+                       kUnassignedStackTaskId, 3u);
+    return;
+  }
+  const size_t record = stack_record_offset(slot);
+  shizuku_c6_stack_diag[record] = task_id;
+  shizuku_c6_stack_diag[record + 1u] = static_cast<uint32_t>(stack_base);
+  shizuku_c6_stack_diag[record + 2u] = static_cast<uint32_t>(stack_top);
+  shizuku_c6_stack_diag[record + 3u] = static_cast<uint32_t>(entry_sp);
+  volatile uint32_t *guard = reinterpret_cast<volatile uint32_t *>(stack_base);
+  for (size_t i = 0; i < 4; ++i) guard[i] = kStackCanary[i];
+  shizuku_c6_stack_diag[record + 4u] = 0u;
+  shizuku_c6_stack_diag[record + 5u] = 1u;
+}
+void check_stack_canary(size_t slot) {
+  const size_t record = stack_record_offset(slot);
+  const uint32_t task_id = shizuku_c6_stack_diag[record];
+  const uintptr_t stack_base = shizuku_c6_stack_diag[record + 1u];
+  const uintptr_t stack_top = shizuku_c6_stack_diag[record + 2u];
+  if (task_id == kUnassignedStackTaskId ||
+      shizuku_c6_stack_diag[record + 5u] != 1u) return;
+  if (stack_base > UINTPTR_MAX - 4096u || stack_top != stack_base + 4096u ||
+      !stop_capture::range_contains(kC6Dram, stack_base, 4096u, 8u)) {
+    record_stack_fault(task_id, stack_base, 4096u,
+                       static_cast<uint32_t>(stack_top), 2u);
+    return;
+  }
+  volatile uint32_t *guard = reinterpret_cast<volatile uint32_t *>(stack_base);
+  shizuku_c6_stack_diag[record + 4u] += 1u;
+  shizuku_c6_stack_diag[2] += 1u;
+  for (size_t i = 0; i < 4; ++i) {
+    const uint32_t actual = guard[i];
+    if (actual != kStackCanary[i])
+      record_stack_fault(task_id, stack_base + i * sizeof(uint32_t),
+                         kStackCanary[i], actual, 1u);
+  }
+}
+void initialize_kernel_stack_canary() {
+  const uintptr_t stack_base = reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack);
+  const uintptr_t stack_top = stack_base + sizeof(shizuku_c6_kernel_stack);
+  if (!stop_capture::range_contains(kC6Dram, stack_base,
+                                   sizeof(shizuku_c6_kernel_stack), 16u)) {
+    record_stack_fault(kKernelStackTaskId, stack_base,
+                       sizeof(shizuku_c6_kernel_stack), 0u, 2u);
+    return;
+  }
+  const size_t record = stack_record_offset(0);
+  shizuku_c6_stack_diag[record] = kKernelStackTaskId;
+  shizuku_c6_stack_diag[record + 1u] = static_cast<uint32_t>(stack_base);
+  shizuku_c6_stack_diag[record + 2u] = static_cast<uint32_t>(stack_top);
+  shizuku_c6_stack_diag[record + 3u] = static_cast<uint32_t>(stack_top);
+  shizuku_c6_stack_diag[record + 4u] = 0u;
+  volatile uint32_t *guard =
+      reinterpret_cast<volatile uint32_t *>(stack_base);
+  for (size_t i = 0; i < 4; ++i) guard[i] = kStackCanary[i];
+  shizuku_c6_stack_diag[record + 5u] = 1u;
+}
+void capture_stop_state(uint32_t status, uint32_t caller_pc) {
+  if (stop_capture_busy != 0u) return;
+  stop_capture_busy = 1u;
+  auto *frame = const_cast<arch::exception_frame_t *>(active_frame);
+  auto *context = const_cast<arch::context_t *>(active_context);
+  uint32_t cause = 0u, pc = 0u, tval = 0u, mstatus = 0u;
+  uint32_t sp = 0u, ra = 0u;
+  asm volatile("csrr %0, mcause" : "=r"(cause));
+  asm volatile("csrr %0, mepc" : "=r"(pc));
+  asm volatile("csrr %0, mtval" : "=r"(tval));
+  asm volatile("csrr %0, mstatus" : "=r"(mstatus));
+  asm volatile("mv %0, sp" : "=r"(sp));
+  asm volatile("mv %0, ra" : "=r"(ra));
+  if (shizuku_c6_stack_diag[0] == kStackDiagMagic &&
+      shizuku_c6_stack_diag[1] == kStackDiagVersion) {
+    for (size_t slot = 0; slot < kStackDiagRecordCount; ++slot)
+      check_stack_canary(slot);
+  }
+  if (!context && shizuku_c6_boot_marker_magic == kBootMarkerMagic &&
+      shizuku_c6_boot_marker >= 0xC602u) {
+    auto *candidate = shizuku::kernel_instance.current_context();
+    if (stop_capture::range_contains(
+            kC6Dram, reinterpret_cast<uintptr_t>(candidate),
+            sizeof(arch::context_t), alignof(uint32_t)))
+      context = candidate;
+  }
+  if (!frame && context &&
+      stop_capture::range_contains(kC6Dram,
+          reinterpret_cast<uintptr_t>(context), sizeof(arch::context_t),
+          alignof(uint32_t)))
+    frame = context->sp;
+  const uintptr_t frame_address = reinterpret_cast<uintptr_t>(frame);
+  const uintptr_t context_address = reinterpret_cast<uintptr_t>(context);
+  const bool boot_marker_valid =
+      (shizuku_c6_boot_marker_magic == kBootMarkerMagic);
+  const stop_capture::capture_input input{
+      status, active_stop_phase, caller_pc,
+      frame_address, context_address, cause, pc, tval, mstatus, sp, ra,
+      shizuku_c6_trap_depth, shizuku_c6_irq_depth,
+      boot_marker_valid ? shizuku_c6_boot_marker : 0u,
+      boot_marker_valid ? shizuku_c6_boot_generation : 0u};
+  stop_capture::capture<arch::context_t>(shizuku_c6_stop_capture, input,
+                                        kC6Dram, kC6Dram);
+}
 inline void reg_write(uint32_t address, uint32_t value) {
   *reinterpret_cast<volatile uint32_t *>(address) = value;
 }
@@ -124,18 +303,26 @@ void interrupt_init() {
   asm volatile("csrr %0, mie" : "=r"(mie));
   shizuku_c6_timer_diag[5] = mie;
 }
-[[noreturn]] void stop(uint32_t status) {
-  shizuku_c6_trap_diag[0] = status;
+__attribute__((noinline)) [[noreturn]] void stop(uint32_t status) {
   asm volatile("csrci mstatus, 8\n fence rw,rw" ::: "memory");
+  if (active_stop_phase == 0u) active_stop_phase = status;
+  const uint32_t caller_pc = static_cast<uint32_t>(
+      reinterpret_cast<uintptr_t>(__builtin_return_address(0)));
+  capture_stop_state(status, caller_pc);
+  shizuku_c6_trap_diag[0] = status;
   for (;;) asm volatile("nop" ::: "memory");
 }
 void install_traps() {
   asm volatile("csrci mstatus, 8" ::: "memory");
+  if (shizuku_c6_stack_diag[0] != kStackDiagMagic ||
+      shizuku_c6_stack_diag[1] != kStackDiagVersion)
+    stack_diag_init();
+  initialize_kernel_stack_canary();
   const auto top = reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack + sizeof(shizuku_c6_kernel_stack));
   const auto vector = reinterpret_cast<uintptr_t>(&shizuku_c6_vectors) | 1u;
   asm volatile("csrw mscratch, %0\n csrw mtvec, %1" :: "r"(top), "r"(vector) : "memory");
 }
-void frame_to_context(arch::exception_frame_t &f, arch::context_t &c) {
+SHIZUKU_STAGE05_ATTR void frame_to_context(arch::exception_frame_t &f, arch::context_t &c) {
   c.sp = &f;
 #define COPY(n) c.s##n = f.s##n;
   COPY(0) COPY(1) COPY(2) COPY(3) COPY(4) COPY(5)
@@ -144,6 +331,13 @@ void frame_to_context(arch::exception_frame_t &f, arch::context_t &c) {
   c.privileged = (f.mstatus & RV32_MSTATUS_MPP) == RV32_MSTATUS_MPP;
 }
 void context_to_frame(arch::context_t &c) {
+  // Capture the untrusted context before dereferencing its saved SP.
+  if (!c.privileged) {
+    active_context = &c;
+    active_frame = c.sp;
+    active_stop_phase = 0xE004u;
+    stop(0xE004);
+  }
   auto &f = *c.sp;
 #define COPY(n) f.s##n = c.s##n;
   COPY(0) COPY(1) COPY(2) COPY(3) COPY(4) COPY(5)
@@ -151,9 +345,61 @@ void context_to_frame(arch::context_t &c) {
 #undef COPY
   // Threads always resume with interrupts enabled; only the kernel runs with MIE=0.
   f.mstatus = ((f.mstatus & ~RV32_MSTATUS_MPP) | (c.privileged ? RV32_MSTATUS_MPP : 0)) | RV32_MSTATUS_MPIE;
-  // Actual U-mode is not safe before PMP and a trusted U-entry stack exist.
-  if (!c.privileged) stop(0xE004);
 }
+}
+extern "C" void shizuku_c6_mark_boot_phase(uint32_t phase) {
+  if (phase == 0xC601u) {
+    const uint32_t generation = shizuku_c6_boot_marker_magic == kBootMarkerMagic
+        ? shizuku_c6_boot_generation + 1u : 1u;
+    shizuku_c6_boot_marker_magic = 0u;
+    shizuku_c6_boot_generation = generation ? generation : 1u;
+    shizuku_c6_boot_marker = phase;
+    shizuku_c6_stop_capture.magic = 0u;
+    stop_capture_busy = 0u;
+    active_frame = nullptr;
+    active_context = nullptr;
+    active_stop_phase = 0u;
+    stack_diag_init();
+    trap_probe_interval_count = 0u;
+    shizuku_c6_boot_marker_magic = kBootMarkerMagic;
+    return;
+  }
+  if (shizuku_c6_boot_marker_magic != kBootMarkerMagic) {
+    shizuku_c6_boot_generation = 1u;
+    shizuku_c6_boot_marker_magic = kBootMarkerMagic;
+  }
+  shizuku_c6_boot_marker = phase;
+}
+extern "C" void shizuku_c6_note_plain_task_stack_start(uint32_t task_id,
+                                                         uintptr_t actual_sp) {
+  if (shizuku_c6_stack_diag[0] != kStackDiagMagic ||
+      shizuku_c6_stack_diag[1] != kStackDiagVersion)
+    stack_diag_init();
+  auto *context = shizuku::kernel_instance.current_context();
+  const uintptr_t context_address = reinterpret_cast<uintptr_t>(context);
+  if (!stop_capture::range_contains(kC6Dram, context_address,
+                                   sizeof(arch::context_t), alignof(uint32_t))) {
+    record_stack_fault(task_id, context_address, sizeof(arch::context_t),
+                       static_cast<uint32_t>(actual_sp), 4u);
+    return;
+  }
+  const uintptr_t stack_base = arch::stack_limit(*context);
+  if (stack_base > UINTPTR_MAX - sizeof(shizuku_c6_kernel_stack)) {
+    record_stack_fault(task_id, stack_base, sizeof(shizuku_c6_kernel_stack),
+                       static_cast<uint32_t>(actual_sp), 2u);
+    return;
+  }
+  write_stack_canary(task_id, stack_base,
+                     stack_base + sizeof(shizuku_c6_kernel_stack), actual_sp);
+}
+extern "C" void shizuku_c6_note_plain_task_stack_probe(uint32_t task_id) {
+  for (size_t slot = 1; slot < kStackDiagRecordCount; ++slot) {
+    const size_t record = stack_record_offset(slot);
+    if (shizuku_c6_stack_diag[record] == task_id) {
+      check_stack_canary(slot);
+      return;
+    }
+  }
 }
 namespace {
 // The trapped thread was already saved by the caller; run the deferred switch after it.
@@ -165,7 +411,14 @@ void run_pending_switch() {
   kernel.pendsv_dispatch(kernel.current_context());
 }
 }
-extern "C" SHIZUKU_RAM_TEXT arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_frame_t *frame) {
+extern "C" arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_frame_t *frame) {
+  if (shizuku_c6_stack_diag[0] == kStackDiagMagic &&
+      shizuku_c6_stack_diag[1] == kStackDiagVersion &&
+      (++trap_probe_interval_count & (kStackProbeInterval - 1u)) == 0u)
+    check_stack_canary(0u);
+  active_frame = frame;
+  active_context = nullptr;
+  active_stop_phase = 0xC6F0u;
   const uint32_t previous_mstatus = active_mstatus;
   active_mstatus = frame->mstatus;
   shizuku_c6_trap_depth = shizuku_c6_trap_depth + 1;
@@ -177,14 +430,25 @@ extern "C" SHIZUKU_RAM_TEXT arch::exception_frame_t *shizuku_rv32_trap_dispatch(
     // ECALL from inside the kernel must never overwrite the current thread.
     if (shizuku_c6_trap_depth != 1) stop(0xE003);
     if ((frame->mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) stop(0xE004);
+#if defined(SHIZUKU_C6_STAGE05_TRACE) && SHIZUKU_C6_STAGE05_TRACE
+    const bool is_return = (frame->a0 == 2 && frame->a4 == 0xA55A);
+    shizuku_c6_stage05_is_return = is_return ? 1u : 0u;
+    shizuku_c6_stage05_hook_trap_entry(frame->reserved0, is_return ? 1u : 0u);
+#endif
     auto &kernel = shizuku::kernel_instance;
     auto *context = kernel.current_context();
+    active_context = context;
     frame_to_context(*frame, *context);
     shizuku_c6_trap_diag[4] = shizuku_c6_trap_diag[4] + 1;
     kernel.svc_dispatch(context);
     run_pending_switch();
     context = kernel.current_context();
+    active_context = context;
+    active_frame = context->sp;
     context_to_frame(*context);
+#if defined(SHIZUKU_C6_STAGE05_TRACE) && SHIZUKU_C6_STAGE05_TRACE
+    shizuku_c6_stage05_hook_return_prep(is_return ? 1u : 0u);
+#endif
     result = context->sp;
   }, [&] {
     // MIE is clear inside traps, so IRQs cannot nest: depth is exactly 1.
@@ -204,22 +468,17 @@ extern "C" SHIZUKU_RAM_TEXT arch::exception_frame_t *shizuku_rv32_trap_dispatch(
         plic_pulse_clear(1u << cpu_irq);
       auto &kernel = shizuku::kernel_instance;
       auto *context = kernel.current_context();
+      active_context = context;
       frame_to_context(*frame, *context);
-      if (shizuku_freertos_compat_isr_enter) shizuku_freertos_compat_isr_enter();
-      if (shizuku_esp_ble_note_irq_dispatch)
-        shizuku_esp_ble_note_irq_dispatch(entry.source, frame->mepc,
-            shizuku_freertos_compat_current_task_id
-                ? shizuku_freertos_compat_current_task_id() : 0u);
-      if ((entry.source == 4u || entry.source == 7u) &&
-          shizuku_esp_ble_note_irq_handler_boundary)
-        shizuku_esp_ble_note_irq_handler_boundary(entry.source, 0u);
+      if (g_irq_dispatch_hooks.on_enter)
+        g_irq_dispatch_hooks.on_enter(entry.source, frame->mepc);
       entry.handler(entry.arg);
-      if ((entry.source == 4u || entry.source == 7u) &&
-          shizuku_esp_ble_note_irq_handler_boundary)
-        shizuku_esp_ble_note_irq_handler_boundary(entry.source, 1u);
-      if (shizuku_freertos_compat_isr_exit) shizuku_freertos_compat_isr_exit();
+      if (g_irq_dispatch_hooks.on_exit)
+        g_irq_dispatch_hooks.on_exit(entry.source);
       run_pending_switch();
       context = kernel.current_context();
+      active_context = context;
+      active_frame = context->sp;
       context_to_frame(*context);
       result = context->sp;
       return;
@@ -230,18 +489,25 @@ extern "C" SHIZUKU_RAM_TEXT arch::exception_frame_t *shizuku_rv32_trap_dispatch(
     reg_write(c6::SYSTIMER_INT_CLR, c6::TARGET0_INT_BIT);
     auto &kernel = shizuku::kernel_instance;
     auto *context = kernel.current_context();
+    active_context = context;
     frame_to_context(*frame, *context);
     kernel.timer_expired();
     run_pending_switch();
     context = kernel.current_context();
+    active_context = context;
+    active_frame = context->sp;
     context_to_frame(*context);
     result = context->sp;
   }, [&] {
     // V2 fault recovery requires timer/switch support. Preserve cause and stop.
+    active_stop_phase = 0xE002u;
     stop(0xE002);
   });
   active_mstatus = previous_mstatus;
   shizuku_c6_trap_depth = shizuku_c6_trap_depth - 1;
+  active_frame = nullptr;
+  active_context = nullptr;
+  active_stop_phase = 0u;
   return result;
 }
 extern "C" [[noreturn]] void shizuku_rv32_return_failed() { stop(0xE005); }
@@ -265,9 +531,10 @@ size_t irq_snapshot(irq_dispatch_snapshot *out, size_t capacity) {
 int irq_register(uint32_t source, uint32_t cpu_irq, irq_handler_t handler, void *arg,
                  uint32_t flags, bool enabled, uint32_t level, bool edge) {
   // Match IDF v6.1 esp32c6/esp_cpu_intr.c reservations and Shizuku's timer.
+  // line 8 also rejected: hw test 2026-10-14 showed PLIC never pends it (see radio/c6_intr_alloc.cpp).
   if (source >= 128 || source == c6::SYSTIMER_TARGET0_SOURCE ||
       cpu_irq == 0 || cpu_irq > 30 || cpu_irq == 1 || cpu_irq == 3 ||
-      cpu_irq == 4 || cpu_irq == 6 || cpu_irq == 7 || cpu_irq == c6::TIMER_CPU_INT ||
+      cpu_irq == 4 || cpu_irq == 6 || cpu_irq == 7 || cpu_irq == 8 || cpu_irq == c6::TIMER_CPU_INT ||
       !handler || level == 0 || level > 7) return -1;
   if (::irq_find_source(source) >= 0 || ::irq_find_cpu(cpu_irq) >= 0) return -2;
   size_t slot = 24;
@@ -280,7 +547,7 @@ int irq_register(uint32_t source, uint32_t cpu_irq, irq_handler_t handler, void 
   uint32_t types = reg_read(c6::PLIC_MXINT_TYPE);
   reg_write(c6::PLIC_MXINT_TYPE, edge ? types | bit : types & ~bit);
   reg_write(c6::plic_pri_reg(cpu_irq), level);
-  plic_pulse_clear(bit);
+  if (edge) plic_pulse_clear(bit);  // IDF clears only edge lines (intr_alloc.c:785-787)
   if (enabled) {
     reg_write(c6::PLIC_MXINT_ENABLE, reg_read(c6::PLIC_MXINT_ENABLE) | bit);
     asm volatile("csrs mie, %0" :: "r"(bit) : "memory");
@@ -346,14 +613,61 @@ void plic_vector_mode::enter_thread_mode(uintptr_t top, uintptr_t limit, void (*
   context_to_frame(*context);
   shizuku_rv32_first_return(context->sp);
 }
+bool plic_vector_mode::cycle_counter_enable() {
+  // 段0不変条件: 呼出し文脈は M-only pilot に限定される (chips/esp32_c6/trap.cpp:86-88)。
+  // U-mode 呼出し元に対する動作は未サポート・未検証 (unknown / unsupported; 段1 PMP/trusted U stack ゲート後に対処)。
+  // ESP-IDF (SOC_CPU_HAS_CSR_PC=1, cpu_ll.h) および ESP32-C6 TRM Version 1.2 Chapter 1 (page 42, 53-54):
+  // C6 custom performance counter (PCCR) M-mode only (CSR 0x7E2 mpccr).
+  // mpcer (CSR 0x7E0): bit 0 = 1 (CYCLE: クロックサイクルイベント選択)
+  // mpcmr (CSR 0x7E1): bit 0 = 1 (COUNT_EN: カウンタ有効化, bit 1 COUNT_SAT = 0: 32bit 最大値でラップ)
+  // mcounteren (CSR 0x306) は下位特権 (U/S) への標準カウンタ公開制御であり、M-mode 0x7E2 では不要のため追加しない。
+  // chip 層不変条件に従い busy-wait は行わない。設定レジスタの読み戻しと、ストレートラインの二重読出しで
+  // counter advancement を確認し、進まなければ fail-closed。
+#if defined(__riscv)
+  uint32_t pcer = 0;
+  uint32_t pcmr = 0;
+  uint32_t c1 = 0;
+  uint32_t c2 = 0;
+  asm volatile(
+      "li t0, 1\n"
+      "csrw 0x7E0, t0\n"
+      "csrw 0x7E1, t0\n"
+      "fence rw,rw\n"
+      "csrr %0, 0x7E0\n"
+      "csrr %1, 0x7E1\n"
+      "csrr %2, 0x7E2\n"
+      "fence rw,rw\n"
+      "csrr %3, 0x7E2\n"
+      : "=r"(pcer), "=r"(pcmr), "=r"(c1), "=r"(c2)
+      :
+      : "t0", "memory");
+  if ((pcer & 1u) == 0 || (pcmr & 1u) == 0) {
+    return false;
+  }
+  return c2 != c1;
+#else
+  return false;
+#endif
+}
+uint32_t plic_vector_mode::cycle_counter_read() {
+  // mpccr (CSR 0x7E2): 32-bit Machine Performance Counter Count Register (M-mode only)
+#if defined(__riscv)
+  uint32_t cycles;
+  asm volatile("csrr %0, 0x7E2" : "=r"(cycles));
+  return cycles;
+#else
+  return 0;
+#endif
+}
 bool plic_vector_mode::in_interrupt() { return shizuku_c6_irq_depth != 0; }
 bool plic_vector_mode::current_priv() {
   // The stage-2 runnable domain is M-only; inside a trap report the saved MPP.
   return shizuku_c6_trap_depth == 0 ||
     (active_mstatus & RV32_MSTATUS_MPP) == RV32_MSTATUS_MPP;
 }
-} // namespace shizuku::chips::esp32_c6
 
-extern "C" void shizuku_esp_ble_pend_compat_context_switch(void) {
-  shizuku::chips::esp32_c6::plic_vector_mode::pend_context_switch();
+void set_irq_dispatch_hooks(irq_dispatch_hooks hooks) {
+  g_irq_dispatch_hooks = hooks;
 }
+
+} // namespace shizuku::chips::esp32_c6
