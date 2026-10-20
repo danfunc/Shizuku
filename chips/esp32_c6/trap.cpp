@@ -90,6 +90,7 @@ SHIZUKU_STAGE05_ATTR void context_to_frame(arch::context_t &c) {
 }
 namespace {
 // The trapped thread was already saved by the caller; run the deferred switch after it.
+SHIZUKU_STAGE05_CPP_ATTR
 void run_pending_switch() {
   if (!pend_flag) return;
   pend_flag = 0;

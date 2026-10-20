@@ -49,11 +49,21 @@ extern "C" void shizuku_boot_trace_return_leave(uint32_t, uint32_t);
 extern "C" void shizuku_boot_trace_primitive_stage(uint32_t);
 #endif
 
+#ifndef SHIZUKU_STAGE05_CPP_ATTR
+#if defined(SHIZUKU_C6_STAGE05_IRAM_CPP) && SHIZUKU_C6_STAGE05_IRAM_CPP
+#define SHIZUKU_STAGE05_CPP_ATTR __attribute__((section(".iram1.text")))
+#else
+#define SHIZUKU_STAGE05_CPP_ATTR
+#endif
+#endif
+
 namespace shizuku {
 
 // ISA 層の例外入口が退避先・復帰先として使う文脈。dispatch が現在スレッドを
 // 差し替えれば、そのまま切替になる (退避後と復帰前の 2 回呼ばれる)。
-template <> KERNEL::CONTEXT *KERNEL::current_context() {
+template <>
+SHIZUKU_STAGE05_CPP_ATTR
+KERNEL::CONTEXT *KERNEL::current_context() {
   return m_threads[m_current[BOARD::core_num()]].thread.context;
 }
 

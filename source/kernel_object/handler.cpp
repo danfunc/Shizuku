@@ -19,6 +19,14 @@ extern "C" void shizuku_boot_trace_phase(uint32_t);
 extern "C" void shizuku_c6_stage05_hook_handler(void);
 #endif
 
+#ifndef SHIZUKU_STAGE05_CPP_ATTR
+#if defined(SHIZUKU_C6_STAGE05_IRAM_CPP) && SHIZUKU_C6_STAGE05_IRAM_CPP
+#define SHIZUKU_STAGE05_CPP_ATTR __attribute__((section(".iram1.text")))
+#else
+#define SHIZUKU_STAGE05_CPP_ATTR
+#endif
+#endif
+
 namespace shizuku {
 
 KERNEL_OBJECT kernel_object_instance;
@@ -31,9 +39,12 @@ static_assert((uintptr_t)object_api::EXIT_METHOD == (uintptr_t)primitive::RETURN
 // 実装より前に使う (下の入口が handle を呼ぶ) ので、特殊化の宣言を先に置く。
 // これが無いと暗黙の実体化が先に起きて「実体化後の特殊化」になる。
 template <>
+SHIZUKU_STAGE05_CPP_ATTR
 uintptr_t KERNEL_OBJECT::handle(uintptr_t, uintptr_t, uintptr_t, uintptr_t,
                                 uintptr_t);
-template <> uintptr_t KERNEL_OBJECT::current_object(uint32_t) const;
+template <>
+SHIZUKU_STAGE05_CPP_ATTR
+uintptr_t KERNEL_OBJECT::current_object(uint32_t) const;
 template <> uintptr_t KERNEL_OBJECT::caller_object(uint32_t) const;
 template <> void KERNEL_OBJECT::init();
 template <> uintptr_t KERNEL_OBJECT::handler_entry();
@@ -126,6 +137,7 @@ template <> bool KERNEL_OBJECT::arena_release(arena &, uintptr_t);
 //   参照実装はこれを callee-saved レジスタで渡し、C の引数へ変換する naked シムを
 //   必要としていた — push 順と引数位置の対応を何度も間違えた箇所なので、構造ごと
 //   無くすのが正しい。
+SHIZUKU_STAGE05_CPP_ATTR
 uintptr_t handler_entry_point(uintptr_t a0, uintptr_t a1, uintptr_t a2,
                               uintptr_t a3, uintptr_t unwind_floor) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
@@ -308,7 +320,9 @@ template <> bool KERNEL_OBJECT::start_secondary_core() {
   return true;
 }
 
-template <> uintptr_t KERNEL_OBJECT::current_object(uint32_t thread) const {
+template <>
+SHIZUKU_STAGE05_CPP_ATTR
+uintptr_t KERNEL_OBJECT::current_object(uint32_t thread) const {
   for (uint32_t i = 0; i < kernel_instance.ledger_size(thread); ++i) {
     const auto *entry = kernel_instance.ledger_entry(thread, i);
     if (entry->via == KERNEL::LEDGER_CALL)
@@ -1523,6 +1537,7 @@ uintptr_t KERNEL_OBJECT::memory_owner(uintptr_t handle, object_error &error) {
 }
 
 template <>
+SHIZUKU_STAGE05_CPP_ATTR
 uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
                                 uintptr_t a3, uintptr_t unwind_floor) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0

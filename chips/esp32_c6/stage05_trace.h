@@ -27,6 +27,14 @@
 #define SHIZUKU_STAGE05_ATTR
 #endif
 
+#ifndef SHIZUKU_STAGE05_CPP_ATTR
+#if defined(SHIZUKU_C6_STAGE05_IRAM_CPP) && SHIZUKU_C6_STAGE05_IRAM_CPP
+#define SHIZUKU_STAGE05_CPP_ATTR __attribute__((section(".iram1.text")))
+#else
+#define SHIZUKU_STAGE05_CPP_ATTR
+#endif
+#endif
+
 // 各隣接区間の統計
 typedef struct {
     uint32_t from_id;
