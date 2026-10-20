@@ -11,6 +11,23 @@
 #define SHIZUKU_C6_FASTCALL_STATUS_UNINIT 0
 #define SHIZUKU_C6_FASTCALL_STATUS_PASSED 1
 #define SHIZUKU_C6_FASTCALL_STATUS_FAILED 2
+#define SHIZUKU_C6_FASTCALL_STATUS_BENCH_ONLY 3
+
+// Compile-time comparison modes. Defaults preserve the probe, trap statistics,
+// and kernel-side return sanitization behavior.
+#ifndef SHIZUKU_C6_FASTCALL_EMPTY_BENCH
+#define SHIZUKU_C6_FASTCALL_EMPTY_BENCH 0
+#endif
+#ifndef SHIZUKU_C6_FASTCALL_TRAP_STATS
+#define SHIZUKU_C6_FASTCALL_TRAP_STATS 1
+#endif
+#ifndef SHIZUKU_C6_FASTCALL_CLEAR_RETURN_IN_CALLER
+#define SHIZUKU_C6_FASTCALL_CLEAR_RETURN_IN_CALLER 0
+#endif
+
+#define SHIZUKU_C6_FASTCALL_MODE_EMPTY_BENCH       (1u << 0)
+#define SHIZUKU_C6_FASTCALL_MODE_TRAP_STATS_OFF    (1u << 1)
+#define SHIZUKU_C6_FASTCALL_MODE_CLEAR_IN_CALLER   (1u << 2)
 
 #define SHIZUKU_C6_FASTCALL_ERR_NONE             0
 #define SHIZUKU_C6_FASTCALL_ERR_RETURN_VAL       1
@@ -74,7 +91,7 @@ typedef struct {
     uint32_t rounds_requested;     // 16: 128
     uint32_t rounds_completed;     // 20: completed sample count
     uint32_t placement_mode;       // 24: 1 (IRAM asm)
-    uint32_t reserved0;            // 28: 0
+    uint32_t reserved0;            // 28: SHIZUKU_C6_FASTCALL_MODE_* bits
 
     // HP CPU core clock verification (SYSTIMER 16MHz vs PCCR 0x7E2)
     uint32_t systimer_ticks;       // 32: SYSTIMER delta (ticks at 16MHz)

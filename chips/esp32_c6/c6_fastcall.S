@@ -61,6 +61,11 @@ shizuku_c6_fastcall_probe_s_after: .space 48
 .global shizuku_c6_fastcall_leaf_callee
 .type shizuku_c6_fastcall_leaf_callee,@function
 shizuku_c6_fastcall_leaf_callee:
+#if SHIZUKU_C6_FASTCALL_EMPTY_BENCH
+  // Minimal method payload for a dedicated bench-only image. Entry remains fixed.
+  addi a0, a0, 1
+  ret
+#else
   // Callee entry check: save argument a0 to caller stub's empty frame slot 60(sp).
   // No non-argument registers are overwritten prior to reading their entry values.
   sw a0, 60(sp)
@@ -121,7 +126,7 @@ shizuku_c6_fastcall_leaf_callee:
   // Restore original argument a0 from 60(sp)
   lw a0, 60(sp)
 
-  // Deliberately dirty scratch registers (a1-a7, t0-t6, gp, tp) to prove Trap 2 zeroes them
+  // Deliberately dirty return-side registers to verify the selected return sanitizer.
   li t0, 0xDEAD0001
   li t1, 0xDEAD0002
   li t2, 0xDEAD0003
@@ -142,6 +147,7 @@ shizuku_c6_fastcall_leaf_callee:
   // 1-method operation: increment argument a0 by 1
   addi a0, a0, 1
   ret
+#endif
 .size shizuku_c6_fastcall_leaf_callee, .-shizuku_c6_fastcall_leaf_callee
 
 // ---------------------------------------------------------------------------
@@ -201,6 +207,26 @@ shizuku_c6_fastcall_stub:
 
   // Execution resumes here after Trap 2 mret.
   // a0 contains the return value from callee.
+#if SHIZUKU_C6_FASTCALL_CLEAR_RETURN_IN_CALLER
+  // The caller stub is the trusted boundary that clears return-side scratch.
+  li ra, 0
+  li gp, 0
+  li tp, 0
+  li a1, 0
+  li a2, 0
+  li a3, 0
+  li a4, 0
+  li a5, 0
+  li a6, 0
+  li a7, 0
+  li t0, 0
+  li t1, 0
+  li t2, 0
+  li t3, 0
+  li t4, 0
+  li t5, 0
+  li t6, 0
+#endif
   // Restore caller's original callee-saved registers, gp, tp, and ra:
   lw ra, 0(sp)
   lw gp, 4(sp)
@@ -386,7 +412,9 @@ shizuku_c6_fastcall_trap_check:
 .global shizuku_c6_fastcall_trap_call
 .type shizuku_c6_fastcall_trap_call,@function
 shizuku_c6_fastcall_trap_call:
+#if SHIZUKU_C6_FASTCALL_TRAP_STATS
   csrr t2, 0x7E2  // trap asm body start timestamp (PCCR)
+#endif
 
   // Access private M-mode fixed descriptor
   lui t1, %hi(shizuku_c6_fastcall_descriptor)
@@ -416,6 +444,7 @@ shizuku_c6_fastcall_trap_call:
   csrw mscratch, t0
 
   // Record measured asm body duration (not entire architectural IRQ-off window)
+#if SHIZUKU_C6_FASTCALL_TRAP_STATS
   csrr t3, 0x7E2
   sub t2, t3, t2
   lui t1, %hi(shizuku_c6_fastcall_record)
@@ -424,6 +453,7 @@ shizuku_c6_fastcall_trap_call:
   bleu t2, t3, 1f
   sw t2, SHIZUKU_C6_FASTCALL_REC_MAX_TRAP1(t1)
 1:
+#endif
   // Register privacy: zero all scratch registers, gp, tp so caller data does not leak
   li gp, 0
   li tp, 0
@@ -457,7 +487,9 @@ shizuku_c6_fastcall_trap_call:
 .global shizuku_c6_fastcall_trap_return
 .type shizuku_c6_fastcall_trap_return,@function
 shizuku_c6_fastcall_trap_return:
+#if SHIZUKU_C6_FASTCALL_TRAP_STATS
   csrr t4, 0x7E2  // trap asm body start timestamp (PCCR)
+#endif
 
   lui t1, %hi(shizuku_c6_fastcall_descriptor)
   addi t1, t1, %lo(shizuku_c6_fastcall_descriptor)
@@ -482,6 +514,7 @@ shizuku_c6_fastcall_trap_return:
   csrw mscratch, t0
 
   // Record measured asm body duration (not entire architectural IRQ-off window)
+#if SHIZUKU_C6_FASTCALL_TRAP_STATS
   csrr t3, 0x7E2
   sub t2, t3, t4
   lui t1, %hi(shizuku_c6_fastcall_record)
@@ -490,8 +523,10 @@ shizuku_c6_fastcall_trap_return:
   bleu t2, t3, 1f
   sw t2, SHIZUKU_C6_FASTCALL_REC_MAX_TRAP2(t1)
 1:
+#endif
   // Register privacy: zero all non-return scratch registers AND ra, gp, tp so callee secrets do not leak
   // Note: a0 preserves callee return value
+#if !SHIZUKU_C6_FASTCALL_CLEAR_RETURN_IN_CALLER
   li ra, 0
   li gp, 0
   li tp, 0
@@ -509,6 +544,7 @@ shizuku_c6_fastcall_trap_return:
   li t4, 0
   li t5, 0
   li t6, 0
+#endif
 
   mret
 

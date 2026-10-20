@@ -83,6 +83,16 @@ void shizuku_c6_run_fastcall_selftests(void) {
     shizuku_c6_fastcall_record.error_code = SHIZUKU_C6_FASTCALL_ERR_NONE;
     shizuku_c6_fastcall_record.rounds_completed = 0;
     shizuku_c6_fastcall_record.assert_pass_mask = 0;
+    shizuku_c6_fastcall_record.reserved0 = 0;
+#if SHIZUKU_C6_FASTCALL_EMPTY_BENCH
+    shizuku_c6_fastcall_record.reserved0 |= SHIZUKU_C6_FASTCALL_MODE_EMPTY_BENCH;
+#endif
+#if !SHIZUKU_C6_FASTCALL_TRAP_STATS
+    shizuku_c6_fastcall_record.reserved0 |= SHIZUKU_C6_FASTCALL_MODE_TRAP_STATS_OFF;
+#endif
+#if SHIZUKU_C6_FASTCALL_CLEAR_RETURN_IN_CALLER
+    shizuku_c6_fastcall_record.reserved0 |= SHIZUKU_C6_FASTCALL_MODE_CLEAR_IN_CALLER;
+#endif
     shizuku_c6_fastcall_record.max_trap1_cycles = 0;
     shizuku_c6_fastcall_record.max_trap2_cycles = 0;
 
@@ -93,7 +103,9 @@ void shizuku_c6_run_fastcall_selftests(void) {
     const uint32_t overhead = calibrate_read_overhead();
     shizuku_c6_fastcall_record.calibrated_overhead = overhead;
 
-    // 3. Functional Selftest using the single fixed ASM callee (no descriptor modification)
+#if !SHIZUKU_C6_FASTCALL_EMPTY_BENCH
+    // Functional selftest is retained in the default probe image only.
+    // The empty-payload image is explicitly BENCH_ONLY and leaves assert mask zero.
     shizuku_c6_fastcall_s_nonzero = 0;
     shizuku_c6_fastcall_gp_tp_nonzero = 0;
     shizuku_c6_fastcall_nonarg_nonzero = 0;
@@ -174,8 +186,9 @@ void shizuku_c6_run_fastcall_selftests(void) {
     } else {
         shizuku_c6_fastcall_record.error_code = SHIZUKU_C6_FASTCALL_ERR_CALLEE_NONARG_DIRTY;
     }
+#endif // !SHIZUKU_C6_FASTCALL_EMPTY_BENCH
 
-    // 4. 128-round benchmark with the exact same fixed asm callee (no descriptor modification)
+    // 128-round benchmark uses the same fixed entry symbol in every image.
     uint64_t total_cycles = 0;
     uint32_t raw_min = 0xFFFFFFFFu;
 
@@ -203,9 +216,41 @@ void shizuku_c6_run_fastcall_selftests(void) {
     shizuku_c6_fastcall_record.net_min = (raw_min > overhead) ? (raw_min - overhead) : 0;
     shizuku_c6_fastcall_record.net_mean = (raw_mean > overhead) ? (raw_mean - overhead) : 0;
 
+#if SHIZUKU_C6_FASTCALL_EMPTY_BENCH
+    if (shizuku_c6_fastcall_record.error_code == SHIZUKU_C6_FASTCALL_ERR_NONE &&
+        shizuku_c6_fastcall_record.rounds_completed == SHIZUKU_C6_FASTCALL_ROUNDS) {
+        shizuku_c6_fastcall_record.status = SHIZUKU_C6_FASTCALL_STATUS_BENCH_ONLY;
+#if SHIZUKU_C6_FASTCALL_TRAP_STATS
+        BOARD::diag_printf("[FASTCALL] BENCH_ONLY: raw_min=%u net_min=%u raw_mean=%u net_mean=%u cpu_mhz=%u trap1_max=%u trap2_max=%u asserts=0x%02x\n",
+                           (unsigned)shizuku_c6_fastcall_record.raw_min,
+                           (unsigned)shizuku_c6_fastcall_record.net_min,
+                           (unsigned)shizuku_c6_fastcall_record.raw_mean,
+                           (unsigned)shizuku_c6_fastcall_record.net_mean,
+                           (unsigned)shizuku_c6_fastcall_record.cpu_mhz,
+                           (unsigned)shizuku_c6_fastcall_record.max_trap1_cycles,
+                           (unsigned)shizuku_c6_fastcall_record.max_trap2_cycles,
+                           (unsigned)shizuku_c6_fastcall_record.assert_pass_mask);
+#else
+        BOARD::diag_printf("[FASTCALL] BENCH_ONLY: raw_min=%u net_min=%u raw_mean=%u net_mean=%u cpu_mhz=%u trapbody=unmeasured asserts=0x%02x\n",
+                           (unsigned)shizuku_c6_fastcall_record.raw_min,
+                           (unsigned)shizuku_c6_fastcall_record.net_min,
+                           (unsigned)shizuku_c6_fastcall_record.raw_mean,
+                           (unsigned)shizuku_c6_fastcall_record.net_mean,
+                           (unsigned)shizuku_c6_fastcall_record.cpu_mhz,
+                           (unsigned)shizuku_c6_fastcall_record.assert_pass_mask);
+#endif
+    } else {
+        shizuku_c6_fastcall_record.status = SHIZUKU_C6_FASTCALL_STATUS_FAILED;
+        BOARD::diag_printf("[FASTCALL] BENCH_ONLY_FAIL: error=%u completed=%u asserts=0x%02x\n",
+                           (unsigned)shizuku_c6_fastcall_record.error_code,
+                           (unsigned)shizuku_c6_fastcall_record.rounds_completed,
+                           (unsigned)shizuku_c6_fastcall_record.assert_pass_mask);
+    }
+#else
     if (shizuku_c6_fastcall_record.assert_pass_mask == SHIZUKU_C6_FASTCALL_ASSERT_ALL_MASK &&
         shizuku_c6_fastcall_record.error_code == SHIZUKU_C6_FASTCALL_ERR_NONE) {
         shizuku_c6_fastcall_record.status = SHIZUKU_C6_FASTCALL_STATUS_PASSED;
+#if SHIZUKU_C6_FASTCALL_TRAP_STATS
         BOARD::diag_printf("[FASTCALL] PASS: raw_min=%u net_min=%u raw_mean=%u net_mean=%u cpu_mhz=%u trap1_max=%u trap2_max=%u asserts=0x%02x\n",
                            (unsigned)shizuku_c6_fastcall_record.raw_min,
                            (unsigned)shizuku_c6_fastcall_record.net_min,
@@ -215,6 +260,15 @@ void shizuku_c6_run_fastcall_selftests(void) {
                            (unsigned)shizuku_c6_fastcall_record.max_trap1_cycles,
                            (unsigned)shizuku_c6_fastcall_record.max_trap2_cycles,
                            (unsigned)shizuku_c6_fastcall_record.assert_pass_mask);
+#else
+        BOARD::diag_printf("[FASTCALL] PASS: raw_min=%u net_min=%u raw_mean=%u net_mean=%u cpu_mhz=%u trapbody=unmeasured asserts=0x%02x\n",
+                           (unsigned)shizuku_c6_fastcall_record.raw_min,
+                           (unsigned)shizuku_c6_fastcall_record.net_min,
+                           (unsigned)shizuku_c6_fastcall_record.raw_mean,
+                           (unsigned)shizuku_c6_fastcall_record.net_mean,
+                           (unsigned)shizuku_c6_fastcall_record.cpu_mhz,
+                           (unsigned)shizuku_c6_fastcall_record.assert_pass_mask);
+#endif
     } else {
         shizuku_c6_fastcall_record.status = SHIZUKU_C6_FASTCALL_STATUS_FAILED;
         BOARD::diag_printf("[FASTCALL] FAIL: status=%u error=%u asserts=0x%02x\n",
@@ -222,6 +276,7 @@ void shizuku_c6_run_fastcall_selftests(void) {
                            (unsigned)shizuku_c6_fastcall_record.error_code,
                            (unsigned)shizuku_c6_fastcall_record.assert_pass_mask);
     }
+#endif // SHIZUKU_C6_FASTCALL_EMPTY_BENCH
 }
 
 } // extern "C"
