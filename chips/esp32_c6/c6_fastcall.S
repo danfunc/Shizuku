@@ -10,7 +10,7 @@
 //    Trap 2: Callee -> Return Stub -> Kernel -> Caller
 // ===========================================================================
 
-.section .iram1.data,"aw",@progbits
+.section .data,"aw",@progbits
 .balign 16
 .global shizuku_c6_fastcall_descriptor
 shizuku_c6_fastcall_descriptor:
