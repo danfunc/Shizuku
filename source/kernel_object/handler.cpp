@@ -325,22 +325,11 @@ template <> bool KERNEL_OBJECT::start_secondary_core() {
 }
 
 template <> uintptr_t KERNEL_OBJECT::current_object(uint32_t thread) const {
-  for (uint32_t i = 0; i < kernel_instance.ledger_size(thread); ++i) {
-    const auto *entry = kernel_instance.ledger_entry(thread, i);
-    if (entry->via == KERNEL::LEDGER_CALL)
-      return entry->object;
-  }
-  return m_thread_object[thread];
+  return kernel_instance.current_object(thread);
 }
 
 template <> uintptr_t KERNEL_OBJECT::caller_object(uint32_t thread) const {
-  uint32_t calls = 0;
-  for (uint32_t i = 0; i < kernel_instance.ledger_size(thread); ++i) {
-    const auto *entry = kernel_instance.ledger_entry(thread, i);
-    if (entry->via == KERNEL::LEDGER_CALL && ++calls == 2)
-      return entry->object;
-  }
-  return calls == 1 ? m_thread_object[thread] : (uintptr_t)NO_OBJECT;
+  return kernel_instance.caller_object(thread);
 }
 
 // 巻き戻さずにその場で答える。**エラーを黙って捨てない**ための共通口 (D12)。

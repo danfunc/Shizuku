@@ -15,8 +15,11 @@ struct svc_attribute {
   svc_save_level save_level;
   svc_authority authority;
 };
-// V2 consumes permission/authority only. mode/save/from_isr describe V3;
-// they must not change V2's raw parent-handler routing.
+// In V3 Stage V1, when an SVC resolves to the root KernelObject handler (to_root == true),
+// svc_mode::handler selects direct kernel trap handling for synchronous bounded APIs
+// (GET_CURRENT_OBJECT / GET_CALLER_OBJECT) without pushing a dispatch frame.
+// Mode does NOT alter objectland raw routing: if a custom dedicated parent handler is
+// bound (to_root == false), raw SVC delivery to the registered parent is strictly preserved.
 inline constexpr auto svc_attributes = [] {
   std::array<svc_attribute, 32> a{};
   for (auto &v : a)

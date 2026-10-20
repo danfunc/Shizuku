@@ -242,6 +242,8 @@ public:
     const THREAD &thread = current_thread();
     return thread.call_stack.depth ? thread.ledger_top().unwind_floor : 0;
   }
+  uintptr_t current_object(uint32_t thread) const;
+  uintptr_t caller_object(uint32_t thread) const;
   // スケジューリング方針 (kobj 側) が候補を探すための読み出し。
   // そのスレッドを走らせてよいコアの集合 (方針側が候補を絞るために読む)。
   uint32_t thread_affinity(uint32_t thread) const {

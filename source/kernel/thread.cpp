@@ -8,7 +8,9 @@
 //  ★期限は quantum ではない。正常時は期限より十分早く返すので発火せず、その限り
 //    「返さない限り処理は原子」という協調の性質は保たれる (§10.2)。期限は
 //    「1 つの暴走が全系を凍らせない」ための安全網。
+#if __has_include("shizuku/config.hpp")
 #include "shizuku/kernel.hpp"
+#endif
 
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
 extern "C" void shizuku_selftest_fault_phase(uint32_t, uint32_t);

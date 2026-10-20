@@ -31,8 +31,11 @@
 //
 //  ★RETURN を解釈できるのは登録済み KOBJ だけ。各 dispatch 先には呼出し鎖の
 //    unwind floor を第 5 引数で渡し、exit API は絶対戻り深さ d を指定する。
+#if __has_include("shizuku/config.hpp")
 #include "shizuku/kernel.hpp"
+#endif
 #include "shizuku/object_api.hpp"
+#include "shizuku/svc_attributes.hpp"
 #if defined(__arm__) || defined(__thumb__)
 extern "C" char shizuku_v2_service_resume;
 #endif
@@ -61,6 +64,31 @@ template <> void KERNEL::set_object_handler(uintptr_t entry_pc,
                                             uint32_t object_id) {
   m_object_svc_handler = entry_pc;
   m_object_svc_handler_object = object_id;
+}
+
+template <> uintptr_t KERNEL::current_object(uint32_t thread_id) const {
+  if (thread_id >= m_thread_count)
+    return (uintptr_t)KERNEL_OBJECT::NO_OBJECT;
+  const THREAD &thread = m_threads[thread_id].thread;
+  for (uint32_t i = 0; i < thread.call_stack.depth; ++i) {
+    const auto &entry = thread.ledger[thread.call_stack.depth - 1 - i];
+    if (entry.via == LEDGER_CALL)
+      return entry.object;
+  }
+  return thread.base_object;
+}
+
+template <> uintptr_t KERNEL::caller_object(uint32_t thread_id) const {
+  if (thread_id >= m_thread_count)
+    return (uintptr_t)KERNEL_OBJECT::NO_OBJECT;
+  const THREAD &thread = m_threads[thread_id].thread;
+  uint32_t calls = 0;
+  for (uint32_t i = 0; i < thread.call_stack.depth; ++i) {
+    const auto &entry = thread.ledger[thread.call_stack.depth - 1 - i];
+    if (entry.via == LEDGER_CALL && ++calls == 2)
+      return entry.object;
+  }
+  return calls == 1 ? thread.base_object : (uintptr_t)KERNEL_OBJECT::NO_OBJECT;
 }
 
 
@@ -346,6 +374,35 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
   const uintptr_t target_entry = service_gate ? m_object_svc_handler : thread.current_handler_entry();
   const uint32_t target_object = service_gate ? m_object_svc_handler_object : thread.current_handler_object();
   const bool to_root = (target_object == m_object_svc_handler_object);
+
+  // 段 V1: 宛先が信頼された root KernelObject かつ mode == svc_mode::handler の
+  // 同期・有界 native API (GET_CURRENT_OBJECT, GET_CALLER_OBJECT) は、
+  // dispatch frame を積まずに trap 内で直接処理する。
+  // 専用親ハンドラ宛て (to_root == false) の raw SVC は、属性値と同じ番号であっても
+  // ここを素通りし、下の既存親ハンドラ dispatch 経路へ同一番号のまま配送される。
+  if (to_root) {
+    const uintptr_t id = ARCH::arg(*frame, 0);
+    const auto *attr = svc_attribute_for(id);
+    if (attr != nullptr) {
+      const bool privileged = !is_context_unprivileged(context);
+      if (!svc_permission_allows(id, privileged)) {
+        ARCH::set_result(*frame, (uintptr_t)object_error::NOT_PRIVILEGED, 0);
+        return;
+      }
+      if (attr->mode == svc_mode::handler) {
+        if (id == (uintptr_t)object_api::GET_CURRENT_OBJECT) {
+          ARCH::set_result(*frame, (uintptr_t)object_error::OK,
+                           current_object(current_thread_id()));
+          return;
+        }
+        if (id == (uintptr_t)object_api::GET_CALLER_OBJECT) {
+          ARCH::set_result(*frame, (uintptr_t)object_error::OK,
+                           caller_object(current_thread_id()));
+          return;
+        }
+      }
+    }
+  }
 
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(412);

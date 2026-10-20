@@ -25,6 +25,7 @@ constexpr uintptr_t OBJ_UNPRIV   = object_id::binding_unpriv;
 constexpr uintptr_t CMD_SETUP           = 0x01;
 constexpr uintptr_t CMD_COMPUTE         = 0x10;
 constexpr uintptr_t CMD_CALL_KOBJ       = 0x20;
+constexpr uintptr_t CMD_CALL_KOBJ_GET   = 0x21;
 constexpr uintptr_t CMD_NEST            = 0x30;
 constexpr uintptr_t CMD_SETUP_PRIMITIVE = 0x40;
 constexpr uintptr_t CMD_SETUP_COMPUTE   = 0x41;
@@ -60,6 +61,16 @@ api_result call_method(uintptr_t id, uintptr_t method, uintptr_t arg = 0) {
 
 // 子 A の実装
 uintptr_t child_a_compute(uintptr_t arg, uintptr_t, uintptr_t, uintptr_t) {
+  if (arg == 55) {
+    // 段V1: 子Aから raw SVC 5 (GET_CURRENT_OBJECT 番号) を発行
+    const auto result = ARCH::syscall((uintptr_t)object_api::GET_CURRENT_OBJECT);
+    return result.value;
+  }
+  if (arg == 66) {
+    // 段V1: 子Aから raw SVC 6 (GET_CALLER_OBJECT 番号) を発行
+    const auto result = ARCH::syscall((uintptr_t)object_api::GET_CALLER_OBJECT);
+    return result.value;
+  }
   const auto result = ARCH::syscall(CMD_COMPUTE, arg, 0, 0);
 #if defined(__arm__) || defined(__thumb__)
   const auto service = kernel_services::yield();
@@ -121,10 +132,26 @@ uintptr_t handler_a_entry(uintptr_t a0, uintptr_t a1, uintptr_t a2,
     // 通常の SVC として受け取った証拠の値を返す (reply 経由で Child A へ戻る)
     return 0x7777;
   }
+  if (a0 == (uintptr_t)object_api::GET_CURRENT_OBJECT) {
+    // 段V1: 子Aからの生の SVC 5 (GET_CURRENT_OBJECT と同一番号) が
+    // 親ハンドラへ横取りされず配送された証拠
+    return 0x5555;
+  }
+  if (a0 == (uintptr_t)object_api::GET_CALLER_OBJECT) {
+    // 段V1: 子Aからの生の SVC 6 (GET_CALLER_OBJECT と同一番号) が
+    // 親ハンドラへ横取りされず配送された証拠
+    return 0x6666;
+  }
   if (a0 == CMD_CALL_KOBJ) {
     // 専用ハンドラ自身の SVC が Root Kernel Object へ届くかの検証
     const auto res = ARCH::syscall((uintptr_t)object_api::YIELD);
     return (res.error == 0) ? 0x9999 : 0xEEEE;
+  }
+  if (a0 == CMD_CALL_KOBJ_GET) {
+    // 専用ハンドラ自身の親は Root KOBJ (to_root == true) なので、
+    // GET_CURRENT_OBJECT はカーネル直接解釈され OBJ_PARENT_A が返る
+    const auto res = ARCH::syscall((uintptr_t)object_api::GET_CURRENT_OBJECT);
+    return (res.error == 0 && res.value == OBJ_PARENT_A) ? 0x8888 : 0xEEEE;
   }
   if (a0 == CMD_NEST) {
     // ネスト呼び出し: 親ハンドラ A から子 B のメソッドを呼ぶ
@@ -227,11 +254,43 @@ void handler_binding_probe() {
   check("child_b SVC routed to parent_b (+200) and exit forwarded",
         res_b.error == 0 && res_b.value == 210, res_b.value, 210);
 
+  // 4b. 段V1: native API と同一番号 (5, 6) の raw SVC が親ハンドラへ配送されることの検証
+  const auto raw5_res = call_method(OBJ_CHILD_A, 0, 55);
+  check("child_a raw SVC 5 delivered to handler_a unchanged",
+        raw5_res.error == 0 && raw5_res.value == 0x5555, raw5_res.value, 0x5555);
+
+  const auto raw6_res = call_method(OBJ_CHILD_A, 0, 66);
+  check("child_a raw SVC 6 delivered to handler_a unchanged",
+        raw6_res.error == 0 && raw6_res.value == 0x6666, raw6_res.value, 0x6666);
+
   // 5. 専用ハンドラ自身の SVC → Root Kernel Object
   // handler_a に CMD_CALL_KOBJ を実行させ、内部で SVC (YIELD) を呼ぶ
   const auto kobj_call_res = call_method(OBJ_PARENT_A, 0, CMD_CALL_KOBJ);
   check("handler_a own SVC routed to root kobj",
         kobj_call_res.value == 0x9999, kobj_call_res.value, 0x9999);
+
+  // 5b. 段V1: 専用ハンドラ自身の GET_CURRENT_OBJECT は Root KOBJ (to_root=true) 経由で直接解釈
+  const auto kobj_get_res = call_method(OBJ_PARENT_A, 0, CMD_CALL_KOBJ_GET);
+  check("handler_a own GET_CURRENT_OBJECT handled directly by kernel",
+        kobj_get_res.value == 0x8888, kobj_get_res.value, 0x8888);
+
+  // 5c. 段V1: root direct GET_CURRENT_OBJECT / GET_CALLER_OBJECT で dispatch frame が積まれないことの検証
+  const uint32_t d_before = kernel_instance.current_depth();
+  const auto root_get_cur = api(object_api::GET_CURRENT_OBJECT);
+  const uint32_t d_after = kernel_instance.current_depth();
+  check("root direct GET_CURRENT_OBJECT value",
+        root_get_cur.error == 0 && root_get_cur.value == KERNEL_OBJECT::ROOT_OBJECT,
+        root_get_cur.value, KERNEL_OBJECT::ROOT_OBJECT);
+  check("root direct GET_CURRENT_OBJECT no dispatch frame",
+        d_before == d_after, d_after, d_before);
+
+  const auto root_get_caller = api(object_api::GET_CALLER_OBJECT);
+  check("root direct GET_CALLER_OBJECT at base is NO_OBJECT",
+        root_get_caller.error == 0 && root_get_caller.value == KERNEL_OBJECT::NO_OBJECT,
+        root_get_caller.value, KERNEL_OBJECT::NO_OBJECT);
+  check("root direct GET_CALLER_OBJECT no dispatch frame",
+        kernel_instance.current_depth() == d_before,
+        kernel_instance.current_depth(), d_before);
 
   // 6. kernel primitive の直接利用は拒否 & 親自身による replace で parent binding 維持 (重大指摘 3)
   // handler_a 自身から child_a を child_a_try_primitive に replace させる
