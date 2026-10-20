@@ -623,11 +623,9 @@ bool plic_vector_mode::cycle_counter_enable() {
   asm volatile("fence" ::: "memory");
 
   // 進行検出: カウンタが実際に進んでいることを確認して true を返す (ARMv8-M DWT 実装と同等の規律)
+  // chip 層の busy-wait 禁止規律に基づき、spin-loop は排して連続 CSR 読取で判定する。
   uint32_t first = 0;
   asm volatile("fence\n csrr %0, 0x7e2\n fence" : "=r"(first) :: "memory");
-  for (uint32_t spin = 0; spin < 64; ++spin) {
-    asm volatile("nop" ::: "memory");
-  }
   uint32_t second = 0;
   asm volatile("fence\n csrr %0, 0x7e2\n fence" : "=r"(second) :: "memory");
   return second != first;
