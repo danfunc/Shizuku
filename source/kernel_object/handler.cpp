@@ -393,6 +393,15 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
       m_objects[id].created = true;
       m_objects[id].flags =
           (uint32_t)(flags & ~(OBJECT_REPLACE | INTERNAL_FLAG_HANDLER));
+      if (!m_objects[id].generation || replace) {
+        ++m_objects[id].generation;
+        if (m_objects[id].generation == 0) m_objects[id].generation = 1;
+      }
+      if (replace) {
+        for (auto &d : m_objects[id].method_descriptors) {
+          d.valid = 0;
+        }
+      }
       // 最初のメソッドは生成側が与える (オブジェクト自身はまだ走っていないので
       // 自分では登録できない)。以後は EXPORT_METHOD で自分が増やす。
       m_objects[id].methods[0] = (method_t)entry;
@@ -526,7 +535,52 @@ uintptr_t KERNEL_OBJECT::export_method(uintptr_t method, uintptr_t entry,
   }
   table_guard guard;
   m_objects[self].methods[method] = (method_t)entry;
+  ++m_objects[self].generation;
+  if (m_objects[self].generation == 0) m_objects[self].generation = 1;
   return self;
+}
+
+template <>
+uintptr_t KERNEL_OBJECT::create_method_descriptor(uintptr_t target_id,
+                                                   uintptr_t method_index,
+                                                   object_error &error) {
+  if (target_id >= OBJECT_COUNT || !m_objects[target_id].created) {
+    error = object_error::BAD_DESCRIPTOR;
+    return 0;
+  }
+  if (method_index >= METHOD_COUNT || m_objects[target_id].methods[method_index] == nullptr) {
+    error = object_error::BAD_DESCRIPTOR;
+    return 0;
+  }
+  if (m_objects[target_id].generation == 0) {
+    error = object_error::BAD_DESCRIPTOR;
+    return 0;
+  }
+  const uint32_t thread_id = kernel_instance.current_thread_id();
+  const uint32_t caller_id = (uint32_t)current_object(thread_id);
+  table_guard guard;
+  int free_slot = -1;
+  for (int i = 0; i < 16; ++i) {
+    if (m_objects[caller_id].method_descriptors[i].valid == 0) {
+      free_slot = i;
+      break;
+    }
+  }
+  if (free_slot < 0) {
+    error = object_error::NO_DESCRIPTOR; // 21
+    return 0;
+  }
+  auto &desc = m_objects[caller_id].method_descriptors[free_slot];
+  desc.target_object = (uint32_t)target_id;
+  desc.target_entry = (uintptr_t)m_objects[target_id].methods[method_index];
+  desc.target_generation = m_objects[target_id].generation;
+  desc.owner_object = caller_id;
+  desc.method_index = (uint32_t)method_index;
+  desc.flags = m_objects[target_id].flags;
+  desc.region_base = m_objects[target_id].region_base;
+  desc.region_limit = m_objects[target_id].region_limit;
+  ARCH::store_release32(&desc.valid, 1u);
+  return (uintptr_t)free_slot;
 }
 
 template <>
@@ -1588,6 +1642,9 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     shizuku_boot_trace_phase(424);
 #endif
+    break;
+  case object_api::CREATE_METHOD_DESCRIPTOR:
+    value = create_method_descriptor(a1, a2, error);
     break;
   case object_api::EXPORT_METHOD:
     value = export_method(a1, a2, error);

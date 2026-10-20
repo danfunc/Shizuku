@@ -106,6 +106,10 @@ uintptr_t leaf(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
   return argument + 1;
 }
 
+uintptr_t desc_target_fn(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f) {
+  return a + b + c + d + e + f;
+}
+
 uintptr_t leaf_dirty_scratch(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
 #if defined(__arm__) || defined(__thumb__)
   __asm volatile("mov ip, %0" : : "r"(0xDEADBEEFu) : "ip");
@@ -340,6 +344,38 @@ void call_ladder() {
           absent.error == (uintptr_t)object_error::BAD_OBJECT,
           (unsigned long)absent.error,
           (unsigned long)object_error::BAD_OBJECT);
+  }
+
+  // ---- V2a Method Descriptors & Direct Trap Call (APIs 32 & 33) ----
+  {
+    constexpr uintptr_t OBJECT_DESC_TEST = 77;
+    api(object_api::CREATE_OBJECT, OBJECT_DESC_TEST, (uintptr_t)&leaf, OBJECT_REPLACE);
+    api(object_api::EXPORT_METHOD, 1, (uintptr_t)&desc_target_fn);
+
+    const api_result created = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1);
+    check("descriptor: create valid descriptor",
+          created.error == (uintptr_t)object_error::OK && created.value < 16,
+          (unsigned long)created.value, 0);
+
+    const uintptr_t desc_idx = created.value;
+
+#if defined(__riscv)
+    const auto desc_call = ARCH::syscall((uintptr_t)object_api::CALL_METHOD_DESCRIPTOR, desc_idx, 1, 2, 3, 4, 5, 6);
+    check("descriptor: direct trap call returns sum 21",
+          desc_call.error == 0 && desc_call.value == 21,
+          (unsigned long)desc_call.value, 21);
+#endif
+
+    api(object_api::EXPORT_METHOD, 1, (uintptr_t)&leaf);
+    const auto stale_call = ARCH::syscall((uintptr_t)object_api::CALL_METHOD_DESCRIPTOR, desc_idx, 1, 2, 3, 4, 5, 6);
+    check("descriptor: stale descriptor rejected with STALE_DESCRIPTOR (23)",
+          stale_call.error == (uintptr_t)object_error::STALE_DESCRIPTOR,
+          (unsigned long)stale_call.error, (unsigned long)object_error::STALE_DESCRIPTOR);
+
+    const auto bad_idx = ARCH::syscall((uintptr_t)object_api::CALL_METHOD_DESCRIPTOR, 16, 0, 0, 0, 0, 0, 0);
+    check("descriptor: invalid index >= 16 rejected with BAD_DESCRIPTOR (22)",
+          bad_idx.error == (uintptr_t)object_error::BAD_DESCRIPTOR,
+          (unsigned long)bad_idx.error, (unsigned long)object_error::BAD_DESCRIPTOR);
   }
 
   BOARD::diag_printf("[SELFTEST] call ladder done: %lu passed, %lu failed\n",

@@ -80,7 +80,7 @@ constexpr uint32_t PROTECTION_UNPRIVILEGED = 1u << 0; // 軸 A: 非特権で走�
 struct call_request {
   uintptr_t entry_pc;  // 呼び先の入口
   uint32_t protection; // PROTECTION_* のビット和
-  uintptr_t args[4];   // 呼び先が受け取る引数 (a0..a3)
+  uintptr_t args[6];   // 呼び先が受け取る引数 (a0..a5) [C6 standard method entry]
   uint32_t callee_object = 0; // 呼び先のオブジェクトID
   // ★呼び先の**種別**。既定は PLAIN — ハンドラを務めるオブジェクトを呼ぶときだけ
   //   HANDLER を載せる。ここが「役」を運ぶ唯一の場所で、ID からは決めない。

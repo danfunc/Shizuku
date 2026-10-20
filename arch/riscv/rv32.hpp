@@ -142,6 +142,8 @@ public:
     frame.a1 = args[1];
     frame.a2 = args[2];
     frame.a3 = args[3];
+    frame.a4 = args[4];
+    frame.a5 = args[5];
   }
 
   // RV32's fifth AAPCS argument is a4, which is already in the saved trap frame.
@@ -224,11 +226,34 @@ public:
                  : "memory");
     return {r_a0, r_a1};
   }
+
+  static syscall_result syscall(uintptr_t number, uintptr_t a1,
+                                uintptr_t a2, uintptr_t a3,
+                                uintptr_t a4, uintptr_t a5,
+                                uintptr_t a6, uintptr_t a7) {
+    register uintptr_t r_a0 asm("a0") = number;
+    register uintptr_t r_a1 asm("a1") = a1;
+    register uintptr_t r_a2 asm("a2") = a2;
+    register uintptr_t r_a3 asm("a3") = a3;
+    register uintptr_t r_a4 asm("a4") = a4;
+    register uintptr_t r_a5 asm("a5") = a5;
+    register uintptr_t r_a6 asm("a6") = a6;
+    register uintptr_t r_a7 asm("a7") = a7;
+    asm volatile("ecall"
+                 : "+r"(r_a0), "+r"(r_a1)
+                 : "r"(r_a2), "r"(r_a3), "r"(r_a4), "r"(r_a5), "r"(r_a6), "r"(r_a7)
+                 : "memory");
+    return {r_a0, r_a1};
+  }
 #else
   // 非-RISC-V 環境でのホスト呼出しを成功に見せる no-op は禁止。未対応時リンク不能とする。
   static syscall_result syscall(uintptr_t number, uintptr_t a1 = 0,
                                 uintptr_t a2 = 0, uintptr_t a3 = 0,
                                 uintptr_t a4 = 0);
+  static syscall_result syscall(uintptr_t number, uintptr_t a1,
+                                uintptr_t a2, uintptr_t a3,
+                                uintptr_t a4, uintptr_t a5,
+                                uintptr_t a6, uintptr_t a7);
 #endif
 
   static void prepare_thread_entry(context_t &context, uintptr_t stack_top,

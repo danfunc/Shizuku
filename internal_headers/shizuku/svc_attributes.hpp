@@ -21,11 +21,11 @@ struct svc_attribute {
 // Mode does NOT alter objectland raw routing: if a custom dedicated parent handler is
 // bound (to_root == false), raw SVC delivery to the registered parent is strictly preserved.
 inline constexpr auto svc_attributes = [] {
-  std::array<svc_attribute, 32> a{};
+  std::array<svc_attribute, 34> a{};
   for (auto &v : a)
     v = {svc_permission::unprivileged_allowed, false, svc_mode::thread,
          svc_save_level::continuation, svc_authority::none};
-  for (unsigned i : {5u, 6u, 16u, 18u, 20u, 29u, 30u, 31u}) {
+  for (unsigned i : {5u, 6u, 16u, 18u, 20u, 29u, 30u, 31u, 33u}) {
     a[i].mode = svc_mode::handler;
     a[i].save_level = svc_save_level::minimal;
   }

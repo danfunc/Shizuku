@@ -387,7 +387,8 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
   if (to_root) {
     const uintptr_t id = ARCH::arg(*frame, 0);
     if (id == (uintptr_t)object_api::GET_CURRENT_OBJECT ||
-        id == (uintptr_t)object_api::GET_CALLER_OBJECT) {
+        id == (uintptr_t)object_api::GET_CALLER_OBJECT ||
+        id == (uintptr_t)object_api::CALL_METHOD_DESCRIPTOR) {
       const auto *attr = svc_attribute_for(id);
       if (attr != nullptr && attr->mode == svc_mode::handler) {
         const bool privileged = !is_context_unprivileged(context);
@@ -404,6 +405,47 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
           ARCH::set_result(*frame, (uintptr_t)object_error::OK,
                            caller_object(current_thread_id()));
           return;
+        }
+        if (id == (uintptr_t)object_api::CALL_METHOD_DESCRIPTOR) {
+#if !defined(__riscv)
+          ARCH::set_result(*frame, (uintptr_t)object_error::BAD_DESCRIPTOR, 0);
+          return;
+#else
+          const uint32_t thread_id = current_thread_id();
+          const uint32_t caller_id = (uint32_t)current_object(thread_id);
+          const uint32_t index = (uint32_t)ARCH::arg(*frame, 1);
+          method_descriptor_entry desc{};
+          object_error error = object_error::OK;
+          if (!validate_method_descriptor(caller_id, index, desc, error)) {
+            ARCH::set_result(*frame, (uintptr_t)error, 0);
+            return;
+          }
+          const uint32_t unwind_floor = thread.call_stack.depth
+                                            ? thread.ledger_top().unwind_floor
+                                            : 0;
+          if (unwind_floor > UINT16_MAX ||
+              !call_frame_push(thread, context, &frame)) {
+            ARCH::set_result(*frame, (uintptr_t)object_error::NO_STACK, 0);
+            return;
+          }
+          auto &entry = thread.ledger[thread.call_stack.depth - 1];
+          entry.object = desc.target_object;
+          entry.kind = (uint8_t)object_kind::PLAIN;
+          entry.via = LEDGER_DISPATCH;
+          entry.handler_object = m_object_svc_handler_object;
+          entry.handler_entry = m_object_svc_handler;
+          entry.unwind_floor = (uint16_t)unwind_floor;
+
+          uintptr_t args[6];
+          for (unsigned i = 0; i < 6; ++i) {
+            args[i] = ARCH::arg(*frame, 2 + i);
+          }
+          ARCH::set_entry(*frame, desc.target_entry, ARCH::return_stub());
+          ARCH::set_args(*frame, args);
+          ARCH::set_priv(*context, false);
+          ARCH::set_region_window(*context, desc.region_base, desc.region_limit);
+          return;
+#endif
         }
       }
     }
