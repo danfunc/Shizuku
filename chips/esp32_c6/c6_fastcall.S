@@ -61,6 +61,14 @@ shizuku_c6_fastcall_probe_s_after: .space 48
 .global shizuku_c6_fastcall_leaf_callee
 .type shizuku_c6_fastcall_leaf_callee,@function
 shizuku_c6_fastcall_leaf_callee:
+#if SHIZUKU_C6_FASTCALL_STAGE2_TIMING
+  // Callee entry timestamp ts3: read PCCR without clobbering any non-argument register.
+  // Save a0 to caller frame slot 60(sp), read cycle counter into a0, store to slot 68(sp), restore a0.
+  sw a0, 60(sp)
+  csrr a0, 0x7E2
+  sw a0, 68(sp)
+  lw a0, 60(sp)
+#endif
 #if SHIZUKU_C6_FASTCALL_EMPTY_BENCH
   // Minimal method payload for a dedicated bench-only image. Entry remains fixed.
   addi a0, a0, 1
@@ -156,6 +164,14 @@ shizuku_c6_fastcall_leaf_callee:
 .global shizuku_c6_fastcall_return_stub
 .type shizuku_c6_fastcall_return_stub,@function
 shizuku_c6_fastcall_return_stub:
+#if SHIZUKU_C6_FASTCALL_STAGE2_TIMING
+  // Return stub timestamp ts4: immediately before RETURN ecall.
+  // Save return value a0 to caller frame slot 60(sp), read cycle counter into a0, store to slot 72(sp), restore a0.
+  sw a0, 60(sp)
+  csrr a0, 0x7E2
+  sw a0, 72(sp)
+  lw a0, 60(sp)
+#endif
   li a7, SHIZUKU_FASTCALL_TRAP_RETURN
   ecall
   // If return fails or falls through, halt with fatal error 0xE005
@@ -169,8 +185,13 @@ shizuku_c6_fastcall_return_stub:
 .global shizuku_c6_fastcall_stub
 .type shizuku_c6_fastcall_stub,@function
 shizuku_c6_fastcall_stub:
+#if SHIZUKU_C6_FASTCALL_STAGE2_TIMING
+  // Allocate frame (96 bytes aligned to 16 bytes: 60B regs + 20B timestamps/scratch + 16B pad)
+  addi sp, sp, -96
+#else
   // Allocate frame for ra, gp, tp, and s0-s11 (15 words = 60 bytes -> 64 bytes aligned)
   addi sp, sp, -64
+#endif
   sw ra, 0(sp)
   sw gp, 4(sp)
   sw tp, 8(sp)
@@ -201,12 +222,28 @@ shizuku_c6_fastcall_stub:
   li s10, 0
   li s11, 0
 
+#if SHIZUKU_C6_FASTCALL_STAGE2_TIMING
+  // ts1: CALL ecall immediately before
+  sw a0, 60(sp)
+  csrr a0, 0x7E2
+  sw a0, 64(sp)
+  lw a0, 60(sp)
+#endif
+
   // Identify fastcall CALL trap
   li a7, SHIZUKU_FASTCALL_TRAP_CALL
   ecall
 
   // Execution resumes here after Trap 2 mret.
   // a0 contains the return value from callee.
+#if SHIZUKU_C6_FASTCALL_STAGE2_TIMING
+  // ts6: caller resume immediately after Trap 2 mret
+  sw a0, 60(sp)
+  csrr a0, 0x7E2
+  sw a0, 76(sp)
+  lw a0, 60(sp)
+#endif
+
 #if SHIZUKU_C6_FASTCALL_CLEAR_RETURN_IN_CALLER
   // The caller stub is the trusted boundary that clears return-side scratch.
   li ra, 0
@@ -243,7 +280,29 @@ shizuku_c6_fastcall_stub:
   lw s9, 48(sp)
   lw s10, 52(sp)
   lw s11, 56(sp)
+
+#if SHIZUKU_C6_FASTCALL_STAGE2_TIMING
+  // Copy ts1, ts3, ts4, ts6 from frame slots to global staging area.
+  // Save t0 and t1 to slots 80/84 and restore them afterwards so no register leak is masked.
+  sw t0, 80(sp)
+  sw t1, 84(sp)
+  lui t0, %hi(shizuku_c6_fastcall_stage2_current_sample)
+  addi t0, t0, %lo(shizuku_c6_fastcall_stage2_current_sample)
+  lw t1, 64(sp)
+  sw t1, 4(t0)   // ts1_call_ecall_pre (offset 4)
+  lw t1, 68(sp)
+  sw t1, 12(t0)  // ts3_callee_entry (offset 12)
+  lw t1, 72(sp)
+  sw t1, 16(t0)  // ts4_ret_ecall_pre (offset 16)
+  lw t1, 76(sp)
+  sw t1, 24(t0)  // ts6_caller_resume (offset 24)
+  lw t0, 80(sp)
+  lw t1, 84(sp)
+
+  addi sp, sp, 96
+#else
   addi sp, sp, 64
+#endif
   ret
 .size shizuku_c6_fastcall_stub, .-shizuku_c6_fastcall_stub
 
@@ -391,6 +450,14 @@ shizuku_c6_fastcall_trap_check:
   beqz t0, .Lfastcall_from_nested
   // Save t1 at top of kernel stack
   sw t1, -4(t0)
+#if SHIZUKU_C6_FASTCALL_STAGE2_TIMING
+  // Post-preservation router-entry sample:
+  // Captured at instruction 4 of the router (after vector jump in rv32_trap.S and router prologue
+  // csrrw/beqz/sw t1). Read PCCR cycle counter into t1 and save to -8(t0) on kernel stack.
+  // Note: Does NOT include hardware ecall latency, vector jump, or router prologue cycles.
+  csrr t1, 0x7E2
+  sw t1, -8(t0)
+#endif
   csrr t1, mcause
   addi t1, t1, -11
   bnez t1, .Lfastcall_not_ecall
@@ -412,6 +479,14 @@ shizuku_c6_fastcall_trap_check:
 .global shizuku_c6_fastcall_trap_call
 .type shizuku_c6_fastcall_trap_call,@function
 shizuku_c6_fastcall_trap_call:
+#if SHIZUKU_C6_FASTCALL_STAGE2_TIMING
+  // ts2: Post-preservation router-entry sample captured at -8(t0) on kernel stack.
+  // Measures router post-prologue state; does not include vector jump or router prologue.
+  lw t2, -8(t0)
+  lui t3, %hi(shizuku_c6_fastcall_stage2_current_sample)
+  addi t3, t3, %lo(shizuku_c6_fastcall_stage2_current_sample)
+  sw t2, 8(t3)  // ts2_call_router_post_prologue
+#endif
 #if SHIZUKU_C6_FASTCALL_TRAP_STATS
   csrr t2, 0x7E2  // trap asm body start timestamp (PCCR)
 #endif
@@ -487,6 +562,14 @@ shizuku_c6_fastcall_trap_call:
 .global shizuku_c6_fastcall_trap_return
 .type shizuku_c6_fastcall_trap_return,@function
 shizuku_c6_fastcall_trap_return:
+#if SHIZUKU_C6_FASTCALL_STAGE2_TIMING
+  // ts5: Post-preservation return router-entry sample captured at -8(t0) on kernel stack.
+  // Measures router post-prologue state; does not include vector jump or router prologue.
+  lw t4, -8(t0)
+  lui t3, %hi(shizuku_c6_fastcall_stage2_current_sample)
+  addi t3, t3, %lo(shizuku_c6_fastcall_stage2_current_sample)
+  sw t4, 20(t3) // ts5_ret_router_post_prologue
+#endif
 #if SHIZUKU_C6_FASTCALL_TRAP_STATS
   csrr t4, 0x7E2  // trap asm body start timestamp (PCCR)
 #endif
