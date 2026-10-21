@@ -169,6 +169,10 @@ constexpr uintptr_t OBJECT_COUNT_PROBE = object_id::count;
 constexpr uintptr_t OBJECT_DESC_TEST = object_id::desc_test;
 constexpr uintptr_t OBJECT_DESC_OWNER = object_id::desc_owner;
 constexpr uintptr_t OBJECT_DESC_RELAY = object_id::desc_relay;
+#if defined(__riscv)
+// 中継 B が自分の子として作る C (B の関数内で CREATE_OBJECT する)。
+constexpr uintptr_t OBJECT_DESC_RELAY_TARGET = object_id::desc_relay_target;
+#endif
 // 作成権限の試験用。KERNEL (役付き) / CHILD と GRANDCHILD (OWNER の子と孫)。
 constexpr uintptr_t OBJECT_DESC_KERNEL = object_id::desc_kernel;
 constexpr uintptr_t OBJECT_DESC_CHILD = object_id::desc_child;
@@ -387,6 +391,20 @@ uint32_t g_relay_depth_before = 0;
 uint32_t g_relay_depth_after = 0;
 uintptr_t g_relay_call_value = 0;
 uintptr_t g_relay_call_error = (uintptr_t)object_error::UNKNOWN_API;
+#if defined(__riscv)
+uintptr_t g_relay_target_create_error = (uintptr_t)object_error::UNKNOWN_API;
+uintptr_t g_relay_desc_error = (uintptr_t)object_error::UNKNOWN_API;
+
+// 中継の子 C の main。走ると自分の表に 1 番 (desc_target_fn) を export する。
+// B がこれを一度走らせてから、C への記述子を B の表に作る。
+uintptr_t desc_relay_target_fn(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  const api_result exported =
+      api(object_api::EXPORT_METHOD, 1, (uintptr_t)&desc_target_fn);
+  return exported.error == (uintptr_t)object_error::OK
+             ? exported.value
+             : 0xDEAD0000u | (uint32_t)exported.error;
+}
+#endif
 
 uintptr_t desc_relay_fn(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   g_relay_self = api(object_api::GET_CURRENT_OBJECT).value;
@@ -396,8 +414,27 @@ uintptr_t desc_relay_fn(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   g_relay_call_value = 0;
   g_relay_call_error = (uintptr_t)object_error::UNKNOWN_API;
 #if defined(__riscv)
+  // C は B が自分の子として作る (B の creator が C になる)。C の main を一度走らせて
+  // C 自身に 1 番を export させ、その 1 番への記述子を B の表に作る。
+  // 作成も記述子も親→直接の子の一般規則のまま通る (kernel 役は使わない)。
+  g_relay_target_create_error =
+      api(object_api::CREATE_OBJECT, OBJECT_DESC_RELAY_TARGET,
+          (uintptr_t)&desc_relay_target_fn)
+          .error;
+  if (g_relay_target_create_error != (uintptr_t)object_error::OK) {
+    g_relay_depth_after = kernel_instance.current_depth();
+    return 0xDEAD0000u | (uint32_t)g_relay_target_create_error;
+  }
+  const api_result target_exported = call_method(OBJECT_DESC_RELAY_TARGET, 0);
+  if (target_exported.error != (uintptr_t)object_error::OK) {
+    g_relay_desc_error = target_exported.error;
+    g_relay_depth_after = kernel_instance.current_depth();
+    return 0xDEAD0000u | (uint32_t)target_exported.error;
+  }
   // 記述子は B 自身の表に作られる (呼び出し元の表からだけ撃てる、の確認も兼ねる)。
-  const api_result made = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1);
+  const api_result made =
+      api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_RELAY_TARGET, 1);
+  g_relay_desc_error = made.error;
   if (made.error != (uintptr_t)object_error::OK) {
     g_relay_depth_after = kernel_instance.current_depth();
     return 0xDEAD0000u | (uint32_t)made.error;
@@ -1111,32 +1148,42 @@ void call_ladder() {
           (unsigned long)(g_desc_legacy_a4 | g_desc_legacy_a5), 0);
 #endif
 
-    // ---- 呼び出し元の識別: A (ルート) -> B (desc_relay) -> C (desc_test, 記述子で直接呼出し) ----
+    // ---- 呼び出し元の識別: A (ルート) -> B (desc_relay) -> C (desc_relay_target, 記述子で直接呼出し) ----
+    // 階層は A が B の親、B が C の親。各段は親→直接の子へ作る (kernel 役は使わない)。
+    //   A→B: ルートが B を作る (B の creator は A)。 B→C: B が C を作る (C の creator は B)。
+    //   B の表の C への記述子: 対象の creator が呼出し元なので一般規則で許可される。
     // ★C の g_desc_* に残る値が「B 経由で撃たれた」ものだと言えるように、先に空けておく。
-    //   ルートは B しか呼ばず、B の表の記述子だけで C に届く。C の 1 番は上の export のまま生きている。
+    //   ルートは B しか呼ばず、B の表の記述子だけで C に届く。
     {
-      // B は kernel 役付きで作る。ここで試すのは caller 識別 (B の表で作って C を撃つこと)
-      // であって作成権限の規則ではない。権限規則は B と C が兄弟であることで拒否されるが、
-      // 役付きなら相手を問わず通るので、識別の経路だけを残す。
       const api_result relay_made = api(
-          object_api::CREATE_OBJECT, OBJECT_DESC_RELAY, (uintptr_t)&desc_relay_fn,
-          KERNEL_OBJECT::INTERNAL_FLAG_KERNEL_ROLE);
+          object_api::CREATE_OBJECT, OBJECT_DESC_RELAY, (uintptr_t)&desc_relay_fn);
       check("descriptor A->B->C: create relay object",
             relay_made.error == (uintptr_t)object_error::OK,
             (unsigned long)relay_made.error, 0);
 
       g_desc_self = 0;
       g_desc_caller = 0;
+#if defined(__riscv)
+      g_relay_target_create_error = (uintptr_t)object_error::UNKNOWN_API;
+      g_relay_desc_error = (uintptr_t)object_error::UNKNOWN_API;
+#endif
       const auto root_depth_before = kernel_instance.current_depth();
       const api_result relay = call_method(OBJECT_DESC_RELAY, 0);
       check("descriptor A->B->C: root call into B returns OK",
             relay.error == (uintptr_t)object_error::OK,
             (unsigned long)relay.error, 0);
 #if defined(__riscv)
+      // B が C を作れたこと、B の表に C への記述子を作れたこと。
+      check("descriptor A->B->C: B creates C (desc_relay_target)",
+            g_relay_target_create_error == (uintptr_t)object_error::OK,
+            (unsigned long)g_relay_target_create_error, 0);
+      check("descriptor A->B->C: B creates descriptor for C",
+            g_relay_desc_error == (uintptr_t)object_error::OK,
+            (unsigned long)g_relay_desc_error, 0);
       // C の identity。B の中から撃たれたので、呼んだ側は B (ルートでも C 自身でもない)。
-      check("descriptor A->B->C: C self is C (desc_test)",
-            g_desc_self == OBJECT_DESC_TEST,
-            (unsigned long)g_desc_self, (unsigned long)OBJECT_DESC_TEST);
+      check("descriptor A->B->C: C self is C (desc_relay_target)",
+            g_desc_self == OBJECT_DESC_RELAY_TARGET,
+            (unsigned long)g_desc_self, (unsigned long)OBJECT_DESC_RELAY_TARGET);
       check("descriptor A->B->C: C caller is B (desc_relay)",
             g_desc_caller == OBJECT_DESC_RELAY,
             (unsigned long)g_desc_caller, (unsigned long)OBJECT_DESC_RELAY);
