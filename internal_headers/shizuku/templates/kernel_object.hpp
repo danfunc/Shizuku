@@ -1,6 +1,7 @@
 #ifndef SHIZUKU_TEMPLATES_KERNEL_OBJECT_HPP
 #define SHIZUKU_TEMPLATES_KERNEL_OBJECT_HPP
 #include <cstdint>
+#include "shizuku/hot.hpp"
 #include "shizuku/kernel_abi.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/stream.hpp"
@@ -178,10 +179,11 @@ public:
     uint32_t region_limit;
     volatile uint32_t valid;
   };
-  bool validate_method_descriptor(uint32_t caller_id, uint32_t index,
-                                    uint32_t caller_generation,
-                                    method_descriptor_entry &out_desc,
-                                    object_error &error) const {
+  SHIZUKU_HOT bool validate_method_descriptor(uint32_t caller_id,
+                                              uint32_t index,
+                                              uint32_t caller_generation,
+                                              method_descriptor_entry &out_desc,
+                                              object_error &error) const {
     if (index >= METHOD_DESCRIPTOR_CAPACITY) {
       error = object_error::BAD_DESCRIPTOR;
       return false;

@@ -10,6 +10,7 @@
 #include "shizuku/kernel.hpp"
 #include "shizuku/kernel_object.hpp"
 #include "shizuku/svc_attributes.hpp"
+#include "shizuku/hot.hpp"
 #if defined(SHIZUKU_CRASH_RECORD)
 #include "shizuku/objects/usb_cdc.hpp"
 #endif
@@ -524,7 +525,7 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
 //   直に呼ばない」オブジェクトだけで (静的データもペリフェラルも region の外 =
 //   特権のみになるため。DESIGN §11.2.2)、今それを満たすのは宣言した相手だけ。
 //   arena が入って既定を反転できるようになるまでは、opt-in にしておく。
-template <> uint32_t KERNEL_OBJECT::object_protection(uintptr_t id) const {
+template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::object_protection(uintptr_t id) const {
   return (m_objects[id].flags & OBJECT_UNPRIVILEGED) ? PROTECTION_UNPRIVILEGED
                                                      : PROTECTION_PRIVILEGED;
 }
@@ -553,10 +554,10 @@ uintptr_t KERNEL_OBJECT::set_object_affinity(uintptr_t id, uintptr_t cores,
   return 1;
 }
 
-template <> uint32_t KERNEL_OBJECT::object_region_base(uintptr_t id) const {
+template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::object_region_base(uintptr_t id) const {
   return m_objects[id].region_base;
 }
-template <> uint32_t KERNEL_OBJECT::object_region_limit(uintptr_t id) const {
+template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::object_region_limit(uintptr_t id) const {
   return m_objects[id].region_limit;
 }
 
@@ -711,7 +712,7 @@ uintptr_t KERNEL_OBJECT::create_method_descriptor(uintptr_t target_id,
   return (uintptr_t)free_slot;
 }
 
-template <> call_request KERNEL_OBJECT::callee_request(uintptr_t id, uintptr_t entry_pc) const {
+template <> SHIZUKU_HOT call_request KERNEL_OBJECT::callee_request(uintptr_t id, uintptr_t entry_pc) const {
   call_request request{};
   request.entry_pc = entry_pc;
   request.callee_object = (uint32_t)id;                    // ★呼び先オブジェクトID
@@ -1136,7 +1137,7 @@ uintptr_t KERNEL_OBJECT::kill_thread(uintptr_t thread, object_error &error) {
 // ★1 コアのときは無償だった相互排除を、2 コアでは明示的に取る (kernel_object.hpp)。
 //   区間は短く、**syscall を含まない**ものだけ。握ったまま実行権を手放すと、
 //   相手のコアが「走っていない持ち主」を待って回り続ける。
-template <> void KERNEL_OBJECT::table_lock() {
+template <> SHIZUKU_HOT void KERNEL_OBJECT::table_lock() {
   while (true) {
     if (ARCH::cas32(&m_table_lock, 0u, 1u)) {
 #if defined(SHIZUKU_CRASH_RECORD)
@@ -1153,7 +1154,7 @@ template <> void KERNEL_OBJECT::table_lock() {
   }
 }
 
-template <> void KERNEL_OBJECT::table_unlock() {
+template <> SHIZUKU_HOT void KERNEL_OBJECT::table_unlock() {
   ARCH::store_release32(&m_table_lock, 0u);
 #if defined(SHIZUKU_CRASH_RECORD)
   kobj_diag_mark(objects::boot_diag_breadcrumb::KOBJ_TABLE_UNLOCK);

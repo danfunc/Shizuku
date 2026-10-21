@@ -6,6 +6,15 @@
 #include <cstdint>
 #include "arch/riscv/rv32.hpp"
 
+// hot 経路 (CALL_METHOD_DESCRIPTOR とその RETURN) を IRAM へ置くための配置マクロ。
+// kernel 側の既定は shizuku/hot.hpp の空定義で、この chip 以外は変わらない。
+#undef SHIZUKU_HOT
+#if defined(__riscv)
+#define SHIZUKU_HOT __attribute__((section(".iram1")))
+#else
+#define SHIZUKU_HOT
+#endif
+
 namespace shizuku::chips::esp32_c6 {
 
 // C6 の割込み方式 (PLIC + 256B 整列 32 スロットの vector table)。

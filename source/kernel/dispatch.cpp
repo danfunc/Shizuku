@@ -37,6 +37,7 @@
 #include "shizuku/object_api.hpp"
 #include "shizuku/kernel_object.hpp"
 #include "shizuku/svc_attributes.hpp"
+#include "shizuku/hot.hpp"
 #if defined(__arm__) || defined(__thumb__)
 extern "C" char shizuku_v2_service_resume;
 #endif
@@ -90,7 +91,7 @@ template <> uintptr_t KERNEL::caller_object(uint32_t thread_id) const {
 extern "C" { volatile uint32_t shizuku_push_diag[6]; volatile uint32_t shizuku_push_diag_n; volatile uint32_t shizuku_push_diag_kind; volatile uint32_t shizuku_push_diag_reject_kind; }
 #endif
 template <>
-bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
+SHIZUKU_HOT bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                              KERNEL::FRAME **frame) {
   const uint32_t frame_bytes = ARCH::exc_frame_bytes(*context);
   const uint32_t stack_arg_bytes = ARCH::HANDLER_STACK_ARG_BYTES;
@@ -176,7 +177,7 @@ bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
 }
 
 template <>
-bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
+SHIZUKU_HOT bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                             KERNEL::FRAME **frame) {
   if (thread.call_stack.top == 0)
     return false;
@@ -209,7 +210,7 @@ bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
 // 通常 CALL と方法記述子の直接 call が共有する前半。台帳段を LEDGER_CALL で積み、
 // 戻りの床を積む前の深さに置く。呼び先の入口・引数・保護は呼び出し側が決める。
 template <>
-kernel_error KERNEL::enter_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
+SHIZUKU_HOT kernel_error KERNEL::enter_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                                 KERNEL::FRAME **frame,
                                 const call_request &request) {
   // ★偽装防止 (指摘4): 一般 call_request から KERNEL_OBJECT 種別や
@@ -285,7 +286,7 @@ static constexpr bool is_context_unprivileged(const C *ctx) {
   }
 }
 
-template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
+template <> SHIZUKU_HOT void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(410);
 #endif

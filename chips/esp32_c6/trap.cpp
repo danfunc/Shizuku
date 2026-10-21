@@ -322,7 +322,7 @@ void install_traps() {
   const auto vector = reinterpret_cast<uintptr_t>(&shizuku_c6_vectors) | 1u;
   asm volatile("csrw mscratch, %0\n csrw mtvec, %1" :: "r"(top), "r"(vector) : "memory");
 }
-void frame_to_context(arch::exception_frame_t &f, arch::context_t &c) {
+SHIZUKU_HOT void frame_to_context(arch::exception_frame_t &f, arch::context_t &c) {
   c.sp = &f;
 #define COPY(n) c.s##n = f.s##n;
   COPY(0) COPY(1) COPY(2) COPY(3) COPY(4) COPY(5)
@@ -330,7 +330,7 @@ void frame_to_context(arch::exception_frame_t &f, arch::context_t &c) {
 #undef COPY
   c.privileged = (f.mstatus & RV32_MSTATUS_MPP) == RV32_MSTATUS_MPP;
 }
-void context_to_frame(arch::context_t &c) {
+SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
   // Capture the untrusted context before dereferencing its saved SP.
   if (!c.privileged) {
     active_context = &c;
@@ -403,7 +403,7 @@ extern "C" void shizuku_c6_note_plain_task_stack_probe(uint32_t task_id) {
 }
 namespace {
 // The trapped thread was already saved by the caller; run the deferred switch after it.
-void run_pending_switch() {
+SHIZUKU_HOT void run_pending_switch() {
   if (!pend_flag) return;
   pend_flag = 0;
   shizuku_c6_timer_diag[2] = shizuku_c6_timer_diag[2] + 1;
@@ -411,7 +411,7 @@ void run_pending_switch() {
   kernel.pendsv_dispatch(kernel.current_context());
 }
 }
-extern "C" arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_frame_t *frame) {
+extern "C" SHIZUKU_HOT arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_frame_t *frame) {
   if (shizuku_c6_stack_diag[0] == kStackDiagMagic &&
       shizuku_c6_stack_diag[1] == kStackDiagVersion &&
       (++trap_probe_interval_count & (kStackProbeInterval - 1u)) == 0u)
