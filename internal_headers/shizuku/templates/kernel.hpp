@@ -272,6 +272,10 @@ private:
   bool call_frame_push(THREAD &thread, CONTEXT *context, FRAME **frame);
   bool call_frame_pop(THREAD &thread, CONTEXT *context, FRAME **frame);
 
+  // 台帳段を 1 つ積んで呼び先の入口へ向ける前半。通常 CALL と方法記述子の直接 call が
+  // 共有する (積み方と戻りの床をそろえるため)。
+  kernel_error enter_call(THREAD &thread, CONTEXT *context, FRAME **frame,
+                          const call_request &request);
   kernel_error do_call(THREAD &thread, CONTEXT *context, FRAME **frame,
                        const call_request &request);
 

@@ -200,37 +200,49 @@ bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   return true;
 }
 
+// 通常 CALL と方法記述子の直接 call が共有する前半。台帳段を LEDGER_CALL で積み、
+// 戻りの床を積む前の深さに置く。呼び先の入口・引数・保護は呼び出し側が決める。
 template <>
-kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
-                             KERNEL::FRAME **frame,
-                             const call_request &request) {
-  if (request.entry_pc == 0)
-    return kernel_error::BAD_REQUEST;
+kernel_error KERNEL::enter_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
+                                KERNEL::FRAME **frame,
+                                const call_request &request) {
   // ★偽装防止 (指摘4): 一般 call_request から KERNEL_OBJECT 種別や
   //   m_object_svc_handler_object を名乗ることは拒否する。
   if (request.callee_kind == (uint32_t)object_kind::KERNEL_OBJECT ||
       request.callee_object == m_object_svc_handler_object) {
     return kernel_error::BAD_REQUEST;
   }
-#if defined(SHIZUKU_RP2040)
-  if (!ARCH::region_range_representable(request.region_base, request.region_limit))
-    return kernel_error::BAD_REQUEST;
-#endif
   // 呼び先の普通の return は svc_dispatch 経由でもう 1 枚 call_frame_push する。
   // その 1 枚ぶんの余白を CALL 時に先取りする (全 arch 共通。2026-10-21 実機で
   // RV32 の OBJECT_DEEP が最深で return を断られ 0xE005 停止したため)。
   if (!ARCH::call_entry_has_return_room(*context, sizeof(call_frame_header)))
     return kernel_error::NO_STACK;
   const uint32_t unwind_floor = thread.call_stack.depth;
-#if defined(SHIZUKU_DEEP_DIAG)
-  shizuku_push_diag_kind = 1; // do_call 経由の push
-#endif
   if (unwind_floor > UINT16_MAX || !call_frame_push(thread, context, frame))
     return kernel_error::NO_STACK;
   auto &entry = thread.ledger[thread.call_stack.depth - 1];
   entry = {request.callee_object, request.parent_handler_object,
            request.parent_handler_entry, (uint8_t)request.callee_kind,
            LEDGER_CALL, (uint16_t)unwind_floor};
+  return kernel_error::OK;
+}
+
+template <>
+kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
+                             KERNEL::FRAME **frame,
+                             const call_request &request) {
+  if (request.entry_pc == 0)
+    return kernel_error::BAD_REQUEST;
+#if defined(SHIZUKU_RP2040)
+  if (!ARCH::region_range_representable(request.region_base, request.region_limit))
+    return kernel_error::BAD_REQUEST;
+#endif
+#if defined(SHIZUKU_DEEP_DIAG)
+  shizuku_push_diag_kind = 1; // do_call 経由の push
+#endif
+  const kernel_error error = enter_call(thread, context, frame, request);
+  if (error != kernel_error::OK)
+    return error;
   // 戻り口は常にカーネルの 1 本。撃つ svc は同じでも、そこから出たときの**種別**で
   // 「プリミティブとしての巻き戻し」か「メソッドが戻った知らせ」かが決まる
   // (発行側が戻り口を選ぶ必要は無い)。
@@ -433,24 +445,20 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
             ARCH::set_result(*frame, (uintptr_t)error, 0);
             return;
           }
-          const uint32_t unwind_floor = thread.call_stack.depth
-                                            ? thread.ledger_top().unwind_floor
-                                            : 0;
+          // 通常の CALL (do_call) と同じ形の台帳段を積む。戻りは既存の CALL の戻りに合流する。
+          const call_request request = kernel_object_instance.callee_request(
+              desc.target_object, desc.target_entry);
 #if defined(SHIZUKU_DEEP_DIAG)
           shizuku_push_diag_kind = 3; // CALL_METHOD_DESCRIPTOR 経路 (riscv のみ)
 #endif
-          if (unwind_floor > UINT16_MAX ||
-              !call_frame_push(thread, context, &frame)) {
-            ARCH::set_result(*frame, (uintptr_t)object_error::NO_STACK, 0);
+          const kernel_error entered = enter_call(thread, context, &frame, request);
+          if (entered != kernel_error::OK) {
+            ARCH::set_result(*frame, (uintptr_t)(entered == kernel_error::NO_STACK
+                                                     ? object_error::NO_STACK
+                                                     : object_error::BAD_DESCRIPTOR),
+                             0);
             return;
           }
-          auto &entry = thread.ledger[thread.call_stack.depth - 1];
-          entry.object = desc.target_object;
-          entry.kind = (uint8_t)object_kind::PLAIN;
-          entry.via = LEDGER_DISPATCH;
-          entry.handler_object = m_object_svc_handler_object;
-          entry.handler_entry = m_object_svc_handler;
-          entry.unwind_floor = (uint16_t)unwind_floor;
 
           uintptr_t args[6];
           for (unsigned i = 0; i < 6; ++i) {
@@ -459,9 +467,7 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
           ARCH::set_entry(*frame, desc.target_entry, ARCH::return_stub());
           ARCH::set_args_6(*frame, args);
           // 通常の CALL (do_call) と同じ規則: 呼び先オブジェクトの保護指定で決める。
-          ARCH::set_priv(*context,
-                         (kernel_object_instance.object_protection(desc.target_object) &
-                          PROTECTION_UNPRIVILEGED) == 0);
+          ARCH::set_priv(*context, (request.protection & PROTECTION_UNPRIVILEGED) == 0);
           ARCH::set_region_window(*context, desc.region_base, desc.region_limit);
           return;
 #endif

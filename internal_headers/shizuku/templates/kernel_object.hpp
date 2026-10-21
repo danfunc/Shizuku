@@ -210,6 +210,9 @@ public:
   // そのオブジェクトを走らせるときの保護指定 (PROTECTION_*)。直接 call (記述子経路) も
   // 通常の CALL と同じく、呼び先オブジェクトの設定を呼び出し時に引く。
   uint32_t object_protection(uintptr_t id) const;
+  // 呼び先 1 件ぶんの CALL 要求 (種別・親ハンドラ・保護・窓)。call_method と
+  // 方法記述子の直接 call が同じ引き方をするよう、ここでだけ作る。
+  call_request callee_request(uintptr_t id, uintptr_t entry_pc) const;
 
 private:
   // The compatibility probe inspects a suspended thread's private ledger

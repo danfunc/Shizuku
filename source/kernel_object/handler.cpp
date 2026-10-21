@@ -602,6 +602,19 @@ uintptr_t KERNEL_OBJECT::create_method_descriptor(uintptr_t target_id,
   return (uintptr_t)free_slot;
 }
 
+template <> call_request KERNEL_OBJECT::callee_request(uintptr_t id, uintptr_t entry_pc) const {
+  call_request request{};
+  request.entry_pc = entry_pc;
+  request.callee_object = (uint32_t)id;                    // ★呼び先オブジェクトID
+  request.callee_kind = (uint32_t)object_kind_of(id);      // ★呼び先の種別
+  request.parent_handler_object = m_objects[id].parent_handler_object;
+  request.parent_handler_entry = m_objects[id].parent_handler_entry;
+  request.protection = object_protection(id);
+  request.region_base = object_region_base(id);
+  request.region_limit = object_region_limit(id);
+  return request;
+}
+
 template <>
 uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
                                      uintptr_t argument, object_error &error) {
@@ -628,15 +641,7 @@ uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
     return 0;
   }
 
-  call_request request{};
-  request.entry_pc = (uintptr_t)entry;
-  request.callee_object = (uint32_t)id;                    // ★呼び先オブジェクトID
-  request.callee_kind = (uint32_t)object_kind_of(id);      // ★呼び先の種別
-  request.parent_handler_object = m_objects[id].parent_handler_object;
-  request.parent_handler_entry = m_objects[id].parent_handler_entry;
-  request.protection = object_protection(id);
-  request.region_base = object_region_base(id);
-  request.region_limit = object_region_limit(id);
+  call_request request = callee_request(id, (uintptr_t)entry);
   request.args[0] = argument;
 
   // CALL 段はカーネルが push する。失敗時は台帳に段が残らない。
