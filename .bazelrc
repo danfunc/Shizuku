@@ -105,3 +105,4 @@ build:esp32c5_ble --copt=-DSHIZUKU_ESP_BLE=1
 build:esp32c6_ble --config=esp32c6
 build:esp32c6_ble --//configs:ble_profile=controller_init
 build:esp32c6_ble --copt=-DSHIZUKU_ESP_BLE=1
+test --platforms=@platforms//host

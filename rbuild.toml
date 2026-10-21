@@ -3,11 +3,10 @@
 #   ESP32-C5 は esptool ではなく OpenOCD の JTAG で書く。
 #   子エージェントの sandbox からは Tailscale に届かないので、rbuild は sandbox 外で実行する。
 #
-# 注意: worker 定義 (bazelisk_path を含む) は project 側ではなく user 側の
-#   ~/.config/rbuild.toml にある。job には bazelisk_path の項目が無いため、
-#   build_esp32c5 は worker "main-lxc" の既定 bazelisk を使う。
-#   C5 用 bazelisk-c5 を使うには、user 側に専用 worker (bazelisk_path 指定) を作り、
-#   build_esp32c5 の worker をそれに向ける必要がある。
+# 備考: 各 job では必要に応じて bazelisk_path / cargo_path / remote_path_entries / env を
+#   個別に上書きできる (例: bazelisk_path = "/home/ishigakiyua/.local/bin/bazelisk-c5")。
+
+excludes = ["compile_commands.json"]
 
 [jobs.build_rp2040_xiao]
 worker = "main-lxc"
@@ -23,8 +22,8 @@ depends_on = "build_rp2040_xiao"
 [jobs.build_rp2040_pico_w]
 worker = "main-lxc"
 backend = "bazel"
-# picotool host build が通常並列で止まった実績があるため --jobs=2。
-args = ["build", "--config=rp2040_pico_w", "--jobs=2", "//firmware:shizuku_uf2"]
+# picotool host build が通常並列で止まった実績あり (旧 --jobs=2)。2026-10-15 ユーザー指示で auto に戻した。止まったら 2 に戻す。
+args = ["build", "--config=rp2040_pico_w", "--jobs=auto", "//firmware:shizuku_uf2"]
 artifacts = ["bazel-bin/firmware/shizuku.uf2"]
 
 [jobs.flash_rp2040_pico_w]
@@ -38,6 +37,12 @@ backend = "bazel"
 args = ["build", "--config=rp2350_pico2_w", "//firmware:shizuku_uf2"]
 artifacts = ["bazel-bin/firmware/shizuku.uf2"]
 
+[jobs.build_rp2350_pico2_w_elf]
+worker = "main-lxc"
+backend = "bazel"
+args = ["build", "--config=rp2350_pico2_w", "//firmware:shizuku_uf2", "//firmware:shizuku"]
+artifacts = ["bazel-bin/firmware/shizuku.uf2", "bazel-bin/firmware/shizuku"]
+
 [jobs.flash_rp2350_pico2_w]
 worker = "local"
 command = ["/bin/sh", "-c", "/opt/picotool/bin/picotool load -x -v -f \"$RBUILD_ARTIFACTS_DIR/firmware/shizuku.uf2\""]
@@ -46,11 +51,43 @@ depends_on = "build_rp2350_pico2_w"
 [jobs.build_esp32c5]
 worker = "main-lxc"
 backend = "bazel"
-# worker の ESP-IDF は bazelisk-c5 ラッパーと同じ場所を action_env で渡す。
-args = ["build", "--config=esp32c5", "--jobs=2", "--action_env=CMAKE_BUILD_PARALLEL_LEVEL=2", "--action_env=IDF_PATH=/home/ishigakiyua/.local/esp-idf-c5-v6.1", "--action_env=IDF_TOOLS_PATH=/home/ishigakiyua/.local/idf-tools-c5-v6.1", "//modules/esp_idf_support/firmware:esp32c5"]
+# worker の ESP-IDF は bazelisk-c5 ラッパーと同じ場所を env / action_env で渡す。
+args = ["build", "--config=esp32c5", "--jobs=auto", "--action_env=CMAKE_BUILD_PARALLEL_LEVEL=24", "--action_env=IDF_PATH=/home/ishigakiyua/.local/esp-idf-c5-v6.1", "--action_env=IDF_TOOLS_PATH=/home/ishigakiyua/.local/idf-tools-c5-v6.1", "//modules/esp_idf_support/firmware:esp32c5"]
 artifacts = ["bazel-bin/modules/esp_idf_support/firmware/shizuku_esp32c5.bin"]
+
+[jobs.build_esp32c5.env]
+CMAKE_BUILD_PARALLEL_LEVEL = "24"
+IDF_PATH = "/home/ishigakiyua/.local/esp-idf-c5-v6.1"
+IDF_TOOLS_PATH = "/home/ishigakiyua/.local/idf-tools-c5-v6.1"
 
 [jobs.flash_esp32c5]
 worker = "local"
 command = ["/bin/sh", "-c", "/Users/ishigakiyua/github/Shizuku-esp32/.local/idf-tools/tools/openocd-esp32/v0.12.0-esp32-20260703/openocd-esp32/bin/openocd -s /Users/ishigakiyua/github/Shizuku-esp32/.local/idf-tools/tools/openocd-esp32/v0.12.0-esp32-20260703/openocd-esp32/share/openocd/scripts -f board/esp32c5-builtin.cfg -c \"program_esp $RBUILD_ARTIFACTS_DIR/modules/esp_idf_support/firmware/shizuku_esp32c5.bin 0x10000 verify reset exit\""]
 depends_on = "build_esp32c5"
+
+# ESP32-C6。IDF は C5 と同じ v6.1 の場所を使う。
+[jobs.build_esp32c6]
+worker = "main-lxc"
+backend = "bazel"
+args = ["build", "--config=esp32c6", "--jobs=auto", "--action_env=CMAKE_BUILD_PARALLEL_LEVEL=24", "--action_env=IDF_PATH=/home/ishigakiyua/.local/esp-idf-c5-v6.1", "--action_env=IDF_TOOLS_PATH=/home/ishigakiyua/.local/idf-tools-c5-v6.1", "//modules/esp_idf_support/firmware:esp32c6"]
+artifacts = ["bazel-bin/modules/esp_idf_support/firmware/shizuku_esp32c6.bin"]
+
+[jobs.build_esp32c6.env]
+CMAKE_BUILD_PARALLEL_LEVEL = "24"
+IDF_PATH = "/home/ishigakiyua/.local/esp-idf-c5-v6.1"
+IDF_TOOLS_PATH = "/home/ishigakiyua/.local/idf-tools-c5-v6.1"
+
+[jobs.build_esp32c6_ble]
+worker = "main-lxc"
+backend = "bazel"
+args = ["build", "--config=esp32c6_ble", "--jobs=auto", "--action_env=CMAKE_BUILD_PARALLEL_LEVEL=24", "--action_env=IDF_PATH=/home/ishigakiyua/.local/esp-idf-c5-v6.1", "--action_env=IDF_TOOLS_PATH=/home/ishigakiyua/.local/idf-tools-c5-v6.1", "//modules/esp_idf_support/firmware:esp32c6_ble"]
+artifacts = [
+    "bazel-bin/modules/esp_idf_support/firmware/shizuku_esp32c6_ble.bin",
+    "bazel-bin/modules/esp_idf_support/firmware/shizuku_esp32c6_ble.elf",
+    "bazel-bin/modules/esp_idf_support/firmware/shizuku_esp32c6_ble.map",
+]
+
+[jobs.build_esp32c6_ble.env]
+CMAKE_BUILD_PARALLEL_LEVEL = "24"
+IDF_PATH = "/home/ishigakiyua/.local/esp-idf-c5-v6.1"
+IDF_TOOLS_PATH = "/home/ishigakiyua/.local/idf-tools-c5-v6.1"
