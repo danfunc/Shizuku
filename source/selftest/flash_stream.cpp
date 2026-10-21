@@ -10,7 +10,7 @@
 //    「非特権で動いた」と読み違えた事故がある)。
 //  ★★2026-08-24 (Q8): region0 は**ファーム本体の範囲だけ**になった。flash_fs の
 //    データは region0 の外なので、開いた本人が GRANT_REGION で自分の extent を
-//    明示的に開示しないと、直接ポインタで読んでも落ちる (docs/03_porting_policy.md
+//    明示的に開示しないと、直接ポインタで読んでも落ちる (docs/record/kernel_v2_record.typ
 //    Q8)。「開いたその extent だけ読める」ことを、正当な読みと拒否のテストの
 //    両方で確かめる。
 #include "shizuku/kernel.hpp"

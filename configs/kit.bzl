@@ -1,6 +1,6 @@
 """config.hpp の kit 変数 (configs/BUILD.bazel の config_hpp が使う)。"""
 
-# kit 変数 (docs/03_porting_policy.md §1)。チップで変わるのは ARCH / BOARD と
+# kit 変数 (削除した docs/03_porting_policy.md §1、全文はコミット ce5b304)。チップで変わるのは ARCH / BOARD と
 # その include だけなので、それ以外は共通にしておく。
 _CONFIG_COMMON = {
     "${SHIZUKU_CPU_COUNT}": "2",

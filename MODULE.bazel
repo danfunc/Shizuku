@@ -1,4 +1,4 @@
-# Shizuku — Bazel ビルド (docs/03_porting_policy.md D15)
+# Shizuku — Bazel ビルド (docs/record/kernel_v2_record.typ D15)
 # pico-sdk は公式 Bazel サポート (2.0+) を使う (BCR の 2.2.0)。
 module(
     name = "shizuku",

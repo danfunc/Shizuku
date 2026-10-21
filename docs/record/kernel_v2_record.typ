@@ -149,3 +149,41 @@ object destroy の契機と stream 自動片付けは未決 (`docs/design/kernel
   [区間値はevent間差でhook/IRQ込み。区間minの和を速度予測に使わない。],
   [RAM実験はflash edge 33–38件を残し、.dataを約11.7–15.1 KiB増加。RAM閉包・stack・MPU受入を別に測る。],
 ]
+
+== 03 から移した現行決定
+
+`docs/03_porting_policy.md` の決定のうち、今も有効でコードや他の正本に要点が無かったものを移す。コードのコメントは D 番号で参照しているため、番号は残す。廃止・置換された決定は移さない (経緯は `docs/record/legacy_docs_summary.typ` を参照)。根拠欄は 2026-10-21 時点の worktree のコードと文書で確認した位置である。動作は実機で確かめ直していない。
+
+#table(
+  columns: (0.8fr, 3.7fr, 1.9fr),
+  table.header([番号], [決定の要点], [根拠]),
+  [D2], [arch と board を分ける。arch は ISA 依存 (例外入口、文脈退避、特権遷移、atomic)、board は SoC 依存 (時刻、コア起動、ペリフェラル、クロック)。`cpu_driver` の名は廃止した。], [`internal_headers/shizuku/concepts/arch.hpp`、`concepts/board.hpp`、`arch/`、`boards/`],
+  [D3, D5], [実行プリミティブは CALL / RETURN / SWITCH / GRANT の 4 種。REDISPATCH は削除済み。経路は今走っているオブジェクトの種別 (`object_kind`) だけで決め、svc 番号・ID・段数のパリティでは決めない。種別は呼び出しフレームに退避し、書けるのはカーネルだけ。exit は RETURN 1 本に統一し、オブジェクトが申告した段数 (`depth_claim`) をカーネルが実際の深さと突き合わせる。], [`internal_headers/shizuku/kernel_abi.hpp`、`object_api.hpp:152–163` の注釈],
+  [D12 (I-9)], [一般オブジェクト起因の失敗は必ずエラーで返す。panic はカーネル自身の不変条件が破れたときだけ。共通の原則は「黙って捨てない」で、返す先が無いときだけ panic する。], [`kernel_abi.hpp` の `kernel_error`、`templates::result<T>`],
+  [D15, D38], [ビルドは Bazel のみ。CMake は 2026-08-21 に削除した。構成のつまみは `.bazelrc` と `configs/BUILD.bazel`、オブジェクト番号は `objects.list`。CYW43 の SCK は `configs/cyw43_clock.bzl` から導出し、`PICO_CONFIG_EXTRA_HEADER` 経由で SDK 内部まで届ける (`--copt` では届かない)。], [`BUILD.bazel`、`MODULE.bazel`、`configs/cyw43_clock.bzl`],
+  [D17], [XNO 分離。Shizuku 本体には kernel、kobj、arch、board、カーネル自己テスト用オブジェクトだけを残し、小さく保つ。XNO との境界は svc とメソッド呼び出しの安定 ABI。公開ヘッダの区分 (`public_headers/` 相当) は未実装。], [`public_headers/` が無いことを確認],
+  [D18, D19], [スレッドの表とスタックはオブジェクト側から貸す (`set_thread_storage`、`spawn_request` の `stack_base`)。所有 (誰が出すか) と保護 (どこに置くか) は別問題で、置き場所はカーネルが検査する。`base >= unprivileged_floor()` を満たさなければ panic する。簿記は特権のみの領域、作業領域は非特権から届く領域から出す。], [`source/kernel/`、`boards/rp2350_pico2/board.cpp:149`],
+  [D20], [メモリの授受は持ち主を記録する。`MEMORY_ALLOCATE` / `RELEASE` / `HAND_OVER` / `OWNER`。持ち主でないものは返せず (`NOT_OWNER`)、`HAND_OVER` で渡した側は以後返せない。持ち主は発行元から導出し、名乗らせない。], [`internal_headers/shizuku/object_api.hpp:76, 200`],
+  [D23], [オーバークロックは今は入れない。理由は「SPI が上げられないから」ではない。SCK を半分にしても LED 書き込みの最小値は +52 µs しか変わらず、費用の大半は ioctl 往復とスケジューリング方針で、clk_sys に比例しない。分周比は自由なつまみではなく、PIO プログラムの選択 (応答のサンプル位置) と対で決まる。上げるときは XIP のスイープを先に回す。], [`configs/cyw43_clock.bzl`。実測値は消した文書の要約に残す],
+  [D24, D25], [実行権の貸し借りの単位はクロックにする (残量は「クロック数」で持つ)。仕事量はクロック数で、µs で持つと周波数が変わったとき同じ数字が別の仕事量を意味する。SLEEP は壁時計なので µs のまま、単位を揃えない。タイマの装填 (`arm_timer`) とサイクル計数 (`grant_charge`) は別の関数で、arch ごとに変わるのは装填だけ。残量が装填の下限より小さいときは貸さずに断る (`GRANT_TOO_SMALL`)。下限へ切り上げて貸すと、借り手は貸された以上に走る。], [`templates/kernel.hpp`、`source/kernel/thread.cpp:232–264`、`kernel_abi.hpp:133`],
+  [D26], [オブジェクトシステムは定数時間で抜ける。名前による解決や文字列比較は入れない。`DECLARE_NAME` の名前は保持するだけで比較しない。例外はファイルシステムの `lookup` で、返すのはアドレスなので引いた後の読み出しは定数時間。メモリ割当は階級別の空きリストで O(1)。2026-08-21 の監査でオブジェクトシステム本体に文字列処理が無いことを確認した。], [`object_api.hpp`、`source/kernel_object/memory.cpp`、`objects/flash_fs.cpp`],
+  [D27, D28], [オブジェクトは自分で名乗る (`DECLARE_NAME`)。名前は発行元から導出し、付け直しは断る。`OBJECT_NAME` は名前を返すだけで比較しない。カーネルは `resolve` を持たない。名前解決が要る系 (後から積むドライバ、FS、セッション) は System Object の仕事。番号はソースに書かず、ビルドが振る。各モジュールが `objects.list` (1 行 1 名) を置き、`tools/gen_object_ids.py` が読む。二重宣言と上限超過は生成時に落とす。`create_object` の衝突は拒否し、鳴らす。], [`modules/pico_sdk_support/objects.list`、`tools/gen_object_ids.py`、`object_api.hpp`],
+  [D29, D30, D32], [2 コア化後、kobj の表、arena、名前、スレッドスタックの控えは `table_lock` で守る。錠を握ったまま実行権を手放さない (スケジューラを呼ぶ前に放す)。他コアを止める操作は入れ子で数え、実際に止めるのは外側の 1 回だけにする。2 コアが互いを止め合うと即デッドロックするので、止める側は錠で 1 コアに絞る。], [`table_lock`、`park_other_cores` の呼び出し元],
+  [D31, D34], [flash は 1 から 0 にしか書けない前提で、消去は本当に 0xFF へ戻すときだけにする。目録は追記式で、削除はビットを落とすだけ。締切のある系では消去を書き込み経路に置かない (1 セクタの消去約 33 ms は媒体の性質で縮まない)。空きは `PREPARE` で事前に払い、走行中の書き込みは 0xFF の場所へ書くだけにする。まとめて消すほど 1 バイトあたりは安いが、64KB のブロック消去は 64KB 境界に揃えないと効かない。], [`objects/internal_headers/shizuku/objects/flash_fs.hpp:53`、`objects/flash_fs.cpp`],
+  [D39], [デバッグ UI は VS Code 標準の Run and Debug に寄せる。launch.json は固定名 `/tmp/shizuku-gdb-port` だけを指し、焼く前にポートを聞かない。焼いた直後はデバイスノードが消えて戻るので、焼く側は消えるのを待ってから戻るのを待つ。焼く前にポートを掴んだ gdb だけを SIGKILL する (SIGTERM では死なない)。], [`.vscode/launch.json`、`.vscode/tasks.json`、`tools/flash_and_wait.sh`],
+  [D40, D41, D43], [デバッグは自己ホスト型。Cortex-M33 の DebugMonitor (例外 12) と FPB、DWT で、外付けプローブは要らない。halting debugger が繋がっている間は DEMCR の MON_EN が効かないので併用しない。MON_STEP は arm した瞬間の実行中の文脈の次の 1 命令に効くので、対象が次に復帰する直前 (CTX_RESTORE の直前) で arm する。DEMCR に書いたら dsb と isb を入れ、対になる clear にも入れる。], [`modules/pico_sdk_support/rp2350/objects/gdb_stub.cpp`、`consume_pending_step`、`source/selftest/debug_ladder.cpp`],
+  [D42, D45, D47], [USB CDC は 2 本。若い番号が診断、大きい番号が GDB。診断は溢れたら捨てて本業を止めない。GDB の返事は 1 バイトも落とせないので、FIFO が空くまで上限付きで待つ。記述子で名乗ったインターフェースには必ずドライバが要る。panic は診断を 1 行ごとに flush して出し切り、もう一方のコアを止め、USB に要る IRQ だけを残して SysTick を止める。macOS は CDC のインターフェース名を読まないので、名前では見分けられない。見分けは番号の規則による。], [`objects/usb_cdc.cpp` (`usb_cdc_isolate_for_panic`)、`shizuku_panic_dump`],
+  [D44, Q8], [GRANT_REGION: 窓の開示は特権オブジェクトだけができる (誰に何を見せるかを決める権限)。開示された窓は対象オブジェクトの性質として保存され、対象の CALL / SPAWN のたびに効く。呼び出し元が渡す値ではない。region0 は XIP 全域ではなく、ファーム本体の終端までに絞る。PMSAv8 は 32B 粒度で、要求範囲の末尾はそのブロックの末尾まで読めてしまう (HW の限界)。窓の取り消し (CLOSE 時の解除) は未実装。], [`object_api.hpp` (`GRANT_REGION`)、`boards/rp2350_pico2/board.cpp`、`source/selftest/flash_stream.cpp`],
+  [D48, D51, D52, D53], [GDB stub は走行中も応答する。走らせたら返事をせず主ループへ戻り、止まったとき、または 0x03 を受けたときだけ停止応答を送る。スレッド ID は 16 進 (10 進で書くと 10 本目から静かにずれる)。止めたものは自分が止めたものだけをビットマスクで持ち、detach で戻す。all-stop は運用上使えない (止めると系が終わるスレッドがある) ので non-stop を使う。停止通知は握手が済むまで送らない。], [`modules/pico_sdk_support/rp2350/objects/gdb_stub.cpp`],
+  [D49, D55], [GDB stub は 3 役に分ける。server 1 本が CDC と RSP の解釈を担い、コアごとの agent 2 本が自コアの FPB と DEMCR を仕掛ける。FPB とデバッグ機構はコアごとに独立なので、agent は両コアに置く。止めてよい相手は絞る。デバッガ自身 (server と agent) と転送スレッドは GDB の一覧に出さず、止められない。], [`gdb_stub.cpp` (`g_protected_threads`)],
+  [D54, D57], [止めたスレッドが走り続けて見えた原因は、切り替え経路と grant の巻き戻し経路が状態を無条件に上書きしていたことだった。両方に状態ガードを入れた。寝ているスレッドは `sleep_us` の抜け条件に状態を入れ、締切で勝手に起きないようにした。例外復帰の全経路 (CTX_RESTORE) に検査を入れる案は測って効果が無かったので採らなかった。syscall を撃たない純粋な計算ループは量が切れるまで止まらないので、「全部止められる」とは書かない。], [`templates/kernel.hpp` (`do_switch`、`grant_unwind`)、`kernel_object.hpp` (`sleep_us`)],
+  [D58], [D1 (カーネルはオブジェクトを知らない) は 2026-09-28 に廃止した。現行の必須要件は、システムコールハンドラとカーネルオブジェクトを再登録できること (ホットスワップ) で、両者の密結合は禁じない。MMU のある構成では重くても保護してよい。オブジェクトは保護付きオブジェクトとカーネル空間オブジェクトの 2 種別を持つ。kobj の差し替え想定と、ID 0 のハードコード禁止は維持する。], [`docs/06_esp32_port_manifest.typ` (ホットスワップの手順)、`kernel_abi.hpp:68` (`KERNEL_OBJECT`)],
+)
+
+未決として残るもの:
+
+- Q7 (idle スレッド): 未着手。起こし方として、board のアラームを使うか、grant のタイマの意味を広げるかを決める。
+- D26 残: `schedule()` は O(THREAD_COUNT) の巡回のまま。ready のビットマップと ctz で定数にできるが未着手。
+- D42 残: CDC は今も直接呼び出しで、ストリームとして扱っていない。
+- GDB の書き込み系 (メモリ書き込み `M`/`X`、レジスタ書き込み `G`/`P`) は未実装。空の返事のまま GDB に黙って無視される。明示的にエラーを返すか、実装するかを決める。
+- D53 の限界: カーネルが持つデバッグ記録は直近 1 件だけなので、2 本がほぼ同時に止まると古い方を見落とす窓がある。

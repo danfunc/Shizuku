@@ -47,7 +47,7 @@ constexpr uintptr_t DEBUGGEE_OBJECT = object_id::debuggee;
 // ★external_target を渡すと、合成の debuggee を作らずそのスレッドを対象にする
 //   (2026-08-24 デモ用: 実在するスレッド — 例えば LED を叩く blink — を
 //   attach するだけで止められることを目で見るため)。既定は今まで通り
-//   合成の debuggee (docs/05_handoff.md の `break debuggee_step` はこちら前提)。
+//   合成の debuggee (削除済みの docs/05_handoff.md (ce5b304) の `break debuggee_step` はこちら前提)。
 constexpr uint32_t NO_EXTERNAL_TARGET = 0xFFFFFFFFu;
 uint32_t start_gdb_stub(uint32_t external_target = NO_EXTERNAL_TARGET);
 

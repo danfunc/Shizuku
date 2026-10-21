@@ -3,7 +3,7 @@
 #include <cstdint>
 
 // ===========================================================================
-//  カーネル ABI — 機構だけの語彙 (docs/03_porting_policy.md D1 / DESIGN §7)
+//  カーネル ABI — 機構だけの語彙 (docs/record/kernel_v2_record.typ D1 / DESIGN §7)
 // ===========================================================================
 //  syscall の形: a0 = 番号, a1..a4 = 引数 / 戻り a0 = エラー (0 = 成功), a1 = 値。
 //
@@ -87,7 +87,7 @@ struct call_request {
   uint32_t callee_kind = (uint32_t)object_kind::PLAIN;
   // ★軸 B (DESIGN §11.3)。呼び先が特権命令なしに読める追加の窓
   //   (region0/1 の外)。0/0 = 窓なし。**呼び出し元ではなく呼び先の性質**として
-  //   決まる値をここへ載せる (docs/03_porting_policy.md Q8)。
+  //   決まる値をここへ載せる (docs/record/kernel_v2_record.typ Q8)。
   uintptr_t region_base = 0;
   uintptr_t region_limit = 0;
   // ★解決済み親 handling object の情報 (thread コンテキストへ伝播)

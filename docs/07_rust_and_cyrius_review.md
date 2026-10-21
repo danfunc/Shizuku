@@ -134,9 +134,9 @@ OCI ランタイムをカーネル内に持ち、ホスト世界とコンテナ�
 2. **オブジェクトごとの名前空間**。Cyrius はコンテナ VFS によって、プロセスが
    ホストのパスを解決できないことを**構造で**保証している。Shizuku の flash_fs は
    今はグローバルなので、オブジェクト単位のハンドル (ストリーム) からしか触れない形に
-   寄せると、「気をつけるで守らない」(05_handoff §5) に合う。
+   寄せると、「気をつけるで守らない」(削除した 05_handoff §5、[legacy_docs_summary.typ](record/legacy_docs_summary.typ) の 05 節「この repo の作法」) に合う。
 3. **設計メモの置き方**: Cyrius はモジュールごとに `DESIGN.md` を置いている。
-   Shizuku は 03_porting_policy.md に集約しているので、今回分けた
+   Shizuku は決定を docs/record/kernel_v2_record.typ に集約しているので、今回分けた
    `modules/pico_sdk_support/{rp2040,rp2350,objects}` に短い README を置くと
    決定 (D-n) への索引として効く。
 

@@ -301,7 +301,7 @@ void shizuku::app_entry() {
   // ★★2026-08-24 デモ用: 合成の debuggee ではなく実在の blink (LED を叩く
   //   スレッド) を対象にする。attach するだけで LED が目に見えて止まり、
   //   detach で再開する — DebugMonitor が「そのスレッドだけ」止めることの
-  //   一番分かりやすい確認 (docs/03_porting_policy.md D43)。
+  //   一番分かりやすい確認 (docs/record/kernel_v2_record.typ D43)。
   shizuku::objects::start_gdb_stub(blink_thread);
 #endif
 

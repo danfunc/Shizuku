@@ -1,5 +1,5 @@
 # このモジュールが提供するオブジェクトの名前。★番号は書かない — 振るのは
-# ビルドシステム (tools/gen_object_ids.py, docs/03_porting_policy.md D28)。
+# ビルドシステム (tools/gen_object_ids.py, docs/record/kernel_v2_record.typ D28)。
 # 1 行 1 名。'#' から行末はコメント。
 gpio
 spi

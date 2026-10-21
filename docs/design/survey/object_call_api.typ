@@ -40,7 +40,7 @@ Shizuku OS はマイクロ組み込み環境において、実行権貸付け (G
   - context reuse によるスタック幾何・保護境界分割、実行権の GRANT 貸付けと無引数 YIELD 返却、ドライバ API を user/kernel 双方から呼出可能とし peripheral object が interface 差を吸収する方針が明記されている。
 + *`docs/record/kernel_v2_record.typ` の不在と代替資料*:
   - 指定されたパス `docs/record/kernel_v2_record.typ` はリポジトリ内に存在しない (`docs/record/` ディレクトリ自体が存在しない)。
-  - 代替関連資料として `docs/01_current_repo_survey.md`、`docs/02_reference_survey.md`、`docs/design/kernel_stream.typ` が存在する。
+  - 代替関連資料として `docs/design/kernel_stream.typ` が存在する。`docs/01_current_repo_survey.md`、`docs/02_reference_survey.md` は後に削除した (要約は `docs/record/legacy_docs_summary.typ`)。
 
 == Scarlet 詳説 (Deep Dive)
 
@@ -417,4 +417,4 @@ POSIX の伝統的な抽象 (`fd` に対する `read`/`write`/`ioctl`) は、UNI
 - `source/kernel_object/handler.cpp`: L318–325 (`current_object`), L327–335 (`caller_object`), L337–355 (`interposed_handler`), L533–581 (`call_method`), L620–648 (`forward_child_exit`), L1572–1690 (`handle`)
 - `internal_headers/shizuku/object_api.hpp`: L15–139, L145–154, L190–215
 - `docs/design/kernel_v3.typ`: L20, L34–37, L76–80, L89–100
-- `docs/record/kernel_v2_record.typ`: *不在* (代替: `docs/01_current_repo_survey.md`, `docs/02_reference_survey.md`)
+- `docs/record/kernel_v2_record.typ`: 存在する (この調査の時点では不在だった。代替として読んだ 01、02 は削除済みで、要約は `docs/record/legacy_docs_summary.typ`)

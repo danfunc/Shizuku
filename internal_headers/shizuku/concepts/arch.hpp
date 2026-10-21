@@ -5,7 +5,7 @@
 namespace shizuku {
 namespace concepts {
 
-// arch = ISA 依存層の要件 (docs/03_porting_policy.md D2, PORT §5.1)。
+// arch = ISA 依存層の要件 (docs/record/kernel_v2_record.typ D2, PORT §5.1)。
 // ISA ごとに書き直すのはこの concept を満たすクラス 1 つ (+ 文脈退避 asm) だけ。
 //
 // ★意味の契約 (関数を「用意したが意味が違う」形の破れを防ぐため、ここに明記する):

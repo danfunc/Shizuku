@@ -97,7 +97,7 @@ enum struct object_api : uintptr_t {
   //   DMA チャネルはカーネル側が握る (MPU を素通りするのでオブジェクトへ渡さない)。
   STREAM_CONNECT = 22,
   // ★軸 B (メモリ到達範囲) を**オブジェクト単位で動的に**開示する
-  // (docs/03_porting_policy.md Q8)。a1 = 対象オブジェクト ID, a2 = base (XIP
+  // (docs/record/kernel_v2_record.typ Q8)。a1 = 対象オブジェクト ID, a2 = base (XIP
   // アドレス), a3 = limit (内包)。対象オブジェクトへの CALL_METHOD/SPAWN の
   // たびに、この窓が読み専用で開く (a2=a3=0 で閉じる)。
   // ★呼び出しを基準にしない — 「誰が呼んだか」ではなく「対象オブジェクトが
