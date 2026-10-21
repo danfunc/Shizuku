@@ -118,8 +118,13 @@ public:
     return reinterpret_cast<uintptr_t>(context.sp) + sizeof(exception_frame_t);
   }
 
-  static void normalize_frame(exception_frame_t &) {
+  static void normalize_frame(exception_frame_t &frame) {
+#if defined(SHIZUKU_EXP_C6_STAGE1)
+    frame.reserved0 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&frame) + sizeof(exception_frame_t));
+#else
+    (void)frame;
     // RV32 ではハードウェアによる SP の奇数ワード自動調整等は存在しない
+#endif
   }
 
   // syscall ABI: a0..a4 = frame.a0..frame.a4 (source/kernel/dispatch.cpp:209, 218-239 と整合)
@@ -142,6 +147,15 @@ public:
     frame.a1 = args[1];
     frame.a2 = args[2];
     frame.a3 = args[3];
+  }
+
+  static void set_args_6(exception_frame_t &frame, const uintptr_t *args) {
+    frame.a0 = args[0];
+    frame.a1 = args[1];
+    frame.a2 = args[2];
+    frame.a3 = args[3];
+    frame.a4 = args[4];
+    frame.a5 = args[5];
   }
 
   // RV32's fifth AAPCS argument is a4, which is already in the saved trap frame.
@@ -183,7 +197,21 @@ public:
     context.stack_limit = limit;
   }
 
+#if defined(SHIZUKU_EXP_C6_STAGE1)
+  static bool is_kstack_address(uintptr_t addr) {
+    return IntMode::is_kstack_address(addr);
+  }
+  static uintptr_t kstack_limit() {
+    return IntMode::kstack_limit();
+  }
+#endif
+
   static uintptr_t stack_limit(const context_t &context) {
+#if defined(SHIZUKU_EXP_C6_STAGE1)
+    if (IntMode::is_kstack_address(reinterpret_cast<uintptr_t>(context.sp))) {
+      return IntMode::kstack_limit();
+    }
+#endif
     return context.stack_limit;
   }
 
@@ -224,11 +252,34 @@ public:
                  : "ra", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "a5", "a6", "a7", "memory");
     return {r_a0, r_a1};
   }
+
+  static syscall_result syscall(uintptr_t number, uintptr_t a1,
+                                uintptr_t a2, uintptr_t a3,
+                                uintptr_t a4, uintptr_t a5,
+                                uintptr_t a6, uintptr_t a7) {
+    register uintptr_t r_a0 asm("a0") = number;
+    register uintptr_t r_a1 asm("a1") = a1;
+    register uintptr_t r_a2 asm("a2") = a2;
+    register uintptr_t r_a3 asm("a3") = a3;
+    register uintptr_t r_a4 asm("a4") = a4;
+    register uintptr_t r_a5 asm("a5") = a5;
+    register uintptr_t r_a6 asm("a6") = a6;
+    register uintptr_t r_a7 asm("a7") = a7;
+    asm volatile("ecall"
+                 : "+r"(r_a0), "+r"(r_a1)
+                 : "r"(r_a2), "r"(r_a3), "r"(r_a4), "r"(r_a5), "r"(r_a6), "r"(r_a7)
+                 : "memory");
+    return {r_a0, r_a1};
+  }
 #else
   // 非-RISC-V 環境でのホスト呼出しを成功に見せる no-op は禁止。未対応時リンク不能とする。
   static syscall_result syscall(uintptr_t number, uintptr_t a1 = 0,
                                 uintptr_t a2 = 0, uintptr_t a3 = 0,
                                 uintptr_t a4 = 0);
+  static syscall_result syscall(uintptr_t number, uintptr_t a1,
+                                uintptr_t a2, uintptr_t a3,
+                                uintptr_t a4, uintptr_t a5,
+                                uintptr_t a6, uintptr_t a7);
 #endif
 
   static void prepare_thread_entry(context_t &context, uintptr_t stack_top,
@@ -247,7 +298,28 @@ public:
     frame->a1 = frame->a2 = frame->a3 = frame->a4 = 0;
     frame->mstatus = context.privileged ? RV32_MSTATUS_MPP : 0;
     // MPIE stays clear until the interrupt matrix and timer are owned.
+#if defined(SHIZUKU_EXP_C6_STAGE1)
+    frame->reserved0 = (stack_top & ~static_cast<uintptr_t>(15));
     context.sp = frame;
+#else
+    context.sp = frame;
+#endif
+  }
+
+  // サイクルカウンタ処理は IntMode (チップ側) に委ねる。
+  static bool cycle_counter_enable() {
+    if constexpr (HAS_CYCLE_COUNTER) {
+      return IntMode::cycle_counter_enable();
+    } else {
+      return false;
+    }
+  }
+  static uint32_t cycle_counter_read() {
+    if constexpr (HAS_CYCLE_COUNTER) {
+      return IntMode::cycle_counter_read();
+    } else {
+      return 0;
+    }
   }
 
   // サイクルカウンタ処理は IntMode (チップ側) に委ねる。
@@ -273,6 +345,10 @@ public:
     return IntMode::timer_remaining(wrapped);
   }
   static void pend_context_switch() { IntMode::pend_context_switch(); }
+
+  // サイクルカウンタの制御・読取りは IntMode (チップ側) に委ねる。
+  static bool cycle_counter_enable() { return IntMode::cycle_counter_enable(); }
+  static uint32_t cycle_counter_read() { return IntMode::cycle_counter_read(); }
 
   // デバッグおよびフォールト状態は IntMode に委ねる
   static uint32_t debug_reason_take() { return IntMode::debug_reason_take(); }

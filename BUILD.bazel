@@ -296,7 +296,7 @@ cc_library(
 cc_library(
     name = "shizuku_kernel",
     srcs = KERNEL_SRCS + KERNEL_OBJECT_SRCS + C6_SELFTEST_SRCS + [
-        ":object_ids_c_file",
+        "source/selftest/call_cost.cpp",
         "source/memory_manager/freestanding.cpp",
         "//modules/esp_idf_support/c6:early_boot.cpp",
         "//modules/esp_idf_support/c6:link_stubs.cpp",

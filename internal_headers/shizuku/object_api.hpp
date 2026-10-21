@@ -5,8 +5,9 @@
 // ===========================================================================
 //  オブジェクトランドの API — カーネルオブジェクトが提供する syscall の語彙
 // ===========================================================================
-//  ★番号を持つのはここだけ。カーネルは番号を一切知らない (I-1) ので、この
-//    ヘッダはカーネル側からは参照されない。
+//  ★大部分の番号を持つのはここだが、V2a 以降の直接トラップ・メソッド記述子
+//    (CREATE_METHOD_DESCRIPTOR=32, CALL_METHOD_DESCRIPTOR=33) 等の基礎機構は
+//    カーネルディスパッチが直接処理する。
 //  形は a0 = 番号, a1..a4 = 引数 / 戻り a0 = エラー (0 = 成功), a1 = 値。
 //  ★将来 XNO (オブジェクト集合の別リポジトリ, D17) が使う公開 ABI はこれ。
 //    今は internal_headers に置いているが、境界を切るときにここから公開ヘッダへ移す。
@@ -128,6 +129,8 @@ enum struct object_api : uintptr_t {
   STREAM_PUSH_N = 29,  // a1 = ID, a2 = push_request* → value = 件数
   STREAM_POP_N = 30,   // a1 = ID, a2 = pop_request* → value = 件数
   STREAM_AVAILABLE = 31, // a1 = ID → value = available (capacity で飽和)
+  CREATE_METHOD_DESCRIPTOR = 32,
+  CALL_METHOD_DESCRIPTOR = 33,
   // 専用ハンドラ (HANDLER) が配下の子オブジェクトの終了を Root KOBJ へ転送する。
   // a1 = 絶対戻り先深さ d, a2 = 戻り値, a3 = エラーコード。
   // Root は d を検証し、現在深さとの差分だけ RETURN する。
@@ -208,7 +211,15 @@ enum struct object_error : uintptr_t {
   ALREADY_NAMED, // 名は付け直せない (誰かが控えた名が別物を指すようになるため)
   NOT_PRIVILEGED, // GRANT_REGION 等、特権オブジェクトしか撃てない番号を非特権が撃った
   STREAM_BUSY,    // 接続中のため destroy できない
+  NO_DESCRIPTOR,  // 記述子テーブルが一杯 (容量 16 超過)
+  BAD_DESCRIPTOR, // インデックス不正 / 未公開 / 権限なし
+  STALE_DESCRIPTOR, // 呼び出し先世代が一致しない (stale)
 };
+
+static_assert(static_cast<uintptr_t>(object_error::STREAM_BUSY) == 20);
+static_assert(static_cast<uintptr_t>(object_error::NO_DESCRIPTOR) == 21);
+static_assert(static_cast<uintptr_t>(object_error::BAD_DESCRIPTOR) == 22);
+static_assert(static_cast<uintptr_t>(object_error::STALE_DESCRIPTOR) == 23);
 
 } // namespace shizuku
 #endif // SHIZUKU_OBJECT_API_HPP

@@ -31,8 +31,11 @@
 //
 //  ★RETURN を解釈できるのは登録済み KOBJ だけ。各 dispatch 先には呼出し鎖の
 //    unwind floor を第 5 引数で渡し、exit API は絶対戻り深さ d を指定する。
+#if __has_include("shizuku/config.hpp")
 #include "shizuku/kernel.hpp"
+#endif
 #include "shizuku/object_api.hpp"
+#include "shizuku/svc_attributes.hpp"
 #if defined(__arm__) || defined(__thumb__)
 extern "C" char shizuku_v2_service_resume;
 #endif
@@ -49,11 +52,21 @@ extern "C" void shizuku_boot_trace_return_leave(uint32_t, uint32_t);
 extern "C" void shizuku_boot_trace_primitive_stage(uint32_t);
 #endif
 
+#ifndef SHIZUKU_STAGE05_CPP_ATTR
+#if defined(SHIZUKU_C6_STAGE05_IRAM_CPP) && SHIZUKU_C6_STAGE05_IRAM_CPP
+#define SHIZUKU_STAGE05_CPP_ATTR __attribute__((section(".iram1.text")))
+#else
+#define SHIZUKU_STAGE05_CPP_ATTR
+#endif
+#endif
+
 namespace shizuku {
 
 // ISA 層の例外入口が退避先・復帰先として使う文脈。dispatch が現在スレッドを
 // 差し替えれば、そのまま切替になる (退避後と復帰前の 2 回呼ばれる)。
-template <> KERNEL::CONTEXT *KERNEL::current_context() {
+template <>
+SHIZUKU_STAGE05_CPP_ATTR
+KERNEL::CONTEXT *KERNEL::current_context() {
   return m_threads[m_current[BOARD::core_num()]].thread.context;
 }
 
@@ -61,6 +74,31 @@ template <> void KERNEL::set_object_handler(uintptr_t entry_pc,
                                             uint32_t object_id) {
   m_object_svc_handler = entry_pc;
   m_object_svc_handler_object = object_id;
+}
+
+template <> uintptr_t KERNEL::current_object(uint32_t thread_id) const {
+  if (thread_id >= m_thread_count)
+    return (uintptr_t)KERNEL_OBJECT::NO_OBJECT;
+  const THREAD &thread = m_threads[thread_id].thread;
+  for (uint32_t i = 0; i < thread.call_stack.depth; ++i) {
+    const auto &entry = thread.ledger[thread.call_stack.depth - 1 - i];
+    if (entry.via == LEDGER_CALL)
+      return entry.object;
+  }
+  return thread.base_object;
+}
+
+template <> uintptr_t KERNEL::caller_object(uint32_t thread_id) const {
+  if (thread_id >= m_thread_count)
+    return (uintptr_t)KERNEL_OBJECT::NO_OBJECT;
+  const THREAD &thread = m_threads[thread_id].thread;
+  uint32_t calls = 0;
+  for (uint32_t i = 0; i < thread.call_stack.depth; ++i) {
+    const auto &entry = thread.ledger[thread.call_stack.depth - 1 - i];
+    if (entry.via == LEDGER_CALL && ++calls == 2)
+      return entry.object;
+  }
+  return calls == 1 ? thread.base_object : (uintptr_t)KERNEL_OBJECT::NO_OBJECT;
 }
 
 
@@ -363,6 +401,82 @@ template <> SHIZUKU_STAGE05_HOTPATH_ATTR void KERNEL::svc_dispatch(KERNEL::CONTE
   const uintptr_t target_entry = service_gate ? m_object_svc_handler : thread.current_handler_entry();
   const uint32_t target_object = service_gate ? m_object_svc_handler_object : thread.current_handler_object();
   const bool to_root = (target_object == m_object_svc_handler_object);
+
+  // 段 V1: 宛先が信頼された root KernelObject かつ mode == svc_mode::handler の
+  // 同期・有界 native API (現 candidate は GET_CURRENT_OBJECT, GET_CALLER_OBJECT) に
+  // 限定して trap 内で直接処理し、dispatch frame を積まずに即時復帰する。
+  //
+  // 重要 (Luna レビュー指摘 1):
+  // 移行対象外の mode == svc_mode::thread (GRANT_REGION, YIELD, CALL_METHOD 等) や
+  // 未移行の mode::handler (MEMORY_OWNER 等) は、trap 内で先行して属性・権限検査を行わず、
+  // 既存の KOBJ actor dispatch 経路へそのまま通す (先行拒絶の禁止)。
+  // また、専用親ハンドラ宛て (to_root == false) の raw SVC は全 ID で親ハンドラへ無加工配送される。
+  if (to_root) {
+    const uintptr_t id = ARCH::arg(*frame, 0);
+    if (id == (uintptr_t)object_api::GET_CURRENT_OBJECT ||
+        id == (uintptr_t)object_api::GET_CALLER_OBJECT ||
+        id == (uintptr_t)object_api::CALL_METHOD_DESCRIPTOR) {
+      const auto *attr = svc_attribute_for(id);
+      if (attr != nullptr && attr->mode == svc_mode::handler) {
+        const bool privileged = !is_context_unprivileged(context);
+        if (!svc_permission_allows(id, privileged)) {
+          ARCH::set_result(*frame, (uintptr_t)object_error::NOT_PRIVILEGED, 0);
+          return;
+        }
+        if (id == (uintptr_t)object_api::GET_CURRENT_OBJECT) {
+          ARCH::set_result(*frame, (uintptr_t)object_error::OK,
+                           current_object(current_thread_id()));
+          return;
+        }
+        if (id == (uintptr_t)object_api::GET_CALLER_OBJECT) {
+          ARCH::set_result(*frame, (uintptr_t)object_error::OK,
+                           caller_object(current_thread_id()));
+          return;
+        }
+        if (id == (uintptr_t)object_api::CALL_METHOD_DESCRIPTOR) {
+#if !defined(__riscv)
+          ARCH::set_result(*frame, (uintptr_t)object_error::UNKNOWN_API, 0);
+          return;
+#else
+          const uint32_t thread_id = current_thread_id();
+          const uint32_t caller_id = (uint32_t)current_object(thread_id);
+          const uint32_t index = (uint32_t)ARCH::arg(*frame, 1);
+          method_descriptor_entry desc{};
+          object_error error = object_error::OK;
+          if (!validate_method_descriptor(caller_id, index, desc, error)) {
+            ARCH::set_result(*frame, (uintptr_t)error, 0);
+            return;
+          }
+          const uint32_t unwind_floor = thread.call_stack.depth
+                                            ? thread.ledger_top().unwind_floor
+                                            : 0;
+          if (unwind_floor > UINT16_MAX ||
+              !call_frame_push(thread, context, &frame)) {
+            ARCH::set_result(*frame, (uintptr_t)object_error::NO_STACK, 0);
+            return;
+          }
+          auto &entry = thread.ledger[thread.call_stack.depth - 1];
+          entry.object = desc.target_object;
+          entry.kind = (uint8_t)object_kind::PLAIN;
+          entry.via = LEDGER_DISPATCH;
+          entry.handler_object = m_object_svc_handler_object;
+          entry.handler_entry = m_object_svc_handler;
+          entry.unwind_floor = (uint16_t)unwind_floor;
+
+          uintptr_t args[6];
+          for (unsigned i = 0; i < 6; ++i) {
+            args[i] = ARCH::arg(*frame, 2 + i);
+          }
+          ARCH::set_entry(*frame, desc.target_entry, ARCH::return_stub());
+          ARCH::set_args_6(*frame, args);
+          ARCH::set_priv(*context, false);
+          ARCH::set_region_window(*context, desc.region_base, desc.region_limit);
+          return;
+#endif
+        }
+      }
+    }
+  }
 
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(412);

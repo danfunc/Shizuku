@@ -24,12 +24,9 @@
 #include "shizuku/object_api.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/selftest.hpp"
+#if !defined(__riscv)
 #include "shizuku/service_profile.hpp"
 #include "shizuku/kernel_services.hpp"
-#if defined(SHIZUKU_C6_STAGE05_TRACE) && SHIZUKU_C6_STAGE05_TRACE
-#include "chips/esp32_c6/stage05_trace.h"
-#include "chips/esp32_c6/systimer.hpp"
-#include "chips/esp32_c6/trap_api.hpp"
 #endif
 
 namespace shizuku {
@@ -58,6 +55,7 @@ template <typename A> inline uint32_t cycles_now() {
   __asm__ volatile("isb" ::: "memory");
 #endif
   return cycles;
+#endif
 }
 
 // ---- 測る相手 ---------------------------------------------------------------
@@ -241,9 +239,18 @@ template <typename A> void bench() {
   }
   ++passed;
 
+#if defined(__riscv)
+  // C6 / RISC-V: BOARD::cycles_per_us() は SYSTIMER (16MHz) 基準であり、CPU周波数 (160MHz) と乖離するため、
+  // CPUサイクル周波数に見える表記を避け、単位を明確に systimer ticks/us と表示 (cycles中心方針、160MHz仮定なし)
+  const uint32_t systimer_ticks_per_us = BOARD::cycles_per_us();
+  BOARD::diag_printf("[COST] systimer = %lu ticks/us (cycles-based; CPU clock unassumed)\n",
+                     (unsigned long)systimer_ticks_per_us);
+  const uint32_t cycles_per_us = 0;
+#else
   const uint32_t cycles_per_us = BOARD::cycles_per_us();
   BOARD::diag_printf("[COST] clk_sys = %lu cycles/us\n",
                      (unsigned long)cycles_per_us);
+#endif
 
   struct entry_t {
     uintptr_t object;
@@ -255,8 +262,8 @@ template <typename A> void bench() {
         api(object_api::CREATE_OBJECT, entry.object, (uintptr_t)entry.main);
     if (created.error != (uintptr_t)object_error::OK) {
       BOARD::diag_printf("[COST] FAIL create object %lu: error %lu\n",
-                         (unsigned long)entry.object,
-                         (unsigned long)created.error);
+                          (unsigned long)entry.object,
+                          (unsigned long)created.error);
       ++failed;
       return;
     }
@@ -288,6 +295,36 @@ template <typename A> void bench() {
   cost_call1 = net(call1);
   cost_call2 = net(call2);
 
+#if defined(__riscv)
+  const auto net_min = [&](stat_t value) -> uint32_t {
+    return value.min > nothing.min ? value.min - nothing.min : 0;
+  };
+  const auto net_mean = [&](stat_t value) -> uint32_t {
+    return value.mean > nothing.mean ? value.mean - nothing.mean : 0;
+  };
+  shizuku_c6_call_cost_record.magic = 0x434F5354u;
+  shizuku_c6_call_cost_record.version = 1;
+  shizuku_c6_call_cost_record.rounds = ROUNDS;
+  shizuku_c6_call_cost_record.baseline_min = nothing.min;
+  shizuku_c6_call_cost_record.baseline_mean = nothing.mean;
+  shizuku_c6_call_cost_record.direct_raw_min = direct.min;
+  shizuku_c6_call_cost_record.direct_raw_mean = direct.mean;
+  shizuku_c6_call_cost_record.direct_net_min = net_min(direct);
+  shizuku_c6_call_cost_record.direct_net_mean = net_mean(direct);
+  shizuku_c6_call_cost_record.svc_raw_min = svc.min;
+  shizuku_c6_call_cost_record.svc_raw_mean = svc.mean;
+  shizuku_c6_call_cost_record.svc_net_min = net_min(svc);
+  shizuku_c6_call_cost_record.svc_net_mean = net_mean(svc);
+  shizuku_c6_call_cost_record.call1_raw_min = call1.min;
+  shizuku_c6_call_cost_record.call1_raw_mean = call1.mean;
+  shizuku_c6_call_cost_record.call1_net_min = net_min(call1);
+  shizuku_c6_call_cost_record.call1_net_mean = net_mean(call1);
+  shizuku_c6_call_cost_record.call2_raw_min = call2.min;
+  shizuku_c6_call_cost_record.call2_raw_mean = call2.mean;
+  shizuku_c6_call_cost_record.call2_net_min = net_min(call2);
+  shizuku_c6_call_cost_record.call2_net_mean = net_mean(call2);
+#endif
+
   // 1 段あたりの限界費用。1 段目には呼び出し元側の svc が 1 回だけ余分に入るので、
   // 差を取ると「純粋にもう 1 段積む費用」が出る。
   if (call2.min > call1.min)
@@ -298,9 +335,16 @@ template <typename A> void bench() {
   const api_result checked = call_method(OBJECT_COST_LEAF, 41);
   if (checked.error == (uintptr_t)object_error::OK && checked.value == 42) {
     ++passed;
+#if defined(__riscv)
+    shizuku_c6_call_cost_record.checked_ok = 1;
+#endif
     BOARD::diag_printf("[COST] PASS method call still returns 42\n");
   } else {
     ++failed;
+    record_fail("COST method call still returns 42", checked.value, 42);
+#if defined(__riscv)
+    shizuku_c6_call_cost_record.checked_ok = 0;
+#endif
     BOARD::diag_printf("[COST] FAIL method call: error %lu value %lu\n",
                        (unsigned long)checked.error,
                        (unsigned long)checked.value);
@@ -426,6 +470,7 @@ void call_cost() {
 #if SHIZUKU_KERNEL_SERVICE_PROFILE && !defined(__riscv)
   service_profile::reset();
   BOARD::diag_printf("[V3GW] COST includes compiled hooks; use normal build for untraced comparison\n");
+#endif
 #endif
   if constexpr (ARCH::HAS_CYCLE_COUNTER) {
     bench<ARCH>();

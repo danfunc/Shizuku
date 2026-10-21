@@ -22,6 +22,14 @@ extern "C" void shizuku_boot_trace_phase(uint32_t);
 extern "C" void shizuku_c6_stage05_hook_handler(void);
 #endif
 
+#ifndef SHIZUKU_STAGE05_CPP_ATTR
+#if defined(SHIZUKU_C6_STAGE05_IRAM_CPP) && SHIZUKU_C6_STAGE05_IRAM_CPP
+#define SHIZUKU_STAGE05_CPP_ATTR __attribute__((section(".iram1.text")))
+#else
+#define SHIZUKU_STAGE05_CPP_ATTR
+#endif
+#endif
+
 namespace shizuku {
 
 KERNEL_OBJECT kernel_object_instance;
@@ -43,9 +51,12 @@ static_assert((uintptr_t)object_api::EXIT_METHOD == (uintptr_t)primitive::RETURN
 // 実装より前に使う (下の入口が handle を呼ぶ) ので、特殊化の宣言を先に置く。
 // これが無いと暗黙の実体化が先に起きて「実体化後の特殊化」になる。
 template <>
+SHIZUKU_STAGE05_CPP_ATTR
 uintptr_t KERNEL_OBJECT::handle(uintptr_t, uintptr_t, uintptr_t, uintptr_t,
                                 uintptr_t);
-template <> uintptr_t KERNEL_OBJECT::current_object(uint32_t) const;
+template <>
+SHIZUKU_STAGE05_CPP_ATTR
+uintptr_t KERNEL_OBJECT::current_object(uint32_t) const;
 template <> uintptr_t KERNEL_OBJECT::caller_object(uint32_t) const;
 template <> void KERNEL_OBJECT::init();
 template <> uintptr_t KERNEL_OBJECT::handler_entry();
@@ -138,6 +149,7 @@ template <> bool KERNEL_OBJECT::arena_release(arena &, uintptr_t);
 //   参照実装はこれを callee-saved レジスタで渡し、C の引数へ変換する naked シムを
 //   必要としていた — push 順と引数位置の対応を何度も間違えた箇所なので、構造ごと
 //   無くすのが正しい。
+SHIZUKU_STAGE05_CPP_ATTR
 uintptr_t handler_entry_point(uintptr_t a0, uintptr_t a1, uintptr_t a2,
                               uintptr_t a3, uintptr_t unwind_floor) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
@@ -174,9 +186,12 @@ template <> void KERNEL_OBJECT::init() {
     m_objects[id].flags = 0;
     m_objects[id].region_base = 0;
     m_objects[id].region_limit = 0;
+    m_objects[id].generation = 0;
     m_object_name[id] = nullptr;
     for (uintptr_t method = 0; method < METHOD_COUNT; ++method)
       m_objects[id].methods[method] = nullptr;
+    for (auto &d : m_objects[id].method_descriptors)
+      d.valid = 0;
   }
   for (uintptr_t thread = 0; thread < THREAD_COUNT; ++thread) {
     m_kill_pending[thread] = 0;
@@ -329,22 +344,11 @@ template <> bool KERNEL_OBJECT::start_secondary_core() {
 }
 
 template <> uintptr_t KERNEL_OBJECT::current_object(uint32_t thread) const {
-  for (uint32_t i = 0; i < kernel_instance.ledger_size(thread); ++i) {
-    const auto *entry = kernel_instance.ledger_entry(thread, i);
-    if (entry->via == KERNEL::LEDGER_CALL)
-      return entry->object;
-  }
-  return m_thread_object[thread];
+  return kernel_instance.current_object(thread);
 }
 
 template <> uintptr_t KERNEL_OBJECT::caller_object(uint32_t thread) const {
-  uint32_t calls = 0;
-  for (uint32_t i = 0; i < kernel_instance.ledger_size(thread); ++i) {
-    const auto *entry = kernel_instance.ledger_entry(thread, i);
-    if (entry->via == KERNEL::LEDGER_CALL && ++calls == 2)
-      return entry->object;
-  }
-  return calls == 1 ? m_thread_object[thread] : (uintptr_t)NO_OBJECT;
+  return kernel_instance.caller_object(thread);
 }
 
 // 巻き戻さずにその場で答える。**エラーを黙って捨てない**ための共通口 (D12)。
@@ -408,6 +412,19 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
       m_objects[id].created = true;
       m_objects[id].flags =
           (uint32_t)(flags & ~(OBJECT_REPLACE | INTERNAL_FLAG_HANDLER));
+      if (!m_objects[id].generation || replace) {
+        if (m_objects[id].generation < UINT32_MAX) {
+          ++m_objects[id].generation;
+        } else {
+          m_objects[id].generation = UINT32_MAX;
+        }
+        if (m_objects[id].generation == 0) m_objects[id].generation = 1;
+      }
+      if (replace) {
+        for (auto &d : m_objects[id].method_descriptors) {
+          d.valid = 0;
+        }
+      }
       // 最初のメソッドは生成側が与える (オブジェクト自身はまだ走っていないので
       // 自分では登録できない)。以後は EXPORT_METHOD で自分が増やす。
       m_objects[id].methods[0] = (method_t)entry;
@@ -541,7 +558,63 @@ uintptr_t KERNEL_OBJECT::export_method(uintptr_t method, uintptr_t entry,
   }
   table_guard guard;
   m_objects[self].methods[method] = (method_t)entry;
+  if (m_objects[self].generation < UINT32_MAX) {
+    ++m_objects[self].generation;
+  } else {
+    m_objects[self].generation = UINT32_MAX;
+  }
   return self;
+}
+
+template <>
+uintptr_t KERNEL_OBJECT::create_method_descriptor(uintptr_t target_id,
+                                                   uintptr_t method_index,
+                                                   object_error &error) {
+  if (target_id >= OBJECT_COUNT || !m_objects[target_id].created) {
+    error = object_error::BAD_OBJECT;
+    return 0;
+  }
+  if (method_index >= METHOD_COUNT) {
+    error = object_error::BAD_METHOD;
+    return 0;
+  }
+  if (m_objects[target_id].methods[method_index] == nullptr) {
+    error = object_error::UNDECLARED_METHOD;
+    return 0;
+  }
+  if (m_objects[target_id].generation == 0) {
+    error = object_error::BAD_DESCRIPTOR;
+    return 0;
+  }
+  const uint32_t thread_id = kernel_instance.current_thread_id();
+  const uint32_t caller_id = (uint32_t)current_object(thread_id);
+  if (caller_id >= OBJECT_COUNT || !m_objects[caller_id].created) {
+    error = object_error::BAD_OBJECT;
+    return 0;
+  }
+  table_guard guard;
+  int free_slot = -1;
+  for (int i = 0; i < (int)METHOD_DESCRIPTOR_CAPACITY; ++i) {
+    if (m_objects[caller_id].method_descriptors[i].valid == 0) {
+      free_slot = i;
+      break;
+    }
+  }
+  if (free_slot < 0) {
+    error = object_error::NO_DESCRIPTOR; // 21
+    return 0;
+  }
+  auto &desc = m_objects[caller_id].method_descriptors[free_slot];
+  desc.target_object = (uint32_t)target_id;
+  desc.target_entry = (uintptr_t)m_objects[target_id].methods[method_index];
+  desc.target_generation = m_objects[target_id].generation;
+  desc.owner_object = caller_id;
+  desc.method_index = (uint32_t)method_index;
+  desc.flags = m_objects[target_id].flags;
+  desc.region_base = m_objects[target_id].region_base;
+  desc.region_limit = m_objects[target_id].region_limit;
+  ARCH::store_release32(&desc.valid, 1u);
+  return (uintptr_t)free_slot;
 }
 
 template <>
@@ -1589,6 +1662,7 @@ uintptr_t KERNEL_OBJECT::memory_owner(uintptr_t handle, object_error &error) {
 }
 
 template <>
+SHIZUKU_STAGE05_CPP_ATTR
 uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
                                 uintptr_t a3, uintptr_t unwind_floor) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
@@ -1603,6 +1677,9 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     shizuku_boot_trace_phase(424);
 #endif
+    break;
+  case object_api::CREATE_METHOD_DESCRIPTOR:
+    value = create_method_descriptor(a1, a2, error);
     break;
   case object_api::EXPORT_METHOD:
     value = export_method(a1, a2, error);

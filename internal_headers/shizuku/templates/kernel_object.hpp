@@ -39,6 +39,7 @@ public:
   using method_t = uintptr_t (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
   static constexpr uintptr_t OBJECT_COUNT = OBJECT_COUNT_T;
   static constexpr uintptr_t METHOD_COUNT = METHOD_COUNT_T;
+  static constexpr uintptr_t METHOD_DESCRIPTOR_CAPACITY = 16;
   static constexpr uintptr_t MAX_DEPTH = MAX_DEPTH_T;
   static constexpr uint32_t LEDGER_CAPACITY = 2 * MAX_DEPTH + 2;
   // ★スレッドを何本まで作れるかは**こちらが決める** (記憶を出すのがこちらなので)。
@@ -165,6 +166,18 @@ private:
   // shape without exposing that inspection through the object API.
   friend struct ::shizuku::selftest::compat_probe_access;
 
+  struct method_descriptor_entry {
+    uint32_t target_object;
+    uintptr_t target_entry;
+    uint32_t target_generation;
+    uint32_t owner_object;
+    uint32_t method_index;
+    uint32_t flags;
+    uint32_t region_base;
+    uint32_t region_limit;
+    volatile uint32_t valid;
+  };
+
   struct object_t {
     bool created;
     // ★名前はここではなく別配列に置く。object_t は呼び出し経路 (created / flags /
@@ -185,6 +198,8 @@ private:
     //   軸 B (Q8)。0/0 = 窓なし。
     uint32_t region_base;
     uint32_t region_limit;
+    uint32_t generation;
+    method_descriptor_entry method_descriptors[METHOD_DESCRIPTOR_CAPACITY];
   };
   // 名前の置き場。**コピーではなくポインタ**を持つ (kobj は文字列を触らない)。
   const char *m_object_name[OBJECT_COUNT_T];
@@ -244,6 +259,41 @@ private:
   // 各 API。戻り値はそのまま発行元へ返る値。エラーは error 引数へ書く。
   uintptr_t create_object(uintptr_t id, uintptr_t entry, uintptr_t flags,
                           object_error &error);
+  uintptr_t create_method_descriptor(uintptr_t target_id, uintptr_t method_index,
+                                     object_error &error);
+  bool validate_method_descriptor(uint32_t caller_id, uint32_t index,
+                                    method_descriptor_entry &out_desc,
+                                    object_error &error) const {
+    if (index >= METHOD_DESCRIPTOR_CAPACITY) {
+      error = object_error::BAD_DESCRIPTOR;
+      return false;
+    }
+    if (caller_id >= OBJECT_COUNT_T || !m_objects[caller_id].created) {
+      error = object_error::BAD_DESCRIPTOR;
+      return false;
+    }
+    const auto &desc = m_objects[caller_id].method_descriptors[index];
+    if (__atomic_load_n(&desc.valid, __ATOMIC_ACQUIRE) == 0) {
+      error = object_error::BAD_DESCRIPTOR;
+      return false;
+    }
+    if (desc.owner_object != caller_id) {
+      error = object_error::BAD_DESCRIPTOR;
+      return false;
+    }
+    if (desc.target_generation == 0 ||
+        desc.target_generation != m_objects[desc.target_object].generation) {
+      error = object_error::STALE_DESCRIPTOR;
+      return false;
+    }
+    if (!m_objects[desc.target_object].created || desc.target_entry == 0) {
+      error = object_error::BAD_DESCRIPTOR;
+      return false;
+    }
+    out_desc = desc;
+    error = object_error::OK;
+    return true;
+  }
   // 名乗り。★保持して返すだけで、比較はしない (D26)。
   uintptr_t declare_name(uintptr_t name, object_error &error);
   // ---- ストリームの制御プレーン ------------------------------------------

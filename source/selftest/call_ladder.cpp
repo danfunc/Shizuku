@@ -106,6 +106,10 @@ uintptr_t leaf(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
   return argument + 1;
 }
 
+uintptr_t desc_target_fn(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f) {
+  return a + b + c + d + e + f;
+}
+
 uintptr_t leaf_dirty_scratch(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
 #if defined(__arm__) || defined(__thumb__)
   __asm volatile("mov ip, %0" : : "r"(0xDEADBEEFu) : "ip");
@@ -440,6 +444,12 @@ void call_ladder() {
 
     CL_PROG(807);
   // スタックを掘り切る。panic でも無音ロックアップでもなく NO_STACK が返ること。
+#if defined(SHIZUKU_SELFTEST_SKIP_DEEP_STACK) && SHIZUKU_SELFTEST_SKIP_DEEP_STACK
+  {
+    CL_PROG(808);
+    BOARD::diag_printf("[SELFTEST] SKIP stack exhaustion (SHIZUKU_SELFTEST_SKIP_DEEP_STACK)\n");
+  }
+#else
   {
     CL_PROG(808);
     const api_result result = call_method(OBJECT_DEEP, 0);
@@ -459,6 +469,7 @@ void call_ladder() {
     BOARD::diag_printf("[SELFTEST] max nesting before NO_STACK: %lu\n",
                        (unsigned long)g_deep_max);
   }
+#endif
 
     CL_PROG(810);
   // ---- 名乗り (System Object が起動するまでの暫定の宿) --------------------
@@ -495,6 +506,75 @@ void call_ladder() {
           absent.error == (uintptr_t)object_error::BAD_OBJECT,
           (unsigned long)absent.error,
           (unsigned long)object_error::BAD_OBJECT);
+  }
+
+  // ---- V2a Method Descriptors & Direct Trap Call (APIs 32 & 33) ----
+  {
+    constexpr uintptr_t OBJECT_DESC_TEST = 77;
+    api(object_api::CREATE_OBJECT, OBJECT_DESC_TEST, (uintptr_t)&leaf, OBJECT_REPLACE);
+    api(object_api::EXPORT_METHOD, 1, (uintptr_t)&desc_target_fn);
+
+    const api_result created = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1);
+    check("descriptor: create valid descriptor",
+          created.error == (uintptr_t)object_error::OK && created.value < 16,
+          (unsigned long)created.value, 0);
+
+    const uintptr_t desc_idx = created.value;
+
+#if defined(__riscv)
+    const auto desc_call = ARCH::syscall((uintptr_t)object_api::CALL_METHOD_DESCRIPTOR, desc_idx, 1, 2, 3, 4, 5, 6);
+    check("descriptor: direct trap call returns sum 21",
+          desc_call.error == 0 && desc_call.value == 21,
+          (unsigned long)desc_call.value, 21);
+#endif
+
+    const api_result bad_obj = api(object_api::CREATE_METHOD_DESCRIPTOR, 9999, 1);
+    check("descriptor: BAD_OBJECT on invalid target",
+          bad_obj.error == (uintptr_t)object_error::BAD_OBJECT,
+          (unsigned long)bad_obj.error, (unsigned long)object_error::BAD_OBJECT);
+
+    const api_result bad_mth = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 999);
+    check("descriptor: BAD_METHOD on out of bounds method",
+          bad_mth.error == (uintptr_t)object_error::BAD_METHOD,
+          (unsigned long)bad_mth.error, (unsigned long)object_error::BAD_METHOD);
+
+    const api_result undecl_mth = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 5);
+    check("descriptor: UNDECLARED_METHOD on null method",
+          undecl_mth.error == (uintptr_t)object_error::UNDECLARED_METHOD,
+          (unsigned long)undecl_mth.error, (unsigned long)object_error::UNDECLARED_METHOD);
+
+    bool capacity_filled = true;
+    for (int i = 0; i < 15; ++i) {
+      auto r = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1);
+      if (r.error != (uintptr_t)object_error::OK) {
+        capacity_filled = false;
+        break;
+      }
+    }
+    check("descriptor: fill capacity up to 16", capacity_filled, 1, 1);
+
+    const api_result over_cap = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1);
+    check("descriptor: NO_DESCRIPTOR (21) when capacity exceeded",
+          over_cap.error == (uintptr_t)object_error::NO_DESCRIPTOR,
+          (unsigned long)over_cap.error, (unsigned long)object_error::NO_DESCRIPTOR);
+
+    api(object_api::EXPORT_METHOD, 1, (uintptr_t)&leaf);
+#if defined(__riscv)
+    const auto stale_call = ARCH::syscall((uintptr_t)object_api::CALL_METHOD_DESCRIPTOR, desc_idx, 1, 2, 3, 4, 5, 6);
+    check("descriptor: stale descriptor rejected with STALE_DESCRIPTOR (23)",
+          stale_call.error == (uintptr_t)object_error::STALE_DESCRIPTOR,
+          (unsigned long)stale_call.error, (unsigned long)object_error::STALE_DESCRIPTOR);
+#endif
+
+    const auto bad_idx = ARCH::syscall((uintptr_t)object_api::CALL_METHOD_DESCRIPTOR, 16, 0, 0, 0, 0, 0, 0);
+    check("descriptor: invalid index >= 16 rejected with BAD_DESCRIPTOR (22)",
+          bad_idx.error == (uintptr_t)object_error::BAD_DESCRIPTOR,
+          (unsigned long)bad_idx.error, (unsigned long)object_error::BAD_DESCRIPTOR);
+
+    const api_result legacy_call = api(object_api::CALL_METHOD, OBJECT_DESC_TEST, 1, 42);
+    check("descriptor: legacy CALL_METHOD compatibility",
+          legacy_call.error == (uintptr_t)object_error::OK,
+          (unsigned long)legacy_call.error, 0);
   }
 
   BOARD::diag_printf("[SELFTEST] call ladder done: %lu passed, %lu failed\n",

@@ -30,3 +30,4 @@ binding_unpriv
 compat_h
 compat_c
 compat_gc
+c6_stage1_probe
