@@ -4,7 +4,6 @@
 #include "shizuku/kernel.hpp"
 #include "shizuku/kernel_object.hpp"
 #include "shizuku/object_api.hpp"
-#include "shizuku/objects/flash_fs.hpp"
 #if !defined(SHIZUKU_RP2040)
 #include "shizuku/objects/gdb_stub.hpp"
 #endif
@@ -62,7 +61,6 @@ enum BootStage : uint32_t {
   kAppEntry = 50,
   kLaunchApp = 55,
   kPeripherals = 60,
-  kFlashRegistration = 90,
   kCallLadder = 100,
   kHandlerBinding = 110,
   kCallCost = 120,
@@ -72,7 +70,6 @@ enum BootStage : uint32_t {
   kSecondaryCore = 160,
   kMulticore = 170,
   kStreamLadder = 180,
-  kFlashFsProbe = 190,
   kFlashStream = 200,
   kStress = 220,
   kBootComplete = 230,
@@ -121,16 +118,6 @@ void shizuku::app_entry() {
   boot_stage(kPeripherals);
 #endif
   const uint32_t peripheral_failures = shizuku::objects::register_peripherals();
-#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
-  boot_stage(kFlashRegistration);
-#endif
-  // 媒体を持つオブジェクト。読むのは XIP のアドレスを配るだけなので安いが、
-  // 書くと XIP ごと止まるので、扱いはペリフェラルと同じく特権側。
-#if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(CYW43_WL_GPIO_LED_PIN)
-  shizuku::objects::usb_cdc_boot_diag_set_stage(
-      shizuku::objects::boot_diag_stage::FLASHFS);
-#endif
-  shizuku::objects::register_flash_fs();
   bool secondary_core_ready = false;
 #if defined(SHIZUKU_FLASHFS_ONLY)
   // Keep flash writes after core 1 is running: erase pauses XIP, so every
@@ -150,7 +137,6 @@ void shizuku::app_entry() {
       secondary_core_ready ? "ready" : "unavailable");
   if (secondary_core_ready) {
     const uint64_t flashfs_started_us = time_us_64();
-    const uint32_t flashfs_failures = shizuku::objects::flash_fs_probe();
     const uint32_t stream_passed_before = shizuku::selftest::passed;
     const uint32_t stream_failed_before = shizuku::selftest::failed;
     shizuku::selftest::flash_stream_ladder();
@@ -159,11 +145,9 @@ void shizuku::app_entry() {
     const uint32_t stream_failed =
         shizuku::selftest::failed - stream_failed_before;
     shizuku::KERNEL::BOARD::diag_printf(
-        "[FLASHFS_ONLY] flash_fs_probe: %s (failures=%lu); "
-        "flash_stream_ladder: %lu passed, %lu failed; elapsed=%lu ms\n",
-        flashfs_failures == 0 ? "PASS" : "FAIL",
-        (unsigned long)flashfs_failures, (unsigned long)stream_passed,
-        (unsigned long)stream_failed,
+        "[FLASHFS_ONLY] flash_stream_ladder: %lu passed, %lu failed; "
+        "elapsed=%lu ms\n",
+        (unsigned long)stream_passed, (unsigned long)stream_failed,
         (unsigned long)((time_us_64() - flashfs_started_us) / 1000ull));
   } else {
     shizuku::KERNEL::BOARD::diag_printf(
@@ -231,11 +215,7 @@ void shizuku::app_entry() {
   // ★flash の書き込みは 2 コア目を起こした**後**に試す。消去中は XIP が止まるので、
   //   相手が止められていなければそのコアは flash 上のコードを踏んで即死する。
   //   つまりここで書けること自体が「止められている」ことの証拠になる。
-#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
-  boot_stage(kFlashFsProbe);
-#endif
   APP_PROG(60);
-  shizuku::objects::flash_fs_probe();
   APP_PROG(61);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   boot_stage(kFlashStream);
@@ -287,7 +267,7 @@ void shizuku::app_entry() {
     shizuku::KERNEL::BOARD::diag_printf("[BOOT] secondary core unavailable\n");
 #endif
 
-#if !defined(SHIZUKU_RP2040) && !defined(SHIZUKU_SKIP_SELFTEST)
+#if !defined(SHIZUKU_RP2040) && !defined(SHIZUKU_SKIP_SELFTEST) && !defined(SHIZUKU_FLASHFS_ONLY)
   // ★GDB stub。繋がれるまでは何もしない (繋がれた瞬間に診断出力を GDB へ譲る)。
   // ★★2026-08-24 デモ用: 合成の debuggee ではなく実在の blink (LED を叩く
   //   スレッド) を対象にする。attach するだけで LED が目に見えて止まり、

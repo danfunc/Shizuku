@@ -67,7 +67,6 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":memory_manager",
-        "//modules/pico_sdk_support/objects:flash_fs",
         "//modules/pico_sdk_support/objects:flash_layout_limit",
         "//modules/pico_sdk_support/objects:peripherals",
         "//modules/pico_sdk_support/objects:usb_cdc",

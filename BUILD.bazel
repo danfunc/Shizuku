@@ -164,10 +164,12 @@ cc_library(
         "source/selftest/unprivileged.cpp",
     ],
     visibility = ["//visibility:public"],
-    # flash_stream / stress はオブジェクト (flash_fs / peripherals) を相手に試す。
+    # flash_stream はカーネルの stream と flash_ops / flash_map を直接試す (FlashFS は使わない)。
+    # stress はオブジェクト (peripherals) を相手に試す。
     deps = [
         ":kernel_object",
-        "//modules/pico_sdk_support/objects:flash_fs",
+        "//modules/pico_sdk_support/objects:flash_layout",
+        "//modules/pico_sdk_support/objects:flash_ops",
         "//modules/pico_sdk_support/objects:peripherals",
     ],
 )

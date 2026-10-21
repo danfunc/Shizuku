@@ -29,7 +29,7 @@ flash_layout_config(
     name = "generated_flash_layout_config",
 )
 
-# flash の区画 (論理容量・BT bank・FS 領域)。flash_fs と ota が共有する。
+# flash の区画 (論理容量・BT bank・FS 領域)。XNO 側の flash_fs と ota が共有する。
 cc_library(
     name = "flash_layout",
     hdrs = [
@@ -68,35 +68,6 @@ cc_library(
         "@pico-sdk//src/rp2_common/hardware_sync",
         "@pico-sdk//src/rp2_common/pico_stdlib",
     ],
-)
-
-cc_library(
-    name = "flash_fs",
-    srcs = ["flash_fs.cpp"],
-    hdrs = ["internal_headers/shizuku/objects/flash_fs.hpp"],
-    includes = ["internal_headers"],
-    alwayslink = True,
-    deps = [
-        ":flash_layout",
-        ":flash_ops",
-        ":usb_cdc",
-        "//:internal_headers",
-        "//:kernel",
-        "//configs:config",
-        "@pico-sdk//src/rp2_common/hardware_flash",
-        "@pico-sdk//src/rp2_common/hardware_sync",
-        "@pico-sdk//src/rp2_common/pico_stdlib",
-    ],
-    local_defines = select({
-        "//configs:boot_log_wait_enabled": ["SHIZUKU_BOOT_LOG_WAIT=1"],
-        "//conditions:default": [],
-    }) + select({
-        "//configs:crash_record_enabled": [
-            "SHIZUKU_CRASH_RECORD=1",
-            "SHIZUKU_BOOT_LOG_WAIT=1",
-        ],
-        "//conditions:default": [],
-    }),
 )
 
 # ---- I/O --------------------------------------------------------------------
@@ -295,8 +266,7 @@ cc_library(
 
 # XNO の flash_fs が呼ぶ媒体境界 (xno_flashfs_media.h) の RP2040 / RP2350 実装。
 # 宣言は internal_headers/shizuku/objects/xno_flashfs_media.h (XNO のヘッダは見ない)。
-# 旧 flash_fs は消さずに残す (両方を 1 つのファームへ同時に入れると、
-# 旧 flash_fs と衝突しないよう fault 経路の名前を xno_flashfs_ で分けてある)。
+# 旧 flash_fs (削除済み) と衝突しないよう、fault 経路の名前は xno_flashfs_ で分けてある。
 cc_library(
     name = "xno_flashfs_media",
     srcs = ["xno_flashfs_media.cpp"],
