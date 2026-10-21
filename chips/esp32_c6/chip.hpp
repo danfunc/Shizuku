@@ -8,9 +8,14 @@
 
 // hot 経路 (CALL_METHOD_DESCRIPTOR とその RETURN) を IRAM へ置くための配置マクロ。
 // kernel 側の既定は shizuku/hot.hpp の空定義で、この chip 以外は変わらない。
+// 関数ごとに ".iram1.<N>" と一意の section 名にする (IDF の IRAM_ATTR と同じ方式)。
+// 同名 section に COMDAT のテンプレートと通常関数を混ぜると GCC が section type conflict で止まる。
+// リンカ側は ESP-IDF 標準の `*(.iram1 .iram1.*)` で拾う (この checkout 内の ld は未確認)。
+#define SHIZUKU_CHIP_STR_(x) #x
+#define SHIZUKU_CHIP_STR(x) SHIZUKU_CHIP_STR_(x)
 #undef SHIZUKU_HOT
 #if defined(__riscv)
-#define SHIZUKU_HOT __attribute__((section(".iram1")))
+#define SHIZUKU_HOT __attribute__((section(".iram1." SHIZUKU_CHIP_STR(__COUNTER__))))
 #else
 #define SHIZUKU_HOT
 #endif
