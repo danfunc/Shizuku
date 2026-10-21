@@ -40,6 +40,9 @@ using BOARD = KERNEL::BOARD;
 constexpr uintptr_t OBJECT_COST_LEAF = object_id::cost_leaf;
 constexpr uintptr_t OBJECT_COST_NEST = object_id::cost_nest;
 constexpr uintptr_t METHOD_MAIN = 0;
+// 1 回の測定の標本数 (min と mean の母数)。記述子・作成の測定も同じ数に揃える。
+constexpr uint32_t ROUNDS = 2048;
+static_assert(ROUNDS >= 128, "call_cost sample rounds must be >= 128");
 
 // ★fence/isb で挟む。挟まないとコンパイラとパイプラインが読み出しを前後へ動かせるので、
 //   測っている区間が実際の区間とずれる。バリア自身の費用は (1) にも同じだけ乗るので
@@ -145,7 +148,7 @@ static_assert(std::is_same_v<decltype(stat_t::min), uint32_t> &&
 extern "C" {
 struct shizuku_c6_call_cost_record_t {
   uint32_t magic;           // 0x434F5354 ("COST")
-  uint32_t version;         // 1
+  uint32_t version;         // 2
   uint32_t rounds;          // 2048
   uint32_t baseline_min;    // op_nothing
   uint32_t baseline_mean;
@@ -166,7 +169,59 @@ struct shizuku_c6_call_cost_record_t {
   uint32_t call2_net_min;
   uint32_t call2_net_mean;
   uint32_t checked_ok;      // 1 if checked returns 42, else 0
+  uint32_t desc1_raw_min;   // descriptor call (1 hop): D -> cost_dleaf
+  uint32_t desc1_raw_mean;
+  uint32_t desc1_net_min;
+  uint32_t desc1_net_mean;
+  uint32_t desc2_raw_min;   // descriptor call (2 hops): D -> cost_dnest -> cost_dinner
+  uint32_t desc2_raw_mean;
+  uint32_t desc2_net_min;
+  uint32_t desc2_net_mean;
+  uint32_t create_desc_raw_min;  // create method descriptor (API 32), table emptied per sample
+  uint32_t create_desc_raw_mean;
+  uint32_t create_desc_net_min;
+  uint32_t create_desc_net_mean;
+  uint32_t create_desc_rounds;   // samples for create_desc
+  uint32_t desc_checked_ok;      // 1 if both descriptor calls return 42 and setup/create all succeeded
 };
+// ★レイアウトを固定する。記録を読む側 (ホスト) はこの並びを前提にしている。
+static_assert(sizeof(shizuku_c6_call_cost_record_t) == 144, "call_cost record size");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, magic) == 0, "magic");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, version) == 4, "version");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, rounds) == 8, "rounds");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, baseline_min) == 12, "baseline_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, baseline_mean) == 16, "baseline_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, direct_raw_min) == 20, "direct_raw_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, direct_raw_mean) == 24, "direct_raw_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, direct_net_min) == 28, "direct_net_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, direct_net_mean) == 32, "direct_net_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, svc_raw_min) == 36, "svc_raw_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, svc_raw_mean) == 40, "svc_raw_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, svc_net_min) == 44, "svc_net_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, svc_net_mean) == 48, "svc_net_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, call1_raw_min) == 52, "call1_raw_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, call1_raw_mean) == 56, "call1_raw_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, call1_net_min) == 60, "call1_net_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, call1_net_mean) == 64, "call1_net_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, call2_raw_min) == 68, "call2_raw_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, call2_raw_mean) == 72, "call2_raw_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, call2_net_min) == 76, "call2_net_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, call2_net_mean) == 80, "call2_net_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, checked_ok) == 84, "checked_ok");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, desc1_raw_min) == 88, "desc1_raw_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, desc1_raw_mean) == 92, "desc1_raw_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, desc1_net_min) == 96, "desc1_net_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, desc1_net_mean) == 100, "desc1_net_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, desc2_raw_min) == 104, "desc2_raw_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, desc2_raw_mean) == 108, "desc2_raw_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, desc2_net_min) == 112, "desc2_net_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, desc2_net_mean) == 116, "desc2_net_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, create_desc_raw_min) == 120, "create_desc_raw_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, create_desc_raw_mean) == 124, "create_desc_raw_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, create_desc_net_min) == 128, "create_desc_net_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, create_desc_net_mean) == 132, "create_desc_net_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, create_desc_rounds) == 136, "create_desc_rounds");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, desc_checked_ok) == 140, "desc_checked_ok");
 volatile shizuku_c6_call_cost_record_t shizuku_c6_call_cost_record = {};
 }
 #endif
@@ -224,6 +279,141 @@ void report(const char *name, stat_t raw, stat_t baseline,
 }
 
 
+#if defined(__riscv)
+// ---- 記述子の計測 (riscv 限定。CALL_METHOD_DESCRIPTOR は trap 内の直接処理にだけある) --
+// 記述子は**呼び手 (current object) の表**から引かれ、作れるのは「自分自身・作成者・
+// 直接の子」への記述子だけ。root の表は call_ladder が 16 枠を埋め切っているので使えない。
+// そこで呼び手は専用の D (cost_driver) にし、D が子 cost_dleaf / cost_dnest を作って、
+// その先へ記述子を張る。2 段目の cost_dnest はさらに自分の子 cost_dinner へ張る。
+constexpr uintptr_t OBJECT_COST_DRIVER = object_id::cost_driver;
+constexpr uintptr_t OBJECT_COST_OWNER = object_id::cost_owner;
+constexpr uintptr_t OBJECT_COST_DLEAF = object_id::cost_dleaf;
+constexpr uintptr_t OBJECT_COST_DNEST = object_id::cost_dnest;
+constexpr uintptr_t OBJECT_COST_DINNER = object_id::cost_dinner;
+// main の引数の取り決め。測定の引数 (0 / 41) と衝突しない値を使う。
+constexpr uintptr_t MODE_SETUP = UINTPTR_MAX;
+constexpr uintptr_t MODE_MEASURE = UINTPTR_MAX - 1;
+
+// 下の index は呼び手の表を指す (g_dnest_index だけは cost_dnest の表)。
+volatile uintptr_t g_desc1_index = 0; // D -> cost_dleaf
+volatile uintptr_t g_desc2_index = 0; // D -> cost_dnest
+volatile uintptr_t g_dnest_index = 0; // cost_dnest -> cost_dinner
+volatile uintptr_t g_setup_error = (uintptr_t)object_error::OK;
+volatile uintptr_t g_desc1_value = 0;
+volatile uintptr_t g_desc2_value = 0;
+stat_t g_desc1_stat{};
+stat_t g_desc2_stat{};
+volatile uint32_t g_create_cycles = 0;
+volatile uintptr_t g_create_error = (uintptr_t)object_error::OK;
+
+// 記述子の呼出し。a2 だけ引数を渡し、残りは 0 (計測では 0、検算では 41)。
+api_result desc_call(uintptr_t index, uintptr_t argument) {
+  const auto result = ARCH::syscall((uintptr_t)object_api::CALL_METHOD_DESCRIPTOR,
+                                    index, argument, 0, 0, 0, 0, 0);
+  if (result.error & KERNEL_ERROR_MARK)
+    return {(uintptr_t)object_error::KERNEL_REFUSED, result.error};
+  return {result.error, result.value};
+}
+
+// 設定の最初の失敗だけを残す (後の成功で上書きしない)。
+void note_setup(uintptr_t error) {
+  if (error != (uintptr_t)object_error::OK &&
+      g_setup_error == (uintptr_t)object_error::OK)
+    g_setup_error = error;
+}
+
+// 記述子 1 段 / 2 段の 1 回ぶん (呼び手は D)。
+__attribute__((noinline)) uintptr_t op_desc1(uintptr_t) {
+  return desc_call(g_desc1_index, 0).value;
+}
+__attribute__((noinline)) uintptr_t op_desc2(uintptr_t) {
+  return desc_call(g_desc2_index, 0).value;
+}
+
+// 2 段目の受け手。SETUP では自分の子 cost_dinner と、それへの記述子 (自分の表) を作る。
+// それ以外は記述子で cost_dinner を呼び、引数をそのまま渡す。
+uintptr_t cost_dnest(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+  if (argument == MODE_SETUP) {
+    note_setup(api(object_api::CREATE_OBJECT, OBJECT_COST_DINNER,
+                   (uintptr_t)&cost_leaf).error);
+    const api_result made =
+        api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_COST_DINNER, 0);
+    note_setup(made.error);
+    g_dnest_index = made.value;
+    return 0;
+  }
+  return desc_call(g_dnest_index, argument).value;
+}
+
+// 呼び手 (D)。SETUP では子 cost_dleaf / cost_dnest と、自分の表への記述子 2 本を作る。
+// MEASURE では D の中から記述子を撃って測る (撃つのが D なので、呼び手は D になる)。
+uintptr_t cost_driver(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+  if (argument == MODE_SETUP) {
+    note_setup(api(object_api::CREATE_OBJECT, OBJECT_COST_DLEAF,
+                   (uintptr_t)&cost_leaf).error);
+    note_setup(api(object_api::CREATE_OBJECT, OBJECT_COST_DNEST,
+                   (uintptr_t)&cost_dnest).error);
+    const api_result desc1 =
+        api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_COST_DLEAF, 0);
+    note_setup(desc1.error);
+    g_desc1_index = desc1.value;
+    // 子の cost_dnest に自分の子と記述子を作らせる (その作成者は cost_dnest になる)。
+    note_setup(call_method(OBJECT_COST_DNEST, MODE_SETUP).error);
+    const api_result desc2 =
+        api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_COST_DNEST, 0);
+    note_setup(desc2.error);
+    g_desc2_index = desc2.value;
+    return 0;
+  }
+  if (argument != MODE_MEASURE)
+    return 0;
+  g_desc1_stat = measure<ARCH>(op_desc1, ROUNDS);
+  g_desc2_stat = measure<ARCH>(op_desc2, ROUNDS);
+  // 検算: 引数 41 が両方の段を通って 42 に戻ること。
+  g_desc1_value = desc_call(g_desc1_index, 41).value;
+  g_desc2_value = desc_call(g_desc2_index, 41).value;
+  return 0;
+}
+
+// 作成の測定対象。中で**自分自身への記述子**を 1 つ作り、その API 往復の区間だけを測る
+// (自分自身への作成は作成権限で常に通る)。表は呼ぶ前に root が差し替えで空にしておく。
+uintptr_t cost_owner(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  const uint32_t started = cycles_now<ARCH>();
+  g_create_error =
+      api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_COST_OWNER, 0).error;
+  const uint32_t ended = cycles_now<ARCH>();
+  g_create_cycles = ended - started;
+  return 0;
+}
+
+// 作成 1 回ぶん。差し替え (表を空にする) と呼び出しは計測の外。区間は cost_owner の中。
+uint32_t create_once(bool &ok) {
+  const api_result fresh = api(object_api::CREATE_OBJECT, OBJECT_COST_OWNER,
+                               (uintptr_t)&cost_owner, OBJECT_REPLACE);
+  const api_result ran = call_method(OBJECT_COST_OWNER, 0);
+  if (fresh.error != (uintptr_t)object_error::OK ||
+      ran.error != (uintptr_t)object_error::OK ||
+      g_create_error != (uintptr_t)object_error::OK)
+    ok = false;
+  return g_create_cycles;
+}
+
+// 作成の min / mean。標本ごとに空の表で作るので、枠の埋まり具合に依らない。
+stat_t measure_create(bool &ok) {
+  for (uint32_t warm = 0; warm < 32; ++warm)
+    create_once(ok);
+  uint32_t best = 0xFFFFFFFFu;
+  uint64_t total = 0;
+  for (uint32_t round = 0; round < ROUNDS; ++round) {
+    const uint32_t elapsed = create_once(ok);
+    if (elapsed < best)
+      best = elapsed;
+    total += elapsed;
+  }
+  return {best, (uint32_t)(total / ROUNDS)};
+}
+#endif
+
 // ★ARCH::HAS_CYCLE_COUNTER が false の arch ではこのテンプレートは実体化されない。
 //   CYCCNT の番地も有効化手順も arch 側にあり、ここには DWT を知るコードが無い。
 template <typename A> void bench() {
@@ -269,13 +459,33 @@ template <typename A> void bench() {
 
   // ★ウォームアップは measure の中で行う (呼び出し経路そのものを温めるため)。
 
-  constexpr uint32_t ROUNDS = 2048;
-  static_assert(ROUNDS >= 128, "call_cost sample rounds must be >= 128");
   const stat_t nothing = measure<A>(op_nothing, ROUNDS);
   const stat_t direct = measure<A>(op_direct, ROUNDS);
   const stat_t svc = measure<A>(op_svc, ROUNDS);
   const stat_t call1 = measure<A>(op_call, ROUNDS);
   const stat_t call2 = measure<A>(op_call2, ROUNDS);
+
+#if defined(__riscv)
+  // 記述子の計測 (riscv 限定)。呼び手は D。作成は cost_owner を毎回差し替えて空の表で測る。
+  const api_result driver =
+      api(object_api::CREATE_OBJECT, OBJECT_COST_DRIVER, (uintptr_t)&cost_driver);
+  const api_result owner =
+      api(object_api::CREATE_OBJECT, OBJECT_COST_OWNER, (uintptr_t)&cost_owner);
+  if (driver.error != (uintptr_t)object_error::OK ||
+      owner.error != (uintptr_t)object_error::OK) {
+    BOARD::diag_printf("[COST] FAIL create descriptor bench objects: error %lu / %lu\n",
+                       (unsigned long)driver.error, (unsigned long)owner.error);
+    ++failed;
+    return;
+  }
+  call_method(OBJECT_COST_DRIVER, MODE_SETUP);
+  const uintptr_t setup_error = g_setup_error;
+  call_method(OBJECT_COST_DRIVER, MODE_MEASURE);
+  bool create_ok = true;
+  const stat_t desc1 = g_desc1_stat;
+  const stat_t desc2 = g_desc2_stat;
+  const stat_t create = measure_create(create_ok);
+#endif
 
   BOARD::diag_printf("[COST] harness baseline = %lu cyc (subtracted below)\n",
                      (unsigned long)nothing.min);
@@ -283,6 +493,11 @@ template <typename A> void bench() {
   report("svc round trip", svc, nothing, cycles_per_us);
   report("method call (1 hop)", call1, nothing, cycles_per_us);
   report("method call (2 hops)", call2, nothing, cycles_per_us);
+#if defined(__riscv)
+  report("desc call (1 hop)", desc1, nothing, cycles_per_us);
+  report("desc call (2 hops)", desc2, nothing, cycles_per_us);
+  report("create desc", create, nothing, cycles_per_us);
+#endif
 
   const auto net = [&](stat_t value) -> uint32_t {
     return value.min > nothing.min ? value.min - nothing.min : 0;
@@ -301,7 +516,7 @@ template <typename A> void bench() {
     return value.mean > nothing.mean ? value.mean - nothing.mean : 0;
   };
   shizuku_c6_call_cost_record.magic = 0x434F5354u;
-  shizuku_c6_call_cost_record.version = 1;
+  shizuku_c6_call_cost_record.version = 2;
   shizuku_c6_call_cost_record.rounds = ROUNDS;
   shizuku_c6_call_cost_record.baseline_min = nothing.min;
   shizuku_c6_call_cost_record.baseline_mean = nothing.mean;
@@ -321,6 +536,19 @@ template <typename A> void bench() {
   shizuku_c6_call_cost_record.call2_raw_mean = call2.mean;
   shizuku_c6_call_cost_record.call2_net_min = net_min(call2);
   shizuku_c6_call_cost_record.call2_net_mean = net_mean(call2);
+  shizuku_c6_call_cost_record.desc1_raw_min = desc1.min;
+  shizuku_c6_call_cost_record.desc1_raw_mean = desc1.mean;
+  shizuku_c6_call_cost_record.desc1_net_min = net_min(desc1);
+  shizuku_c6_call_cost_record.desc1_net_mean = net_mean(desc1);
+  shizuku_c6_call_cost_record.desc2_raw_min = desc2.min;
+  shizuku_c6_call_cost_record.desc2_raw_mean = desc2.mean;
+  shizuku_c6_call_cost_record.desc2_net_min = net_min(desc2);
+  shizuku_c6_call_cost_record.desc2_net_mean = net_mean(desc2);
+  shizuku_c6_call_cost_record.create_desc_raw_min = create.min;
+  shizuku_c6_call_cost_record.create_desc_raw_mean = create.mean;
+  shizuku_c6_call_cost_record.create_desc_net_min = net_min(create);
+  shizuku_c6_call_cost_record.create_desc_net_mean = net_mean(create);
+  shizuku_c6_call_cost_record.create_desc_rounds = ROUNDS;
 #endif
 
   // 1 段あたりの限界費用。1 段目には呼び出し元側の svc が 1 回だけ余分に入るので、
@@ -347,6 +575,23 @@ template <typename A> void bench() {
                        (unsigned long)checked.error,
                        (unsigned long)checked.value);
   }
+#if defined(__riscv)
+  // 記述子の戻り値検証 (checked_ok と同じ流儀)。41 を渡して 42 が返ること、
+  // 設定と作成がすべて成功したこと。
+  const bool desc_ok = create_ok && setup_error == (uintptr_t)object_error::OK &&
+                       g_desc1_value == 42 && g_desc2_value == 42;
+  if (desc_ok) {
+    ++passed;
+    BOARD::diag_printf("[COST] PASS descriptor calls return 42, create ok\n");
+  } else {
+    ++failed;
+    record_fail("COST descriptor call returns 42", g_desc1_value, 42);
+    BOARD::diag_printf("[COST] FAIL descriptor: setup %lu desc1 %lu desc2 %lu create_ok %u\n",
+                       (unsigned long)setup_error, (unsigned long)g_desc1_value,
+                       (unsigned long)g_desc2_value, create_ok ? 1u : 0u);
+  }
+  shizuku_c6_call_cost_record.desc_checked_ok = desc_ok ? 1u : 0u;
+#endif
   BOARD::diag_printf("[COST] call cost bench done\n");
 }
 
