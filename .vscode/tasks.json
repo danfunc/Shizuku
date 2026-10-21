@@ -1,6 +1,6 @@
 {
   // ===========================================================================
-  //  Shizuku のビルドは Bazel (docs/03_porting_policy.md D15 / D38)
+  //  Shizuku のビルドは Bazel (docs/record/kernel_v2_record.typ の D15 / D38)
   // ===========================================================================
   //  ★Cmd+Shift+B (Windows/Linux: Ctrl+Shift+B) が「焼く」に割り当ててある。
   //    一覧から選ぶなら Terminal → Run Task。
