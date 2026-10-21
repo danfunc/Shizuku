@@ -215,9 +215,12 @@ kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
 #if defined(SHIZUKU_RP2040)
   if (!ARCH::region_range_representable(request.region_base, request.region_limit))
     return kernel_error::BAD_REQUEST;
+#endif
+  // 呼び先の普通の return は svc_dispatch 経由でもう 1 枚 call_frame_push する。
+  // その 1 枚ぶんの余白を CALL 時に先取りする (全 arch 共通。2026-10-21 実機で
+  // RV32 の OBJECT_DEEP が最深で return を断られ 0xE005 停止したため)。
   if (!ARCH::call_entry_has_return_room(*context, sizeof(call_frame_header)))
     return kernel_error::NO_STACK;
-#endif
   const uint32_t unwind_floor = thread.call_stack.depth;
 #if defined(SHIZUKU_DEEP_DIAG)
   shizuku_push_diag_kind = 1; // do_call 経由の push

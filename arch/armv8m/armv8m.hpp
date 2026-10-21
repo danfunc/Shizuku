@@ -390,6 +390,24 @@ public:
   static uintptr_t stack_limit(const context_t &context) {
     return context.psplim;
   }
+  // CALL 時に、戻りの dispatch が積む 1 枚ぶんの余白が残るか (dispatch.cpp の
+  // do_call)。PSPLIM は実スタック下限の検出であり、call_frame_push の**ソフトな**
+  // 余白判定 (NO_STACK) は別物なので、ハード検出の有無には頼らず同じ式で見る。
+  // 式は call_frame_push と同じ構成要素 (ヘッダ・実フレーム・余白) から出す。
+  static bool call_entry_has_return_room(const context_t &context,
+                                         uint32_t header_bytes) {
+    const uintptr_t limit = stack_limit(context);
+    if (limit == 0)
+      return true;
+    const uintptr_t frame_bytes = exc_frame_bytes(context);
+    const uintptr_t unaligned = header_bytes + frame_bytes + HANDLER_STACK_ARG_BYTES;
+    const uintptr_t total = (unaligned + 7u) & ~(uintptr_t)7u;
+    const uintptr_t dispatch_reserve = unaligned + EXC_FRAME_MAX_BYTES +
+                                       FAULT_CONTEXT_BYTES + CALL_HEADROOM;
+    const uintptr_t sp = (uintptr_t)context.sp;
+    // total は呼び先のフレーム、もう 1 つの total は戻りの dispatch のフレーム。
+    return sp >= limit && sp - limit >= 2u * total + dispatch_reserve;
+  }
 
   // ---- ★ARCH SEAM — マルチコア atomic (DESIGN §14.5.3) --------------------
   // RP2350 (ARMv8-M) は LDREX/STREX (= __atomic 系)。SIO ハードウェアスピンロックは
