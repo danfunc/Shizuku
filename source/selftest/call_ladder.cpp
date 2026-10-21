@@ -63,12 +63,26 @@ struct descriptor_test_record_t {
   uint32_t collision_count;
   uint32_t name_hash[kDescriptorRecordSlots];
   uint8_t status[kDescriptorRecordSlots]; // 0=not run, 3=in progress, 1=PASS, 2=FAIL
+  // 失敗の詳細 (診断専用, version 2)。first_* は最初の FAIL、second_* は 2 番目の FAIL。
+  // FAIL の総数は failed_count。hash は name の FNV-1a。got/want は下位 32 bit。
+  uint32_t first_fail_hash;
+  uint32_t first_fail_got;
+  uint32_t first_fail_want;
+  uint32_t second_fail_hash;
+  uint32_t second_fail_got;
+  uint32_t second_fail_want;
 };
 extern "C" {
 #if defined(__ELF__)
 __attribute__((used, aligned(4), section(".noinit")))
 #endif
 volatile descriptor_test_record_t shizuku_descriptor_test_record;
+}
+
+// 診断専用 (挙動不変)。中継 A→B→C の作成前後の値を sysbus から読むための口。
+// [0] 開始印 0xD1A60001, [1..6] CREATE_OBJECT 直後の値, [7] 終了印 0xD1A60002。
+extern "C" {
+__attribute__((used)) volatile uint32_t shizuku_desc_relay_diag[8];
 }
 
 uint32_t passed = 0;
@@ -100,9 +114,23 @@ using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
 constexpr uint32_t DESCRIPTOR_TEST_RECORD_MAGIC = 0x44535452u; // "DSTR"
-constexpr uint32_t DESCRIPTOR_TEST_RECORD_VERSION = 1;
-static_assert(sizeof(descriptor_test_record_t) == 516,
+constexpr uint32_t DESCRIPTOR_TEST_RECORD_VERSION = 2;
+static_assert(sizeof(descriptor_test_record_t) == 540,
               "descriptor record layout changed; re-audit C6 noinit RAM map");
+static_assert(__builtin_offsetof(descriptor_test_record_t, status) == 420,
+              "descriptor record status offset moved");
+static_assert(__builtin_offsetof(descriptor_test_record_t, first_fail_hash) == 516,
+              "descriptor record first_fail_hash offset moved");
+static_assert(__builtin_offsetof(descriptor_test_record_t, first_fail_got) == 520,
+              "descriptor record first_fail_got offset moved");
+static_assert(__builtin_offsetof(descriptor_test_record_t, first_fail_want) == 524,
+              "descriptor record first_fail_want offset moved");
+static_assert(__builtin_offsetof(descriptor_test_record_t, second_fail_hash) == 528,
+              "descriptor record second_fail_hash offset moved");
+static_assert(__builtin_offsetof(descriptor_test_record_t, second_fail_got) == 532,
+              "descriptor record second_fail_got offset moved");
+static_assert(__builtin_offsetof(descriptor_test_record_t, second_fail_want) == 536,
+              "descriptor record second_fail_want offset moved");
 static_assert(kDescriptorRecordSlots >= 88,
               "descriptor record must hold every current assertion");
 
@@ -116,6 +144,12 @@ void reset_descriptor_test_record() {
   shizuku_descriptor_test_record.checksum = 0;
   shizuku_descriptor_test_record.overflow_count = 0;
   shizuku_descriptor_test_record.collision_count = 0;
+  shizuku_descriptor_test_record.first_fail_hash = 0;
+  shizuku_descriptor_test_record.first_fail_got = 0;
+  shizuku_descriptor_test_record.first_fail_want = 0;
+  shizuku_descriptor_test_record.second_fail_hash = 0;
+  shizuku_descriptor_test_record.second_fail_got = 0;
+  shizuku_descriptor_test_record.second_fail_want = 0;
   for (unsigned i = 0; i < kDescriptorRecordSlots; ++i) {
     shizuku_descriptor_test_record.name_hash[i] = 0;
     shizuku_descriptor_test_record.status[i] = 0;
@@ -123,7 +157,8 @@ void reset_descriptor_test_record() {
   shizuku_descriptor_test_record.magic = DESCRIPTOR_TEST_RECORD_MAGIC;
 }
 
-void record_descriptor_check(const char *name, bool ok) {
+void record_descriptor_check(const char *name, bool ok, unsigned long got,
+                             unsigned long want) {
   if (!(name[0] == 'd' && name[1] == 'e' && name[2] == 's' &&
         name[3] == 'c' && name[4] == 'r' && name[5] == 'i' &&
         name[6] == 'p' && name[7] == 't' && name[8] == 'o' &&
@@ -152,9 +187,20 @@ void record_descriptor_check(const char *name, bool ok) {
   if (ok)
     shizuku_descriptor_test_record.passed_count =
         shizuku_descriptor_test_record.passed_count + 1;
-  else
+  else {
+    // 診断専用: 1 本目と 2 本目の FAIL の詳細を残す (数える処理は下の failed_count が担う)。
+    if (shizuku_descriptor_test_record.failed_count == 0) {
+      shizuku_descriptor_test_record.first_fail_hash = hash;
+      shizuku_descriptor_test_record.first_fail_got = (uint32_t)got;
+      shizuku_descriptor_test_record.first_fail_want = (uint32_t)want;
+    } else if (shizuku_descriptor_test_record.failed_count == 1) {
+      shizuku_descriptor_test_record.second_fail_hash = hash;
+      shizuku_descriptor_test_record.second_fail_got = (uint32_t)got;
+      shizuku_descriptor_test_record.second_fail_want = (uint32_t)want;
+    }
     shizuku_descriptor_test_record.failed_count =
         shizuku_descriptor_test_record.failed_count + 1;
+  }
   shizuku_descriptor_test_record.checksum =
       (shizuku_descriptor_test_record.checksum << 5) ^ hash ^ (ok ? 1u : 2u);
 }
@@ -182,7 +228,7 @@ constexpr uintptr_t OBJECT_DESC_RECUR = object_id::desc_recur;
 constexpr uintptr_t METHOD_MAIN = 0;
 
 void check(const char *name, bool ok, unsigned long got, unsigned long want) {
-  record_descriptor_check(name, ok);
+  record_descriptor_check(name, ok, got, want);
   if (ok) {
     ++passed;
     BOARD::diag_printf("[SELFTEST] PASS %s (=%lu)\n", name, got);
@@ -1155,8 +1201,18 @@ void call_ladder() {
     // ★C の g_desc_* に残る値が「B 経由で撃たれた」ものだと言えるように、先に空けておく。
     //   ルートは B しか呼ばず、B の表の記述子だけで C に届く。
     {
+      // 診断専用 (挙動不変): 作成前後の値を shizuku_desc_relay_diag に残す。
+      shizuku_desc_relay_diag[0] = 0xD1A60001u;
       const api_result relay_made = api(
           object_api::CREATE_OBJECT, OBJECT_DESC_RELAY, (uintptr_t)&desc_relay_fn);
+      shizuku_desc_relay_diag[1] = (uint32_t)relay_made.error;
+      shizuku_desc_relay_diag[2] = (uint32_t)relay_made.value;
+      shizuku_desc_relay_diag[3] = (uint32_t)OBJECT_DESC_RELAY;
+      shizuku_desc_relay_diag[4] = (uint32_t)kernel_instance.current_object(
+          kernel_instance.current_thread_id());
+      shizuku_desc_relay_diag[5] = kernel_instance.current_depth();
+      shizuku_desc_relay_diag[6] = (uint32_t)KERNEL_OBJECT::OBJECT_COUNT;
+      shizuku_desc_relay_diag[7] = 0xD1A60002u;
       check("descriptor A->B->C: create relay object",
             relay_made.error == (uintptr_t)object_error::OK,
             (unsigned long)relay_made.error, 0);

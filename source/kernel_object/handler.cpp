@@ -365,18 +365,33 @@ template <> uintptr_t KERNEL_OBJECT::return_to_depth(uint32_t target_depth,
   return result.error;
 }
 
+// ---- 診断専用 (挙動不変) ------------------------------------------------------
+// create_object が失敗 return する直前の最後の error と、その生成者・番号。
+// sysbus から llvm-nm -C で引けるよう外部リンケージにしてある (static だと読めない)。
+extern "C" {
+__attribute__((used)) volatile uint32_t shizuku_kobj_last_create_error = 0;
+__attribute__((used)) volatile uint32_t shizuku_kobj_last_create_creator = 0;
+__attribute__((used)) volatile uint32_t shizuku_kobj_last_create_id = 0;
+}
+static void note_create_failure(uintptr_t id, uint32_t creator, object_error error) {
+  shizuku_kobj_last_create_error = (uint32_t)error;
+  shizuku_kobj_last_create_creator = creator;
+  shizuku_kobj_last_create_id = (uint32_t)id;
+}
+
 template <>
 uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
                                        uintptr_t flags, object_error &error) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(421);
 #endif
-  if (id >= OBJECT_COUNT || id == KERNEL_OBJECT_ID || id == ROOT_OBJECT) {
-    error = object_error::BAD_OBJECT;
-    return 0;
-  }
   const uint32_t creator =
       (uint32_t)current_object(kernel_instance.current_thread_id());
+  if (id >= OBJECT_COUNT || id == KERNEL_OBJECT_ID || id == ROOT_OBJECT) {
+    error = object_error::BAD_OBJECT;
+    note_create_failure(id, creator, error);
+    return 0;
+  }
   const bool is_privileged =
       (object_protection(creator) == PROTECTION_PRIVILEGED);
 
@@ -387,6 +402,7 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
           creator == ROOT_OBJECT || creator == KERNEL_OBJECT_ID, false, flags,
           INTERNAL_FLAG_HANDLER)) {
     error = object_error::NOT_PRIVILEGED;
+    note_create_failure(id, creator, error);
     return 0;
   }
 
@@ -396,6 +412,7 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
   if (is_kernel_role && creator != ROOT_OBJECT &&
       !m_objects[creator].kernel_role) {
     error = object_error::NOT_PRIVILEGED;
+    note_create_failure(id, creator, error);
     return 0;
   }
 
@@ -417,10 +434,12 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
         ARCH::load_acquire32(&m_objects[id].instance_generation);
     if (replace && current_generation == UINT32_MAX) {
       error = object_error::BAD_OBJECT;
+      note_create_failure(id, creator, error);
       return 0;
     }
     if (replace && current_instance_generation == UINT32_MAX) {
       error = object_error::BAD_OBJECT;
+      note_create_failure(id, creator, error);
       return 0;
     }
     // ★差し替えても kernel 役は引き継ぐ (番号ではなく役で判定するので、差し替え後の
@@ -495,6 +514,7 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
         "[KOBJ] object %lu is already taken by '%s' — create refused\n",
         (unsigned long)id, taken_by != nullptr ? taken_by : "(unnamed)");
     error = object_error::ALREADY_EXISTS;
+    note_create_failure(id, creator, error);
     return 0;
   }
 }
