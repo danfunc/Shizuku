@@ -2175,7 +2175,7 @@ uint32_t start_ble_uart(uintptr_t object_id) {
   usb_cdc_boot_diag_set_ble("poll-starting");
 #endif
   // ★method 0 (main) を起こしてはいけない — export して戻るだけ。ポーリングは
-  //   別スレッドで (apps/thermal.cpp の sampler と同じ形)。
+  //   別スレッドで (thermal の sampler と同じ形)。
   const auto spawned =
       api(shizuku::object_api::SPAWN, OBJECT, (uintptr_t)method::POLL, 0);
   if (spawned.error != 0) {

@@ -108,7 +108,6 @@ cc_binary(
     }),
     deps = [
         "//:internal_headers",
-        "//:apps",
         "//:kernel_object",
         "//configs:config",
         "//modules/pico_sdk_support",
@@ -122,7 +121,6 @@ cc_binary(
     }) + select({
         "//configs:cyw43": [
             "//modules/pico_sdk_support:ble_uart",
-            "//modules/pico_sdk_support:ota",
         ],
         "//conditions:default": [],
     }),

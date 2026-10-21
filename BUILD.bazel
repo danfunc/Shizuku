@@ -126,17 +126,6 @@ cc_library(
     }),
 )
 
-# アプリ。★いずれ XNO 側へ移す (D17) が、今は動かす場所がここしか無い。
-cc_library(
-    name = "apps",
-    srcs = ["source/apps/thermal.cpp"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":kernel_object",
-        "//modules/pico_sdk_support/objects:peripherals",
-    ],
-)
-
 # C6 M-only で成立可能な selftest の 5 つのサブセット
 C6_SELFTEST_SRCS = [
     "source/selftest/call_ladder.cpp",

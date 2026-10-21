@@ -10,11 +10,9 @@
 #endif
 #if defined(CYW43_WL_GPIO_LED_PIN)
 #include "shizuku/objects/ble_uart.hpp"
-#include "shizuku/objects/ota.hpp"
 #endif
 #include "shizuku/objects/usb_cdc.hpp"
 #include "shizuku/objects/peripherals.hpp"
-#include "shizuku/apps/thermal.hpp"
 #include "shizuku/selftest.hpp"
 
 #if defined(SHIZUKU_FLASHFS_ONLY)
@@ -76,7 +74,6 @@ enum BootStage : uint32_t {
   kStreamLadder = 180,
   kFlashFsProbe = 190,
   kFlashStream = 200,
-  kThermal = 210,
   kStress = 220,
   kBootComplete = 230,
 };
@@ -245,16 +242,10 @@ void shizuku::app_entry() {
 #endif
   shizuku::selftest::flash_stream_ladder();
   APP_PROG(62);
-#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
-  boot_stage(kThermal);
-#endif
 #if !defined(SHIZUKU_RP2040)
   shizuku::selftest::debug_ladder();
 #endif
 
-  // 温度の履歴アプリ。★負荷試験より前に起こして、負荷の下で周期がどれだけ
-  //   揺らぐかを見る (静かな系で測っても揺らぎの話にならない)。
-  shizuku::apps::start_thermal();
   APP_PROG(63);
 
   // 負荷試験を起動する。以後、点滅と報告は専用スレッドが行う。
@@ -307,7 +298,6 @@ void shizuku::app_entry() {
 
 #if defined(CYW43_WL_GPIO_LED_PIN)
   const uintptr_t BLE_UART_OBJ = shizuku::object_id::ble_uart;
-  const uintptr_t OTA_OBJ = shizuku::object_id::ota;
 
   if (!secondary_core_ready) {
 #if defined(SHIZUKU_BOOT_LOG_WAIT)
@@ -316,7 +306,7 @@ void shizuku::app_entry() {
     shizuku::objects::usb_cdc_boot_diag_set_ble("core1-unavailable");
 #endif
     shizuku::KERNEL::BOARD::diag_printf(
-        "[BOOT] BLE/OTA not started: core 1 unavailable for flash-safe CYW43 init\n");
+        "[BOOT] BLE not started: core 1 unavailable for flash-safe CYW43 init\n");
   } else {
 #if defined(SHIZUKU_BOOT_LOG_WAIT)
   shizuku::objects::usb_cdc_boot_diag_set_stage(
@@ -329,40 +319,7 @@ void shizuku::app_entry() {
                                         (unsigned long)ble_rc);
   }
 
-#if defined(SHIZUKU_BOOT_LOG_WAIT)
-  shizuku::objects::usb_cdc_boot_diag_set_stage(
-      shizuku::objects::boot_diag_stage::OTA_REGISTER);
-#endif
-  const uint32_t ota_rc =
-      shizuku::objects::ota::register_ota(OTA_OBJ, 0, BLE_UART_OBJ);
-  if (ota_rc != 0) {
-    shizuku::KERNEL::BOARD::diag_printf("[BOOT] register_ota failed: %lu\n",
-                                        (unsigned long)ota_rc);
-  }
-
-  if (ble_rc == 0 && ota_rc == 0) {
-    // 結線: ble_uart の OTA 受信ストリーム -> ota の入力 (slot 0: BLE)
-    const auto ota_rx = shizuku::KERNEL::ARCH::syscall(
-        (uintptr_t)shizuku::object_api::CALL_METHOD, BLE_UART_OBJ,
-        (uintptr_t)shizuku::objects::ble_uart::method::GET_OTA_STREAM, 0);
-    if (ota_rx.error == 0 && ota_rx.value != 0) {
-      shizuku::KERNEL::ARCH::syscall(
-          (uintptr_t)shizuku::object_api::CALL_METHOD, OTA_OBJ,
-          (uintptr_t)shizuku::objects::ota::method::SET_INPUT_STREAM,
-          ota_rx.value);
-    }
-
-    // 結線: ota の進捗・結果出力ストリーム -> ble_uart の TX 本線
-    const auto ota_tx = shizuku::KERNEL::ARCH::syscall(
-        (uintptr_t)shizuku::object_api::CALL_METHOD, OTA_OBJ,
-        (uintptr_t)shizuku::objects::ota::method::GET_STREAM, 0);
-    if (ota_tx.error == 0 && ota_tx.value != 0) {
-      shizuku::KERNEL::ARCH::syscall(
-          (uintptr_t)shizuku::object_api::CALL_METHOD, BLE_UART_OBJ,
-          (uintptr_t)shizuku::objects::ble_uart::method::SET_TX_STREAM,
-          ota_tx.value);
-    }
-
+  if (ble_rc == 0) {
     // 起動 (CYW43 の owner = ble_uart の poll スレッド。init もここで行う)
 #if defined(SHIZUKU_BOOT_LOG_WAIT)
     shizuku::objects::usb_cdc_boot_diag_set_stage(
@@ -375,7 +332,6 @@ void shizuku::app_entry() {
 #endif
 #endif
     shizuku::objects::ble_uart::start_ble_uart(BLE_UART_OBJ);
-    shizuku::objects::ota::start_ota(OTA_OBJ);
   } else {
     // fail-closed: owner が立たないので CYW43 には一切触れない。LED 書込みは
     // LED_NO_OWNER で失敗し、ここに理由を残す。
@@ -385,8 +341,8 @@ void shizuku::app_entry() {
     shizuku::objects::usb_cdc_boot_diag_set_ble("register-failed");
 #endif
     shizuku::KERNEL::BOARD::diag_printf(
-        "[BOOT] BLE/OTA not started (ble=%lu ota=%lu): CYW43 owner absent, LED disabled\n",
-        (unsigned long)ble_rc, (unsigned long)ota_rc);
+        "[BOOT] BLE not started (ble=%lu): CYW43 owner absent, LED disabled\n",
+        (unsigned long)ble_rc);
   }
   }
 #endif
