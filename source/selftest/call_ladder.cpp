@@ -48,7 +48,7 @@ namespace selftest {
 // ring cannot erase which checks ran or passed. The test names in check() are
 // hashed in source order. Each slot maps to the corresponding descriptor-prefixed
 // check() occurrence in this file; name_hash is FNV-1a of that assertion name.
-// 96 slots: the descriptor-prefixed check() occurrences are 88 (the riscv build runs
+// 96 slots: the descriptor-prefixed check() occurrences are 89 (the riscv build runs
 // all of them; the host build runs fewer). Growing this adds 160 bytes of .noinit RAM.
 constexpr uint32_t kDescriptorRecordSlots = 96;
 struct descriptor_test_record_t {
@@ -62,7 +62,7 @@ struct descriptor_test_record_t {
   uint32_t overflow_count;
   uint32_t collision_count;
   uint32_t name_hash[kDescriptorRecordSlots];
-  uint8_t status[kDescriptorRecordSlots]; // 0=not run, 3=in progress, 1=PASS, 2=FAIL
+  uint8_t status[kDescriptorRecordSlots]; // 0=not run, 3=in progress, 1=PASS, 2=FAIL, 4=SKIPPED (version 3)
   // 失敗の詳細 (診断専用, version 2)。first_* は最初の FAIL、second_* は 2 番目の FAIL。
   // FAIL の総数は failed_count。hash は name の FNV-1a。got/want は下位 32 bit。
   uint32_t first_fail_hash;
@@ -83,6 +83,20 @@ volatile descriptor_test_record_t shizuku_descriptor_test_record;
 // [0] 開始印 0xD1A60001, [1..6] CREATE_OBJECT 直後の値, [7] 終了印 0xD1A60002。
 extern "C" {
 __attribute__((used)) volatile uint32_t shizuku_desc_relay_diag[8];
+}
+
+// 診断専用 (挙動不変)。深さの試験 (desc_recur_fn) の各段の局所変数アドレスを段番号ごとに残す。
+// 隣接する段のアドレスの差が 1 段あたりの実消費バイト (sp の代用)。
+// [0] 到達した段数 (最後に入った段の番号)
+// [1..33] 段 k の局所変数アドレス (k は 1 始まり。33 段目までを記録)
+// [34] 試験の前に読んだ thread のスタック下限 (ARCH::stack_limit)。読めなければ 0
+// [35] 最後に NO_STACK を観測した段の番号 (無ければ 0)
+// [36] 完了印 0xD1A60003 (試験ブロックを抜けた印。riscv 以外では 0 のまま)
+// [37] 深さ上限の厳密な試験を実行しなかった理由 (0=実行した, 1=下限が読めない,
+//      2=段あたり消費を測れない, 3=余白が足りない)
+// [38] 測った 1 段あたりの消費 (バイト), [39] 最初の段の上の余白 (バイト: 段1 - 下限)
+extern "C" {
+__attribute__((used)) volatile uintptr_t shizuku_desc_recur_diag[40];
 }
 
 uint32_t passed = 0;
@@ -114,7 +128,7 @@ using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
 constexpr uint32_t DESCRIPTOR_TEST_RECORD_MAGIC = 0x44535452u; // "DSTR"
-constexpr uint32_t DESCRIPTOR_TEST_RECORD_VERSION = 2;
+constexpr uint32_t DESCRIPTOR_TEST_RECORD_VERSION = 3;
 static_assert(sizeof(descriptor_test_record_t) == 540,
               "descriptor record layout changed; re-audit C6 noinit RAM map");
 static_assert(__builtin_offsetof(descriptor_test_record_t, status) == 420,
@@ -131,7 +145,7 @@ static_assert(__builtin_offsetof(descriptor_test_record_t, second_fail_got) == 5
               "descriptor record second_fail_got offset moved");
 static_assert(__builtin_offsetof(descriptor_test_record_t, second_fail_want) == 536,
               "descriptor record second_fail_want offset moved");
-static_assert(kDescriptorRecordSlots >= 88,
+static_assert(kDescriptorRecordSlots >= 89,
               "descriptor record must hold every current assertion");
 
 void reset_descriptor_test_record() {
@@ -203,6 +217,29 @@ void record_descriptor_check(const char *name, bool ok, unsigned long got,
   }
   shizuku_descriptor_test_record.checksum =
       (shizuku_descriptor_test_record.checksum << 5) ^ hash ^ (ok ? 1u : 2u);
+}
+
+// 走らせなかった試験の印 (status=4)。PASS/FAIL には数えない。名前の付け方は check() と同じ。
+void record_descriptor_skip(const char *name) {
+  if (!(name[0] == 'd' && name[1] == 'e' && name[2] == 's' &&
+        name[3] == 'c' && name[4] == 'r' && name[5] == 'i' &&
+        name[6] == 'p' && name[7] == 't' && name[8] == 'o' &&
+        name[9] == 'r'))
+    return;
+  const uint32_t slot = shizuku_descriptor_test_record.executed_count;
+  if (slot >= kDescriptorRecordSlots) {
+    shizuku_descriptor_test_record.overflow_count =
+        shizuku_descriptor_test_record.overflow_count + 1;
+    return;
+  }
+  uint32_t hash = 2166136261u;
+  for (const unsigned char *p = (const unsigned char *)name; *p; ++p)
+    hash = (hash ^ *p) * 16777619u;
+  shizuku_descriptor_test_record.name_hash[slot] = hash;
+  shizuku_descriptor_test_record.status[slot] = 4;
+  shizuku_descriptor_test_record.executed_count = slot + 1;
+  shizuku_descriptor_test_record.checksum =
+      (shizuku_descriptor_test_record.checksum << 5) ^ hash ^ 4u;
 }
 
 constexpr uintptr_t OBJECT_LEAF = object_id::leaf;
@@ -557,6 +594,8 @@ uint32_t g_recur_calls = 0;
 uintptr_t g_recur_refused = (uintptr_t)object_error::UNKNOWN_API;
 uintptr_t g_recur_index = UINTPTR_MAX;
 constexpr uintptr_t RECUR_SETUP_KEY = 0x5E7;
+// 段の入口に要る余白 (rv32 call_entry_has_return_room の 2T + 残り)。診断と試験の判断に使う。
+constexpr uintptr_t RECUR_ENTRY_ROOM_BYTES = 1140;
 
 uintptr_t desc_recur_fn(uintptr_t mode, uintptr_t, uintptr_t, uintptr_t) {
   if (mode == RECUR_SETUP_KEY) {
@@ -566,10 +605,17 @@ uintptr_t desc_recur_fn(uintptr_t mode, uintptr_t, uintptr_t, uintptr_t) {
     return made.error;
   }
   ++g_recur_calls;
+  // 診断専用 (挙動不変): この段の局所変数のアドレスを段番号ごとに残す (sp の代用)。
+  volatile uintptr_t frame_mark = 0;
+  shizuku_desc_recur_diag[0] = g_recur_calls;
+  if (g_recur_calls <= 33)
+    shizuku_desc_recur_diag[g_recur_calls] = (uintptr_t)&frame_mark;
 #if defined(__riscv)
   const api_result next = call_descriptor(g_recur_index);
   if (next.error != (uintptr_t)object_error::OK)
     g_recur_refused = next.error;
+  if (next.error == (uintptr_t)object_error::NO_STACK)
+    shizuku_desc_recur_diag[35] = g_recur_calls;
 #endif
   return 0;
 }
@@ -1066,15 +1112,22 @@ void call_ladder() {
             (unsigned long)g_recur_index, 0);
       const uint32_t recur_depth = kernel_instance.current_depth();
       const uint32_t recur_count = kernel_instance.current_call_count();
+      // 診断配列を空にし、走らせる前に thread のスタック下限を読んでおく。
+      for (unsigned i = 0; i < 40; ++i)
+        shizuku_desc_recur_diag[i] = 0;
+      shizuku_desc_recur_diag[34] =
+          (uintptr_t)ARCH::stack_limit(*kernel_instance.current_context());
       g_recur_calls = 0;
       g_recur_refused = (uintptr_t)object_error::UNKNOWN_API;
       const api_result top = call_method(OBJECT_DESC_RECUR, 0);
-      check("descriptor: recursion refused at the depth limit with NO_STACK",
+      const uintptr_t recur_n = g_recur_calls;
+      // (a) 常に実行: 止まった理由が スタック上限 でも 深さ上限 でも、NO_STACK で拒否される。
+      check("descriptor: recursion refused with NO_STACK (stack or depth limit)",
             g_recur_refused == (uintptr_t)object_error::NO_STACK,
             (unsigned long)g_recur_refused, (unsigned long)object_error::NO_STACK);
-      check("descriptor: recursion ran exactly MAX_DEPTH callees",
-            g_recur_calls == KERNEL_OBJECT::MAX_DEPTH,
-            (unsigned long)g_recur_calls, (unsigned long)KERNEL_OBJECT::MAX_DEPTH);
+      check("descriptor: recursion ran between 1 and MAX_DEPTH callees",
+            recur_n >= 1 && recur_n <= KERNEL_OBJECT::MAX_DEPTH,
+            (unsigned long)recur_n, (unsigned long)KERNEL_OBJECT::MAX_DEPTH);
       check("descriptor: top-level recursive call returned OK",
             top.error == (uintptr_t)object_error::OK,
             (unsigned long)top.error, 0);
@@ -1084,8 +1137,42 @@ void call_ladder() {
       check("descriptor: call count restored after recursion",
             kernel_instance.current_call_count() == recur_count,
             (unsigned long)kernel_instance.current_call_count(), (unsigned long)recur_count);
+
+      // (b) 深さ上限の厳密な試験。上の走行で測った 1 段あたり消費 s と、下限より上の余白
+      // room から、MAX_DEPTH 段に足りると言える時だけ check を呼ぶ。足りない/測れないなら
+      // check は呼ばず、status=4 (SKIPPED) と理由コードだけを残す (偽の PASS/FAIL を出さない)。
+      const uintptr_t limit = shizuku_desc_recur_diag[34];
+      const uintptr_t first = shizuku_desc_recur_diag[1];
+      const uintptr_t measured = recur_n < 33 ? recur_n : 33;
+      uintptr_t stride = 0;
+      uintptr_t room = 0;
+      uint32_t reason = 0;
+      if (limit == 0) {
+        reason = 1; // 下限が読めない
+      } else if (measured < 2 || first < shizuku_desc_recur_diag[measured]) {
+        reason = 2; // 段あたり消費を測れない
+      } else {
+        stride = (first - shizuku_desc_recur_diag[measured]) / (measured - 1);
+        room = first > limit ? first - limit : 0;
+        // 1140 = call_entry_has_return_room の 2T + 残り (rv32: 2*224 + 692)。
+        if (room < stride * KERNEL_OBJECT::MAX_DEPTH + RECUR_ENTRY_ROOM_BYTES)
+          reason = 3; // 余白が足りない
+      }
+      shizuku_desc_recur_diag[37] = reason;
+      shizuku_desc_recur_diag[38] = stride;
+      shizuku_desc_recur_diag[39] = room;
+      if (reason == 0) {
+        check("descriptor: recursion ran exactly MAX_DEPTH callees",
+              recur_n == KERNEL_OBJECT::MAX_DEPTH,
+              (unsigned long)recur_n, (unsigned long)KERNEL_OBJECT::MAX_DEPTH);
+      } else {
+        record_descriptor_skip("descriptor: recursion ran exactly MAX_DEPTH callees");
+        BOARD::diag_printf("[SELFTEST] SKIP descriptor: recursion ran exactly MAX_DEPTH callees (reason=%lu)\n",
+                           (unsigned long)reason);
+      }
     }
 #endif
+    shizuku_desc_recur_diag[36] = 0xD1A60003u;
 
     const api_result fresh = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1);
     check("descriptor: new descriptor after replace is created",
