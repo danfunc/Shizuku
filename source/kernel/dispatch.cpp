@@ -458,7 +458,10 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
           }
           ARCH::set_entry(*frame, desc.target_entry, ARCH::return_stub());
           ARCH::set_args_6(*frame, args);
-          ARCH::set_priv(*context, false);
+          // 通常の CALL (do_call) と同じ規則: 呼び先オブジェクトの保護指定で決める。
+          ARCH::set_priv(*context,
+                         (kernel_object_instance.object_protection(desc.target_object) &
+                          PROTECTION_UNPRIVILEGED) == 0);
           ARCH::set_region_window(*context, desc.region_base, desc.region_limit);
           return;
 #endif

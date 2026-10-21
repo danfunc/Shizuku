@@ -207,6 +207,9 @@ public:
     error = object_error::OK;
     return true;
   }
+  // そのオブジェクトを走らせるときの保護指定 (PROTECTION_*)。直接 call (記述子経路) も
+  // 通常の CALL と同じく、呼び先オブジェクトの設定を呼び出し時に引く。
+  uint32_t object_protection(uintptr_t id) const;
 
 private:
   // The compatibility probe inspects a suspended thread's private ledger
@@ -331,8 +334,6 @@ private:
   uintptr_t run_for(uintptr_t thread, uintptr_t cycles, object_error &error);
   void exit_thread();
   uintptr_t kill_thread(uintptr_t thread, object_error &error);
-  // そのオブジェクトを走らせるときの保護指定 (PROTECTION_*)。
-  uint32_t object_protection(uintptr_t id) const;
   // そのオブジェクトのスレッドを走らせてよいコア (0 = どこでもよい)。
   uint32_t object_affinity(uintptr_t id) const;
   // ★軸 B (Q8)。呼び出し元ではなく**対象オブジェクトの性質**として引く —
