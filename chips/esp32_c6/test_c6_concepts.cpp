@@ -5,9 +5,35 @@
 #define SHIZUKU_C6_SKELETON_PERMITTED 1
 #include "chips/esp32_c6/rv32_c6.hpp"
 #include "boards/esp32_c6/esp32_c6.hpp"
+#include "chips/esp32_c6/stop_capture.hpp"
+#include "chips/esp32_c6/trap_api.hpp"
 
 using arch = shizuku::archs::rv32_c6;
 using board = shizuku::boards::esp32_c6;
+
+// Context layout deduction concept validation
+static_assert(shizuku::chips::esp32_c6::stop_capture::layout_of<arch::context_t>().object_bytes ==
+                  sizeof(arch::context_t),
+              "deduced layout size must match sizeof(arch::context_t)");
+static_assert(shizuku::chips::esp32_c6::stop_capture::layout_of<arch::context_t>().sp_offset ==
+                  offsetof(arch::context_t, sp),
+              "deduced layout sp_offset must match offsetof");
+static_assert(shizuku::chips::esp32_c6::stop_capture::layout_of<arch::context_t>().privileged_offset ==
+                  offsetof(arch::context_t, privileged),
+              "deduced layout privileged_offset must match offsetof");
+
+// Policy concept validation for make_irq_dispatch_hooks
+struct test_empty_policy {};
+struct test_full_policy {
+  static void on_enter(uint32_t, uint32_t) {}
+  static void on_exit(uint32_t) {}
+};
+static_assert(shizuku::chips::esp32_c6::make_irq_dispatch_hooks<test_empty_policy>().on_enter == nullptr &&
+              shizuku::chips::esp32_c6::make_irq_dispatch_hooks<test_empty_policy>().on_exit == nullptr,
+              "empty policy must yield null hooks");
+static_assert(shizuku::chips::esp32_c6::make_irq_dispatch_hooks<test_full_policy>().on_enter != nullptr &&
+              shizuku::chips::esp32_c6::make_irq_dispatch_hooks<test_full_policy>().on_exit != nullptr,
+              "full policy must yield valid hook function pointers");
 
 // static_assert による concept 検証
 static_assert(shizuku::concepts::arch_requires<arch>,

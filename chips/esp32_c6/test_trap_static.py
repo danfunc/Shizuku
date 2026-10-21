@@ -41,6 +41,10 @@ assert 'shizuku_c6_early_diag_log.magic = SHIZUKU_C6_EARLY_DIAG_ENTRY_MAGIC' not
 assert begin.index('shizuku_c6_early_diag_progress = SHIZUKU_C6_EARLY_DIAG_ENTRY_MAGIC') < begin.index('esp_rom_get_reset_reason')
 
 trap_src = (root / 'chips/esp32_c6/trap.cpp').read_text()
+assert '__attribute__((weak))' not in trap_src
+assert 'shizuku_esp_ble_' not in trap_src
+assert 'shizuku_freertos_' not in trap_src
+assert 'SHIZUKU_IRQ_DELAY_US' not in trap_src
 assert 'shizuku_rv32_trap_dispatch' in trap_src and 'shizuku_rv32_return_failed' in trap_src
 board_src = (root / 'boards/esp32_c6/board_esp32_c6.cpp').read_text()
 api_src = (root / 'chips/esp32_c6/trap_api.hpp').read_text()
@@ -57,5 +61,9 @@ boot_src = (root / 'modules/esp_idf_support/c6/early_boot.cpp').read_text()
 assert 'shizuku_c6_thread1_diag' in boot_src
 assert 'records[2]' in boot_src
 assert 'thread1' in boot_src
+assert 'c6_idf_ble_freertos_policy' in boot_src
+assert 'set_irq_dispatch_hooks' in boot_src
+assert 'set_irq_dispatch_hooks' in api_src
+assert 'make_irq_dispatch_hooks' in api_src
 
 print('PASS: frame offsets, full saves/restores, CSR capture, vector slots, mscratch nesting, ring retention, timer/thread1 invariants')
