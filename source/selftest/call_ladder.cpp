@@ -48,7 +48,7 @@ namespace selftest {
 // ring cannot erase which checks ran or passed. The test names in check() are
 // hashed in source order. Each slot maps to the corresponding descriptor-prefixed
 // check() occurrence in this file; name_hash is FNV-1a of that assertion name.
-// 96 slots: the descriptor-prefixed check() occurrences are 74 (the riscv build runs
+// 96 slots: the descriptor-prefixed check() occurrences are 88 (the riscv build runs
 // all of them; the host build runs fewer). Growing this adds 160 bytes of .noinit RAM.
 constexpr uint32_t kDescriptorRecordSlots = 96;
 struct descriptor_test_record_t {
@@ -74,6 +74,26 @@ volatile descriptor_test_record_t shizuku_descriptor_test_record;
 uint32_t passed = 0;
 uint32_t failed = 0;
 
+// 旧 4 引数 CALL_METHOD の callee が捕まえた a4/a5 (riscv の naked probe が書く)。
+// 無名 namespace の中に置くと内部リンケージになり、asm の la が同じ TU の局所シンボルに
+// 頼る形になる。外部リンケージ (shizuku::selftest 直下、extern "C" で名前は修飾されない)
+// に出して、名前解決を普通のグローバル参照にしてある。
+extern "C" {
+uintptr_t g_desc_legacy_a4 = UINTPTR_MAX;
+uintptr_t g_desc_legacy_a5 = UINTPTR_MAX;
+}
+#if defined(__riscv)
+extern "C" __attribute__((naked)) uintptr_t desc_legacy_probe(
+    uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  __asm volatile("la t0, g_desc_legacy_a4\n"
+                 "sw a4, 0(t0)\n"
+                 "la t0, g_desc_legacy_a5\n"
+                 "sw a5, 0(t0)\n"
+                 "li a0, 77\n"
+                 "ret\n");
+}
+#endif
+
 namespace {
 
 using ARCH = KERNEL::ARCH;
@@ -83,7 +103,7 @@ constexpr uint32_t DESCRIPTOR_TEST_RECORD_MAGIC = 0x44535452u; // "DSTR"
 constexpr uint32_t DESCRIPTOR_TEST_RECORD_VERSION = 1;
 static_assert(sizeof(descriptor_test_record_t) == 516,
               "descriptor record layout changed; re-audit C6 noinit RAM map");
-static_assert(kDescriptorRecordSlots >= 74,
+static_assert(kDescriptorRecordSlots >= 88,
               "descriptor record must hold every current assertion");
 
 void reset_descriptor_test_record() {
@@ -153,6 +173,8 @@ constexpr uintptr_t OBJECT_DESC_RELAY = object_id::desc_relay;
 constexpr uintptr_t OBJECT_DESC_KERNEL = object_id::desc_kernel;
 constexpr uintptr_t OBJECT_DESC_CHILD = object_id::desc_child;
 constexpr uintptr_t OBJECT_DESC_GRANDCHILD = object_id::desc_grandchild;
+// 記述子経路の深さ上限の試験用 (自分自身への記述子を撃ち続ける)。
+constexpr uintptr_t OBJECT_DESC_RECUR = object_id::desc_recur;
 constexpr uintptr_t METHOD_MAIN = 0;
 
 void check(const char *name, bool ok, unsigned long got, unsigned long want) {
@@ -221,10 +243,6 @@ uint32_t g_desc_calls = 0;
 uint32_t g_desc_v2_calls = 0;
 uintptr_t g_desc_self = 0;
 uintptr_t g_desc_caller = 0;
-extern "C" {
-uintptr_t g_desc_legacy_a4 = UINTPTR_MAX;
-uintptr_t g_desc_legacy_a5 = UINTPTR_MAX;
-}
 bool g_desc_export_v2 = false;
 bool g_owner_probe_old_index = false;
 uintptr_t g_owner_old_index_error = (uintptr_t)object_error::UNKNOWN_API;
@@ -244,17 +262,8 @@ uintptr_t desc_target_fn_v2(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d,
   return a + b + c + d + e + f + 1000;
 }
 
-#if defined(__riscv)
-extern "C" __attribute__((naked)) uintptr_t desc_legacy_probe(
-    uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
-  __asm volatile("la t0, g_desc_legacy_a4\n"
-                 "sw a4, 0(t0)\n"
-                 "la t0, g_desc_legacy_a5\n"
-                 "sw a5, 0(t0)\n"
-                 "li a0, 77\n"
-                 "ret\n");
-}
-#else
+// riscv の naked 版は上 (外部リンケージ) にある。ここは riscv 以外の代用だけ。
+#if !defined(__riscv)
 uintptr_t desc_legacy_probe(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   return 77;
 }
@@ -455,6 +464,31 @@ uintptr_t deep(uintptr_t depth, uintptr_t, uintptr_t, uintptr_t) {
   if (result.error != (uintptr_t)object_error::OK)
     return 0xBAD00000u | (uint32_t)result.error;
   return result.value;
+}
+
+// ---- 記述子経路の深さ上限 (MAX_DEPTH) --------------------------------------
+// 自分の表の 0 番 (自分自身への記述子) を撃ち続ける。上限に達した呼出しだけが NO_STACK で
+// 拒否され、その段がそれを観測する。記述子経路は a2..a7 = 1..6 を渡すので、設定の呼出しは
+// それと区別できる鍵値で行う。
+uint32_t g_recur_calls = 0;
+uintptr_t g_recur_refused = (uintptr_t)object_error::UNKNOWN_API;
+uintptr_t g_recur_index = UINTPTR_MAX;
+constexpr uintptr_t RECUR_SETUP_KEY = 0x5E7;
+
+uintptr_t desc_recur_fn(uintptr_t mode, uintptr_t, uintptr_t, uintptr_t) {
+  if (mode == RECUR_SETUP_KEY) {
+    const api_result made =
+        api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_RECUR, 0);
+    g_recur_index = made.value;
+    return made.error;
+  }
+  ++g_recur_calls;
+#if defined(__riscv)
+  const api_result next = call_descriptor(g_recur_index);
+  if (next.error != (uintptr_t)object_error::OK)
+    g_recur_refused = next.error;
+#endif
+  return 0;
 }
 
 } // namespace
@@ -675,10 +709,24 @@ void call_ladder() {
           owner.error == (uintptr_t)object_error::OK && owner.value == 0,
           (unsigned long)owner.value, 0);
 #if defined(__riscv)
+    // (h) 拒否の前後で ledger (depth / call_count) が変わらず、呼び先も走らないこと。
+    // ルートの表は空なので、OWNER の番号はルートの表では必ず拒否される。
+    const uint32_t foreign_depth = kernel_instance.current_depth();
+    const uint32_t foreign_count = kernel_instance.current_call_count();
+    const uint32_t foreign_calls = g_desc_calls;
     const api_result foreign = call_descriptor(owner.value);
     check("descriptor: another object's index rejected with BAD_DESCRIPTOR (22)",
           foreign.error == (uintptr_t)object_error::BAD_DESCRIPTOR,
           (unsigned long)foreign.error, (unsigned long)object_error::BAD_DESCRIPTOR);
+    check("descriptor: rejected foreign index leaves ledger depth unchanged",
+          kernel_instance.current_depth() == foreign_depth,
+          (unsigned long)kernel_instance.current_depth(), (unsigned long)foreign_depth);
+    check("descriptor: rejected foreign index leaves call count unchanged",
+          kernel_instance.current_call_count() == foreign_count,
+          (unsigned long)kernel_instance.current_call_count(), (unsigned long)foreign_count);
+    check("descriptor: rejected foreign index does not run the callee",
+          g_desc_calls == foreign_calls,
+          (unsigned long)g_desc_calls, (unsigned long)foreign_calls);
 #endif
     const api_result owner_replaced = api(
         object_api::CREATE_OBJECT, OBJECT_DESC_OWNER, (uintptr_t)&desc_make_index,
@@ -899,6 +947,8 @@ void call_ladder() {
 #if defined(__riscv)
     {
       const uint32_t calls_before = g_desc_calls;
+      const uint32_t stale_depth = kernel_instance.current_depth();
+      const uint32_t stale_count = kernel_instance.current_call_count();
       const api_result stale = call_descriptor(fresh_reexport.value);
       check("descriptor: stale descriptor rejected with STALE_DESCRIPTOR (23)",
             stale.error == (uintptr_t)object_error::STALE_DESCRIPTOR,
@@ -907,6 +957,50 @@ void call_ladder() {
       check("descriptor: stale rejection does not run the callee",
             g_desc_calls == calls_before,
             (unsigned long)g_desc_calls, (unsigned long)calls_before);
+      // (h) 拒否は段を積む前に返るので、ledger は元のまま。
+      check("descriptor: stale rejection leaves ledger depth unchanged",
+            kernel_instance.current_depth() == stale_depth,
+            (unsigned long)kernel_instance.current_depth(), (unsigned long)stale_depth);
+      check("descriptor: stale rejection leaves call count unchanged",
+            kernel_instance.current_call_count() == stale_count,
+            (unsigned long)kernel_instance.current_call_count(), (unsigned long)stale_count);
+    }
+#endif
+
+#if defined(__riscv)
+    // (d) 記述子経路の深さ上限。RECUR は自分自身への記述子 (0 番) を撃ち続け、上限に達した
+    // 最後の呼出しだけが NO_STACK で拒否される。拒否された呼出しは callee を走らせない。
+    // 上限までに走った段の数は MAX_DEPTH と一致する (CALL 段 1 本ぶんは ROOT からの call_method)。
+    {
+      const api_result recur_made =
+          api(object_api::CREATE_OBJECT, OBJECT_DESC_RECUR, (uintptr_t)&desc_recur_fn);
+      check("descriptor: create recursion object",
+            recur_made.error == (uintptr_t)object_error::OK,
+            (unsigned long)recur_made.error, 0);
+      const api_result setup = call_method(OBJECT_DESC_RECUR, RECUR_SETUP_KEY);
+      check("descriptor: recursion object creates its self descriptor",
+            setup.error == (uintptr_t)object_error::OK && g_recur_index < 16,
+            (unsigned long)g_recur_index, 0);
+      const uint32_t recur_depth = kernel_instance.current_depth();
+      const uint32_t recur_count = kernel_instance.current_call_count();
+      g_recur_calls = 0;
+      g_recur_refused = (uintptr_t)object_error::UNKNOWN_API;
+      const api_result top = call_method(OBJECT_DESC_RECUR, 0);
+      check("descriptor: recursion refused at the depth limit with NO_STACK",
+            g_recur_refused == (uintptr_t)object_error::NO_STACK,
+            (unsigned long)g_recur_refused, (unsigned long)object_error::NO_STACK);
+      check("descriptor: recursion ran exactly MAX_DEPTH callees",
+            g_recur_calls == KERNEL_OBJECT::MAX_DEPTH,
+            (unsigned long)g_recur_calls, (unsigned long)KERNEL_OBJECT::MAX_DEPTH);
+      check("descriptor: top-level recursive call returned OK",
+            top.error == (uintptr_t)object_error::OK,
+            (unsigned long)top.error, 0);
+      check("descriptor: ledger depth restored after recursion",
+            kernel_instance.current_depth() == recur_depth,
+            (unsigned long)kernel_instance.current_depth(), (unsigned long)recur_depth);
+      check("descriptor: call count restored after recursion",
+            kernel_instance.current_call_count() == recur_count,
+            (unsigned long)kernel_instance.current_call_count(), (unsigned long)recur_count);
     }
 #endif
 
@@ -1001,6 +1095,18 @@ void call_ladder() {
           (unsigned long)legacy_abi.value, 77);
 #if defined(__riscv)
     check("descriptor: legacy four-argument entry sees a4/a5 zero",
+          g_desc_legacy_a4 == 0 && g_desc_legacy_a5 == 0,
+          (unsigned long)(g_desc_legacy_a4 | g_desc_legacy_a5), 0);
+    // 旧 4 引数 CALL_METHOD の経路 (CALL 段の積み込み = set_args) へ、呼出し側の a4/a5 に
+    // ゴミを入れて撃つ。callee の a4/a5 は 0 のまま (呼出し側の値が届いてはならない)。
+    g_desc_legacy_a4 = UINTPTR_MAX;
+    g_desc_legacy_a5 = UINTPTR_MAX;
+    const auto dirty = ARCH::syscall((uintptr_t)object_api::CALL_METHOD, OBJECT_DESC_TEST,
+                                     2, 42, 0x5A5A5A5Au, 0xC3C3C3C3u, 0, 0);
+    check("descriptor: legacy four-argument call with dirty caller a4/a5 returns 77",
+          dirty.error == (uintptr_t)object_error::OK && dirty.value == 77,
+          (unsigned long)dirty.value, 77);
+    check("descriptor: dirty caller a4/a5 do not reach the four-argument callee",
           g_desc_legacy_a4 == 0 && g_desc_legacy_a5 == 0,
           (unsigned long)(g_desc_legacy_a4 | g_desc_legacy_a5), 0);
 #endif
