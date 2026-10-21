@@ -77,6 +77,9 @@ struct test_port final : port {
   uint32_t priorities[32]{};
   uint32_t route_handler=0,route_method=0,route_hz=0;
   domain *route_domain=nullptr;
+  bool irq_masked=false,now_tick_deferred=false;
+  std::function<void()> on_now_ticks;
+  size_t now_ticks_countdown=0;
   std::function<void()> on_irq_save;
   size_t irq_save_calls=0,irq_save_hook_at=0;
   static thread_local uint32_t task;
@@ -84,7 +87,13 @@ struct test_port final : port {
   static std::atomic<uint32_t> next_task;
   void set_task(uint32_t id){task=id;}
   bool configure_route(uint32_t h,uint32_t method,uint32_t hz,void *d) override{route_handler=h;route_method=method;route_hz=hz;route_domain=static_cast<domain*>(d);return d&&hz;}
-  uint64_t now_ticks() override{return now;}
+  uint64_t now_ticks() override{
+    if(on_now_ticks&&now_ticks_countdown&&--now_ticks_countdown==0){
+      if(irq_masked)now_tick_deferred=true;
+      else {auto cb=on_now_ticks;on_now_ticks={};cb();}
+    }
+    return now;
+  }
   uint64_t now_us() override{return now*10000u;}
   uint32_t block_calls=0;
   size_t current_task_countdown=0; std::function<void()> on_current_task;
@@ -112,9 +121,16 @@ struct test_port final : port {
   uint32_t irq_save() override{
     ++irq_save_calls;
     if(on_irq_save&&irq_save_calls==irq_save_hook_at){auto cb=on_irq_save;on_irq_save={};cb();}
-    return 9;
+    const uint32_t previous=irq_masked?10u:9u;
+    irq_masked=true;
+    return previous;
   }
-  void irq_restore(uint32_t) override{}
+  void irq_restore(uint32_t previous) override{
+    irq_masked=previous==10u;
+    if(!irq_masked&&now_tick_deferred&&on_now_ticks){
+      now_tick_deferred=false;auto cb=on_now_ticks;on_now_ticks={};cb();
+    }
+  }
 };
 thread_local uint32_t test_port::task=1;
 thread_local bool test_port::isr=false;
@@ -279,6 +295,72 @@ int main(){
    test_port::isr=false;p.set_task(tid);};
  assert(d.task_notify_take(0,true,20)==1&&notification_higher);
  assert(d.task_notify_take(0,true,0)==0);
+
+ // FromISR give between the zero-value check and waiter registration must not
+ // be consumed only after the timeout. The hook fires on task_notify_take's
+ // second now_ticks read (first computes the deadline); irq_restore delivers a
+ // masked interrupt only after BLOCKED state is committed.
+ {
+   const uint64_t notify_start=p.now;
+   bool notify_race_fired=false;
+   bool notify_higher=false;
+   p.set_task(tid); p.block_calls=0; p.tokens.clear(); p.awakened=0;
+   p.now_ticks_countdown=2;
+   p.on_now_ticks=[&]{
+     notify_race_fired=true;
+     const uint32_t waiter=test_port::task;
+     p.set_task(3); test_port::isr=true;
+     assert(d.task_notify(waiter,0,0,static_cast<uint32_t>(eIncrement),
+                          nullptr,true,&notify_higher));
+     test_port::isr=false; p.set_task(waiter);
+   };
+   assert(d.task_notify_take(0,true,20)==1);
+   assert(notify_race_fired&&p.now==notify_start&&p.awakened==tid&&
+          notify_higher);
+   assert(p.block_calls==1); // armed, then woken without waiting to deadline
+   assert(!p.on_now_ticks&&!p.now_tick_deferred);
+
+   const uint64_t wait_start=p.now;
+   uint32_t wait_value=0;
+   p.block_calls=0; p.tokens.clear(); p.awakened=0; p.now_ticks_countdown=2;
+   p.on_now_ticks=[&]{
+     const uint32_t waiter=test_port::task;
+     p.set_task(3); test_port::isr=true;
+     assert(d.task_notify(waiter,0,0x40,static_cast<uint32_t>(eSetBits),
+                          nullptr,true,nullptr));
+     test_port::isr=false; p.set_task(waiter);
+   };
+   assert(d.task_notify_wait(0,0,0,&wait_value,20)&&wait_value==0x40);
+   assert(p.now==wait_start&&p.awakened==tid&&p.block_calls==1);
+   assert(!p.on_now_ticks&&!p.now_tick_deferred);
+
+   // FreeRTOS clear-on-entry is applied once, not at each timeout/poll pass.
+   // If another consumer clears only pending state while the waiter is parked,
+   // the value bits remain visible after a later no-action notification.
+   const uint64_t entry_clear_start=p.now;
+   uint32_t entry_clear_value=0;
+   uint32_t entry_clear_phase=0;
+   p.tokens.clear();
+   p.on_park=[&]{
+     if (entry_clear_phase++ == 0) {
+       p.set_task(3); test_port::isr=true;
+       assert(d.task_notify(tid,0,0x40,static_cast<uint32_t>(eSetBits),
+                            nullptr,true,nullptr));
+       test_port::isr=false;
+       assert(d.task_notify_state_clear(tid,0));
+       p.set_task(tid);
+       p.on_park=[&]{
+         ++entry_clear_phase;
+         p.set_task(3);
+         assert(d.task_notify(tid,0,0,static_cast<uint32_t>(eNoAction),nullptr));
+         p.set_task(tid);
+       };
+     }
+   };
+   assert(d.task_notify_wait(0,0x40,0,&entry_clear_value,20));
+   assert(entry_clear_value==0x40&&entry_clear_phase==2&&p.now==entry_clear_start);
+   p.tokens.clear();
+ }
  p.set_task(1);
  const int q=d.create_queue(1,sizeof(uint32_t)); uint32_t in=42,out=0;
  assert(q>=0&&d.queue_send(q,&in,0)); assert(d.queue_messages(q)==1);
