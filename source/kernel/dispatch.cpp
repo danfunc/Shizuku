@@ -35,6 +35,7 @@
 #include "shizuku/kernel.hpp"
 #endif
 #include "shizuku/object_api.hpp"
+#include "shizuku/kernel_object.hpp"
 #include "shizuku/svc_attributes.hpp"
 #if defined(__arm__) || defined(__thumb__)
 extern "C" char shizuku_v2_service_resume;
@@ -408,15 +409,15 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
         }
         if (id == (uintptr_t)object_api::CALL_METHOD_DESCRIPTOR) {
 #if !defined(__riscv)
-          ARCH::set_result(*frame, (uintptr_t)object_error::BAD_DESCRIPTOR, 0);
+          ARCH::set_result(*frame, (uintptr_t)object_error::UNKNOWN_API, 0);
           return;
 #else
           const uint32_t thread_id = current_thread_id();
           const uint32_t caller_id = (uint32_t)current_object(thread_id);
           const uint32_t index = (uint32_t)ARCH::arg(*frame, 1);
-          method_descriptor_entry desc{};
+          KERNEL_OBJECT::method_descriptor_entry desc{};
           object_error error = object_error::OK;
-          if (!validate_method_descriptor(caller_id, index, desc, error)) {
+          if (!kernel_object_instance.validate_method_descriptor(caller_id, index, desc, error)) {
             ARCH::set_result(*frame, (uintptr_t)error, 0);
             return;
           }
@@ -441,7 +442,7 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
             args[i] = ARCH::arg(*frame, 2 + i);
           }
           ARCH::set_entry(*frame, desc.target_entry, ARCH::return_stub());
-          ARCH::set_args(*frame, args);
+          ARCH::set_args_6(*frame, args);
           ARCH::set_priv(*context, false);
           ARCH::set_region_window(*context, desc.region_base, desc.region_limit);
           return;

@@ -142,6 +142,13 @@ public:
     frame.a1 = args[1];
     frame.a2 = args[2];
     frame.a3 = args[3];
+  }
+
+  static void set_args_6(exception_frame_t &frame, const uintptr_t *args) {
+    frame.a0 = args[0];
+    frame.a1 = args[1];
+    frame.a2 = args[2];
+    frame.a3 = args[3];
     frame.a4 = args[4];
     frame.a5 = args[5];
   }

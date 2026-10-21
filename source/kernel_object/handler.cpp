@@ -170,9 +170,12 @@ template <> void KERNEL_OBJECT::init() {
     m_objects[id].flags = 0;
     m_objects[id].region_base = 0;
     m_objects[id].region_limit = 0;
+    m_objects[id].generation = 0;
     m_object_name[id] = nullptr;
     for (uintptr_t method = 0; method < METHOD_COUNT; ++method)
       m_objects[id].methods[method] = nullptr;
+    for (auto &d : m_objects[id].method_descriptors)
+      d.valid = 0;
   }
   for (uintptr_t thread = 0; thread < THREAD_COUNT; ++thread) {
     m_kill_pending[thread] = 0;
@@ -389,13 +392,17 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     shizuku_boot_trace_phase(422);
 #endif
+    // 世代が尽きたら作成/差し替え/export を拒否 (fail-closed)。再利用させない
+    if (replace && m_objects[id].generation == UINT32_MAX) {
+      error = object_error::BAD_OBJECT;
+      return 0;
+    }
     if (!m_objects[id].created || replace) {
       m_objects[id].created = true;
       m_objects[id].flags =
           (uint32_t)(flags & ~(OBJECT_REPLACE | INTERNAL_FLAG_HANDLER));
       if (!m_objects[id].generation || replace) {
         ++m_objects[id].generation;
-        if (m_objects[id].generation == 0) m_objects[id].generation = 1;
       }
       if (replace) {
         for (auto &d : m_objects[id].method_descriptors) {
@@ -534,9 +541,13 @@ uintptr_t KERNEL_OBJECT::export_method(uintptr_t method, uintptr_t entry,
     return 0;
   }
   table_guard guard;
+  // 世代が尽きたら作成/差し替え/export を拒否 (fail-closed)。再利用させない
+  if (m_objects[self].generation == UINT32_MAX) {
+    error = object_error::BAD_OBJECT;
+    return 0;
+  }
   m_objects[self].methods[method] = (method_t)entry;
   ++m_objects[self].generation;
-  if (m_objects[self].generation == 0) m_objects[self].generation = 1;
   return self;
 }
 
@@ -545,11 +556,15 @@ uintptr_t KERNEL_OBJECT::create_method_descriptor(uintptr_t target_id,
                                                    uintptr_t method_index,
                                                    object_error &error) {
   if (target_id >= OBJECT_COUNT || !m_objects[target_id].created) {
-    error = object_error::BAD_DESCRIPTOR;
+    error = object_error::BAD_OBJECT;
     return 0;
   }
-  if (method_index >= METHOD_COUNT || m_objects[target_id].methods[method_index] == nullptr) {
-    error = object_error::BAD_DESCRIPTOR;
+  if (method_index >= METHOD_COUNT) {
+    error = object_error::BAD_METHOD;
+    return 0;
+  }
+  if (m_objects[target_id].methods[method_index] == nullptr) {
+    error = object_error::UNDECLARED_METHOD;
     return 0;
   }
   if (m_objects[target_id].generation == 0) {
@@ -558,9 +573,13 @@ uintptr_t KERNEL_OBJECT::create_method_descriptor(uintptr_t target_id,
   }
   const uint32_t thread_id = kernel_instance.current_thread_id();
   const uint32_t caller_id = (uint32_t)current_object(thread_id);
+  if (caller_id >= OBJECT_COUNT || !m_objects[caller_id].created) {
+    error = object_error::BAD_OBJECT;
+    return 0;
+  }
   table_guard guard;
   int free_slot = -1;
-  for (int i = 0; i < 16; ++i) {
+  for (int i = 0; i < (int)METHOD_DESCRIPTOR_CAPACITY; ++i) {
     if (m_objects[caller_id].method_descriptors[i].valid == 0) {
       free_slot = i;
       break;

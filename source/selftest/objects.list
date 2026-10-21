@@ -30,3 +30,6 @@ binding_unpriv
 compat_h
 compat_c
 compat_gc
+desc_test
+desc_owner
+desc_relay

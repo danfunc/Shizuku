@@ -58,6 +58,10 @@ constexpr uintptr_t OBJECT_DEEP = object_id::deep;
 constexpr uintptr_t OBJECT_NAMER = object_id::namer;
 // 居ないことが確かな番号 (割り当ての最後より後ろ)。
 constexpr uintptr_t OBJECT_COUNT_PROBE = object_id::count;
+// 記述子の試験用。番号は objects.list の名前から振られる (OBJECT_COUNT の外の番号は使えない)。
+constexpr uintptr_t OBJECT_DESC_TEST = object_id::desc_test;
+constexpr uintptr_t OBJECT_DESC_OWNER = object_id::desc_owner;
+constexpr uintptr_t OBJECT_DESC_RELAY = object_id::desc_relay;
 constexpr uintptr_t METHOD_MAIN = 0;
 
 void check(const char *name, bool ok, unsigned long got, unsigned long want) {
@@ -96,6 +100,20 @@ api_result call_method(uintptr_t object, uintptr_t argument) {
   return api(object_api::CALL_METHOD, object, METHOD_MAIN, argument);
 }
 
+// 記述子での呼出し。riscv では trap 内の直接処理に届く (a2..a7 = 1..6 を渡して、
+// 呼ばれた側に引数が全部届くことも検査する)。それ以外では UNKNOWN_API が返る。
+api_result call_descriptor(uintptr_t index) {
+#if defined(__riscv)
+  const auto result = ARCH::syscall((uintptr_t)object_api::CALL_METHOD_DESCRIPTOR,
+                                    index, 1, 2, 3, 4, 5, 6);
+  if (result.error & KERNEL_ERROR_MARK)
+    return {(uintptr_t)object_error::KERNEL_REFUSED, result.error};
+  return {result.error, result.value};
+#else
+  return api(object_api::CALL_METHOD_DESCRIPTOR, index);
+#endif
+}
+
 // ---- 1 段プローブ: 引数の受け渡しと identity の突き合わせ ---------------------
 uintptr_t g_leaf_self = 0;
 uintptr_t g_leaf_caller = 0;
@@ -106,8 +124,62 @@ uintptr_t leaf(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
   return argument + 1;
 }
 
+// ---- 方法記述子: 直接 trap 呼出しの検査対象 -----------------------------------
+uint32_t g_desc_calls = 0;
+uintptr_t g_desc_self = 0;
+uintptr_t g_desc_caller = 0;
+
 uintptr_t desc_target_fn(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f) {
+  ++g_desc_calls;
+  g_desc_self = api(object_api::GET_CURRENT_OBJECT).value;
+  g_desc_caller = api(object_api::GET_CALLER_OBJECT).value;
   return a + b + c + d + e + f;
+}
+
+// 記述子の対象オブジェクトの main。走った先で自分の表に desc_target_fn を export する。
+// ★EXPORT_METHOD は current_object (呼び出し中のオブジェクト) の表に入る。ルートから
+//   撃つとルート自身の表に入るので、対象オブジェクトの中から撃たせる。
+uintptr_t desc_export_fn(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  return api(object_api::EXPORT_METHOD, 1, (uintptr_t)&desc_target_fn).value;
+}
+
+// 別オブジェクトの main。自分の表に、対象の 1 番を指す記述子を作って番号を返す。
+uintptr_t desc_make_index(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  const api_result made = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1);
+  return made.error == (uintptr_t)object_error::OK ? made.value
+                                                   : 0xDEAD0000u | (uint32_t)made.error;
+}
+
+// 中継オブジェクト B の main。ルートから呼ばれ、自分の表に C (desc_test) の 1 番への記述子を作って
+// 直接 trap で C を撃つ。B 自身の identity と、呼んだ側 (ルートのはず) を記録する。
+// ★記録は riscv 以外でも行う (記述子の作成と直接呼出しだけが riscv 限定)。
+uintptr_t g_relay_self = 0;
+uintptr_t g_relay_caller = 0;
+uint32_t g_relay_depth_before = 0;
+uint32_t g_relay_depth_after = 0;
+uintptr_t g_relay_call_value = 0;
+uintptr_t g_relay_call_error = (uintptr_t)object_error::UNKNOWN_API;
+
+uintptr_t desc_relay_fn(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  g_relay_self = api(object_api::GET_CURRENT_OBJECT).value;
+  g_relay_caller = api(object_api::GET_CALLER_OBJECT).value;
+  g_relay_depth_before = kernel_instance.current_depth();
+  // ★呼出し前の値は「呼ばれていない」を表すように置いておく。riscv 以外ではこれが残る。
+  g_relay_call_value = 0;
+  g_relay_call_error = (uintptr_t)object_error::UNKNOWN_API;
+#if defined(__riscv)
+  // 記述子は B 自身の表に作られる (呼び出し元の表からだけ撃てる、の確認も兼ねる)。
+  const api_result made = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1);
+  if (made.error != (uintptr_t)object_error::OK) {
+    g_relay_depth_after = kernel_instance.current_depth();
+    return 0xDEAD0000u | (uint32_t)made.error;
+  }
+  const api_result called = call_descriptor(made.value);
+  g_relay_call_value = called.value;
+  g_relay_call_error = called.error;
+#endif
+  g_relay_depth_after = kernel_instance.current_depth();
+  return 0;
 }
 
 uintptr_t leaf_dirty_scratch(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
@@ -347,35 +419,221 @@ void call_ladder() {
   }
 
   // ---- V2a Method Descriptors & Direct Trap Call (APIs 32 & 33) ----
+  // ★記述子は**呼び出し元自身の表**に作られ、呼び出し元の表からだけ撃てる。
+  //   対象 (desc_test) の 1 番は対象自身の中で export させる (上の注釈を参照)。
   {
-    constexpr uintptr_t OBJECT_DESC_TEST = 77;
-    api(object_api::CREATE_OBJECT, OBJECT_DESC_TEST, (uintptr_t)&leaf, OBJECT_REPLACE);
-    api(object_api::EXPORT_METHOD, 1, (uintptr_t)&desc_target_fn);
+    const api_result target_made =
+        api(object_api::CREATE_OBJECT, OBJECT_DESC_TEST, (uintptr_t)&desc_export_fn);
+    check("descriptor: create target object",
+          target_made.error == (uintptr_t)object_error::OK,
+          (unsigned long)target_made.error, 0);
+    const api_result exported = call_method(OBJECT_DESC_TEST, 0);
+    check("descriptor: target exports method 1 into its own table",
+          exported.error == (uintptr_t)object_error::OK &&
+              exported.value == OBJECT_DESC_TEST,
+          (unsigned long)exported.value, (unsigned long)OBJECT_DESC_TEST);
+
+    // 別オブジェクトが自分の表に作った記述子の番号。ルートの表はまだ空 (ここまで
+    // ルートは記述子を作っていない) なので、ルートの k 番を撃つと拒否されるのが正しい。
+    const api_result owner_made =
+        api(object_api::CREATE_OBJECT, OBJECT_DESC_OWNER, (uintptr_t)&desc_make_index);
+    check("descriptor: create owner object",
+          owner_made.error == (uintptr_t)object_error::OK,
+          (unsigned long)owner_made.error, 0);
+    const api_result owner = call_method(OBJECT_DESC_OWNER, 0);
+    check("descriptor: owner object makes its own descriptor",
+          owner.error == (uintptr_t)object_error::OK && owner.value == 0,
+          (unsigned long)owner.value, 0);
+#if defined(__riscv)
+    const api_result foreign = call_descriptor(owner.value);
+    check("descriptor: another object's index rejected with BAD_DESCRIPTOR (22)",
+          foreign.error == (uintptr_t)object_error::BAD_DESCRIPTOR,
+          (unsigned long)foreign.error, (unsigned long)object_error::BAD_DESCRIPTOR);
+#endif
 
     const api_result created = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1);
     check("descriptor: create valid descriptor",
           created.error == (uintptr_t)object_error::OK && created.value < 16,
           (unsigned long)created.value, 0);
-
     const uintptr_t desc_idx = created.value;
 
 #if defined(__riscv)
-    const auto desc_call = ARCH::syscall((uintptr_t)object_api::CALL_METHOD_DESCRIPTOR, desc_idx, 1, 2, 3, 4, 5, 6);
-    check("descriptor: direct trap call returns sum 21",
-          desc_call.error == 0 && desc_call.value == 21,
-          (unsigned long)desc_call.value, 21);
+    // 直接 trap 呼出し。戻り値・台帳・呼び出し回数・呼び先の identity を突き合わせる。
+    {
+      const uint32_t calls_before = g_desc_calls;
+      const auto depth_before = kernel_instance.current_depth();
+      const api_result desc_call = call_descriptor(desc_idx);
+      check("descriptor: direct return error is OK",
+            desc_call.error == (uintptr_t)object_error::OK,
+            (unsigned long)desc_call.error, 0);
+      // ★1..6 の和。a2..a7 のどれかが落ちていれば合計がずれる。
+      check("descriptor: direct trap call returns sum 21",
+            desc_call.value == 21, (unsigned long)desc_call.value, 21);
+      check("descriptor: direct return restores the ledger",
+            kernel_instance.current_depth() == depth_before,
+            (unsigned long)kernel_instance.current_depth(),
+            (unsigned long)depth_before);
+      check("descriptor: callee ran exactly once",
+            g_desc_calls == calls_before + 1,
+            (unsigned long)g_desc_calls, (unsigned long)(calls_before + 1));
+      check("descriptor: callee runs as the target object",
+            g_desc_self == OBJECT_DESC_TEST,
+            (unsigned long)g_desc_self, (unsigned long)OBJECT_DESC_TEST);
+      check("descriptor: callee's caller is the root",
+            g_desc_caller == KERNEL_OBJECT::ROOT_OBJECT,
+            (unsigned long)g_desc_caller,
+            (unsigned long)KERNEL_OBJECT::ROOT_OBJECT);
+    }
+#else
+    const api_result unknown_desc = call_descriptor(desc_idx);
+    check("descriptor: non-riscv rejects CALL_METHOD_DESCRIPTOR with UNKNOWN_API (1)",
+          unknown_desc.error == (uintptr_t)object_error::UNKNOWN_API,
+          (unsigned long)unknown_desc.error, (unsigned long)object_error::UNKNOWN_API);
 #endif
 
-    api(object_api::EXPORT_METHOD, 1, (uintptr_t)&leaf);
-    const auto stale_call = ARCH::syscall((uintptr_t)object_api::CALL_METHOD_DESCRIPTOR, desc_idx, 1, 2, 3, 4, 5, 6);
-    check("descriptor: stale descriptor rejected with STALE_DESCRIPTOR (23)",
-          stale_call.error == (uintptr_t)object_error::STALE_DESCRIPTOR,
-          (unsigned long)stale_call.error, (unsigned long)object_error::STALE_DESCRIPTOR);
+    const api_result bad_obj = api(object_api::CREATE_METHOD_DESCRIPTOR, 9999, 1);
+    check("descriptor: BAD_OBJECT on invalid target",
+          bad_obj.error == (uintptr_t)object_error::BAD_OBJECT,
+          (unsigned long)bad_obj.error, (unsigned long)object_error::BAD_OBJECT);
 
-    const auto bad_idx = ARCH::syscall((uintptr_t)object_api::CALL_METHOD_DESCRIPTOR, 16, 0, 0, 0, 0, 0, 0);
-    check("descriptor: invalid index >= 16 rejected with BAD_DESCRIPTOR (22)",
-          bad_idx.error == (uintptr_t)object_error::BAD_DESCRIPTOR,
-          (unsigned long)bad_idx.error, (unsigned long)object_error::BAD_DESCRIPTOR);
+    const api_result bad_mth = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 999);
+    check("descriptor: BAD_METHOD on out of bounds method",
+          bad_mth.error == (uintptr_t)object_error::BAD_METHOD,
+          (unsigned long)bad_mth.error, (unsigned long)object_error::BAD_METHOD);
+
+    const api_result undecl_mth = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 5);
+    check("descriptor: UNDECLARED_METHOD on null method",
+          undecl_mth.error == (uintptr_t)object_error::UNDECLARED_METHOD,
+          (unsigned long)undecl_mth.error, (unsigned long)object_error::UNDECLARED_METHOD);
+
+#if defined(__riscv)
+    // 範囲外と未公開の番号。未公開は 1 番 (ルートの表はまだ 0 番しか使っていない)。
+    check("descriptor: index 16 rejected with BAD_DESCRIPTOR (22)",
+          call_descriptor(16).error == (uintptr_t)object_error::BAD_DESCRIPTOR,
+          (unsigned long)call_descriptor(16).error,
+          (unsigned long)object_error::BAD_DESCRIPTOR);
+    check("descriptor: index 0xFFFFFFFF rejected with BAD_DESCRIPTOR (22)",
+          call_descriptor(0xFFFFFFFFu).error == (uintptr_t)object_error::BAD_DESCRIPTOR,
+          (unsigned long)call_descriptor(0xFFFFFFFFu).error,
+          (unsigned long)object_error::BAD_DESCRIPTOR);
+    check("descriptor: unpublished index rejected with BAD_DESCRIPTOR (22)",
+          call_descriptor(1).error == (uintptr_t)object_error::BAD_DESCRIPTOR,
+          (unsigned long)call_descriptor(1).error,
+          (unsigned long)object_error::BAD_DESCRIPTOR);
+#endif
+
+    // 世代の不一致。対象を差し替えると古い記述子は STALE、差し替え後に作り直したものは通る。
+    const api_result replaced =
+        api(object_api::CREATE_OBJECT, OBJECT_DESC_TEST, (uintptr_t)&desc_export_fn, OBJECT_REPLACE);
+    check("descriptor: replace target bumps generation",
+          replaced.error == (uintptr_t)object_error::OK,
+          (unsigned long)replaced.error, 0);
+
+#if defined(__riscv)
+    {
+      const uint32_t calls_before = g_desc_calls;
+      const api_result stale = call_descriptor(desc_idx);
+      check("descriptor: stale descriptor rejected with STALE_DESCRIPTOR (23)",
+            stale.error == (uintptr_t)object_error::STALE_DESCRIPTOR,
+            (unsigned long)stale.error, (unsigned long)object_error::STALE_DESCRIPTOR);
+      // ★拒否されたら古い入口は走っていないこと。
+      check("descriptor: stale rejection does not run the callee",
+            g_desc_calls == calls_before,
+            (unsigned long)g_desc_calls, (unsigned long)calls_before);
+    }
+#endif
+
+    const api_result fresh = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1);
+    check("descriptor: new descriptor after replace is created",
+          fresh.error == (uintptr_t)object_error::OK && fresh.value < 16,
+          (unsigned long)fresh.value, 0);
+#if defined(__riscv)
+    const api_result fresh_call = call_descriptor(fresh.value);
+    check("descriptor: new descriptor after replace runs (sum 21)",
+          fresh_call.error == (uintptr_t)object_error::OK && fresh_call.value == 21,
+          (unsigned long)fresh_call.value, 21);
+#endif
+
+    // 旧 CALL_METHOD (グローバル経路) は従来どおり同じ入口に届くこと。
+    {
+      const uint32_t calls_before = g_desc_calls;
+      const api_result legacy_call = api(object_api::CALL_METHOD, OBJECT_DESC_TEST, 1, 42);
+      check("descriptor: legacy CALL_METHOD compatibility",
+            legacy_call.error == (uintptr_t)object_error::OK,
+            (unsigned long)legacy_call.error, 0);
+      check("descriptor: legacy CALL_METHOD reaches the same entry",
+            g_desc_calls == calls_before + 1,
+            (unsigned long)g_desc_calls, (unsigned long)(calls_before + 1));
+    }
+
+    // ---- 呼び出し元の識別: A (ルート) -> B (desc_relay) -> C (desc_test, 記述子で直接呼出し) ----
+    // ★C の g_desc_* に残る値が「B 経由で撃たれた」ものだと言えるように、先に空けておく。
+    //   ルートは B しか呼ばず、B の表の記述子だけで C に届く。C の 1 番は上の export のまま生きている。
+    {
+      const api_result relay_made =
+          api(object_api::CREATE_OBJECT, OBJECT_DESC_RELAY, (uintptr_t)&desc_relay_fn);
+      check("descriptor A->B->C: create relay object",
+            relay_made.error == (uintptr_t)object_error::OK,
+            (unsigned long)relay_made.error, 0);
+
+      g_desc_self = 0;
+      g_desc_caller = 0;
+      const auto root_depth_before = kernel_instance.current_depth();
+      const api_result relay = call_method(OBJECT_DESC_RELAY, 0);
+      check("descriptor A->B->C: root call into B returns OK",
+            relay.error == (uintptr_t)object_error::OK,
+            (unsigned long)relay.error, 0);
+#if defined(__riscv)
+      // C の identity。B の中から撃たれたので、呼んだ側は B (ルートでも C 自身でもない)。
+      check("descriptor A->B->C: C self is C (desc_test)",
+            g_desc_self == OBJECT_DESC_TEST,
+            (unsigned long)g_desc_self, (unsigned long)OBJECT_DESC_TEST);
+      check("descriptor A->B->C: C caller is B (desc_relay)",
+            g_desc_caller == OBJECT_DESC_RELAY,
+            (unsigned long)g_desc_caller, (unsigned long)OBJECT_DESC_RELAY);
+      // C の戻り値。B が C から受け取ったものを記録させている。
+      check("descriptor A->B->C: C returned sum 21",
+            g_relay_call_value == 21,
+            (unsigned long)g_relay_call_value, 21);
+      check("descriptor A->B->C: C returned OK",
+            g_relay_call_error == (uintptr_t)object_error::OK,
+            (unsigned long)g_relay_call_error, (unsigned long)object_error::OK);
+#endif
+      // B の identity。B を呼んだのはルート、B 自身は desc_relay として走る。
+      check("descriptor A->B->C: B caller is ROOT",
+            g_relay_caller == KERNEL_OBJECT::ROOT_OBJECT,
+            (unsigned long)g_relay_caller,
+            (unsigned long)KERNEL_OBJECT::ROOT_OBJECT);
+      check("descriptor A->B->C: B self is B (desc_relay)",
+            g_relay_self == OBJECT_DESC_RELAY,
+            (unsigned long)g_relay_self, (unsigned long)OBJECT_DESC_RELAY);
+      // ★C から戻った直後の台帳 (depth) が、B が C を呼ぶ前と等しいこと。
+      check("descriptor A->B->C: depth in B restored after C returns",
+            g_relay_depth_after == g_relay_depth_before,
+            (unsigned long)g_relay_depth_after, (unsigned long)g_relay_depth_before);
+      // ルートへ戻った後の台帳。試験前と等しいこと。
+      check("descriptor A->B->C: depth restored at root",
+            kernel_instance.current_depth() == root_depth_before,
+            (unsigned long)kernel_instance.current_depth(),
+            (unsigned long)root_depth_before);
+    }
+
+    // 容量 16 超過。記述子に解放 API は無いので、ここまでに作った分 (2 本) も数に入れて埋める。
+    // ★最後に行う (以後はこの表に記述子を作れない)。
+    uint32_t filled = 2;
+    for (int i = 0; i < 16; ++i) {
+      if (api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1).error !=
+          (uintptr_t)object_error::OK)
+        break;
+      ++filled;
+    }
+    check("descriptor: fill capacity up to 16", filled == 16,
+          (unsigned long)filled, 16);
+
+    const api_result over_cap = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1);
+    check("descriptor: NO_DESCRIPTOR (21) when capacity exceeded",
+          over_cap.error == (uintptr_t)object_error::NO_DESCRIPTOR,
+          (unsigned long)over_cap.error, (unsigned long)object_error::NO_DESCRIPTOR);
   }
 
   BOARD::diag_printf("[SELFTEST] call ladder done: %lu passed, %lu failed\n",
