@@ -2,7 +2,7 @@
 """BLE OTA 送信ツール (Shizuku 用)
 
 機能:
-  scan : 名前 "Shizuku UART" を探す
+  scan : 名前 "Shizuku UART" または "Shizuku-C6" を探す (--name 指定時はその名前だけ)
   nus  : NUS RX へ文字列を書き、TX notify を表示する
   send : OTA サービスへ XNOR/XNOU 送信、ペーシング制御、NEEDSEQ 再送ループ、
          切断時自動レジューム、done 確認、--commit で XNOC
@@ -40,6 +40,9 @@ except ImportError:
 #  GATT UUID 定義 (ble_uart.gatt と一致)
 # ===========================================================================
 SHIZUKU_DEVICE_NAME = "Shizuku UART"
+# esp_idf_support の stage1 (kBleDeviceName) は OTA 構成でも "Shizuku-C6" で広告する。
+SHIZUKU_C6_DEVICE_NAME = "Shizuku-C6"
+SHIZUKU_DEVICE_NAMES = (SHIZUKU_DEVICE_NAME, SHIZUKU_C6_DEVICE_NAME)
 
 NUS_SERVICE_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 NUS_RX_CHAR_UUID = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"  # Central -> Peripheral (Write)
@@ -419,29 +422,32 @@ def run_selfcheck() -> bool:
 # ===========================================================================
 #  BLE デバイス探索 (scan)
 # ===========================================================================
-async def do_scan(target_name: str = SHIZUKU_DEVICE_NAME, timeout: float = 5.0) -> Optional[str]:
+async def do_scan(target_names: Tuple[str, ...] = SHIZUKU_DEVICE_NAMES, timeout: float = 5.0) -> Optional[str]:
     if BleakScanner is None:
         log("ERROR: bleak がインストールされていません")
         return None
 
-    log(f"BLE スキャン開始 (timeout={timeout}s, 検索対象: '{target_name}')...")
+    names_text = ", ".join(f"'{n}'" for n in target_names)
+    log(f"BLE スキャン開始 (timeout={timeout}s, 検索対象: {names_text})...")
     devices = await BleakScanner.discover(timeout=timeout)
     found_addr = None
+    found_name = None
     log(f"スキャン完了: {len(devices)} 台のデバイスを検出")
 
     for d in devices:
         name = d.name or "(Unknown)"
         rssi = getattr(d, "rssi", "N/A")
-        is_target = (name == target_name) or (target_name.lower() in name.lower())
+        is_target = any(name == t or t.lower() in name.lower() for t in target_names)
         mark = " [* TARGET]" if is_target else ""
         log(f"  - {d.address} | Name: {name} | RSSI: {rssi}{mark}")
         if is_target and found_addr is None:
             found_addr = d.address
+            found_name = name
 
     if found_addr:
-        log(f"ターゲット発見: {found_addr} ('{target_name}')")
+        log(f"ターゲット発見: {found_addr} ('{found_name}')")
     else:
-        log(f"警告: ターゲット '{target_name}' は見つかりませんでした")
+        log(f"警告: ターゲット {names_text} は見つかりませんでした")
     return found_addr
 
 
@@ -894,7 +900,7 @@ def main():
 
     # scan
     sub_scan = subparsers.add_parser("scan", help="BLE デバイス探索")
-    sub_scan.add_argument("--name", default=SHIZUKU_DEVICE_NAME, help="探索するデバイス名")
+    sub_scan.add_argument("--name", help="探索するデバイス名 (省略時は 'Shizuku UART' と 'Shizuku-C6')")
     sub_scan.add_argument("--timeout", type=float, default=5.0, help="スキャン時間 (秒)")
 
     # nus
@@ -932,7 +938,8 @@ def main():
         sys.exit(1)
 
     if args.command == "scan":
-        addr = asyncio.run(do_scan(target_name=args.name, timeout=args.timeout))
+        target_names = (args.name,) if args.name else SHIZUKU_DEVICE_NAMES
+        addr = asyncio.run(do_scan(target_names=target_names, timeout=args.timeout))
         sys.exit(0 if addr is not None else 1)
 
     elif args.command == "nus":
