@@ -42,7 +42,7 @@ template <> void KERNEL::bootstrap(
   thread.context = &m_threads[0].context;
   set_thread_ledger(0, ledger, ledger_capacity, 1,
                     (uint32_t)object_kind::PLAIN,
-                    m_object_svc_handler_object, m_object_svc_handler);
+                    m_object_svc_handler_object, m_object_svc_handler, 1);
   // ★ブートスレッドは一般オブジェクトとして走り出す。svc はトランポリンを通って
   //   ハンドラへ届く (ここを HANDLER にすると、ブート直後の svc がハンドラを
   //   経由せずプリミティブとして解釈されてしまう)。
@@ -76,7 +76,7 @@ void KERNEL::bootstrap_secondary(uint32_t thread, void (*entry)(),
   adopted.context = &m_threads[thread].context;
   set_thread_ledger(thread, ledger, ledger_capacity, 1,
                     (uint32_t)object_kind::PLAIN,
-                    m_object_svc_handler_object, m_object_svc_handler);
+                    m_object_svc_handler_object, m_object_svc_handler, 1);
   // ★このコアでしか走らせない。他コアが拾うと、今この CPU が走らせている文脈を
   //   別コアが同時に走らせることになる (claim の CAS は「READY を取る」ための
   //   ものであって、既に走っているものは守れない)。

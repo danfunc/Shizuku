@@ -129,7 +129,15 @@ enum struct object_api : uintptr_t {
   STREAM_PUSH_N = 29,  // a1 = ID, a2 = push_request* → value = 件数
   STREAM_POP_N = 30,   // a1 = ID, a2 = pop_request* → value = 件数
   STREAM_AVAILABLE = 31, // a1 = ID → value = available (capacity で飽和)
+  // ABI: a1=target object, a2=method index; returns caller-owned descriptor index.
+  // Thread-mode API. Creation authority (kernel_object.hpp create_method_descriptor):
+  //   the caller may create a descriptor for itself, its creator (parent), or its
+  //   directly created object (child). A caller holding the kernel role
+  //   (kernel_role, not the object kind) may target any object. Siblings and
+  //   deeper relatives get NOT_PRIVILEGED.
   CREATE_METHOD_DESCRIPTOR = 32,
+  // ABI: a1=descriptor index, a2-a7=up to six register arguments (RISC-V).
+  // The intended path uses creation-time authorization and a bounded lookup.
   CALL_METHOD_DESCRIPTOR = 33,
   // 専用ハンドラ (HANDLER) が配下の子オブジェクトの終了を Root KOBJ へ転送する。
   // a1 = 絶対戻り先深さ d, a2 = 戻り値, a3 = エラーコード。
@@ -146,6 +154,9 @@ constexpr uintptr_t OBJECT_PRIVILEGED = 1u << 0;
 //   誰かを乗っ取る行為なので特権オブジェクトだけが立てられる。立てないときの
 //   既定は「既にあるなら断る」— 番号の衝突を無音で失敗させないため (D28)。
 constexpr uintptr_t OBJECT_REPLACE = 1u << 31;
+// Fixed per-owner descriptor table size. Creation beyond this limit returns
+// object_error::NO_DESCRIPTOR; indices are local to the creating object.
+constexpr uintptr_t METHOD_DESCRIPTOR_CAPACITY = 16;
 // ★非特権で走らせる。触れるのは region に張られた場所 (コードとヒープ) だけになり、
 //   静的データもペリフェラルもカーネルの簿記も見えなくなる。
 //   したがって非特権で走れるオブジェクトは「状態をヒープに置き、標準ライブラリを

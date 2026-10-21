@@ -154,6 +154,9 @@ public:
   //   公開 flags (object_api.hpp) には置かず、ROOT_OBJECT / KERNEL_OBJECT 本人による
   //   create_object 時のみ受理される。一般オブジェクトの指定は NOT_PRIVILEGED で拒否。
   static constexpr uintptr_t INTERNAL_FLAG_HANDLER = 1u << 2;
+  // ★kernel object の役 (kernel_role) の付与。HANDLER と同じく信頼済みの生成者
+  //   (ROOT_OBJECT か kernel_role を持つオブジェクト) だけが立てられる。
+  static constexpr uintptr_t INTERNAL_FLAG_KERNEL_ROLE = 1u << 3;
 
   uint32_t object_parent_handler(uint32_t object_id) const {
     if (object_id >= OBJECT_COUNT_T || !m_objects[object_id].created)
@@ -168,6 +171,7 @@ public:
     uintptr_t target_entry;
     uint32_t target_generation;
     uint32_t owner_object;
+    uint32_t owner_generation;
     uint32_t method_index;
     uint32_t flags;
     uint32_t region_base;
@@ -175,6 +179,7 @@ public:
     volatile uint32_t valid;
   };
   bool validate_method_descriptor(uint32_t caller_id, uint32_t index,
+                                    uint32_t caller_generation,
                                     method_descriptor_entry &out_desc,
                                     object_error &error) const {
     if (index >= METHOD_DESCRIPTOR_CAPACITY) {
@@ -194,8 +199,16 @@ public:
       error = object_error::BAD_DESCRIPTOR;
       return false;
     }
+    if (desc.owner_generation != caller_generation) {
+      error = object_error::STALE_DESCRIPTOR;
+      return false;
+    }
+    if (desc.target_object >= OBJECT_COUNT_T) {
+      error = object_error::BAD_DESCRIPTOR;
+      return false;
+    }
     if (desc.target_generation == 0 ||
-        desc.target_generation != m_objects[desc.target_object].generation) {
+        desc.target_generation != object_version(desc.target_object)) {
       error = object_error::STALE_DESCRIPTOR;
       return false;
     }
@@ -210,6 +223,18 @@ public:
   // そのオブジェクトを走らせるときの保護指定 (PROTECTION_*)。直接 call (記述子経路) も
   // 通常の CALL と同じく、呼び先オブジェクトの設定を呼び出し時に引く。
   uint32_t object_protection(uintptr_t id) const;
+  uint32_t object_generation(uintptr_t id) const {
+    return id < OBJECT_COUNT_T
+               ? ARCH::load_acquire32(const_cast<volatile uint32_t *>(
+                     &m_objects[id].instance_generation))
+               : 0;
+  }
+  uint32_t object_version(uintptr_t id) const {
+    return id < OBJECT_COUNT_T
+               ? ARCH::load_acquire32(const_cast<volatile uint32_t *>(
+                     &m_objects[id].generation))
+               : 0;
+  }
   // 呼び先 1 件ぶんの CALL 要求 (種別・親ハンドラ・保護・窓)。call_method と
   // 方法記述子の直接 call が同じ引き方をするよう、ここでだけ作る。
   call_request callee_request(uintptr_t id, uintptr_t entry_pc) const;
@@ -231,6 +256,12 @@ private:
     //   HANDLER を名乗れるのは svc ハンドラを務めるオブジェクトだけで、これが
     //   「プリミティブを撃てるのは誰か」を決める。
     object_kind kind;
+    // ★生成者 (CREATE_OBJECT の発行元)。方法記述子の作成権限が「親・直接の子」を
+    //   引くために使う。ROOT / KERNEL_OBJECT 自身は生成されたものではないので NO_OBJECT。
+    uint32_t creator_object;
+    // ★kernel object の役を負うか。種別 (kind) とは別の軸で、ID では判定しない。
+    //   kind は dispatch の callee_kind の偽装防止のため変えない。
+    bool kernel_role;
     // ★親 handling object の情報 (解決済み binding: Codex 指摘 5)
     uint32_t parent_handler_object;
     uintptr_t parent_handler_entry;
@@ -239,7 +270,8 @@ private:
     //   軸 B (Q8)。0/0 = 窓なし。
     uint32_t region_base;
     uint32_t region_limit;
-    uint32_t generation;
+    volatile uint32_t generation;
+    volatile uint32_t instance_generation;
     method_descriptor_entry method_descriptors[METHOD_DESCRIPTOR_CAPACITY];
   };
   // 名前の置き場。**コピーではなくポインタ**を持つ (kobj は文字列を触らない)。

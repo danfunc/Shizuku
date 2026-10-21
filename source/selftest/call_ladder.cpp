@@ -44,6 +44,33 @@ extern "C" bool shizuku_selftest_deep_read(uint32_t *out) {
 namespace shizuku {
 namespace selftest {
 
+// Descriptor assertion outcomes live outside the diagnostic ring so a wrapped
+// ring cannot erase which checks ran or passed. The test names in check() are
+// hashed in source order. Each slot maps to the corresponding descriptor-prefixed
+// check() occurrence in this file; name_hash is FNV-1a of that assertion name.
+// 96 slots: the descriptor-prefixed check() occurrences are 74 (the riscv build runs
+// all of them; the host build runs fewer). Growing this adds 160 bytes of .noinit RAM.
+constexpr uint32_t kDescriptorRecordSlots = 96;
+struct descriptor_test_record_t {
+  uint32_t magic;
+  uint32_t version;
+  uint32_t executed_count;
+  uint32_t completed;
+  uint32_t passed_count;
+  uint32_t failed_count;
+  uint32_t checksum;
+  uint32_t overflow_count;
+  uint32_t collision_count;
+  uint32_t name_hash[kDescriptorRecordSlots];
+  uint8_t status[kDescriptorRecordSlots]; // 0=not run, 3=in progress, 1=PASS, 2=FAIL
+};
+extern "C" {
+#if defined(__ELF__)
+__attribute__((used, aligned(4), section(".noinit")))
+#endif
+volatile descriptor_test_record_t shizuku_descriptor_test_record;
+}
+
 uint32_t passed = 0;
 uint32_t failed = 0;
 
@@ -51,6 +78,66 @@ namespace {
 
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
+
+constexpr uint32_t DESCRIPTOR_TEST_RECORD_MAGIC = 0x44535452u; // "DSTR"
+constexpr uint32_t DESCRIPTOR_TEST_RECORD_VERSION = 1;
+static_assert(sizeof(descriptor_test_record_t) == 516,
+              "descriptor record layout changed; re-audit C6 noinit RAM map");
+static_assert(kDescriptorRecordSlots >= 74,
+              "descriptor record must hold every current assertion");
+
+void reset_descriptor_test_record() {
+  shizuku_descriptor_test_record.magic = 0;
+  shizuku_descriptor_test_record.version = DESCRIPTOR_TEST_RECORD_VERSION;
+  shizuku_descriptor_test_record.executed_count = 0;
+  shizuku_descriptor_test_record.completed = 0;
+  shizuku_descriptor_test_record.passed_count = 0;
+  shizuku_descriptor_test_record.failed_count = 0;
+  shizuku_descriptor_test_record.checksum = 0;
+  shizuku_descriptor_test_record.overflow_count = 0;
+  shizuku_descriptor_test_record.collision_count = 0;
+  for (unsigned i = 0; i < kDescriptorRecordSlots; ++i) {
+    shizuku_descriptor_test_record.name_hash[i] = 0;
+    shizuku_descriptor_test_record.status[i] = 0;
+  }
+  shizuku_descriptor_test_record.magic = DESCRIPTOR_TEST_RECORD_MAGIC;
+}
+
+void record_descriptor_check(const char *name, bool ok) {
+  if (!(name[0] == 'd' && name[1] == 'e' && name[2] == 's' &&
+        name[3] == 'c' && name[4] == 'r' && name[5] == 'i' &&
+        name[6] == 'p' && name[7] == 't' && name[8] == 'o' &&
+        name[9] == 'r'))
+    return;
+  const uint32_t slot = shizuku_descriptor_test_record.executed_count;
+  if (slot >= kDescriptorRecordSlots) {
+    shizuku_descriptor_test_record.overflow_count =
+        shizuku_descriptor_test_record.overflow_count + 1;
+    return;
+  }
+  uint32_t hash = 2166136261u;
+  for (const unsigned char *p = (const unsigned char *)name; *p; ++p)
+    hash = (hash ^ *p) * 16777619u;
+  for (uint32_t i = 0; i < slot; ++i) {
+    if (shizuku_descriptor_test_record.name_hash[i] == hash) {
+      shizuku_descriptor_test_record.collision_count =
+          shizuku_descriptor_test_record.collision_count + 1;
+      break;
+    }
+  }
+  shizuku_descriptor_test_record.name_hash[slot] = hash;
+  shizuku_descriptor_test_record.status[slot] = 3;
+  shizuku_descriptor_test_record.executed_count = slot + 1;
+  shizuku_descriptor_test_record.status[slot] = ok ? 1 : 2;
+  if (ok)
+    shizuku_descriptor_test_record.passed_count =
+        shizuku_descriptor_test_record.passed_count + 1;
+  else
+    shizuku_descriptor_test_record.failed_count =
+        shizuku_descriptor_test_record.failed_count + 1;
+  shizuku_descriptor_test_record.checksum =
+      (shizuku_descriptor_test_record.checksum << 5) ^ hash ^ (ok ? 1u : 2u);
+}
 
 constexpr uintptr_t OBJECT_LEAF = object_id::leaf;
 constexpr uintptr_t OBJECT_NEST = object_id::nest;
@@ -62,9 +149,14 @@ constexpr uintptr_t OBJECT_COUNT_PROBE = object_id::count;
 constexpr uintptr_t OBJECT_DESC_TEST = object_id::desc_test;
 constexpr uintptr_t OBJECT_DESC_OWNER = object_id::desc_owner;
 constexpr uintptr_t OBJECT_DESC_RELAY = object_id::desc_relay;
+// 作成権限の試験用。KERNEL (役付き) / CHILD と GRANDCHILD (OWNER の子と孫)。
+constexpr uintptr_t OBJECT_DESC_KERNEL = object_id::desc_kernel;
+constexpr uintptr_t OBJECT_DESC_CHILD = object_id::desc_child;
+constexpr uintptr_t OBJECT_DESC_GRANDCHILD = object_id::desc_grandchild;
 constexpr uintptr_t METHOD_MAIN = 0;
 
 void check(const char *name, bool ok, unsigned long got, unsigned long want) {
+  record_descriptor_check(name, ok);
   if (ok) {
     ++passed;
     BOARD::diag_printf("[SELFTEST] PASS %s (=%lu)\n", name, got);
@@ -126,8 +218,16 @@ uintptr_t leaf(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
 
 // ---- 方法記述子: 直接 trap 呼出しの検査対象 -----------------------------------
 uint32_t g_desc_calls = 0;
+uint32_t g_desc_v2_calls = 0;
 uintptr_t g_desc_self = 0;
 uintptr_t g_desc_caller = 0;
+extern "C" {
+uintptr_t g_desc_legacy_a4 = UINTPTR_MAX;
+uintptr_t g_desc_legacy_a5 = UINTPTR_MAX;
+}
+bool g_desc_export_v2 = false;
+bool g_owner_probe_old_index = false;
+uintptr_t g_owner_old_index_error = (uintptr_t)object_error::UNKNOWN_API;
 
 uintptr_t desc_target_fn(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f) {
   ++g_desc_calls;
@@ -136,16 +236,135 @@ uintptr_t desc_target_fn(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uin
   return a + b + c + d + e + f;
 }
 
+uintptr_t desc_target_fn_v2(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d,
+                            uintptr_t e, uintptr_t f) {
+  ++g_desc_v2_calls;
+  g_desc_self = api(object_api::GET_CURRENT_OBJECT).value;
+  g_desc_caller = api(object_api::GET_CALLER_OBJECT).value;
+  return a + b + c + d + e + f + 1000;
+}
+
+#if defined(__riscv)
+extern "C" __attribute__((naked)) uintptr_t desc_legacy_probe(
+    uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  __asm volatile("la t0, g_desc_legacy_a4\n"
+                 "sw a4, 0(t0)\n"
+                 "la t0, g_desc_legacy_a5\n"
+                 "sw a5, 0(t0)\n"
+                 "li a0, 77\n"
+                 "ret\n");
+}
+#else
+uintptr_t desc_legacy_probe(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  return 77;
+}
+#endif
+
 // 記述子の対象オブジェクトの main。走った先で自分の表に desc_target_fn を export する。
 // ★EXPORT_METHOD は current_object (呼び出し中のオブジェクト) の表に入る。ルートから
 //   撃つとルート自身の表に入るので、対象オブジェクトの中から撃たせる。
 uintptr_t desc_export_fn(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
-  return api(object_api::EXPORT_METHOD, 1, (uintptr_t)&desc_target_fn).value;
+  const uintptr_t entry = (uintptr_t)(g_desc_export_v2 ? &desc_target_fn_v2
+                                                        : &desc_target_fn);
+  const api_result exported = api(object_api::EXPORT_METHOD, 1, entry);
+  const api_result legacy = api(object_api::EXPORT_METHOD, 2,
+                                (uintptr_t)&desc_legacy_probe);
+  return exported.error == (uintptr_t)object_error::OK &&
+                 legacy.error == (uintptr_t)object_error::OK
+             ? exported.value
+             : 0xDEAD0000u | (uint32_t)(exported.error ? exported.error
+                                                       : legacy.error);
+}
+
+// 作成権限の試験 (argument = 1 で呼ばれたとき): まず兄弟 (DESC_TEST) への作成を試みて
+// 拒否されることを記録し、続けて自分自身の 1 番への作成が index 0 に入ることを記録する。
+// 兄弟への拒否で枠が進んでいなければ、自己作成は (owner_recreated の後の) index 1 になる。
+uintptr_t g_sibling_probe_error = (uintptr_t)object_error::UNKNOWN_API;
+uintptr_t g_sibling_probe_index = UINTPTR_MAX;
+
+uintptr_t desc_sibling_probe() {
+  g_sibling_probe_error =
+      api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1).error;
+  // 自分自身の表に 1 番を export してから、自分自身への記述子を作る (自分自身は常に許可)。
+  const api_result exported =
+      api(object_api::EXPORT_METHOD, 1, (uintptr_t)&desc_target_fn);
+  const api_result self =
+      api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_OWNER, 1);
+  g_sibling_probe_index = self.error == (uintptr_t)object_error::OK
+                              ? self.value
+                              : 0xDEAD0000u | (uint32_t)self.error;
+  return exported.error;
+}
+
+// 階層と役の試験 (mode 2)。子 CH と孫 GC は下の関数で作る。GC の生成者は CH なので、
+// OWNER から見て GC は孫になる。権限は親子関係で決まり、役は使わない。
+uintptr_t g_role_flag_error = (uintptr_t)object_error::UNKNOWN_API;
+uintptr_t g_child_create_error = (uintptr_t)object_error::UNKNOWN_API;
+uintptr_t g_grandchild_create_error = (uintptr_t)object_error::UNKNOWN_API;
+uintptr_t g_child_desc_error = (uintptr_t)object_error::UNKNOWN_API;
+uintptr_t g_child_desc_index = UINTPTR_MAX;
+uintptr_t g_grandchild_desc_error = (uintptr_t)object_error::UNKNOWN_API;
+// kernel 役の K の結果。K は役付きなので、兄弟 (DESC_TEST) も孫 (GC) も通るはず。
+uintptr_t g_kernel_sibling_error = (uintptr_t)object_error::UNKNOWN_API;
+uintptr_t g_kernel_grandchild_error = (uintptr_t)object_error::UNKNOWN_API;
+
+// 孫: 中身は使わない。method 0 だけを記述子の対象に使う。
+uintptr_t desc_grandchild_fn(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  return 0;
+}
+
+// 子: 自分の子として孫を作る (孫の生成者は子)。
+uintptr_t desc_child_fn(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  g_grandchild_create_error =
+      api(object_api::CREATE_OBJECT, OBJECT_DESC_GRANDCHILD, (uintptr_t)&desc_grandchild_fn).error;
+  return 0;
+}
+
+// 役付きの K。作成権限の規則の外に置かれ、兄弟と孫のどちらへの作成も通る。
+uintptr_t desc_kernel_fn(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  g_kernel_sibling_error =
+      api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1).error;
+  g_kernel_grandchild_error =
+      api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_GRANDCHILD, 0).error;
+  return 0;
+}
+
+uintptr_t desc_hierarchy_probe() {
+  // 役の付与は一般オブジェクトには拒否される (枠も子も作られない)。
+  g_role_flag_error =
+      api(object_api::CREATE_OBJECT, OBJECT_DESC_CHILD, (uintptr_t)&desc_child_fn,
+          KERNEL_OBJECT::INTERNAL_FLAG_KERNEL_ROLE).error;
+  g_child_create_error =
+      api(object_api::CREATE_OBJECT, OBJECT_DESC_CHILD, (uintptr_t)&desc_child_fn).error;
+  call_method(OBJECT_DESC_CHILD, 0); // 子を走らせる。子が孫を作る。
+  // 直接の子 (生成者は自分) への作成は通る。
+  const api_result child = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_CHILD, 0);
+  g_child_desc_error = child.error;
+  g_child_desc_index = child.value;
+  // 孫 (生成者の生成者) への作成は拒否される。
+  g_grandchild_desc_error =
+      api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_GRANDCHILD, 0).error;
+  return child.error;
 }
 
 // 別オブジェクトの main。自分の表に、対象の 1 番を指す記述子を作って番号を返す。
-uintptr_t desc_make_index(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
-  const api_result made = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1);
+uintptr_t desc_make_index(uintptr_t mode, uintptr_t, uintptr_t, uintptr_t) {
+  if (mode == 1)
+    return desc_sibling_probe();
+  if (mode == 2)
+    return desc_hierarchy_probe();
+#if defined(__riscv)
+  if (g_owner_probe_old_index) {
+    g_owner_old_index_error = call_descriptor(0).error;
+    g_owner_probe_old_index = false;
+  }
+#endif
+  // 自分の 1 番を自分の表に export してから、自分自身への記述子を作る (自己は常に許可)。
+  // 兄弟 (DESC_TEST) への作成は作成権限の規則で拒否されるため、ここでは使わない。
+  const api_result exported = api(object_api::EXPORT_METHOD, 1, (uintptr_t)&desc_target_fn);
+  if (exported.error != (uintptr_t)object_error::OK)
+    return 0xDEAD0000u | (uint32_t)exported.error;
+  const api_result made = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_OWNER, 1);
   return made.error == (uintptr_t)object_error::OK ? made.value
                                                    : 0xDEAD0000u | (uint32_t)made.error;
 }
@@ -241,6 +460,7 @@ uintptr_t deep(uintptr_t depth, uintptr_t, uintptr_t, uintptr_t) {
 } // namespace
 
 void call_ladder() {
+  reset_descriptor_test_record();
   BOARD::diag_printf("[SELFTEST] call ladder start\n");
 
   // オブジェクトを作る。最初のメソッド (main) は生成側が与える。
@@ -460,12 +680,102 @@ void call_ladder() {
           foreign.error == (uintptr_t)object_error::BAD_DESCRIPTOR,
           (unsigned long)foreign.error, (unsigned long)object_error::BAD_DESCRIPTOR);
 #endif
+    const api_result owner_replaced = api(
+        object_api::CREATE_OBJECT, OBJECT_DESC_OWNER, (uintptr_t)&desc_make_index,
+        OBJECT_REPLACE);
+    check("descriptor: replace owner invalidates its descriptor table",
+          owner_replaced.error == (uintptr_t)object_error::OK,
+          (unsigned long)owner_replaced.error, 0);
+    g_owner_probe_old_index = true;
+    const api_result owner_recreated = call_method(OBJECT_DESC_OWNER, 0);
+#if defined(__riscv)
+    check("descriptor: old owner index rejected before new allocation",
+          g_owner_old_index_error == (uintptr_t)object_error::BAD_DESCRIPTOR,
+          (unsigned long)g_owner_old_index_error,
+          (unsigned long)object_error::BAD_DESCRIPTOR);
+#endif
+    check("descriptor: replacement owner starts a new table at index zero",
+          owner_recreated.error == (uintptr_t)object_error::OK &&
+              owner_recreated.value == 0,
+          (unsigned long)owner_recreated.value, 0);
+
+    // 作成権限: 一般オブジェクト (OWNER) から兄弟 (DESC_TEST) への作成は拒否され、
+    // 枠を消費しない。続く自己作成が index 0 に入ることで確かめる。
+    const api_result sibling_probe = call_method(OBJECT_DESC_OWNER, 1);
+    check("descriptor: sibling creation refused with NOT_PRIVILEGED",
+          g_sibling_probe_error == (uintptr_t)object_error::NOT_PRIVILEGED,
+          (unsigned long)g_sibling_probe_error,
+          (unsigned long)object_error::NOT_PRIVILEGED);
+    // index 0 は owner_recreated のもの。拒否で枠が進んでいなければ自己作成は index 1。
+    check("descriptor: refused sibling creation consumes no slot (self at index 1)",
+          sibling_probe.error == (uintptr_t)object_error::OK &&
+              g_sibling_probe_index == 1,
+          (unsigned long)g_sibling_probe_index, 1);
+
+    // 階層 (mode 2): 一般オブジェクト OWNER が子 CH を作り、CH が孫 GC を作る。
+    // 直接の子 CH への作成は通り、孫 GC への作成は拒否される (枠も進まない)。
+    // 役の付与を一般オブジェクトが要求すると拒否される。
+    const api_result hierarchy = call_method(OBJECT_DESC_OWNER, 2);
+    check("descriptor: general object cannot grant kernel role (NOT_PRIVILEGED)",
+          g_role_flag_error == (uintptr_t)object_error::NOT_PRIVILEGED,
+          (unsigned long)g_role_flag_error,
+          (unsigned long)object_error::NOT_PRIVILEGED);
+    check("descriptor: general object creates a child object",
+          g_child_create_error == (uintptr_t)object_error::OK,
+          (unsigned long)g_child_create_error, 0);
+    check("descriptor: child's child (grandchild) created by the child",
+          g_grandchild_create_error == (uintptr_t)object_error::OK,
+          (unsigned long)g_grandchild_create_error, 0);
+    check("descriptor: direct child descriptor allowed (index 2)",
+          hierarchy.error == (uintptr_t)object_error::OK &&
+              g_child_desc_error == (uintptr_t)object_error::OK &&
+              g_child_desc_index == 2,
+          (unsigned long)g_child_desc_index, 2);
+    check("descriptor: grandchild descriptor refused with NOT_PRIVILEGED",
+          g_grandchild_desc_error == (uintptr_t)object_error::NOT_PRIVILEGED,
+          (unsigned long)g_grandchild_desc_error,
+          (unsigned long)object_error::NOT_PRIVILEGED);
+
+    // kernel 役の object K: ROOT が役付きで作り、K から兄弟と孫の両方への作成が通る。
+    const api_result kernel_made = api(
+        object_api::CREATE_OBJECT, OBJECT_DESC_KERNEL, (uintptr_t)&desc_kernel_fn,
+        KERNEL_OBJECT::INTERNAL_FLAG_KERNEL_ROLE);
+    check("descriptor: root creates kernel-role object",
+          kernel_made.error == (uintptr_t)object_error::OK,
+          (unsigned long)kernel_made.error, 0);
+    const api_result kernel_run = call_method(OBJECT_DESC_KERNEL, 0);
+    check("descriptor: kernel-role object creates descriptor for sibling",
+          kernel_run.error == (uintptr_t)object_error::OK &&
+              g_kernel_sibling_error == (uintptr_t)object_error::OK,
+          (unsigned long)g_kernel_sibling_error, (unsigned long)object_error::OK);
+    check("descriptor: kernel-role object creates descriptor for grandchild",
+          g_kernel_grandchild_error == (uintptr_t)object_error::OK,
+          (unsigned long)g_kernel_grandchild_error, (unsigned long)object_error::OK);
+
+    // K を OBJECT_REPLACE で差し替える (付与の要求なし)。役は引き継がれ、新しい K も同じ扱い。
+    const api_result kernel_replaced = api(
+        object_api::CREATE_OBJECT, OBJECT_DESC_KERNEL, (uintptr_t)&desc_kernel_fn,
+        OBJECT_REPLACE);
+    check("descriptor: replace kernel-role object",
+          kernel_replaced.error == (uintptr_t)object_error::OK,
+          (unsigned long)kernel_replaced.error, 0);
+    g_kernel_sibling_error = (uintptr_t)object_error::UNKNOWN_API;
+    g_kernel_grandchild_error = (uintptr_t)object_error::UNKNOWN_API;
+    const api_result kernel_rerun = call_method(OBJECT_DESC_KERNEL, 0);
+    check("descriptor: replaced kernel-role object keeps the role for sibling",
+          kernel_rerun.error == (uintptr_t)object_error::OK &&
+              g_kernel_sibling_error == (uintptr_t)object_error::OK,
+          (unsigned long)g_kernel_sibling_error, (unsigned long)object_error::OK);
+    check("descriptor: replaced kernel-role object keeps the role for grandchild",
+          g_kernel_grandchild_error == (uintptr_t)object_error::OK,
+          (unsigned long)g_kernel_grandchild_error, (unsigned long)object_error::OK);
 
     const api_result created = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1);
     check("descriptor: create valid descriptor",
           created.error == (uintptr_t)object_error::OK && created.value < 16,
           (unsigned long)created.value, 0);
     const uintptr_t desc_idx = created.value;
+    uint32_t root_descriptors_created = 1;
 
 #if defined(__riscv)
     // 直接 trap 呼出し。戻り値・台帳・呼び出し回数・呼び先の identity を突き合わせる。
@@ -532,17 +842,64 @@ void call_ladder() {
           (unsigned long)object_error::BAD_DESCRIPTOR);
 #endif
 
-    // 世代の不一致。対象を差し替えると古い記述子は STALE、差し替え後に作り直したものは通る。
+    // Re-export at a different PC must stale the old index without recycling it.
+    g_desc_export_v2 = true;
+    const api_result reexported = call_method(OBJECT_DESC_TEST, 0);
+    check("descriptor: target re-export succeeds",
+          reexported.error == (uintptr_t)object_error::OK &&
+              reexported.value == OBJECT_DESC_TEST,
+          (unsigned long)reexported.error, 0);
+#if defined(__riscv)
+    {
+      const uint32_t v2_before = g_desc_v2_calls;
+      const api_result stale_reexport = call_descriptor(desc_idx);
+      check("descriptor: re-export makes old index stale",
+            stale_reexport.error == (uintptr_t)object_error::STALE_DESCRIPTOR,
+            (unsigned long)stale_reexport.error,
+            (unsigned long)object_error::STALE_DESCRIPTOR);
+      check("descriptor: stale re-export does not enter changed PC",
+            g_desc_v2_calls == v2_before,
+            (unsigned long)g_desc_v2_calls, (unsigned long)v2_before);
+    }
+#endif
+    const api_result fresh_reexport =
+        api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1);
+    check("descriptor: new index after re-export is allocated",
+          fresh_reexport.error == (uintptr_t)object_error::OK &&
+              fresh_reexport.value != desc_idx,
+          (unsigned long)fresh_reexport.value, 1);
+    if (fresh_reexport.error == (uintptr_t)object_error::OK)
+      ++root_descriptors_created;
+#if defined(__riscv)
+    const api_result fresh_reexport_call = call_descriptor(fresh_reexport.value);
+    check("descriptor: new index enters changed PC (sum 1021)",
+          fresh_reexport_call.error == (uintptr_t)object_error::OK &&
+              fresh_reexport_call.value == 1021,
+          (unsigned long)fresh_reexport_call.value, 1021);
+    check("descriptor: old index stays stale after a different slot is allocated",
+          call_descriptor(desc_idx).error ==
+              (uintptr_t)object_error::STALE_DESCRIPTOR,
+          (unsigned long)call_descriptor(desc_idx).error,
+          (unsigned long)object_error::STALE_DESCRIPTOR);
+#endif
+
+    // OBJECT_REPLACE clears methods 1+; the new object must export them again.
+    g_desc_export_v2 = false;
     const api_result replaced =
         api(object_api::CREATE_OBJECT, OBJECT_DESC_TEST, (uintptr_t)&desc_export_fn, OBJECT_REPLACE);
     check("descriptor: replace target bumps generation",
           replaced.error == (uintptr_t)object_error::OK,
           (unsigned long)replaced.error, 0);
+    const api_result reexport_after_replace = call_method(OBJECT_DESC_TEST, 0);
+    check("descriptor: replacement method 0 re-exports method 1",
+          reexport_after_replace.error == (uintptr_t)object_error::OK &&
+              reexport_after_replace.value == OBJECT_DESC_TEST,
+          (unsigned long)reexport_after_replace.error, 0);
 
 #if defined(__riscv)
     {
       const uint32_t calls_before = g_desc_calls;
-      const api_result stale = call_descriptor(desc_idx);
+      const api_result stale = call_descriptor(fresh_reexport.value);
       check("descriptor: stale descriptor rejected with STALE_DESCRIPTOR (23)",
             stale.error == (uintptr_t)object_error::STALE_DESCRIPTOR,
             (unsigned long)stale.error, (unsigned long)object_error::STALE_DESCRIPTOR);
@@ -556,12 +913,74 @@ void call_ladder() {
     const api_result fresh = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1);
     check("descriptor: new descriptor after replace is created",
           fresh.error == (uintptr_t)object_error::OK && fresh.value < 16,
-          (unsigned long)fresh.value, 0);
+          (unsigned long)fresh.value, 2);
+    if (fresh.error == (uintptr_t)object_error::OK)
+      ++root_descriptors_created;
 #if defined(__riscv)
     const api_result fresh_call = call_descriptor(fresh.value);
     check("descriptor: new descriptor after replace runs (sum 21)",
           fresh_call.error == (uintptr_t)object_error::OK && fresh_call.value == 21,
           (unsigned long)fresh_call.value, 21);
+#endif
+
+    // Region grant and revoke change the target generation, so cached rights
+    // cannot survive either operation. New descriptors use the current window.
+    const api_result grant_one =
+        api(object_api::GRANT_REGION, OBJECT_DESC_TEST, 0x1000, 0x1fff);
+    check("descriptor: initial region grant succeeds",
+          grant_one.error == (uintptr_t)object_error::OK,
+          (unsigned long)grant_one.error, 0);
+    const api_result grant_desc =
+        api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1);
+    check("descriptor: descriptor after region grant is created",
+          grant_desc.error == (uintptr_t)object_error::OK,
+          (unsigned long)grant_desc.error, 0);
+    if (grant_desc.error == (uintptr_t)object_error::OK)
+      ++root_descriptors_created;
+    const api_result grant_two =
+        api(object_api::GRANT_REGION, OBJECT_DESC_TEST, 0x2000, 0x2fff);
+    check("descriptor: region change succeeds",
+          grant_two.error == (uintptr_t)object_error::OK,
+          (unsigned long)grant_two.error, 0);
+#if defined(__riscv)
+    check("descriptor: region change stales old grant descriptor",
+          call_descriptor(grant_desc.value).error ==
+              (uintptr_t)object_error::STALE_DESCRIPTOR,
+          (unsigned long)call_descriptor(grant_desc.value).error,
+          (unsigned long)object_error::STALE_DESCRIPTOR);
+#endif
+    const api_result changed_window_desc =
+        api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1);
+    check("descriptor: descriptor after region change is created",
+          changed_window_desc.error == (uintptr_t)object_error::OK,
+          (unsigned long)changed_window_desc.error, 0);
+    if (changed_window_desc.error == (uintptr_t)object_error::OK)
+      ++root_descriptors_created;
+    const api_result region_revoke =
+        api(object_api::GRANT_REGION, OBJECT_DESC_TEST, 0, 0);
+    check("descriptor: region revoke succeeds",
+          region_revoke.error == (uintptr_t)object_error::OK,
+          (unsigned long)region_revoke.error, 0);
+#if defined(__riscv)
+    check("descriptor: region revoke stales old grant descriptor",
+          call_descriptor(changed_window_desc.value).error ==
+              (uintptr_t)object_error::STALE_DESCRIPTOR,
+          (unsigned long)call_descriptor(changed_window_desc.value).error,
+          (unsigned long)object_error::STALE_DESCRIPTOR);
+#endif
+    const api_result revoked_window_desc =
+        api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1);
+    check("descriptor: descriptor after revoke is created",
+          revoked_window_desc.error == (uintptr_t)object_error::OK,
+          (unsigned long)revoked_window_desc.error, 0);
+    if (revoked_window_desc.error == (uintptr_t)object_error::OK)
+      ++root_descriptors_created;
+#if defined(__riscv)
+    const api_result revoked_window_call = call_descriptor(revoked_window_desc.value);
+    check("descriptor: current revoked window descriptor calls target",
+          revoked_window_call.error == (uintptr_t)object_error::OK &&
+              revoked_window_call.value == 21,
+          (unsigned long)revoked_window_call.value, 21);
 #endif
 
     // 旧 CALL_METHOD (グローバル経路) は従来どおり同じ入口に届くこと。
@@ -575,13 +994,27 @@ void call_ladder() {
             g_desc_calls == calls_before + 1,
             (unsigned long)g_desc_calls, (unsigned long)(calls_before + 1));
     }
+    const api_result legacy_abi = api(object_api::CALL_METHOD, OBJECT_DESC_TEST,
+                                      2, 42);
+    check("descriptor: legacy four-argument ABI probe returns 77",
+          legacy_abi.error == (uintptr_t)object_error::OK && legacy_abi.value == 77,
+          (unsigned long)legacy_abi.value, 77);
+#if defined(__riscv)
+    check("descriptor: legacy four-argument entry sees a4/a5 zero",
+          g_desc_legacy_a4 == 0 && g_desc_legacy_a5 == 0,
+          (unsigned long)(g_desc_legacy_a4 | g_desc_legacy_a5), 0);
+#endif
 
     // ---- 呼び出し元の識別: A (ルート) -> B (desc_relay) -> C (desc_test, 記述子で直接呼出し) ----
     // ★C の g_desc_* に残る値が「B 経由で撃たれた」ものだと言えるように、先に空けておく。
     //   ルートは B しか呼ばず、B の表の記述子だけで C に届く。C の 1 番は上の export のまま生きている。
     {
-      const api_result relay_made =
-          api(object_api::CREATE_OBJECT, OBJECT_DESC_RELAY, (uintptr_t)&desc_relay_fn);
+      // B は kernel 役付きで作る。ここで試すのは caller 識別 (B の表で作って C を撃つこと)
+      // であって作成権限の規則ではない。権限規則は B と C が兄弟であることで拒否されるが、
+      // 役付きなら相手を問わず通るので、識別の経路だけを残す。
+      const api_result relay_made = api(
+          object_api::CREATE_OBJECT, OBJECT_DESC_RELAY, (uintptr_t)&desc_relay_fn,
+          KERNEL_OBJECT::INTERNAL_FLAG_KERNEL_ROLE);
       check("descriptor A->B->C: create relay object",
             relay_made.error == (uintptr_t)object_error::OK,
             (unsigned long)relay_made.error, 0);
@@ -630,8 +1063,8 @@ void call_ladder() {
 
     // 容量 16 超過。記述子に解放 API は無いので、ここまでに作った分 (2 本) も数に入れて埋める。
     // ★最後に行う (以後はこの表に記述子を作れない)。
-    uint32_t filled = 2;
-    for (int i = 0; i < 16; ++i) {
+    uint32_t filled = root_descriptors_created;
+    for (uint32_t i = filled; i < 16; ++i) {
       if (api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1).error !=
           (uintptr_t)object_error::OK)
         break;
@@ -646,6 +1079,7 @@ void call_ladder() {
           (unsigned long)over_cap.error, (unsigned long)object_error::NO_DESCRIPTOR);
   }
 
+  shizuku_descriptor_test_record.completed = 1;
   BOARD::diag_printf("[SELFTEST] call ladder done: %lu passed, %lu failed\n",
                      (unsigned long)passed, (unsigned long)failed);
 }

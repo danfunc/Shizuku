@@ -57,7 +57,7 @@ template <> void KERNEL::set_thread_storage(void *memory, uintptr_t bytes) {
 template <> void KERNEL::set_thread_ledger(
     uint32_t id, KERNEL::call_ledger_entry *memory, uint32_t capacity,
     uint32_t object, uint32_t kind, uint32_t handler_object,
-    uintptr_t handler_entry) {
+    uintptr_t handler_entry, uint32_t object_generation) {
   if (id >= m_thread_count || memory == nullptr || capacity == 0 ||
       (uintptr_t)memory >= BOARD::unprivileged_floor())
     BOARD::panic("call ledger must be privileged memory");
@@ -66,6 +66,7 @@ template <> void KERNEL::set_thread_ledger(
   thread.ledger_capacity = capacity;
   thread.call_stack = {};
   thread.base_object = object;
+  thread.call_stack.base_object_generation = object_generation;
   thread.base_kind = kind;
   thread.base_handler_object = handler_object;
   thread.base_handler_entry = handler_entry;
@@ -102,7 +103,8 @@ KERNEL::spawn_result KERNEL::spawn(const KERNEL::spawn_request &request) {
     BOARD::panic("spawn without call ledger");
   set_thread_ledger(index, request.ledger,
                     request.ledger_capacity, request.object_id, request.kind,
-                    request.parent_handler_object, request.parent_handler_entry);
+                    request.parent_handler_object, request.parent_handler_entry,
+                    request.object_generation);
   // ★既定は**全コア**。core0 固定を既定にすると「渡す機構が効いている」ことを
   //   確かめられない (決めた通りに動いただけになる)。固定したい相手は明示する。
   thread.affinity = request.affinity == 0

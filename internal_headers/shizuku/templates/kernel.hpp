@@ -92,7 +92,8 @@ public:
   static constexpr uint8_t LEDGER_CALL = 1, LEDGER_DISPATCH = 2;
   void set_thread_ledger(uint32_t id, call_ledger_entry *memory,
                          uint32_t capacity, uint32_t object, uint32_t kind,
-                         uint32_t handler_object, uintptr_t handler_entry);
+                         uint32_t handler_object, uintptr_t handler_entry,
+                         uint32_t object_generation = 0);
   uint32_t ledger_size(uint32_t id) const {
     return m_threads[id].thread.call_stack.depth;
   }
@@ -153,6 +154,7 @@ public:
     uintptr_t stack_base;
     uintptr_t stack_bytes;
     uint32_t object_id = 0; // 所属オブジェクトID
+    uint32_t object_generation = 0;
     // ★そのスレッドが走り出すときの種別。CALL と同じく kobj が自分の台帳から
     //   申告する (既定は PLAIN)。
     uint32_t kind = (uint32_t)object_kind::PLAIN;
@@ -238,6 +240,15 @@ public:
     return m_threads[current_thread_id()].thread;
   }
   uint32_t current_depth() const { return current_thread().call_stack.depth; }
+  uint32_t current_call_count() const {
+    return current_thread().call_stack.call_count;
+  }
+  uint32_t current_object_generation() const {
+    const THREAD &thread = current_thread();
+    return thread.call_stack.call_count != 0
+               ? thread.call_stack.current_call_generation
+               : thread.call_stack.base_object_generation;
+  }
   uint32_t current_unwind_floor() const {
     const THREAD &thread = current_thread();
     return thread.call_stack.depth ? thread.ledger_top().unwind_floor : 0;

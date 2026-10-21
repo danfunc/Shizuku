@@ -140,6 +140,9 @@ static void run_dispatcher_tests() {
   thread.ledger[0] = {LEAF_ID, ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY,
                       (uint8_t)object_kind::PLAIN, KERNEL::LEDGER_CALL, 0};
   thread.call_stack.depth = 1;
+  thread.call_stack.call_count = 1;
+  thread.call_stack.current_call_object = LEAF_ID;
+  thread.call_stack.caller_object = ROOT_APP_ID;
 
   frame->a0 = (uintptr_t)object_api::GET_CURRENT_OBJECT;
   kernel_instance.svc_dispatch(ctx);
@@ -158,6 +161,9 @@ static void run_dispatcher_tests() {
   thread.ledger[1] = {NEST_ID, ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY,
                       (uint8_t)object_kind::PLAIN, KERNEL::LEDGER_CALL, 1};
   thread.call_stack.depth = 2;
+  thread.call_stack.call_count = 2;
+  thread.call_stack.current_call_object = NEST_ID;
+  thread.call_stack.caller_object = LEAF_ID;
 
   frame->a0 = (uintptr_t)object_api::GET_CURRENT_OBJECT;
   kernel_instance.svc_dispatch(ctx);
@@ -174,6 +180,9 @@ static void run_dispatcher_tests() {
 
   // Reset depth
   thread.call_stack.depth = 0;
+  thread.call_stack.call_count = 0;
+  thread.call_stack.current_call_object = 0;
+  thread.call_stack.caller_object = 0;
 
   // -------------------------------------------------------------------------
   // 3. Objectland same-number raw delivery to custom parent handler
@@ -227,6 +236,28 @@ static void run_dispatcher_tests() {
   thread.call_stack.depth = 0;
   thread.call_stack.top = 0;
   ctx->sp = frame;
+
+  // 3d/e. The V2 descriptor API numbers remain objectland numbers for a custom
+  // parent handler: the kernel must preserve and deliver each raw request.
+  const uintptr_t descriptor_api_ids[] = {
+      (uintptr_t)object_api::CREATE_METHOD_DESCRIPTOR,
+      (uintptr_t)object_api::CALL_METHOD_DESCRIPTOR};
+  for (uintptr_t raw_id : descriptor_api_ids) {
+    frame->a0 = raw_id;
+    frame->a1 = 0x11223344;
+    frame->a2 = 0x55667788;
+    kernel_instance.svc_dispatch(ctx);
+    assert(kernel_instance.current_depth() == 1);
+    assert(ARCH::frame_pc(*ctx->sp) == CUSTOM_HANDLER_ENTRY);
+    assert(ARCH::arg(*ctx->sp, 0) == raw_id);
+    assert(ARCH::arg(*ctx->sp, 1) == 0x11223344);
+    assert(ARCH::arg(*ctx->sp, 2) == 0x55667788);
+    printf("  objectland raw SVC %lu delivered unchanged to custom handler: PASS\n",
+           (unsigned long)raw_id);
+    thread.call_stack.depth = 0;
+    thread.call_stack.top = 0;
+    ctx->sp = frame;
+  }
 
   // -------------------------------------------------------------------------
   // 4. Mode=thread actor path & unmigrated mode=handler API on root-bound object

@@ -71,25 +71,18 @@ template <> uintptr_t KERNEL::current_object(uint32_t thread_id) const {
   if (thread_id >= m_thread_count)
     return (uintptr_t)KERNEL_OBJECT::NO_OBJECT;
   const THREAD &thread = m_threads[thread_id].thread;
-  for (uint32_t i = 0; i < thread.call_stack.depth; ++i) {
-    const auto &entry = thread.ledger[thread.call_stack.depth - 1 - i];
-    if (entry.via == LEDGER_CALL)
-      return entry.object;
-  }
-  return thread.base_object;
+  return thread.call_stack.call_count != 0
+             ? thread.call_stack.current_call_object
+             : thread.base_object;
 }
 
 template <> uintptr_t KERNEL::caller_object(uint32_t thread_id) const {
   if (thread_id >= m_thread_count)
     return (uintptr_t)KERNEL_OBJECT::NO_OBJECT;
   const THREAD &thread = m_threads[thread_id].thread;
-  uint32_t calls = 0;
-  for (uint32_t i = 0; i < thread.call_stack.depth; ++i) {
-    const auto &entry = thread.ledger[thread.call_stack.depth - 1 - i];
-    if (entry.via == LEDGER_CALL && ++calls == 2)
-      return entry.object;
-  }
-  return calls == 1 ? thread.base_object : (uintptr_t)KERNEL_OBJECT::NO_OBJECT;
+  return thread.call_stack.call_count != 0
+             ? thread.call_stack.caller_object
+             : (uintptr_t)KERNEL_OBJECT::NO_OBJECT;
 }
 
 
@@ -195,6 +188,19 @@ bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   const uintptr_t previous = header->prev;
   *context = header->saved;
   *frame = context->sp;
+  if (thread.call_stack.depth > 0 &&
+      thread.ledger[thread.call_stack.depth - 1].via == LEDGER_CALL) {
+    if (thread.call_stack.call_count == 0)
+      BOARD::panic("call ledger count underflow");
+    thread.call_stack.call_count--;
+    const uint32_t restore_index = thread.call_stack.call_count;
+    thread.call_stack.current_call_object = thread.call_stack.caller_object;
+    thread.call_stack.current_call_generation = thread.call_stack.caller_generation;
+    thread.call_stack.caller_object =
+        thread.call_stack.identity[restore_index].previous_caller_object;
+    thread.call_stack.caller_generation =
+        thread.call_stack.identity[restore_index].previous_caller_generation;
+  }
   thread.call_stack.top = previous;
   thread.call_stack.depth--;
   return true;
@@ -212,6 +218,10 @@ kernel_error KERNEL::enter_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context
       request.callee_object == m_object_svc_handler_object) {
     return kernel_error::BAD_REQUEST;
   }
+  if (thread.call_stack.call_count >= KERNEL_OBJECT::MAX_DEPTH)
+    return kernel_error::NO_STACK;
+  if (thread.call_stack.call_count >= THREAD::CALL_IDENTITY_CAPACITY)
+    return kernel_error::NO_STACK;
   // 呼び先の普通の return は svc_dispatch 経由でもう 1 枚 call_frame_push する。
   // その 1 枚ぶんの余白を CALL 時に先取りする (全 arch 共通。2026-10-21 実機で
   // RV32 の OBJECT_DEEP が最深で return を断られ 0xE005 停止したため)。
@@ -224,6 +234,17 @@ kernel_error KERNEL::enter_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context
   entry = {request.callee_object, request.parent_handler_object,
            request.parent_handler_entry, (uint8_t)request.callee_kind,
            LEDGER_CALL, (uint16_t)unwind_floor};
+  thread.call_stack.identity[thread.call_stack.call_count] = {
+      thread.call_stack.caller_object, thread.call_stack.caller_generation};
+  thread.call_stack.caller_object = thread.call_stack.call_count == 0
+                                        ? thread.base_object
+                                        : thread.call_stack.current_call_object;
+  thread.call_stack.caller_generation = thread.call_stack.call_count == 0
+                                            ? thread.call_stack.base_object_generation
+                                            : thread.call_stack.current_call_generation;
+  thread.call_stack.current_call_object = request.callee_object;
+  thread.call_stack.current_call_generation = request.callee_generation;
+  thread.call_stack.call_count++;
   return kernel_error::OK;
 }
 
@@ -441,13 +462,19 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
           const uint32_t index = (uint32_t)ARCH::arg(*frame, 1);
           KERNEL_OBJECT::method_descriptor_entry desc{};
           object_error error = object_error::OK;
-          if (!kernel_object_instance.validate_method_descriptor(caller_id, index, desc, error)) {
+          kernel_object_instance.table_lock();
+          const bool descriptor_valid =
+              kernel_object_instance.validate_method_descriptor(
+                  caller_id, index, current_object_generation(), desc, error);
+          if (!descriptor_valid) {
+            kernel_object_instance.table_unlock();
             ARCH::set_result(*frame, (uintptr_t)error, 0);
             return;
           }
           // 通常の CALL (do_call) と同じ形の台帳段を積む。戻りは既存の CALL の戻りに合流する。
           const call_request request = kernel_object_instance.callee_request(
               desc.target_object, desc.target_entry);
+          kernel_object_instance.table_unlock();
 #if defined(SHIZUKU_DEEP_DIAG)
           shizuku_push_diag_kind = 3; // CALL_METHOD_DESCRIPTOR 経路 (riscv のみ)
 #endif
@@ -468,7 +495,9 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
           ARCH::set_args_6(*frame, args);
           // 通常の CALL (do_call) と同じ規則: 呼び先オブジェクトの保護指定で決める。
           ARCH::set_priv(*context, (request.protection & PROTECTION_UNPRIVILEGED) == 0);
-          ARCH::set_region_window(*context, desc.region_base, desc.region_limit);
+          // Region grants can change after descriptor creation. Use the live
+          // trusted window, while keeping authorization out of the O(1) call path.
+          ARCH::set_region_window(*context, request.region_base, request.region_limit);
           return;
 #endif
         }

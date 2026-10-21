@@ -142,6 +142,9 @@ public:
     frame.a1 = args[1];
     frame.a2 = args[2];
     frame.a3 = args[3];
+    // Legacy four-argument methods must not inherit syscall a4/a5 values.
+    frame.a4 = 0;
+    frame.a5 = 0;
   }
 
   static void set_args_6(exception_frame_t &frame, const uintptr_t *args) {

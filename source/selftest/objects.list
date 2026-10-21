@@ -33,3 +33,6 @@ compat_gc
 desc_test
 desc_owner
 desc_relay
+desc_kernel
+desc_child
+desc_grandchild

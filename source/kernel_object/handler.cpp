@@ -151,6 +151,8 @@ template <> uintptr_t KERNEL_OBJECT::handler_entry() {
 //   (オブジェクトランド) で、置き場所の条件はカーネルが検査する。
 static_assert(sizeof(KERNEL::call_ledger_entry) == 16,
               "call ledger entry must be 16 bytes on supported targets");
+static_assert(KERNEL_OBJECT::MAX_DEPTH <= KERNEL::THREAD::CALL_IDENTITY_CAPACITY,
+              "per-thread call identity snapshot stack must cover MAX_DEPTH");
 #if defined(SHIZUKU_C5_BLE)
 alignas(8) static uint8_t g_bookkeeping_storage[16 * 1024];
 #else
@@ -168,9 +170,12 @@ template <> void KERNEL_OBJECT::init() {
   for (uintptr_t id = 0; id < OBJECT_COUNT; ++id) {
     m_objects[id].created = false;
     m_objects[id].flags = 0;
+    m_objects[id].creator_object = (uint32_t)NO_OBJECT;
+    m_objects[id].kernel_role = (id == KERNEL_OBJECT_ID);
     m_objects[id].region_base = 0;
     m_objects[id].region_limit = 0;
-    m_objects[id].generation = 0;
+    ARCH::store_release32(&m_objects[id].generation, 0u);
+    ARCH::store_release32(&m_objects[id].instance_generation, 0u);
     m_object_name[id] = nullptr;
     for (uintptr_t method = 0; method < METHOD_COUNT; ++method)
       m_objects[id].methods[method] = nullptr;
@@ -218,6 +223,8 @@ template <> void KERNEL_OBJECT::init() {
   arena_init(m_objects_arena, (uintptr_t)heap.value(), OBJECT_ARENA_BYTES);
   // KERNEL_OBJECT (0) とブートアプリ ROOT_OBJECT (1) は最初から在るものとして扱う。
   m_objects[KERNEL_OBJECT_ID].created = true;
+  ARCH::store_release32(&m_objects[KERNEL_OBJECT_ID].generation, 1u);
+  ARCH::store_release32(&m_objects[KERNEL_OBJECT_ID].instance_generation, 1u);
   m_object_name[KERNEL_OBJECT_ID] = "kernel_object";
   // ★svc ハンドラを務めるのはこのオブジェクト = 種別は HANDLER。カーネルが
   //   「0 番だから」で決めるのではなく、**こちらが役として宣言する**。
@@ -226,6 +233,8 @@ template <> void KERNEL_OBJECT::init() {
   m_objects[KERNEL_OBJECT_ID].parent_handler_object = (uint32_t)KERNEL_OBJECT_ID;
   m_objects[KERNEL_OBJECT_ID].parent_handler_entry = handler_entry();
   m_objects[ROOT_OBJECT].created = true;
+  ARCH::store_release32(&m_objects[ROOT_OBJECT].generation, 1u);
+  ARCH::store_release32(&m_objects[ROOT_OBJECT].instance_generation, 1u);
   m_object_name[ROOT_OBJECT] = "root";
   m_objects[ROOT_OBJECT].kind = object_kind::PLAIN;
   m_objects[ROOT_OBJECT].parent_handler_object = (uint32_t)KERNEL_OBJECT_ID;
@@ -381,6 +390,15 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
     return 0;
   }
 
+  // ★kernel 役の付与は ROOT か kernel 役の生成者だけ (HANDLER と同じ信頼の根)。
+  //   一般オブジェクトが立てようとしたら、枠も表も触らずに NOT_PRIVILEGED で拒否する。
+  const bool is_kernel_role = (flags & INTERNAL_FLAG_KERNEL_ROLE) != 0;
+  if (is_kernel_role && creator != ROOT_OBJECT &&
+      !m_objects[creator].kernel_role) {
+    error = object_error::NOT_PRIVILEGED;
+    return 0;
+  }
+
   // ★既にある番号に**上書きで**生成する要求 (動的ロードの入れ替え) は、
   //   その番号を持っている誰かを黙って乗っ取る行為なので、特権オブジェクト
   //   だけに許す。名前を付けずにビットだけ立てると、衝突の検出 (下) を
@@ -393,22 +411,45 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
     shizuku_boot_trace_phase(422);
 #endif
     // 世代が尽きたら作成/差し替え/export を拒否 (fail-closed)。再利用させない
-    if (replace && m_objects[id].generation == UINT32_MAX) {
+    const uint32_t current_generation =
+        ARCH::load_acquire32(&m_objects[id].generation);
+    const uint32_t current_instance_generation =
+        ARCH::load_acquire32(&m_objects[id].instance_generation);
+    if (replace && current_generation == UINT32_MAX) {
       error = object_error::BAD_OBJECT;
       return 0;
     }
+    if (replace && current_instance_generation == UINT32_MAX) {
+      error = object_error::BAD_OBJECT;
+      return 0;
+    }
+    // ★差し替えても kernel 役は引き継ぐ (番号ではなく役で判定するので、差し替え後の
+    //   新しい中身も同じ扱いになる)。付与の要求が無くても、旧い役は消えない。
+    const bool kept_kernel_role =
+        m_objects[id].created && m_objects[id].kernel_role;
     if (!m_objects[id].created || replace) {
       m_objects[id].created = true;
+      // 生成者は差し替えのたびに記録し直す (旧 creator の権限を新しい中身へ残さない)。
+      m_objects[id].creator_object = (uint32_t)creator;
+      m_objects[id].kernel_role = kept_kernel_role || is_kernel_role;
       m_objects[id].flags =
-          (uint32_t)(flags & ~(OBJECT_REPLACE | INTERNAL_FLAG_HANDLER));
-      if (!m_objects[id].generation || replace) {
-        ++m_objects[id].generation;
+          (uint32_t)(flags & ~(OBJECT_REPLACE | INTERNAL_FLAG_HANDLER |
+                               INTERNAL_FLAG_KERNEL_ROLE));
+      if (current_generation == 0 || replace) {
+        ARCH::store_release32(&m_objects[id].generation,
+                             current_generation + 1u);
+      }
+      if (current_instance_generation == 0 || replace) {
+        ARCH::store_release32(&m_objects[id].instance_generation,
+                             current_instance_generation + 1u);
       }
       if (replace) {
         for (auto &d : m_objects[id].method_descriptors) {
-          d.valid = 0;
+          ARCH::store_release32(&d.valid, 0u);
         }
       }
+      for (uintptr_t method = 1; method < METHOD_COUNT; ++method)
+        m_objects[id].methods[method] = nullptr;
       // 最初のメソッドは生成側が与える (オブジェクト自身はまだ走っていないので
       // 自分では登録できない)。以後は EXPORT_METHOD で自分が増やす。
       m_objects[id].methods[0] = (method_t)entry;
@@ -525,8 +566,18 @@ uintptr_t KERNEL_OBJECT::grant_region(uintptr_t target, uintptr_t base,
   }
 #endif
   table_guard guard;
+  if (!m_objects[target].created) {
+    error = object_error::BAD_OBJECT;
+    return 0;
+  }
+  const uint32_t generation = ARCH::load_acquire32(&m_objects[target].generation);
+  if (generation == UINT32_MAX) {
+    error = object_error::BAD_OBJECT;
+    return 0;
+  }
   m_objects[target].region_base = (uint32_t)base;
   m_objects[target].region_limit = (uint32_t)limit;
+  ARCH::store_release32(&m_objects[target].generation, generation + 1u);
   return 1;
 }
 
@@ -541,13 +592,19 @@ uintptr_t KERNEL_OBJECT::export_method(uintptr_t method, uintptr_t entry,
     return 0;
   }
   table_guard guard;
+  if (self >= OBJECT_COUNT || !m_objects[self].created ||
+      kernel_instance.current_object_generation() != object_generation(self)) {
+    error = object_error::STALE_DESCRIPTOR;
+    return 0;
+  }
   // 世代が尽きたら作成/差し替え/export を拒否 (fail-closed)。再利用させない
-  if (m_objects[self].generation == UINT32_MAX) {
+  const uint32_t generation = ARCH::load_acquire32(&m_objects[self].generation);
+  if (generation == UINT32_MAX) {
     error = object_error::BAD_OBJECT;
     return 0;
   }
   m_objects[self].methods[method] = (method_t)entry;
-  ++m_objects[self].generation;
+  ARCH::store_release32(&m_objects[self].generation, generation + 1u);
   return self;
 }
 
@@ -555,6 +612,7 @@ template <>
 uintptr_t KERNEL_OBJECT::create_method_descriptor(uintptr_t target_id,
                                                    uintptr_t method_index,
                                                    object_error &error) {
+  table_guard guard;
   if (target_id >= OBJECT_COUNT || !m_objects[target_id].created) {
     error = object_error::BAD_OBJECT;
     return 0;
@@ -567,7 +625,9 @@ uintptr_t KERNEL_OBJECT::create_method_descriptor(uintptr_t target_id,
     error = object_error::UNDECLARED_METHOD;
     return 0;
   }
-  if (m_objects[target_id].generation == 0) {
+  const uint32_t target_generation =
+      ARCH::load_acquire32(&m_objects[target_id].generation);
+  if (target_generation == 0) {
     error = object_error::BAD_DESCRIPTOR;
     return 0;
   }
@@ -577,10 +637,38 @@ uintptr_t KERNEL_OBJECT::create_method_descriptor(uintptr_t target_id,
     error = object_error::BAD_OBJECT;
     return 0;
   }
-  table_guard guard;
+  const uint32_t caller_generation = kernel_instance.current_object_generation();
+  if (caller_generation != object_generation(caller_id)) {
+    error = object_error::STALE_DESCRIPTOR;
+    return 0;
+  }
+  // ★作成権限 (方針)。自分自身 / 親 (対象が呼び出し元の creator) / 直接の子 (呼び出し元が
+  //   対象の creator) は許可。呼び出し元が kernel 役 (kernel_role) を負うなら相手を問わず
+  //   許可 (役で判定し、ID では判定しない)。兄弟・孫・無関係は NOT_PRIVILEGED。
+  //   拒否はここで返すので、枠も表も副作用は無い (枠探索より前)。
+  //   NOT_PRIVILEGED を使うのは、既存の「権限の無い呼び出し」の拒否と同じ語彙に揃えるため。
+  const bool caller_is_kernel_role = m_objects[caller_id].kernel_role;
+  const bool permitted =
+      caller_is_kernel_role || target_id == caller_id ||
+      m_objects[caller_id].creator_object == target_id ||
+      m_objects[target_id].creator_object == caller_id;
+  if (!permitted) {
+    error = object_error::NOT_PRIVILEGED;
+    return 0;
+  }
   int free_slot = -1;
   for (int i = 0; i < (int)METHOD_DESCRIPTOR_CAPACITY; ++i) {
-    if (m_objects[caller_id].method_descriptors[i].valid == 0) {
+    auto &candidate = m_objects[caller_id].method_descriptors[i];
+    bool valid = ARCH::load_acquire32(&candidate.valid) != 0;
+    if (valid && (candidate.target_object >= OBJECT_COUNT ||
+                  candidate.target_generation == 0 ||
+                  candidate.target_generation != ARCH::load_acquire32(
+                      &m_objects[candidate.target_object].generation))) {
+      // Stale indices are never recycled within this owner generation: API 33
+      // carries only the index, so reuse would turn an old handle into a new call.
+      continue;
+    }
+    if (!valid) {
       free_slot = i;
       break;
     }
@@ -592,8 +680,9 @@ uintptr_t KERNEL_OBJECT::create_method_descriptor(uintptr_t target_id,
   auto &desc = m_objects[caller_id].method_descriptors[free_slot];
   desc.target_object = (uint32_t)target_id;
   desc.target_entry = (uintptr_t)m_objects[target_id].methods[method_index];
-  desc.target_generation = m_objects[target_id].generation;
+  desc.target_generation = target_generation;
   desc.owner_object = caller_id;
+  desc.owner_generation = caller_generation;
   desc.method_index = (uint32_t)method_index;
   desc.flags = m_objects[target_id].flags;
   desc.region_base = m_objects[target_id].region_base;
@@ -607,6 +696,7 @@ template <> call_request KERNEL_OBJECT::callee_request(uintptr_t id, uintptr_t e
   request.entry_pc = entry_pc;
   request.callee_object = (uint32_t)id;                    // ★呼び先オブジェクトID
   request.callee_kind = (uint32_t)object_kind_of(id);      // ★呼び先の種別
+  request.callee_generation = object_generation(id);
   request.parent_handler_object = m_objects[id].parent_handler_object;
   request.parent_handler_entry = m_objects[id].parent_handler_entry;
   request.protection = object_protection(id);
@@ -618,7 +708,6 @@ template <> call_request KERNEL_OBJECT::callee_request(uintptr_t id, uintptr_t e
 template <>
 uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
                                      uintptr_t argument, object_error &error) {
-  const uint32_t thread = kernel_instance.current_thread_id();
   if (id >= OBJECT_COUNT || !m_objects[id].created) {
     error = object_error::BAD_OBJECT;
     return 0;
@@ -633,10 +722,7 @@ uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
     error = object_error::UNDECLARED_METHOD;
     return 0;
   }
-  uint32_t call_count = 0;
-  for (uint32_t i = 0; i < kernel_instance.ledger_size(thread); ++i)
-    call_count += kernel_instance.ledger_entry(thread, i)->via == KERNEL::LEDGER_CALL;
-  if (call_count >= MAX_DEPTH) {
+  if (kernel_instance.current_call_count() >= MAX_DEPTH) {
     error = object_error::NO_STACK;
     return 0;
   }
@@ -661,12 +747,7 @@ uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
 template <>
 void KERNEL_OBJECT::exit_method(uintptr_t target_depth, uintptr_t value,
                                 uintptr_t error) {
-  const uint32_t thread = kernel_instance.current_thread_id();
-
-  bool has_call = false;
-  for (uint32_t index = 0; index < kernel_instance.ledger_size(thread); ++index)
-    has_call |= kernel_instance.ledger_entry(thread, index)->via == KERNEL::LEDGER_CALL;
-  if (target_depth == 0 && !has_call) {
+  if (target_depth == 0 && kernel_instance.current_call_count() == 0) {
     exit_thread();
     return;
   }
@@ -738,6 +819,7 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
   request.stack_base = stack;
   request.stack_bytes = THREAD_STACK_BYTES;
   request.object_id = (uint32_t)id; // ★所属オブジェクトIDをカーネルに渡す
+  request.object_generation = object_generation(id);
   request.kind = (uint32_t)object_kind_of(id); // ★種別も同じく渡す
   request.parent_handler_object = m_objects[id].parent_handler_object;
   request.parent_handler_entry = m_objects[id].parent_handler_entry;

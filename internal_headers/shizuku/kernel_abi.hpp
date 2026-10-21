@@ -85,6 +85,7 @@ struct call_request {
   // ★呼び先の**種別**。既定は PLAIN — ハンドラを務めるオブジェクトを呼ぶときだけ
   //   HANDLER を載せる。ここが「役」を運ぶ唯一の場所で、ID からは決めない。
   uint32_t callee_kind = (uint32_t)object_kind::PLAIN;
+  uint32_t callee_generation = 0;
   // ★軸 B (DESIGN §11.3)。呼び先が特権命令なしに読める追加の窓
   //   (region0/1 の外)。0/0 = 窓なし。**呼び出し元ではなく呼び先の性質**として
   //   決まる値をここへ載せる (docs/record/kernel_v2_record.typ Q8)。

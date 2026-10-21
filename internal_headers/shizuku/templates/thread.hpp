@@ -13,6 +13,7 @@ namespace templates {
 //   ★2026-09-05: identity を文脈として持つこと自体は設計判断であって D1 違反ではない、
 //     と方針を緩めた。緩めていないのは「役を ID で代用しない」という一点。
 template <typename CONTEXT> struct thread {
+  static constexpr uint32_t CALL_IDENTITY_CAPACITY = 32;
   enum struct state_t : uint32_t {
     UNINITIALIZED = 0,
     // 枠を確保したが初期化が終わっていない過渡状態。READY でないのでどの
@@ -32,6 +33,16 @@ template <typename CONTEXT> struct thread {
   struct call_stack_t {
     uintptr_t top = 0;  // 最内 call_frame_header のアドレス (0 = 空)
     uint32_t depth = 0; // call / dispatch ledger の現在段数
+    uint32_t call_count = 0; // LEDGER_CALL のアクティブ段数 (O(1) MAX_DEPTH 検査用)
+    uint32_t current_call_object = 0;
+    uint32_t caller_object = 0;
+    uint32_t base_object_generation = 0;
+    uint32_t current_call_generation = 0;
+    uint32_t caller_generation = 0;
+    struct call_identity_snapshot {
+      uint32_t previous_caller_object;
+      uint32_t previous_caller_generation;
+    } identity[CALL_IDENTITY_CAPACITY]{};
   };
 
   // ★state は CAS の対象なので 32bit 幅を固定する (ARCH::cas32 が uint32_t* で叩く)。
