@@ -3,7 +3,6 @@
 #include "esp_err.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
-#include "esp_app_format.h"
 
 #include <cstdint>
 #include <cstring>
@@ -31,6 +30,7 @@ bool begin(void *opaque, uint32_t total_bytes, uint32_t, xno::ota::protocol::Mod
   s->image_bytes = total_bytes;
   s->handle_open = true;
   s->image_validated = false;
+  s->commit_acknowledged = false;
   s->lifecycle = after_begin(true);
   return true;
 }
@@ -68,7 +68,8 @@ bool validate(void *opaque, uint32_t total_bytes) {
 
 bool activate(void *opaque) {
   auto *s = static_cast<flash_session *>(opaque);
-  if (!s || !s->partition || !s->image_validated || !may_activate(s->lifecycle))
+  if (!s || !s->partition || !s->image_validated || !s->commit_acknowledged ||
+      !may_activate(s->lifecycle))
     return false;
   if (esp_ota_set_boot_partition(s->partition) != ESP_OK)
     return false;
@@ -86,6 +87,7 @@ void abort(void *opaque) {
   s->partition = nullptr;
   s->image_bytes = 0;
   s->image_validated = false;
+  s->commit_acknowledged = false;
   s->lifecycle = after_abort();
 }
 
@@ -102,3 +104,13 @@ flash_session &global_session() {
 }
 
 } // namespace shizuku::esp_idf_support::ble_ota
+
+extern "C" esp_err_t shizuku_esp_ota_mark_running_app_valid(void) {
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  if (!running) return ESP_ERR_NOT_FOUND;
+  esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+  const esp_err_t state_rc = esp_ota_get_state_partition(running, &state);
+  if (state_rc != ESP_OK) return state_rc;
+  if (state != ESP_OTA_IMG_PENDING_VERIFY) return ESP_ERR_INVALID_STATE;
+  return esp_ota_mark_app_valid_cancel_rollback();
+}

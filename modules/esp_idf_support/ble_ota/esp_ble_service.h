@@ -11,8 +11,8 @@ struct ble_gap_event;
 // Shizuku GATT integration is intentionally a separate patch proposal.
 int shizuku_esp_ota_register_service(void);
 
-// Forward every event from the existing BLE GAP callback to this helper. A
-// confirmed indication is required before XNOC may activate the new image.
+// Forward every event from the existing BLE GAP callback to this helper. XNOC
+// waits for the configured notification TX-complete event or indication ACK.
 int shizuku_esp_ota_gap_event(struct ble_gap_event *event);
 
 // Call from a confirmed post-boot health/selftest path to accept the candidate.

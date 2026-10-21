@@ -57,6 +57,10 @@ static QueueHandle_t g_rx_queue = nullptr;
 static QueueHandle_t g_tx_completion_queue = nullptr;
 static TaskHandle_t g_worker_task = nullptr;
 static volatile uint16_t g_owner_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+static volatile bool g_tx_notifications_enabled = false;
+static volatile bool g_tx_indications_enabled = false;
+static volatile bool g_commit_waiting = false;
+static volatile bool g_commit_expected_indication = false;
 static bool g_registration_attempted = false;
 static bool g_registered = false;
 static uint16_t g_processing_conn_handle = BLE_HS_CONN_HANDLE_NONE;
@@ -90,10 +94,9 @@ bool notify_line(uint16_t conn_handle, const char *text, size_t length,
   return rc == 0;
 }
 
-bool wait_for_commit_indication(uint16_t conn_handle, uint16_t attr_handle) {
+bool wait_for_commit_tx(uint16_t conn_handle, uint16_t attr_handle,
+                        bool indication) {
   if (!g_tx_completion_queue) return false;
-  tx_completion stale{};
-  while (xQueueReceive(g_tx_completion_queue, &stale, 0) == pdTRUE) {}
   tx_completion done{};
   const TickType_t start_timeout = kIndicationTimeout;
   const TickType_t start = xTaskGetTickCount();
@@ -101,10 +104,13 @@ bool wait_for_commit_indication(uint16_t conn_handle, uint16_t attr_handle) {
     const TickType_t left = start_timeout - (xTaskGetTickCount() - start);
     if (xQueueReceive(g_tx_completion_queue, &done, left) != pdTRUE) return false;
     if (done.conn_handle == conn_handle && done.attr_handle == attr_handle &&
-        done.indication && done.status == BLE_HS_EDONE)
+        indication && done.indication && done.status == BLE_HS_EDONE)
       return true;
-    if (done.conn_handle == conn_handle && done.indication && done.status != 0 &&
-        done.status != BLE_HS_EDONE)
+    if (done.conn_handle == conn_handle && done.attr_handle == attr_handle &&
+        !indication && !done.indication && done.status == 0)
+      return true;
+    if (done.conn_handle == conn_handle && done.indication == indication &&
+        done.status != 0 && done.status != BLE_HS_EDONE)
       return false;
   }
   return false;
@@ -113,8 +119,8 @@ bool wait_for_commit_indication(uint16_t conn_handle, uint16_t attr_handle) {
 int gatt_access(uint16_t conn_handle, uint16_t, struct ble_gatt_access_ctxt *ctxt,
                 void *) {
   if (!ctxt) return BLE_ATT_ERR_UNLIKELY;
-  // This production decision denies every characteristic write before reading
-  // or enqueuing payload bytes. No test bypass or compile-time allow switch exists.
+  // Default profile denies every characteristic write before reading or enqueueing.
+  // Only the explicit OTA-only test build define can open the host-tested gate.
   const int gate_status = shizuku_esp_ota_gatt_access_status(ctxt->op);
   if (gate_status != 0) return gate_status;
   if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
@@ -137,26 +143,29 @@ int gatt_access(uint16_t conn_handle, uint16_t, struct ble_gatt_access_ctxt *ctx
   return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
 }
 
-static ble_gatt_chr_def g_nus_chars[] = {
-    {.uuid = &g_nus_rx_uuid.u, .access_cb = gatt_access,
-     .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP},
-    {.uuid = &g_nus_tx_uuid.u, .access_cb = gatt_access,
-     .flags = BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_INDICATE,
-     .val_handle = &g_tx_handle},
-    {0},
-};
-static ble_gatt_chr_def g_ota_chars[] = {
-    {.uuid = &g_ota_rx_uuid.u, .access_cb = gatt_access,
-     .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP},
-    {0},
-};
-static ble_gatt_svc_def g_services[] = {
-    {.type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &g_nus_service_uuid.u,
-     .characteristics = g_nus_chars},
-    {.type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &g_ota_service_uuid.u,
-     .characteristics = g_ota_chars},
-    {0},
-};
+static ble_gatt_chr_def g_nus_chars[3]{};
+static ble_gatt_chr_def g_ota_chars[2]{};
+static ble_gatt_svc_def g_services[3]{};
+
+void init_gatt_definitions() {
+  g_nus_chars[0].uuid = &g_nus_rx_uuid.u;
+  g_nus_chars[0].access_cb = gatt_access;
+  g_nus_chars[0].flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP;
+  g_nus_chars[1].uuid = &g_nus_tx_uuid.u;
+  g_nus_chars[1].access_cb = gatt_access;
+  g_nus_chars[1].flags = BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_INDICATE;
+  g_nus_chars[1].val_handle = &g_tx_handle;
+  g_services[0].type = BLE_GATT_SVC_TYPE_PRIMARY;
+  g_services[0].uuid = &g_nus_service_uuid.u;
+  g_services[0].characteristics = g_nus_chars;
+
+  g_ota_chars[0].uuid = &g_ota_rx_uuid.u;
+  g_ota_chars[0].access_cb = gatt_access;
+  g_ota_chars[0].flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP;
+  g_services[1].type = BLE_GATT_SVC_TYPE_PRIMARY;
+  g_services[1].uuid = &g_ota_service_uuid.u;
+  g_services[1].characteristics = g_ota_chars;
+}
 
 void protocol_event(void *, const Event &event) {
   char line[96]{};
@@ -168,9 +177,19 @@ void protocol_event(void *, const Event &event) {
     return;
   }
   if (event.type == EventType::CommitReady) {
-    const bool sent = notify_line(g_processing_conn_handle, line, length, true);
+    const bool use_indication = !g_tx_notifications_enabled && g_tx_indications_enabled;
+    if (!g_tx_notifications_enabled && !g_tx_indications_enabled) {
+      session.commit_acknowledged = false;
+      return;
+    }
+    tx_completion stale{};
+    while (xQueueReceive(g_tx_completion_queue, &stale, 0) == pdTRUE) {}
+    g_commit_expected_indication = use_indication;
+    g_commit_waiting = true;
+    const bool sent = notify_line(g_processing_conn_handle, line, length, use_indication);
     session.commit_acknowledged = sent &&
-        wait_for_commit_indication(g_processing_conn_handle, g_tx_handle);
+        wait_for_commit_tx(g_processing_conn_handle, g_tx_handle, use_indication);
+    g_commit_waiting = false;
     return;
   }
   (void)notify_line(g_processing_conn_handle, line, length, false);
@@ -198,8 +217,9 @@ void worker(void *) {
     g_processing_conn_handle = packet.conn_handle;
     (void)protocol.feed(packet.bytes, packet.length);
     if (session.lifecycle == phase::activated) {
-      // CommitReady was acknowledged by a confirmed ATT indication before the
-      // backend selected this OTA slot; reboot only after activate returned.
+      // CommitReady was delivered before the backend selected this OTA slot;
+      // reboot only after activate returned. Indications are ACKed when the
+      // central subscribes to them; notifications wait for NimBLE TX completion.
       esp_restart();
     }
   }
@@ -242,12 +262,17 @@ extern "C" int shizuku_esp_ota_register_service(void) {
     cleanup_registration(true);
     return BLE_HS_ENOMEM;
   }
+  init_gatt_definitions();
   int rc = ble_gatts_count_cfg(g_services);
-  if (rc == 0) rc = ble_gatts_add_svcs(g_services);
   if (rc != 0) {
-    // count_cfg failure is retryable. add_svcs failure may have partially
-    // registered attributes, so keep this instance fail-closed and do not retry.
-    cleanup_registration(rc == BLE_HS_ENOMEM || rc == BLE_HS_EBUSY);
+    cleanup_registration(true);
+    return rc;
+  }
+  rc = ble_gatts_add_svcs(g_services);
+  if (rc != 0) {
+    // add_svcs failure may have partially registered attributes; keep this
+    // instance fail-closed and do not retry the GATT registration.
+    cleanup_registration(false);
     return rc;
   }
   g_registered = true;
@@ -267,8 +292,11 @@ extern "C" int shizuku_esp_ota_gap_event(struct ble_gap_event *event) {
     const uint16_t conn_handle = event->disconnect.conn.conn_handle;
     if (g_owner_conn_handle == conn_handle) {
       g_owner_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-      if (g_tx_completion_queue) {
-        tx_completion failed{conn_handle, g_tx_handle, BLE_HS_ENOTCONN, 1};
+      g_tx_notifications_enabled = false;
+      g_tx_indications_enabled = false;
+      if (g_tx_completion_queue && g_commit_waiting) {
+        tx_completion failed{conn_handle, g_tx_handle, BLE_HS_ENOTCONN,
+                             static_cast<uint8_t>(g_commit_expected_indication ? 1 : 0)};
         (void)xQueueSend(g_tx_completion_queue, &failed, 0);
       }
       if (g_rx_queue) {
@@ -279,10 +307,18 @@ extern "C" int shizuku_esp_ota_gap_event(struct ble_gap_event *event) {
         (void)xQueueSendToFront(g_rx_queue, &reset, 0);
       }
     }
-  } else if (event->type == BLE_GAP_EVENT_NOTIFY_TX &&
-             event->notify_tx.indication && g_tx_completion_queue) {
+  } else if (event->type == BLE_GAP_EVENT_SUBSCRIBE &&
+             event->subscribe.attr_handle == g_tx_handle &&
+             event->subscribe.conn_handle == g_owner_conn_handle) {
+    g_tx_notifications_enabled = event->subscribe.cur_notify != 0;
+    g_tx_indications_enabled = event->subscribe.cur_indicate != 0;
+  } else if (event->type == BLE_GAP_EVENT_NOTIFY_TX && g_commit_waiting &&
+             event->notify_tx.attr_handle == g_tx_handle &&
+             event->notify_tx.conn_handle == g_owner_conn_handle &&
+             g_tx_completion_queue) {
     tx_completion done{event->notify_tx.conn_handle, event->notify_tx.attr_handle,
-                       event->notify_tx.status, 1};
+                       event->notify_tx.status,
+                       static_cast<uint8_t>(event->notify_tx.indication ? 1 : 0)};
     (void)xQueueSend(g_tx_completion_queue, &done, 0);
   }
   return 0;

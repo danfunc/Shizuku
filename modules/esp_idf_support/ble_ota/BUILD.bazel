@@ -36,15 +36,11 @@ cc_test(
 
 cc_test(
     name = "status_format_test",
-    srcs = ["status_format.cpp", "status_format_test.cpp"],
+    srcs = ["status_format.cpp", "status_format_test.cpp", "status_format.hpp",
+            "protocol.hpp", "inflate.hpp"],
 )
 
 cc_test(
     name = "ota_lifecycle_test",
-    srcs = ["ota_lifecycle_test.cpp"],
-)
-
-cc_test(
-    name = "xno_protocol_host_test",
-    srcs = ["protocol.cpp", "protocol_test.cpp"],
+    srcs = ["ota_lifecycle_test.cpp", "ota_lifecycle.hpp"],
 )

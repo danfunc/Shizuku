@@ -13,6 +13,7 @@ struct flash_session {
   uint32_t image_bytes = 0;
   bool handle_open = false;
   bool image_validated = false;
+  bool commit_acknowledged = false;
   phase lifecycle = phase::idle;
 };
 

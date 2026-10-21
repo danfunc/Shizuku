@@ -25,7 +25,7 @@ else()
     if("$ENV{SHIZUKU_ESP_OTA}" STREQUAL "1")
       set(SHIZUKU_ESP_OTA_PROFILE ON)
       set(SDKCONFIG_DEFAULTS
-          "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults.esp32c6.ble;${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults.esp32c6.ota")
+          "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults.esp32c6.ble;${CMAKE_CURRENT_LIST_DIR}/esp32c6_ota_defaults.conf")
       list(APPEND EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/../ble_ota")
     else()
       set(SDKCONFIG_DEFAULTS "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults.esp32c6.ble")
@@ -56,5 +56,7 @@ if(SHIZUKU_ESP_OTA_PROFILE)
   endif()
   target_link_libraries(${shizuku_main_lib} INTERFACE ${shizuku_ota_lib})
   target_link_options(${shizuku_main_lib} INTERFACE
-      "-Wl,--undefined=shizuku_esp_ota_register_service")
+      "-Wl,--undefined=shizuku_esp_ota_register_service"
+      "-Wl,--undefined=shizuku_esp_ota_gap_event"
+      "-Wl,--undefined=shizuku_esp_ota_mark_running_app_valid")
 endif()
