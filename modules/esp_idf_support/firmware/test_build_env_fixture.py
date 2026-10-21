@@ -88,13 +88,17 @@ export IDF_PYTHON_ENV_PATH="$IDF_TOOLS_PATH/python_env"
             idf_bin = idf / "bin"
             log_path = root / "idf-args.jsonl"
             executable(idf / "components" / "partition_table" / "gen_esp32part.py", '''#!/usr/bin/env python3
+import os
 import pathlib
 import sys
 
 binary, csv_path, flash_size = sys.argv[1:]
 assert pathlib.Path(binary).is_file()
 assert flash_size == "--flash-size=4MB"
-pathlib.Path(csv_path).write_text("ota_0,app,ota_0,0x20000,0x1F0000\\nota_1,app,ota_1,0x210000,0x1F0000\\n")
+# Stand-in for the decoder: emit the rows of the real partition table source (MOCK_PARTITION_CSV).
+rows = [line for line in pathlib.Path(os.environ["MOCK_PARTITION_CSV"]).read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")]
+pathlib.Path(csv_path).write_text("".join(",".join(cell.strip() for cell in row.split(",")) + "\\n" for row in rows))
 ''')
             executable(idf / "export.sh", '''
 export PATH="$MOCK_IDF/bin:$IDF_TOOLS_PATH/bin:$IDF_TOOLS_PATH/python_env/bin:$PATH"
@@ -118,8 +122,20 @@ build_dir = pathlib.Path(args[args.index("-B") + 1])
 sdkconfig = pathlib.Path(next(arg.split("=", 1)[1] for arg in args
                               if arg.startswith("-DSDKCONFIG=")))
 if "set-target" in args:
+    # Resolve the sdkconfig the way IDF does for this profile: CONFIG_IDF_TARGET comes from set-target,
+    # the rest from the defaults files named in MOCK_SDKCONFIG_DEFAULTS; "=n" becomes "is not set".
+    target = args[args.index("set-target") + 1]
+    lines = ['CONFIG_IDF_TARGET="' + target + '"']
+    for defaults in os.environ["MOCK_SDKCONFIG_DEFAULTS"].split(";"):
+        for line in pathlib.Path(defaults).read_text().splitlines():
+            if not line.startswith("CONFIG_"):
+                continue
+            key, value = line.split("=", 1)
+            lines.append("# " + key + " is not set" if value == "n" else line)
+    if "CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y" in lines:
+        lines.append('CONFIG_ESPTOOLPY_FLASHSIZE="4MB"')
     build_dir.mkdir(parents=True, exist_ok=True)
-    sdkconfig.write_text("CONFIG_BT_ENABLED=y\\nCONFIG_BT_NIMBLE_ENABLED=y\\nCONFIG_ESPTOOLPY_FLASHSIZE=\\\"4MB\\\"\\n")
+    sdkconfig.write_text("\\n".join(lines) + "\\n")
 if "build" in args:
     (build_dir / "bootloader").mkdir(parents=True, exist_ok=True)
     (build_dir / "partition_table").mkdir(parents=True, exist_ok=True)
@@ -144,6 +160,10 @@ if "build" in args:
                 "IDF_TOOLS_PATH": str(tools),
                 "MOCK_IDF": str(idf),
                 "MOCK_IDF_ARGS": str(log_path),
+                # The same defaults CMakeLists.txt:27-28 loads for SHIZUKU_ESP_OTA=1, and the real partition table.
+                "MOCK_SDKCONFIG_DEFAULTS": ";".join(str(Path(__file__).with_name(name)) for name in (
+                    "sdkconfig.defaults.esp32c6.ble", "esp32c6_ota_defaults.conf")),
+                "MOCK_PARTITION_CSV": str(Path(__file__).with_name("partitions_esp32c6_ota.csv")),
             })
 
             def run_profile(name, inputs):
@@ -151,6 +171,8 @@ if "build" in args:
                 output_dir.mkdir()
                 paths = {key: output_dir / filename for key, filename in {
                     "bin": "image.bin",
+                    "elf": "image.elf",
+                    "map": "image.map",
                     "sdkconfig": "sdkconfig",
                     "bootloader": "bootloader.bin",
                     "partition_bin": "partition-table.bin",
@@ -160,7 +182,7 @@ if "build" in args:
                 command = [
                     "bash", str(Path(__file__).with_name("build_ota_profile.sh")),
                     str(BUILD_SH), str(Path(__file__).with_name("collect_ota_artifacts.py")),
-                    str(archive), str(paths["bin"]), "", "",
+                    str(archive), str(paths["bin"]), str(paths["elf"]), str(paths["map"]),
                     str(paths["sdkconfig"]), str(paths["bootloader"]),
                     str(paths["partition_bin"]), str(paths["partition_csv"]),
                     str(paths["manifest"]), *inputs,
@@ -186,6 +208,9 @@ if "build" in args:
                 self.assertIn(source_arg, args)
                 self.assertIn(include_arg, args)
             self.assertEqual(artifacts["bin"].read_bytes(), b"\351fixture")
+            self.assertEqual(artifacts["elf"].read_bytes(), b"elf fixture")
+            self.assertEqual(artifacts["map"].read_bytes(), b"map fixture")
+            self.assertIn('CONFIG_IDF_TARGET="esp32c6"', artifacts["sdkconfig"].read_text())
             self.assertEqual(artifacts["bootloader"].read_bytes(), b"boot fixture")
             self.assertIn("ota_1,app,ota_1", artifacts["partition_csv"].read_text())
             self.assertEqual(json.loads(artifacts["manifest"].read_text())["profile"], "esp32c6_ble_ota")
