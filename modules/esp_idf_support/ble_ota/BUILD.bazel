@@ -1,46 +1,14 @@
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
-
 package(default_visibility = ["//visibility:public"])
 
+# The XNO firmware genrule receives these ESP-only inputs through
+# //modules/esp_idf_support/firmware:esp32c6_project.
 filegroup(
-    name = "component_sources",
+    name = "esp_component_sources",
     srcs = [
         "CMakeLists.txt",
-        "auth_gate.cpp",
-        "auth_gate.h",
         "esp_ble_service.cpp",
         "esp_ble_service.h",
         "esp_flash_backend.cpp",
         "esp_flash_backend.hpp",
-        "inflate.hpp",
-        "ota_lifecycle.hpp",
-        "protocol.cpp",
-        "protocol.hpp",
-        "status_format.cpp",
-        "status_format.hpp",
     ],
-)
-
-cc_library(
-    name = "auth_gate_host",
-    srcs = ["auth_gate.cpp"],
-    hdrs = ["auth_gate.h"],
-    visibility = ["//visibility:public"],
-)
-
-cc_test(
-    name = "auth_gate_test",
-    srcs = ["auth_gate_test.cpp"],
-    deps = [":auth_gate_host"],
-)
-
-cc_test(
-    name = "status_format_test",
-    srcs = ["status_format.cpp", "status_format_test.cpp", "status_format.hpp",
-            "protocol.hpp", "inflate.hpp"],
-)
-
-cc_test(
-    name = "ota_lifecycle_test",
-    srcs = ["ota_lifecycle_test.cpp", "ota_lifecycle.hpp"],
 )

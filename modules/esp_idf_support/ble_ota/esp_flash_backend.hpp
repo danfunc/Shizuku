@@ -14,7 +14,7 @@ struct flash_session {
   bool handle_open = false;
   bool image_validated = false;
   bool commit_acknowledged = false;
-  phase lifecycle = phase::idle;
+  xno::ota::phase lifecycle = xno::ota::phase::idle;
 };
 
 flash_session &global_session();

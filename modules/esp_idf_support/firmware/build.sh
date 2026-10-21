@@ -1,6 +1,6 @@
 #!/bin/bash
 # Bazel (//modules/esp_idf_support/firmware:esp32c6) から呼ぶ薄いラッパ: idf.py build を走らせて .bin を出す。
-#   使い方: build.sh <libshizuku_kernel.a> <出力 .bin> <期待する GCC 版文字列>
+#   使い方: build.sh <libshizuku_kernel.a> <出力 .bin> <期待する GCC 版文字列> [target] [profile] [ELF] [map] [--ota-source path | --ota-sources paths...] [--ota-include-dir path]...
 # ★環境が違えば黙って別物を作らず、理由を出して失敗する (IDF 版 / コンパイラ版の食い違い)。
 # fail は subshell で exit 1 する。`|| fail` は最後のコマンドなので set -e が効いて止まる。
 set -euo pipefail
@@ -21,17 +21,63 @@ test -n "${IDF_PATH:-}" || fail "IDF_PATH が未設定 (--action_env=IDF_PATH �
 test -n "${IDF_TOOLS_PATH:-}" || fail "IDF_TOOLS_PATH が未設定 (--action_env=IDF_TOOLS_PATH が要る)"
 ARCHIVE=$(abspath "$1")
 OUT=$(abspath "$2")
-ELF_OUT=""
-if test -n "${6:-}"; then ELF_OUT=$(abspath "$6"); fi
-MAP_OUT=""
-if test -n "${7:-}"; then MAP_OUT=$(abspath "$7"); fi
 IDF_PATH=$(abspath "$IDF_PATH")
 IDF_TOOLS_PATH=$(abspath "$IDF_TOOLS_PATH")
 export IDF_PATH IDF_TOOLS_PATH
 WANT_GCC=$3
-TARGET=${4:-esp32c6}
-PROFILE=${5:-}
+TARGET=esp32c6
+PROFILE=""
+ELF_OUT=""
+MAP_OUT=""
 BLE_PREFER_1M_PHY=${SHIZUKU_ESP_BLE_PREFER_1M_PHY:-${SHIZUKU_C5_BLE_PREFER_1M_PHY:-0}}
+OTA_SOURCES=()
+OTA_INCLUDE_DIRS=()
+shift 3
+OPTIONAL_POSITIONALS=0
+while (($#)) && [[ "$1" != --* ]] && ((OPTIONAL_POSITIONALS < 4)); do
+  case "$OPTIONAL_POSITIONALS" in
+    0) TARGET=$1 ;;
+    1) PROFILE=$1 ;;
+    2) if test -n "$1"; then ELF_OUT=$(abspath "$1"); fi ;;
+    3) if test -n "$1"; then MAP_OUT=$(abspath "$1"); fi ;;
+  esac
+  shift
+  OPTIONAL_POSITIONALS=$((OPTIONAL_POSITIONALS + 1))
+done
+while (($#)); do
+  case "$1" in
+    --ota-source)
+      test $# -ge 2 || fail "--ota-source には path が必要"
+      OTA_SOURCES+=("$(abspath "$2")")
+      shift 2
+      ;;
+    --ota-sources)
+      shift
+      SOURCE_COUNT=0
+      while (($#)) && [[ "$1" != --* ]]; do
+        OTA_SOURCES+=("$(abspath "$1")")
+        SOURCE_COUNT=$((SOURCE_COUNT + 1))
+        shift
+      done
+      test "$SOURCE_COUNT" -gt 0 || fail "--ota-sources には 1 つ以上の path が必要"
+      ;;
+    --ota-include-dir)
+      test $# -ge 2 || fail "--ota-include-dir には path が必要"
+      OTA_INCLUDE_DIRS+=("$(abspath "$2")")
+      shift 2
+      ;;
+    *) fail "未対応の追加引数: $1" ;;
+  esac
+done
+if ((${#OTA_SOURCES[@]} || ${#OTA_INCLUDE_DIRS[@]})) && test "$PROFILE" != ble; then
+  fail "外部 OTA sources/include dirs は ble profile でのみ指定できる"
+fi
+for source in "${OTA_SOURCES[@]}"; do
+  test -f "$source" || fail "外部 OTA source が無い: $source"
+done
+for include_dir in "${OTA_INCLUDE_DIRS[@]}"; do
+  test -d "$include_dir" || fail "外部 OTA include dir が無い: $include_dir"
+done
 case "$TARGET" in esp32c6|esp32c5) ;; *) fail "未対応の IDF target: $TARGET" ;; esac
 IDF_PROFILE_ARGS=()
 case "$PROFILE" in
@@ -57,6 +103,14 @@ case "$PROFILE" in
     ;;
   *) fail "未対応の firmware profile: $PROFILE" ;;
 esac
+if ((${#OTA_SOURCES[@]})); then
+  OTA_SOURCE_LIST=$(IFS=';'; printf '%s' "${OTA_SOURCES[*]}")
+  IDF_PROFILE_ARGS+=("-DSHIZUKU_ESP_OTA_SOURCES=$OTA_SOURCE_LIST")
+fi
+if ((${#OTA_INCLUDE_DIRS[@]})); then
+  OTA_INCLUDE_LIST=$(IFS=';'; printf '%s' "${OTA_INCLUDE_DIRS[*]}")
+  IDF_PROFILE_ARGS+=("-DSHIZUKU_ESP_OTA_INCLUDE_DIRS=$OTA_INCLUDE_LIST")
+fi
 SRC=$(cd -P "$(dirname "$0")" && pwd)
 
 test -s "$ARCHIVE" || fail "カーネルのアーカイブが無い/空: $ARCHIVE"
@@ -92,6 +146,19 @@ if test "$PROFILE" = ble; then
   grep -qx 'CONFIG_BT_NIMBLE_ENABLED=y' "$BUILD_DIR/sdkconfig" || fail "BLE profile sdkconfig で CONFIG_BT_NIMBLE_ENABLED が有効でない ($BUILD_DIR/sdkconfig)"
 fi
 idf.py -B "$BUILD_DIR" -DSDKCONFIG="$BUILD_DIR/sdkconfig" -DSHIZUKU_KERNEL_ARCHIVE="$ARCHIVE" -DIDF_TARGET="$TARGET" "${IDF_PROFILE_ARGS[@]}" build || fail "idf.py build 失敗"
+if test "${SHIZUKU_ESP_OTA:-}" = 1; then
+  PARTITION_BIN="$BUILD_DIR/partition_table/partition-table.bin"
+  PARTITION_CSV="$BUILD_DIR/partition_table/partition-table.csv"
+  test -s "$PARTITION_BIN" || fail "OTA build の partition-table.bin が無い/空: $PARTITION_BIN"
+  OTA_FLASH_SIZE=$(sed -n 's/^CONFIG_ESPTOOLPY_FLASHSIZE="\([^"]*\)"/\1/p' "$BUILD_DIR/sdkconfig" | tail -1)
+  test -n "$OTA_FLASH_SIZE" || fail "OTA sdkconfig に CONFIG_ESPTOOLPY_FLASHSIZE が無い: $BUILD_DIR/sdkconfig"
+  PARTITION_DECODER="$IDF_PATH/components/partition_table/gen_esp32part.py"
+  test -f "$PARTITION_DECODER" || fail "ESP-IDF partition decoder が無い: $PARTITION_DECODER"
+  "$IDF_PYTHON_ENV_PATH/bin/python" "$PARTITION_DECODER" \
+      "$PARTITION_BIN" "$PARTITION_CSV" "--flash-size=$OTA_FLASH_SIZE" || \
+      fail "OTA partition-table.bin の CSV decode に失敗"
+  test -s "$PARTITION_CSV" || fail "OTA partition-table.csv が無い/空: $PARTITION_CSV"
+fi
 cp "$BUILD_DIR/shizuku_$TARGET.bin" "$OUT"
 if test -n "$ELF_OUT"; then cp "$BUILD_DIR/shizuku_$TARGET.elf" "$ELF_OUT"; fi
 if test -n "$MAP_OUT"; then cp "$BUILD_DIR/shizuku_$TARGET.map" "$MAP_OUT"; fi
