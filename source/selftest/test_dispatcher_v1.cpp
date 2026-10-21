@@ -13,6 +13,8 @@
 //    5. 非特権 origin からの直接 GET で特権が昇格しないこと、および
 //       mode == svc_mode::thread API (GRANT_REGION = 23) は trap で早期拒絶されず、
 //       非特権のまま actor ハンドラへ配送されること。
+//    6. 方法記述子の直接 call の戻り (LEDGER_DESCRIPTOR_CALL 段 + marker 付き RETURN) は
+//       handler を再入させず caller へ直接戻ること。通常 CALL の戻りと検証失敗は従来経路のまま。
 
 #define SHIZUKU_C6_SKELETON_PERMITTED 1
 #include "chips/esp32_c6/chip.hpp"
@@ -331,6 +333,87 @@ static void run_dispatcher_tests() {
   assert(kernel_instance.current_depth() == 0);
   assert(ctx->privileged == false); // Restored caller context is unprivileged!
   printf("  5b. unprivileged mode=thread API (GRANT_REGION): passed to actor handler (depth=1, saved priv=false, restored priv=false): PASS\n");
+
+  // -------------------------------------------------------------------------
+  // 6. 方法記述子の直接 call の戻り (callee の return stub) の高速出口
+  // -------------------------------------------------------------------------
+  // 台帳の最上段が LEDGER_DESCRIPTOR_CALL で、戻りが marker 付き RETURN のときだけ、
+  // handler を再入させず caller へ直接戻す。LEDGER_CALL の段や深さ検証に落ちる段は従来経路。
+  auto arm_frame = [&](uint8_t via, uint16_t unwind_floor, ARCH::exception_frame_t *callee) {
+    ctx->sp = frame;
+    ctx->privileged = true;
+    static KERNEL::call_frame_header header;
+    header = {};
+    header.saved = *ctx; // 呼び出し元の文脈 (sp = frame)
+    thread.call_stack.top = (uintptr_t)&header;
+    thread.call_stack.depth = 1;
+    thread.call_stack.call_count = 1;
+    thread.call_stack.identity[0] = {(uint32_t)KERNEL_OBJECT::NO_OBJECT, 0};
+    thread.call_stack.caller_object = ROOT_APP_ID;
+    thread.call_stack.current_call_object = LEAF_ID;
+    thread.call_stack.caller_generation = 0;
+    thread.call_stack.current_call_generation = 0;
+    thread.ledger[0] = {LEAF_ID, ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY,
+                        (uint8_t)object_kind::PLAIN, via, unwind_floor};
+    callee->a0 = (uintptr_t)primitive::RETURN;
+    callee->a1 = 1;
+    callee->a2 = 0x77;
+    callee->a3 = 0;
+    callee->a4 = RETURN_STUB_MARKER;
+    ctx->sp = callee;
+  };
+  auto *callee = reinterpret_cast<ARCH::exception_frame_t *>(simulated_stack + 1024);
+
+  // 6a. descriptor 段の戻りは caller へ直接戻る。dispatch 段は積まれず、戻り値は caller の a0/a1 に載る。
+  arm_frame(KERNEL::LEDGER_DESCRIPTOR_CALL, 0, callee);
+  kernel_instance.svc_dispatch(ctx);
+  assert(kernel_instance.current_depth() == 0);
+  assert(thread.call_stack.call_count == 0);
+  assert(thread.call_stack.current_call_object == ROOT_APP_ID); // identity を push 時の値へ戻す
+  assert(thread.call_stack.caller_object == (uint32_t)KERNEL_OBJECT::NO_OBJECT);
+  assert(ctx->sp == frame);
+  assert(frame->a0 == (uintptr_t)kernel_error::OK);
+  assert(frame->a1 == 0x77);
+  assert(ctx->privileged == true);
+  printf("  6a. descriptor return fast path (depth 1->0, caller frame, value 0x77, no dispatch frame): PASS\n");
+
+  // 6b. LEDGER_CALL (通常 CALL) の戻りは従来どおり handler へ再入する。
+  arm_frame(KERNEL::LEDGER_CALL, 0, callee);
+  kernel_instance.svc_dispatch(ctx);
+  assert(kernel_instance.current_depth() == 2); // dispatch 段が積まれた
+  assert(thread.ledger[1].via == KERNEL::LEDGER_DISPATCH);
+  assert(ARCH::frame_pc(*ctx->sp) == ROOT_HANDLER_ENTRY);
+  printf("  6b. plain CALL return keeps handler re-entry (depth=2, pc=root handler): PASS\n");
+
+  // 6c. 戻り先が unwind floor を割る descriptor 段は fast path に入らず従来経路へ落ちる。
+  thread.call_stack.depth = 0;
+  thread.call_stack.call_count = 0;
+  thread.call_stack.top = 0;
+  arm_frame(KERNEL::LEDGER_DESCRIPTOR_CALL, 1, callee);
+  kernel_instance.svc_dispatch(ctx);
+  assert(kernel_instance.current_depth() == 2);
+  assert(thread.ledger[1].via == KERNEL::LEDGER_DISPATCH);
+  printf("  6c. descriptor return below unwind floor falls back to handler path (depth=2): PASS\n");
+
+  // 6d. 親ハンドラが専用ハンドラ (root 以外) の descriptor 段は、子の戻りを専用ハンドラへ見せるため従来経路へ落ちる。
+  thread.call_stack.depth = 0;
+  thread.call_stack.call_count = 0;
+  thread.call_stack.top = 0;
+  arm_frame(KERNEL::LEDGER_DESCRIPTOR_CALL, 0, callee);
+  thread.ledger[0].handler_object = CUSTOM_HANDLER_ID;
+  thread.ledger[0].handler_entry = CUSTOM_HANDLER_ENTRY;
+  kernel_instance.svc_dispatch(ctx);
+  assert(kernel_instance.current_depth() == 2);
+  assert(thread.ledger[1].object == CUSTOM_HANDLER_ID);
+  assert(thread.ledger[1].kind == (uint8_t)object_kind::HANDLER);
+  assert(ARCH::frame_pc(*ctx->sp) == CUSTOM_HANDLER_ENTRY);
+  printf("  6d. descriptor return to dedicated parent handler keeps handler path (depth=2, pc=custom): PASS\n");
+
+  // 後始末
+  thread.call_stack.depth = 0;
+  thread.call_stack.call_count = 0;
+  thread.call_stack.top = 0;
+  ctx->sp = frame;
 
   printf("[TEST] All V1 kernel dispatcher host tests PASSED successfully!\n");
 }

@@ -190,7 +190,8 @@ SHIZUKU_HOT bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT 
   *context = header->saved;
   *frame = context->sp;
   if (thread.call_stack.depth > 0 &&
-      thread.ledger[thread.call_stack.depth - 1].via == LEDGER_CALL) {
+      (thread.ledger[thread.call_stack.depth - 1].via == LEDGER_CALL ||
+       thread.ledger[thread.call_stack.depth - 1].via == LEDGER_DESCRIPTOR_CALL)) {
     if (thread.call_stack.call_count == 0)
       BOARD::panic("call ledger count underflow");
     thread.call_stack.call_count--;
@@ -207,12 +208,13 @@ SHIZUKU_HOT bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT 
   return true;
 }
 
-// 通常 CALL と方法記述子の直接 call が共有する前半。台帳段を LEDGER_CALL で積み、
-// 戻りの床を積む前の深さに置く。呼び先の入口・引数・保護は呼び出し側が決める。
+// 通常 CALL と方法記述子の直接 call が共有する前半。台帳段を via (LEDGER_CALL か
+// LEDGER_DESCRIPTOR_CALL) で積み、戻りの床を積む前の深さに置く。呼び先の入口・引数・保護は
+// 呼び出し側が決める。
 template <>
 SHIZUKU_HOT kernel_error KERNEL::enter_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                                 KERNEL::FRAME **frame,
-                                const call_request &request) {
+                                const call_request &request, uint8_t via) {
   // ★偽装防止 (指摘4): 一般 call_request から KERNEL_OBJECT 種別や
   //   m_object_svc_handler_object を名乗ることは拒否する。
   if (request.callee_kind == (uint32_t)object_kind::KERNEL_OBJECT ||
@@ -234,7 +236,7 @@ SHIZUKU_HOT kernel_error KERNEL::enter_call(KERNEL::THREAD &thread, KERNEL::CONT
   auto &entry = thread.ledger[thread.call_stack.depth - 1];
   entry = {request.callee_object, request.parent_handler_object,
            request.parent_handler_entry, (uint8_t)request.callee_kind,
-           LEDGER_CALL, (uint16_t)unwind_floor};
+           via, (uint16_t)unwind_floor};
   thread.call_stack.identity[thread.call_stack.call_count] = {
       thread.call_stack.caller_object, thread.call_stack.caller_generation};
   thread.call_stack.caller_object = thread.call_stack.call_count == 0
@@ -262,7 +264,7 @@ kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
 #if defined(SHIZUKU_DEEP_DIAG)
   shizuku_push_diag_kind = 1; // do_call 経由の push
 #endif
-  const kernel_error error = enter_call(thread, context, frame, request);
+  const kernel_error error = enter_call(thread, context, frame, request, LEDGER_CALL);
   if (error != kernel_error::OK)
     return error;
   // 戻り口は常にカーネルの 1 本。撃つ svc は同じでも、そこから出たときの**種別**で
@@ -273,6 +275,41 @@ kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   ARCH::set_priv(*context, (request.protection & PROTECTION_UNPRIVILEGED) == 0);
   ARCH::set_region_window(*context, request.region_base, request.region_limit);
   return kernel_error::OK;
+}
+
+// 方法記述子の直接 call の戻り。呼び先の return stub が撃つ RETURN (marker 付き) のうち、
+// 台帳の最上段が LEDGER_DESCRIPTOR_CALL のものだけを、同一スレッド内で caller へ戻す。
+// 従来経路は「dispatch 段を 1 枚積んで handler を再入させ、handler が RETURN を撃つ」だったが、
+// handler の EXIT_METHOD は引数を転送するだけ (権限・世代の検査なし、exit_method を経由して
+// return_to_depth が RETURN を撃つ) なので、その再入と dispatch 段を省いても状態は同じになる。
+// 戻り先の検証は従来と同じ validate_return_depth で行い、通らなければ false で従来経路へ任せる。
+// 親ハンドラが専用ハンドラ (root 以外) の段も従来経路へ任せる。専用ハンドラは子の戻りを
+// 観測しうるので、そこを省くと意味が変わるため。
+// 復元は call_frame_pop が行う (文脈・深さ・identity・region window・権限を push 時の値に戻す)。
+template <>
+SHIZUKU_HOT bool KERNEL::try_descriptor_return(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
+                                               KERNEL::FRAME **frame) {
+  const uint32_t depth = thread.call_stack.depth;
+  if (depth == 0)
+    return false;
+  const auto &top = thread.ledger_top();
+  // 呼び先が KERNEL_OBJECT の段は、この経路の対象ではない (KOBJ の戻りは primitive が解釈する)。
+  if (top.via != LEDGER_DESCRIPTOR_CALL || top.kind == (uint8_t)object_kind::KERNEL_OBJECT)
+    return false;
+  if (top.handler_object != m_object_svc_handler_object)
+    return false;
+  // 戻り先は descriptor の段の 1 つ外 (depth - 1)。従来の return stub と同じ式で求める。
+  const return_stub_request stub = resolve_return_stub(depth);
+  if (validate_return_depth(depth, top.unwind_floor, stub.target_depth, stub.count) !=
+      kernel_error::OK)
+    return false;
+  // 復元で作業フレームが差し替わるので、戻り値はその前に読んでおく。
+  const uintptr_t value = ARCH::arg(**frame, 2);
+  const uintptr_t error = ARCH::arg(**frame, 3);
+  if (!call_frame_pop(thread, context, frame))
+    return false;
+  ARCH::set_result(**frame, error, value);
+  return true;
 }
 
 template <typename C>
@@ -479,7 +516,8 @@ template <> SHIZUKU_HOT void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
 #if defined(SHIZUKU_DEEP_DIAG)
           shizuku_push_diag_kind = 3; // CALL_METHOD_DESCRIPTOR 経路 (riscv のみ)
 #endif
-          const kernel_error entered = enter_call(thread, context, &frame, request);
+          const kernel_error entered = enter_call(thread, context, &frame, request,
+                                                  LEDGER_DESCRIPTOR_CALL);
           if (entered != kernel_error::OK) {
             ARCH::set_result(*frame, (uintptr_t)(entered == kernel_error::NO_STACK
                                                      ? object_error::NO_STACK
@@ -505,6 +543,13 @@ template <> SHIZUKU_HOT void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
       }
     }
   }
+
+  // 方法記述子の直接 call の戻り (呼び先の return stub)。handler 再入を省いて caller へ直接戻す。
+  // 条件外 (従来の戻り・KOBJ の戻り・検証失敗) は false で、下の通常経路へ落ちる。
+  if (ARCH::arg(*frame, 0) == (uintptr_t)primitive::RETURN &&
+      ARCH::arg(*frame, 4) == RETURN_STUB_MARKER &&
+      try_descriptor_return(thread, context, &frame))
+    return;
 
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(412);
