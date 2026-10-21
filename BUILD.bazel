@@ -4,7 +4,7 @@
 #  実行ファイルを作るのは //firmware だけ。カーネル / カーネルオブジェクト /
 #  自己テストはそれぞれ別のライブラリで、「どれを繋いで何を走らせるか」を決めるのは
 #  合成 (firmware/main.cpp) の仕事。XNO 側は同じ 3 つを引いて**自分の合成**を書く。
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 # オブジェクト番号の生成。★**CMake とまったく同じスクリプトを呼ぶ** —
 # 番号を振る規則を 2 つ持つと、片方だけ直して番号がずれる。名前の一覧も
@@ -73,6 +73,30 @@ cc_library(
     hdrs = [":arch_internal_header_files"],
     includes = ["internal_headers"],
     visibility = ["//visibility:public"],
+)
+
+# Host unit test for the real dispatcher implementation. Compile the two
+# implementation units separately and force the same C6 test config into each.
+cc_test(
+    name = "dispatcher_v1_test",
+    srcs = [
+        "source/kernel/dispatch.cpp",
+        "source/kernel/thread.cpp",
+        "source/selftest/test_dispatcher_v1.cpp",
+        "source/selftest/test_dispatcher_v1_config.hpp",
+    ],
+    copts = [
+        "-std=c++20",
+        "-include",
+        "source/selftest/test_dispatcher_v1_config.hpp",
+    ],
+    local_defines = ["SHIZUKU_C6_SKELETON_PERMITTED=1"],
+    deps = [
+        ":internal_headers",
+        "//boards/esp32_c6:headers",
+        "//chips/esp32_c6:headers",
+        "//configs:config",
+    ],
 )
 
 # カーネル本体のソース。//:kernel と //:shizuku_kernel (ESP32-C6 の .a) で共有する。

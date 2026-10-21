@@ -17,12 +17,6 @@
 //       handler を再入させず caller へ直接戻ること。通常 CALL の戻りと検証失敗は従来経路のまま。
 
 #define SHIZUKU_C6_SKELETON_PERMITTED 1
-#include "chips/esp32_c6/chip.hpp"
-#include "chips/esp32_c6/rv32_c6.hpp"
-#include "boards/esp32_c6/esp32_c6.hpp"
-#include "shizuku/templates/cpu_manager.hpp"
-#include "shizuku/templates/kernel.hpp"
-#include "shizuku/templates/kernel_object.hpp"
 #include "shizuku/svc_attributes.hpp"
 #include <cassert>
 #include <cstdio>
@@ -30,15 +24,6 @@
 #include <cstdarg>
 
 namespace shizuku {
-using ARCH = archs::rv32_c6;
-using CHIP = chips::esp32_c6::chip;
-using BOARD = boards::esp32_c6;
-using CPU_MANAGER = templates::cpu_manager<ARCH, CHIP, BOARD, 1>;
-struct test_memory_manager {};
-using MEMORY_MANAGER = test_memory_manager;
-using KERNEL = templates::kernel<CPU_MANAGER, MEMORY_MANAGER>;
-using KERNEL_OBJECT = templates::kernel_object<KERNEL, 64, 16, 32, 32>;
-
 KERNEL kernel_instance;
 }
 
@@ -72,9 +57,6 @@ template <>
 bool plic_vector_mode::faulted_in_thread_mode<shizuku::archs::rv32_c6::context_t>(
     const shizuku::archs::rv32_c6::context_t &) { return true; }
 }
-
-#include "source/kernel/thread.cpp"
-#include "source/kernel/dispatch.cpp"
 
 using namespace shizuku;
 
@@ -362,7 +344,8 @@ static void run_dispatcher_tests() {
     callee->a4 = RETURN_STUB_MARKER;
     ctx->sp = callee;
   };
-  auto *callee = reinterpret_cast<ARCH::exception_frame_t *>(simulated_stack + 1024);
+  // Keep enough lower-stack room for the fallback dispatch frame in 6b-6d.
+  auto *callee = frame - 2;
 
   // 6a. descriptor 段の戻りは caller へ直接戻る。dispatch 段は積まれず、戻り値は caller の a0/a1 に載る。
   arm_frame(KERNEL::LEDGER_DESCRIPTOR_CALL, 0, callee);
