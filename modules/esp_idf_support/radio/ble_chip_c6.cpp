@@ -55,6 +55,35 @@ volatile uint32_t shizuku_c6_ble_timer_diag[22];
 // RUN_FOR completions, last RUN_FOR result (0/1)}.
 __attribute__((used, aligned(4), section(".noinit")))
 volatile uint32_t shizuku_c6_ble_exec_diag[39];
+// Raw syscall evidence alongside C6EX: [0..2] magic/version/orphan RUN_FOR
+// count; eight records [object ID, kernel thread ID returned by SPAWN,
+// RUN_FOR a0 error, RUN_FOR a1 grant_end/value, RUN_FOR return count].
+__attribute__((used, aligned(4), section(".noinit")))
+volatile uint32_t shizuku_c6_ble_grant_diag[43];
+// Minimal timestamp timeline for Form (2) stop diagnosis (safe store only):
+// [0..1] magic "C6LT"/version, [2..3] src4 entry/return us, [4..5] src7 entry/return us,
+// [6..7] ble_ll attempt/complete us, [8..9] nimble_host attempt/complete us,
+// [10..11] queue_send us/handle, [12..13] queue_recv us/handle, [14..15] reserved.
+__attribute__((used, aligned(4), section(".noinit")))
+volatile uint32_t shizuku_c6_ble_timeline_diag[16];
+}
+
+namespace {
+bool grant_diag_initialized = false;
+void ensure_grant_diag_initialized() {
+  if (grant_diag_initialized) return;
+  shizuku_c6_ble_grant_diag[0] = 0u;
+  shizuku_c6_ble_grant_diag[1] = 1u;
+  shizuku_c6_ble_grant_diag[2] = 0u;
+  for (size_t slot = 0; slot < 8; ++slot) {
+    const size_t base = 3u + slot * 5u;
+    for (size_t word = 0; word < 4u; ++word)
+      shizuku_c6_ble_grant_diag[base + word] = UINT32_MAX;
+    shizuku_c6_ble_grant_diag[base + 4u] = 0u;
+  }
+  shizuku_c6_ble_grant_diag[0] = 0x52473643u; // "C6GR"
+  grant_diag_initialized = true;
+}
 }
 
 namespace shizuku::esp_idf_support::ble_chip {
@@ -102,6 +131,10 @@ int prepare_radio() {
     shizuku_c6_ble_exec_diag[base + 2u] = 0u;
     shizuku_c6_ble_exec_diag[base + 3u] = UINT32_MAX;
   }
+  ensure_grant_diag_initialized();
+  shizuku_c6_ble_timeline_diag[0] = 0x544C3643u; // "C6LT"
+  shizuku_c6_ble_timeline_diag[1] = 1u;
+  for (size_t i = 2; i < 16; ++i) shizuku_c6_ble_timeline_diag[i] = 0u;
   for (size_t i = 15; i < 37; ++i) diag[i] = UINT32_MAX;
   gpio_config_t config{};
   config.pin_bit_mask = (1ULL << GPIO_NUM_3) | (1ULL << GPIO_NUM_14);
@@ -222,9 +255,11 @@ extern "C" void shizuku_esp_ble_note_irq_handler_boundary(uint32_t source,
   if (source == 4u) {
     const size_t index = event == 0u ? 2u : 3u;
     ::shizuku_c6_ble_exec_diag[index] += 1u;
+    ::shizuku_c6_ble_timeline_diag[index] = static_cast<uint32_t>(shizuku::boards::esp32_c6::time_us());
   } else if (source == 7u) {
     const size_t index = event == 0u ? 4u : 5u;
     ::shizuku_c6_ble_exec_diag[index] += 1u;
+    ::shizuku_c6_ble_timeline_diag[index] = static_cast<uint32_t>(shizuku::boards::esp32_c6::time_us());
   }
 }
 
@@ -236,6 +271,15 @@ extern "C" void shizuku_esp_ble_note_compat_progress(uint32_t event,
     return;
   }
   if (event != 1u && event != 2u) return;
+  // Bounded safe timestamp for ble_ll (task 2) and nimble_host (task 3).
+  // Exclude task 1 (esp_timer) from systimer read to avoid 27 kHz overhead.
+  if (task_id == 2u) {
+    const size_t time_idx = event == 1u ? 6u : 7u;
+    ::shizuku_c6_ble_timeline_diag[time_idx] = static_cast<uint32_t>(shizuku::boards::esp32_c6::time_us());
+  } else if (task_id == 3u) {
+    const size_t time_idx = event == 1u ? 8u : 9u;
+    ::shizuku_c6_ble_timeline_diag[time_idx] = static_cast<uint32_t>(shizuku::boards::esp32_c6::time_us());
+  }
   size_t slot = 8u;
   for (size_t i = 0; i < 8u; ++i) {
     const size_t base = 7u + i * 4u;
@@ -250,4 +294,51 @@ extern "C" void shizuku_esp_ble_note_compat_progress(uint32_t event,
     ::shizuku_c6_ble_exec_diag[base + 2u] += 1u;
     ::shizuku_c6_ble_exec_diag[base + 3u] = result;
   }
+}
+
+namespace {
+size_t grant_diag_object_slot(uint32_t object_id) {
+  size_t free_slot = 8u;
+  for (size_t slot = 0; slot < 8u; ++slot) {
+    const size_t base = 3u + slot * 5u;
+    if (::shizuku_c6_ble_grant_diag[base] == object_id) return slot;
+    if (free_slot == 8u && ::shizuku_c6_ble_grant_diag[base] == UINT32_MAX)
+      free_slot = slot;
+  }
+  if (free_slot < 8u)
+    ::shizuku_c6_ble_grant_diag[3u + free_slot * 5u] = object_id;
+  return free_slot;
+}
+size_t grant_diag_thread_slot(uint32_t thread_id) {
+  for (size_t slot = 0; slot < 8u; ++slot) {
+    const size_t base = 3u + slot * 5u;
+    if (::shizuku_c6_ble_grant_diag[base] != UINT32_MAX &&
+        ::shizuku_c6_ble_grant_diag[base + 1u] == thread_id)
+      return slot;
+  }
+  return 8u;
+}
+}
+
+extern "C" void shizuku_esp_ble_note_plain_spawn(uint32_t object_id,
+                                                  uint32_t thread_id) {
+  ensure_grant_diag_initialized();
+  const size_t slot = grant_diag_object_slot(object_id);
+  if (slot < 8u)
+    ::shizuku_c6_ble_grant_diag[4u + slot * 5u] = thread_id;
+}
+
+extern "C" void shizuku_esp_ble_note_run_for_result(uint32_t task_id,
+                                                      uint32_t a0_error,
+                                                      uint32_t a1_value) {
+  ensure_grant_diag_initialized();
+  const size_t slot = grant_diag_thread_slot(task_id);
+  if (slot >= 8u) {
+    ::shizuku_c6_ble_grant_diag[2] += 1u;
+    return;
+  }
+  const size_t base = 3u + slot * 5u;
+  ::shizuku_c6_ble_grant_diag[base + 2u] = a0_error;
+  ::shizuku_c6_ble_grant_diag[base + 3u] = a1_value;
+  ::shizuku_c6_ble_grant_diag[base + 4u] += 1u;
 }

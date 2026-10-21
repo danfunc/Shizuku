@@ -34,6 +34,9 @@
 extern "C" BaseType_t shizuku_freertos_compat_set_ble_scheduler_boost(
     uint32_t task_id, uint32_t enabled, uint32_t priority_boost,
     uint32_t idle_poll_us);
+#if defined(SHIZUKU_ESP32_C6)
+extern "C" void shizuku_c6_mark_boot_phase(uint32_t phase);
+#endif
 
 namespace {
 constexpr uint32_t kHeapRegionDiagCapacity = 16;
@@ -393,7 +396,17 @@ constexpr uint16_t kShizukuGattServiceUuid = 0xFFF0;
 constexpr uint16_t kShizukuGattBuildVersionUuid = 0xFFF1;
 constexpr uint16_t kShizukuGattThroughputUuid = 0xFFF2;
 constexpr size_t kMaxNotifyValueLength = 514; // ATT MTU 517 minus opcode and handle.
+#if defined(SHIZUKU_ESP32_C6)
+#ifndef SHIZUKU_BLE_COMPAT_GRANT_CYCLES
+#define SHIZUKU_BLE_COMPAT_GRANT_CYCLES 1600
+#endif
+static_assert(SHIZUKU_BLE_COMPAT_GRANT_CYCLES > 0 &&
+              SHIZUKU_BLE_COMPAT_GRANT_CYCLES <= UINT32_MAX,
+              "C6 BLE grant must fit in a positive uint32_t cycle count");
+constexpr uint32_t kBleCompatGrantCycles = SHIZUKU_BLE_COMPAT_GRANT_CYCLES;
+#else
 constexpr uint32_t kBleCompatGrantCycles = 1600u; // 100 us at the C5/C6 16 MHz timer rate.
+#endif
 // Regression probes are opt-in so the stage-8 baseline has no connection-only
 // update request or pend-switch sampling overhead.
 #ifndef SHIZUKU_ESP_BLE_ENABLE_CONN_PARAM_UPDATE
@@ -934,6 +947,9 @@ int shizuku_esp_ble_register_gatt(void) {
 }
 
 int shizuku_esp_ble_start_advertising(void) {
+#if defined(SHIZUKU_ESP32_C6)
+    shizuku_c6_mark_boot_phase(0xC613u);
+#endif
     uint8_t own_addr_type = 0;
     int rc = ble_hs_id_infer_auto(0, &own_addr_type);
     shizuku_esp_ble_diag.adv_addr_infer_rc = rc;
@@ -963,6 +979,9 @@ int shizuku_esp_ble_start_advertising(void) {
     shizuku_esp_ble_diag.adv_start_rc = rc;
     if (rc == 0) {
         shizuku_esp_ble_set_stage(8);
+#if defined(SHIZUKU_ESP32_C6)
+        shizuku_c6_mark_boot_phase(0xC614u);
+#endif
         shizuku::esp_idf_support::ble_chip::capture_radio_state(7u);
     }
     return rc;
@@ -1397,8 +1416,15 @@ void shizuku_esp_ble_note_queue_shape(uint32_t capacity, uint32_t item_size) {
         requested > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(requested);
 }
 
+extern "C" volatile uint32_t shizuku_c6_ble_timeline_diag[16] __attribute__((weak));
+
 void shizuku_esp_ble_note_queue_send(uint32_t handle, uint32_t item_size,
                                     uint32_t first_word) {
+    if (shizuku_c6_ble_timeline_diag) {
+        shizuku_c6_ble_timeline_diag[10] = static_cast<uint32_t>(
+            shizuku::esp_idf_support::ble_chip::time_us());
+        shizuku_c6_ble_timeline_diag[11] = handle;
+    }
     shizuku_esp_ble_diag.queue_send_count = shizuku_esp_ble_diag.queue_send_count + 1u;
     shizuku_esp_ble_diag.queue_send_last_handle = handle;
     shizuku_esp_ble_diag.queue_send_last_item_size = item_size;
@@ -1416,6 +1442,11 @@ void shizuku_esp_ble_note_queue_send(uint32_t handle, uint32_t item_size,
 
 void shizuku_esp_ble_note_queue_receive(uint32_t handle, uint32_t item_size,
                                        uint32_t first_word) {
+    if (shizuku_c6_ble_timeline_diag) {
+        shizuku_c6_ble_timeline_diag[12] = static_cast<uint32_t>(
+            shizuku::esp_idf_support::ble_chip::time_us());
+        shizuku_c6_ble_timeline_diag[13] = handle;
+    }
     shizuku_esp_ble_diag.queue_receive_count = shizuku_esp_ble_diag.queue_receive_count + 1u;
     shizuku_esp_ble_diag.queue_receive_last_handle = handle;
     shizuku_esp_ble_diag.queue_receive_last_item_size = item_size;
@@ -1895,6 +1926,9 @@ extern "C" void shizuku_esp_ble_post_core_ctors(void) {
 
 extern "C" [[noreturn]] void shizuku_esp_ble_stage1_start(void)
 {
+#if defined(SHIZUKU_ESP32_C6)
+    shizuku_c6_mark_boot_phase(0xC611u);
+#endif
     // CORE callbacks and libc constructors run before the Shizuku task layer
     // is ready. Keep libc locks as pre-scheduler no-ops until SECONDARY init.
     shizuku_freertos_compat_set_scheduler_state(taskSCHEDULER_RUNNING);
