@@ -8,8 +8,8 @@
 
 // ARMv8-M mainline (Cortex-M33 / RP2350) の arch バックエンド。
 // 文脈退避・復帰・戻り口・スレッドモード移行の実体は armv8m_ctx.S。
-// レイアウトと退避規約は参照実装 (latest_ver_from_flight_robocon の
-// svc_asm_handler.S / kernel.hpp context_t) の実機検証済みの形をそのまま移植した。
+// レイアウトと退避規約は旧参照実装 (svc_asm_handler.S / kernel.hpp context_t) の
+// 実機検証済みの形をそのまま移植した。
 
 extern "C" {
 // armv8m_ctx.S の例外入口。board 層がベクタへ登録する。

@@ -1,7 +1,7 @@
 // ===========================================================================
 //  BLE UART (Nordic UART Service) — Shizuku オブジェクト版 (v1: 最小構成)
 // ===========================================================================
-//  移植元: flight_robocon_telemetory_sender/BLE_UART_DRIVER.cpp (旧 CMake
+//  移植元: 旧参照実装の BLE_UART_DRIVER.cpp (旧 CMake
 //  ビルド)。 v1 スコープ: advertise / pairing / notify・write / CI 強制 (15ms
 //  固定)。 ★ペアリング方式は CDC の実行時コマンドで切替 (既定 = NC
 //  必須、事故防止)。

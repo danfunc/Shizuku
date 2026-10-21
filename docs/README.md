@@ -7,15 +7,15 @@
 
 > Shizuku のリファクタリングと移植対応を行う。
 > **コード設計・書き方は現行リポジトリ (このリポジトリのルート以下) の組み方をベース**とし、
-> **機能面・設計面は `latest_ver_from_flight_robocon/` に保存されている資料を正しいもの**とする。
-> latest 以下には docs の形で設計方針が記載され、コード中にもコメントがあるので適宜参照する。
+> **機能面・設計面は `docs/design/kernel_v3.typ` と `docs/design/kernel_v3_arch.typ` に書かれた V3 カーネル設計を正しいもの**とする。
+> 旧 V2 カーネルの記録は `docs/record/kernel_v2_record.typ` にある。
 
 つまり:
-- **何を作るか** = `latest_ver_from_flight_robocon/flight_robocon_telemetory_sender/docs/SHIZUKU_DESIGN.md`
-  (以下 **DESIGN**) が規範。移し方は同 `SHIZUKU_REDESIGN_PORTABILITY.md` (以下 **PORT**) が規範
+- **何を作るか** = `docs/design/kernel_v3.typ`
+  (以下 **DESIGN**) が規範。ISA 展開と非依存核モデルは `docs/design/kernel_v3_arch.typ` (以下 **ARCH**) を参照
 - **どう書くか** = 現行リポジトリの骨格 (template + concepts、configs/ による型注入、
   modules/ による差し替え、`result<T>`、CMake 構成) を踏襲する
-- 参照実装 (`latest_.../kernel.cpp` ほか) は「実機検証済みの機構の宝庫」だが、
+- 旧参照実装 (削除済み) は「実機検証済みの機構の宝庫」だが、
   **設計としてはそのまま移植しない** (DESIGN §12 が明示する欠陥を含む)。
   機構 (フレーム幾何・CAS・優先度設計) は移植する。カーネルとオブジェクトの境界は
   D58 (2026-09-28) に従い、再登録によるホットスワップを要件として設計する
