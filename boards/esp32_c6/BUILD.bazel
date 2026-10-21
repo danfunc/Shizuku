@@ -8,6 +8,7 @@ exports_files([
     "esp32_c6.hpp",
     "board_esp32_c6.cpp",
     "board_esp32_c6_stubs.cpp",
+    "heartbeat_logic.hpp",
 ])
 
 cc_library(
@@ -18,4 +19,11 @@ cc_library(
         "//:internal_headers",
         "//chips/esp32_c6:headers",
     ],
+)
+
+# ユーザー LED 点滅の判定 (レジスタに触れない純粋ロジック)。ホストテストと board の両方から使う。
+cc_library(
+    name = "heartbeat_logic",
+    hdrs = ["heartbeat_logic.hpp"],
+    deps = ["//chips/esp32_c6:headers"],
 )

@@ -136,3 +136,11 @@ cc_test(
         "//chips/esp32_c6:headers",
     ],
 )
+
+# ユーザー LED 点滅の判定 (boards/esp32_c6/heartbeat_logic.hpp) の単体試験。レジスタには触れない。
+cc_test(
+    name = "heartbeat_logic_test",
+    srcs = ["heartbeat_test.cpp"],
+    copts = ["-std=c++20"],
+    deps = ["//boards/esp32_c6:heartbeat_logic"],
+)

@@ -446,5 +446,6 @@ cc_library(
         "//arch/riscv:pmp",
         "//chips/esp32_c6:headers",
         "//boards/esp32_c6:headers",
+        "//boards/esp32_c6:heartbeat_logic",
     ],
 )
