@@ -14,7 +14,7 @@
 #include "shizuku/object_ids.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/selftest.hpp"
-#if defined(SHIZUKU_DEEP_DIAG)
+#if defined(SHIZUKU_DEEP_DIAG) && defined(SHIZUKU_RP2040)
 #include "pico/time.h"
 #endif
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
@@ -221,6 +221,8 @@ uint32_t g_deep_max = 0;
 }
 extern "C" volatile uint32_t shizuku_push_diag[6];
 extern "C" volatile uint32_t shizuku_push_diag_n;
+extern "C" volatile uint32_t shizuku_push_diag_kind;
+extern "C" volatile uint32_t shizuku_push_diag_reject_kind;
 namespace {
 #endif
 
@@ -372,10 +374,18 @@ void call_ladder() {
           (unsigned long)kernel_instance.current_depth(), 0);
     CL_PROG(809);
 #if defined(SHIZUKU_DEEP_DIAG)
-    for (int i = 0; i < 6; ++i) { busy_wait_us(200000); BOARD::diag_printf("[DD0] wait %d\n", i); }
+    // [DD0] の 200ms 待ちは出力を流し切るための間と推定 (コードに明記なし)。
+    // C6 の diag_printf は診断リングに積むだけなので、待ちは RP2040 のみ行う。
+    for (int i = 0; i < 6; ++i) {
+#if defined(SHIZUKU_RP2040)
+      busy_wait_us(200000);
+#endif
+      BOARD::diag_printf("[DD0] wait %d\n", i);
+    }
     BOARD::diag_printf("[DD1] err=%lu max=%lu n=%lu\n",(unsigned long)result.error,(unsigned long)g_deep_max,(unsigned long)shizuku_push_diag_n);
     BOARD::diag_printf("[DD2] callee=%08lx limit=%08lx\n",(unsigned long)shizuku_push_diag[0],(unsigned long)shizuku_push_diag[1]);
     BOARD::diag_printf("[DD3] reserve=%lu hdr=%lu depth=%lu\n",(unsigned long)shizuku_push_diag[2],(unsigned long)shizuku_push_diag[3],(unsigned long)shizuku_push_diag[4]);
+    BOARD::diag_printf("[DD4] push_kind=%lu reject_kind=%lx (1=do_call 2=svc_dispatch 3=descriptor, 0x100=ledger full)\n",(unsigned long)shizuku_push_diag_kind,(unsigned long)shizuku_push_diag_reject_kind);
 #endif
     BOARD::diag_printf("[SELFTEST] max nesting before NO_STACK: %lu\n",
                        (unsigned long)g_deep_max);

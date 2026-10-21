@@ -94,7 +94,7 @@ template <> uintptr_t KERNEL::caller_object(uint32_t thread_id) const {
 
 
 #if defined(SHIZUKU_DEEP_DIAG)
-extern "C" { volatile uint32_t shizuku_push_diag[6]; volatile uint32_t shizuku_push_diag_n; }
+extern "C" { volatile uint32_t shizuku_push_diag[6]; volatile uint32_t shizuku_push_diag_n; volatile uint32_t shizuku_push_diag_kind; volatile uint32_t shizuku_push_diag_reject_kind; }
 #endif
 template <>
 bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
@@ -109,8 +109,13 @@ bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   const uintptr_t snapshot = caller_stack - total; // 呼び先の復帰 SP / stack arg area
   const uintptr_t header_address = snapshot + stack_arg_bytes;
   const uintptr_t callee_frame = snapshot - frame_bytes;
-  if (thread.ledger == nullptr || thread.call_stack.depth >= thread.ledger_capacity)
+  if (thread.ledger == nullptr || thread.call_stack.depth >= thread.ledger_capacity) {
+#if defined(SHIZUKU_DEEP_DIAG)
+    // 台帳超過は diag[0..5] と _n に触れない (意味を変えないため)。経路だけ残す。
+    shizuku_push_diag_reject_kind = 0x100 | shizuku_push_diag_kind;
+#endif
     return false; // 台帳容量超過は呼び出し側が NO_STACK にする
+  }
 
   // スタック下限の手前で止める。ここで false を返せば呼び出し側がエラーを返すので、
   // スタック不足が無音ロックアップにならない (I-9)。
@@ -139,6 +144,7 @@ bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
     shizuku_push_diag[0] = (uint32_t)callee_frame; shizuku_push_diag[1] = (uint32_t)limit;
     shizuku_push_diag[2] = (uint32_t)reserve; shizuku_push_diag[3] = (uint32_t)sizeof(call_frame_header);
     shizuku_push_diag[4] = (uint32_t)thread.call_stack.depth; shizuku_push_diag[5] = ++shizuku_push_diag_n;
+    shizuku_push_diag_reject_kind = shizuku_push_diag_kind;
 #endif
     return false;
   }
@@ -213,6 +219,9 @@ kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
     return kernel_error::NO_STACK;
 #endif
   const uint32_t unwind_floor = thread.call_stack.depth;
+#if defined(SHIZUKU_DEEP_DIAG)
+  shizuku_push_diag_kind = 1; // do_call 経由の push
+#endif
   if (unwind_floor > UINT16_MAX || !call_frame_push(thread, context, frame))
     return kernel_error::NO_STACK;
   auto &entry = thread.ledger[thread.call_stack.depth - 1];
@@ -424,6 +433,9 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
           const uint32_t unwind_floor = thread.call_stack.depth
                                             ? thread.ledger_top().unwind_floor
                                             : 0;
+#if defined(SHIZUKU_DEEP_DIAG)
+          shizuku_push_diag_kind = 3; // CALL_METHOD_DESCRIPTOR 経路 (riscv のみ)
+#endif
           if (unwind_floor > UINT16_MAX ||
               !call_frame_push(thread, context, &frame)) {
             ARCH::set_result(*frame, (uintptr_t)object_error::NO_STACK, 0);
@@ -458,6 +470,9 @@ template <> void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
   const uint32_t unwind_floor = thread.call_stack.depth
                                     ? thread.ledger_top().unwind_floor
                                     : 0;
+#if defined(SHIZUKU_DEEP_DIAG)
+  shizuku_push_diag_kind = 2; // svc_dispatch の通常 CALL 経路
+#endif
   if (unwind_floor > UINT16_MAX ||
       !call_frame_push(thread, context, &frame)) {
     // ★この拒否は object_api の呼出しへの答え。object 版 NO_STACK で返し、呼出し元が
