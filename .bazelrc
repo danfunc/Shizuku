@@ -81,6 +81,10 @@ build:esp32c6 --copt=-DSHIZUKU_C6_SKELETON_PERMITTED=1
 build:esp32c6 --action_env=IDF_PATH
 build:esp32c6 --action_env=IDF_TOOLS_PATH
 build:esp32c6 --action_env=PATH
+# カーネル (カーネル本体・カーネルオブジェクト・trap 入口) だけ -O2。オブジェクト側・selftest・board・
+# ESP-IDF 側は -Og のまま (上の `--copt=-Og` の後に付くので後勝ち)。ARM (RP) は変えない。
+# 戻すときは `--per_file_copt=^source/(kernel|kernel_object|cpu_manager)/@-Og` を足す。
+build:esp32c6 --per_file_copt=^source/(kernel|kernel_object|cpu_manager)/,^chips/esp32_c6/trap\.cpp$@-O2
 
 # ---------------------------------------------------------------------------
 # ESP32-C5 (RV32, CLIC) — C6 と同じ rv32_esp ツールチェーン / platform。board だけが違う。
@@ -93,6 +97,8 @@ build:esp32c5 --copt=-DSHIZUKU_C5_SKELETON_PERMITTED=1
 build:esp32c5 --action_env=IDF_PATH
 build:esp32c5 --action_env=IDF_TOOLS_PATH
 build:esp32c5 --action_env=PATH
+# C6 と同じ: カーネルだけ -O2 (理由と戻し方は esp32c6 の節)。
+build:esp32c5 --per_file_copt=^source/(kernel|kernel_object|cpu_manager)/,^chips/esp32_c5/trap\.cpp$@-O2
 
 # Separate C5 BLE controller-init image. The ordinary esp32c5 profile and
 # selftest firmware remain unchanged.
