@@ -90,8 +90,8 @@ public:
   };
   using call_ledger_entry = typename THREAD::call_ledger_entry;
   // LEDGER_DESCRIPTOR_CALL は方法記述子の直接 call (CALL_METHOD_DESCRIPTOR) の段。
-  // 識別と戻りの扱い (identity の復元) は LEDGER_CALL と同じで、戻りだけ同一スレッド内の
-  // 高速出口 (try_descriptor_return) に載せる。
+  // 識別と戻りの扱い (identity の復元) は LEDGER_CALL と同じ。戻りも同じく EXIT_METHOD
+  // (svc_dispatch の trap 内処理) が解釈する。
   static constexpr uint8_t LEDGER_CALL = 1, LEDGER_DISPATCH = 2,
                            LEDGER_DESCRIPTOR_CALL = 3;
   void set_thread_ledger(uint32_t id, call_ledger_entry *memory,
@@ -293,9 +293,6 @@ private:
                           const call_request &request, uint8_t via);
   kernel_error do_call(THREAD &thread, CONTEXT *context, FRAME **frame,
                        const call_request &request);
-  // 方法記述子の直接 call の戻り (callee の return stub) を、handler 再入と dispatch 段を
-  // 省いて caller へ直接戻す。条件に合わなければ false を返し、従来経路へ任せる。
-  bool try_descriptor_return(THREAD &thread, CONTEXT *context, FRAME **frame);
 
   kernel_error do_switch(uint32_t target);
   kernel_error do_grant(uint32_t target, uint32_t cycles);

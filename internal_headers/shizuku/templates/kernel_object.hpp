@@ -9,6 +9,7 @@
 namespace shizuku {
 namespace selftest {
 struct compat_probe_access;
+struct dispatcher_test_access;
 }
 namespace templates {
 
@@ -237,14 +238,43 @@ public:
                      &m_objects[id].generation))
                : 0;
   }
-  // 呼び先 1 件ぶんの CALL 要求 (種別・親ハンドラ・保護・窓)。call_method と
+  // 呼び先 1 件ぶんの CALL 要求 (種別・親ハンドラ・保護・窓)。CALL_METHOD と
   // 方法記述子の直接 call が同じ引き方をするよう、ここでだけ作る。
   call_request callee_request(uintptr_t id, uintptr_t entry_pc) const;
+
+  // ---- trap 内 (svc_dispatch) で直接処理する API の部品 ----------------------
+  //  CALL_METHOD / SET_BUDGET は dispatch 段も kobj 再入も経由せず、カーネルの svc
+  //  ハンドラがここを直接読み書きする (D1 廃止済み: カーネルと kobj の密結合は許容)。
+  //  どちらも待たず・syscall を撃たず・ループしない。錠は取らない (kobj 経由だった
+  //  従来も取っていなかった。表の書き換えと競っても、古い値で 1 回呼ぶだけ)。
+
+  // (id, method) から呼び先の CALL 要求を O(1) で引く。OK 以外のとき request は触らない。
+  // 判定と順序は従来と同じ: BAD_OBJECT → BAD_METHOD → UNDECLARED_METHOD。
+  SHIZUKU_HOT object_error method_call_request(uintptr_t id, uintptr_t method,
+                                               call_request &request) const {
+    if (id >= OBJECT_COUNT_T || !m_objects[id].created)
+      return object_error::BAD_OBJECT;
+    if (method >= METHOD_COUNT_T)
+      return object_error::BAD_METHOD;
+    const method_t entry = m_objects[id].methods[method];
+    if (entry == nullptr)
+      return object_error::UNDECLARED_METHOD; // 未 export は panic ではなくエラー
+    request = callee_request(id, (uintptr_t)entry);
+    return object_error::OK;
+  }
+  // スケジューラが後でそのスレッドを選んだときに渡す量の既定値 [クロック]。範囲外は
+  // 従来どおり黙って何もしない。★権限検査は無い (誰でも任意スレッドの量を書ける。従来のまま)。
+  void set_budget(uintptr_t thread, uintptr_t cycles) {
+    if (thread < THREAD_COUNT_T)
+      m_budget[thread] = (uint32_t)cycles;
+  }
 
 private:
   // The compatibility probe inspects a suspended thread's private ledger
   // shape without exposing that inspection through the object API.
   friend struct ::shizuku::selftest::compat_probe_access;
+  // dispatcher の host 試験が、オブジェクト表とメソッド表を直接組み立てる。
+  friend struct ::shizuku::selftest::dispatcher_test_access;
 
   struct object_t {
     bool created;
@@ -368,7 +398,6 @@ private:
                          object_error &error);
   uintptr_t yield(object_error &error);
   uintptr_t sleep_us(uintptr_t microseconds, object_error &error);
-  uintptr_t run_for(uintptr_t thread, uintptr_t cycles, object_error &error);
   void exit_thread();
   uintptr_t kill_thread(uintptr_t thread, object_error &error);
   // そのオブジェクトのスレッドを走らせてよいコア (0 = どこでもよい)。
@@ -393,8 +422,6 @@ private:
                                 object_error &error);
   uintptr_t export_method(uintptr_t method, uintptr_t entry,
                           object_error &error);
-  uintptr_t call_method(uintptr_t id, uintptr_t method, uintptr_t argument,
-                        object_error &error);
   void exit_method(uintptr_t target_depth, uintptr_t value, uintptr_t error);
   // 専用ハンドラ (HANDLER) からの子オブジェクトのメソッド終了転送 (重大指摘 2)
   void forward_child_exit(uintptr_t target_depth, uintptr_t value,

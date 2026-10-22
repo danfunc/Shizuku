@@ -62,9 +62,6 @@ uintptr_t KERNEL_OBJECT::set_object_affinity(uintptr_t, uintptr_t,
                                              object_error &);
 template <>
 uintptr_t KERNEL_OBJECT::export_method(uintptr_t, uintptr_t, object_error &);
-template <>
-uintptr_t KERNEL_OBJECT::call_method(uintptr_t, uintptr_t, uintptr_t,
-                                     object_error &);
 template <> void KERNEL_OBJECT::exit_method(uintptr_t, uintptr_t, uintptr_t);
 template <> uintptr_t KERNEL_OBJECT::return_to_depth(uint32_t, uintptr_t,
                                                      uintptr_t);
@@ -75,8 +72,6 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t, uintptr_t, uintptr_t,
                                       object_error &);
 template <> uintptr_t KERNEL_OBJECT::yield(object_error &);
 template <> uintptr_t KERNEL_OBJECT::sleep_us(uintptr_t, object_error &);
-template <>
-uintptr_t KERNEL_OBJECT::run_for(uintptr_t, uintptr_t, object_error &);
 template <> void KERNEL_OBJECT::exit_thread();
 template <>
 uintptr_t KERNEL_OBJECT::kill_thread(uintptr_t thread, object_error &error);
@@ -727,45 +722,6 @@ template <> SHIZUKU_HOT call_request KERNEL_OBJECT::callee_request(uintptr_t id,
 }
 
 template <>
-uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
-                                     uintptr_t argument, object_error &error) {
-  if (id >= OBJECT_COUNT || !m_objects[id].created) {
-    error = object_error::BAD_OBJECT;
-    return 0;
-  }
-  if (method >= METHOD_COUNT) {
-    error = object_error::BAD_METHOD;
-    return 0;
-  }
-  const method_t entry = m_objects[id].methods[method];
-  if (entry == nullptr) {
-    // 未 export は panic ではなくエラー (呼び出し元は待って再試行できる)。
-    error = object_error::UNDECLARED_METHOD;
-    return 0;
-  }
-  if (kernel_instance.current_call_count() >= MAX_DEPTH) {
-    error = object_error::NO_STACK;
-    return 0;
-  }
-
-  call_request request = callee_request(id, (uintptr_t)entry);
-  request.args[0] = argument;
-
-  // CALL 段はカーネルが push する。失敗時は台帳に段が残らない。
-  const auto result =
-      ARCH::syscall((uintptr_t)primitive::CALL, (uintptr_t)&request);
-  // ★成功した場合、この syscall は呼び先が戻ってから返る。戻ってきた時点で
-  //   台帳は exit_method 側が既に戻している。
-  if (result.error != (uintptr_t)kernel_error::OK) {
-    error = result.error == (uintptr_t)kernel_error::NO_STACK
-                ? object_error::NO_STACK
-                : object_error::BAD_OBJECT;
-    return 0;
-  }
-  return result.value;
-}
-
-template <>
 void KERNEL_OBJECT::exit_method(uintptr_t target_depth, uintptr_t value,
                                 uintptr_t error) {
   if (target_depth == 0 && kernel_instance.current_call_count() == 0) {
@@ -1037,24 +993,6 @@ uintptr_t KERNEL_OBJECT::yield(object_error &error) {
     return 0;
   }
   return schedule(self) ? 1 : 0; // 誰も居なければ自分が続ける
-}
-
-template <>
-uintptr_t KERNEL_OBJECT::run_for(uintptr_t thread, uintptr_t cycles,
-                                 object_error &error) {
-  const auto result =
-      ARCH::syscall((uintptr_t)primitive::GRANT, thread, cycles);
-  if (result.error == (uintptr_t)kernel_error::GRANT_TOO_SMALL) {
-    // ★「相手が走れない」ではなく「こちらに配れる持ち分が無い」。区別しないと、
-    //   スケジューラが次の候補を延々と試して空回りする。
-    error = object_error::NO_TIME;
-    return 0;
-  }
-  if (result.error != (uintptr_t)kernel_error::OK) {
-    error = object_error::NOT_RUNNABLE;
-    return 0;
-  }
-  return result.value; // grant_end (0 = 期限切れ, 1 = 相手が返した)
 }
 
 // スレッドを終える。**このスレッドはもう走らない**ので、終える前に次の相手へ
@@ -1776,11 +1714,10 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
   case object_api::EXPORT_METHOD:
     value = export_method(a1, a2, error);
     break;
-  case object_api::CALL_METHOD:
-    value = call_method(a1, a2, a3, error);
-    break;
   case object_api::EXIT_METHOD:
     // a1 = absolute return depth, a2 = value, a3 = error.
+    // 通常の戻りは svc_dispatch が trap 内で直接処理する。ここへ来るのは、スレッドの
+    // 最外のメソッドが戻った場合 (d == 0 かつ呼出し段なし = スレッドの終わり) だけ。
     exit_method(a1, a2, a3);
     return 0;
   case object_api::FORWARD_CHILD_EXIT:
@@ -1798,9 +1735,6 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
     break;
   case object_api::YIELD:
     value = yield(error);
-    break;
-  case object_api::RUN_FOR:
-    value = run_for(a1, a2, error);
     break;
   case object_api::EXIT_THREAD:
     exit_thread();
@@ -1861,10 +1795,6 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
     break;
   case object_api::KILL_THREAD:
     value = kill_thread(a1, error);
-    break;
-  case object_api::SET_BUDGET:
-    if (a1 < THREAD_COUNT)
-      m_budget[a1] = (uint32_t)a2;
     break;
   default:
     // ★未知の番号は**ここの語彙**。黙って捨てず必ずエラーで返す
