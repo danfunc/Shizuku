@@ -45,5 +45,86 @@ template <auto F> inline uintptr_t entry_address() {
 #endif
 }
 
+// ---- caller 側 ------------------------------------------------------------
+//  ecall の呼び出し規約: カーネルが保つのは sp / pc / a0 (error) / a1 (value) だけで、ほかの
+//  レジスタは返ったときに 0 か callee の値になっていてよい。だから caller は、コンパイラ任せで
+//  済むものはクラバー宣言で (ra・s1–s11・t*・a2–a7)、コンパイラが「触らない」と決めている
+//  gp / tp と、フレームポインタに使われうる s0 は asm の中で自分のスタックへ退避・復元する。
+//  ★クラバーに s1–s11 を宣言すると、コンパイラは inline したこの箇所で本当に生きているものだけを
+//    関数の入口・出口で退避する (旧: カーネルが全部の s* を退避・復元していた)。
+//  ★gp は callee が自分のものへ入れ替えてよい (入口 stub)。ここで復元するのは caller 自身の値。
+//  ★スタックを一時的に 16 バイト使うが、asm の間はコンパイラの sp 相対アクセスは起きない
+//    (オペランドはすべてレジスタ)。
+struct call_result {
+  uintptr_t error;
+  uintptr_t value;
+};
+
+#if defined(__riscv)
+#define SHIZUKU_RV32_ABI_SAVE_RESTORE_CLOBBERS                                   \
+  "ra", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "s1", "s2", "s3", "s4", "s5", \
+      "s6", "s7", "s8", "s9", "s10", "s11", "memory"
+
+// a0 = 番号, a1..a4 = 引数。a5..a7 はカーネルに渡さず、返ったあと値が不定になるだけ。
+[[gnu::always_inline]] inline call_result ecall(uintptr_t number, uintptr_t a1,
+                                                uintptr_t a2, uintptr_t a3,
+                                                uintptr_t a4) {
+  register uintptr_t r_a0 asm("a0") = number;
+  register uintptr_t r_a1 asm("a1") = a1;
+  register uintptr_t r_a2 asm("a2") = a2;
+  register uintptr_t r_a3 asm("a3") = a3;
+  register uintptr_t r_a4 asm("a4") = a4;
+  register uintptr_t r_a5 asm("a5");
+  register uintptr_t r_a6 asm("a6");
+  register uintptr_t r_a7 asm("a7");
+  asm volatile(
+      "addi sp, sp, -16\n"
+      "sw gp, 0(sp)\n"
+      "sw tp, 4(sp)\n"
+      "sw s0, 8(sp)\n"
+      "ecall\n"
+      "lw gp, 0(sp)\n"
+      "lw tp, 4(sp)\n"
+      "lw s0, 8(sp)\n"
+      "addi sp, sp, 16\n"
+      : "+r"(r_a0), "+r"(r_a1), "+r"(r_a2), "+r"(r_a3), "+r"(r_a4),
+        "=r"(r_a5), "=r"(r_a6), "=r"(r_a7)
+      :
+      : SHIZUKU_RV32_ABI_SAVE_RESTORE_CLOBBERS);
+  return {r_a0, r_a1};
+}
+
+// a0 = 番号, a1..a7 = 引数 (CALL_METHOD_DESCRIPTOR は a2..a7 に 6 引数を載せる)。
+[[gnu::always_inline]] inline call_result ecall(uintptr_t number, uintptr_t a1,
+                                                uintptr_t a2, uintptr_t a3,
+                                                uintptr_t a4, uintptr_t a5,
+                                                uintptr_t a6, uintptr_t a7) {
+  register uintptr_t r_a0 asm("a0") = number;
+  register uintptr_t r_a1 asm("a1") = a1;
+  register uintptr_t r_a2 asm("a2") = a2;
+  register uintptr_t r_a3 asm("a3") = a3;
+  register uintptr_t r_a4 asm("a4") = a4;
+  register uintptr_t r_a5 asm("a5") = a5;
+  register uintptr_t r_a6 asm("a6") = a6;
+  register uintptr_t r_a7 asm("a7") = a7;
+  asm volatile(
+      "addi sp, sp, -16\n"
+      "sw gp, 0(sp)\n"
+      "sw tp, 4(sp)\n"
+      "sw s0, 8(sp)\n"
+      "ecall\n"
+      "lw gp, 0(sp)\n"
+      "lw tp, 4(sp)\n"
+      "lw s0, 8(sp)\n"
+      "addi sp, sp, 16\n"
+      : "+r"(r_a0), "+r"(r_a1), "+r"(r_a2), "+r"(r_a3), "+r"(r_a4),
+        "+r"(r_a5), "+r"(r_a6), "+r"(r_a7)
+      :
+      : SHIZUKU_RV32_ABI_SAVE_RESTORE_CLOBBERS);
+  return {r_a0, r_a1};
+}
+#undef SHIZUKU_RV32_ABI_SAVE_RESTORE_CLOBBERS
+#endif
+
 } // namespace shizuku::rv32_abi
 #endif // SHIZUKU_RV32_ABI_HPP

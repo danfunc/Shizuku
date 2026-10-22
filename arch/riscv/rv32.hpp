@@ -251,38 +251,21 @@ public:
   }
 
 #if defined(__riscv)
-  static syscall_result syscall(uintptr_t number, uintptr_t a1 = 0,
+  // caller 側 ABI converter (shizuku/rv32_abi.hpp): カーネルは sp / pc / a0 / a1 以外を
+  // 保証しない。callee-saved・ra・gp・tp の退避と復元は ecall の中 (クラバー + 明示退避)。
+  [[gnu::always_inline]] static syscall_result syscall(uintptr_t number, uintptr_t a1 = 0,
                                 uintptr_t a2 = 0, uintptr_t a3 = 0,
                                 uintptr_t a4 = 0) {
-    register uintptr_t r_a0 asm("a0") = number;
-    register uintptr_t r_a1 asm("a1") = a1;
-    register uintptr_t r_a2 asm("a2") = a2;
-    register uintptr_t r_a3 asm("a3") = a3;
-    register uintptr_t r_a4 asm("a4") = a4;
-    asm volatile("ecall"
-                 : "+r"(r_a0), "+r"(r_a1)
-                 : "r"(r_a2), "r"(r_a3), "r"(r_a4)
-                 : "memory");
-    return {r_a0, r_a1};
+    const auto result = rv32_abi::ecall(number, a1, a2, a3, a4);
+    return {result.error, result.value};
   }
 
-  static syscall_result syscall(uintptr_t number, uintptr_t a1,
+  [[gnu::always_inline]] static syscall_result syscall(uintptr_t number, uintptr_t a1,
                                 uintptr_t a2, uintptr_t a3,
                                 uintptr_t a4, uintptr_t a5,
                                 uintptr_t a6, uintptr_t a7) {
-    register uintptr_t r_a0 asm("a0") = number;
-    register uintptr_t r_a1 asm("a1") = a1;
-    register uintptr_t r_a2 asm("a2") = a2;
-    register uintptr_t r_a3 asm("a3") = a3;
-    register uintptr_t r_a4 asm("a4") = a4;
-    register uintptr_t r_a5 asm("a5") = a5;
-    register uintptr_t r_a6 asm("a6") = a6;
-    register uintptr_t r_a7 asm("a7") = a7;
-    asm volatile("ecall"
-                 : "+r"(r_a0), "+r"(r_a1)
-                 : "r"(r_a2), "r"(r_a3), "r"(r_a4), "r"(r_a5), "r"(r_a6), "r"(r_a7)
-                 : "memory");
-    return {r_a0, r_a1};
+    const auto result = rv32_abi::ecall(number, a1, a2, a3, a4, a5, a6, a7);
+    return {result.error, result.value};
   }
 #else
   // 非-RISC-V 環境でのホスト呼出しを成功に見せる no-op は禁止。未対応時リンク不能とする。
