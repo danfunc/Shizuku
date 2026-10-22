@@ -716,15 +716,16 @@ void call_ladder() {
       if (g_nest_self[level] != OBJECT_NEST ||
           g_nest_caller[level] != expected_caller)
         ++identity_bad;
-      // 呼び出し 1 段はフレーム 2 枚 (呼び先の枠 + その中の svc を運ぶ枠)。
-      if (g_nest_depth[level] != 2u * (level + 1u))
+      // 呼び出し 1 段はフレーム 1 枚 (呼び先の枠だけ)。CALL_METHOD は svc_dispatch が
+      // trap 内で呼び先へ直接入り、kobj を中継する dispatch 段を積まない。
+      if (g_nest_depth[level] != level + 1u)
         ++depth_bad;
     }
     CL_PROG(802);
     check("nested: identity at every level", identity_bad == 0,
           (unsigned long)identity_bad, 0);
     CL_PROG(803);
-    check("nested: depth grows by 2 per level", depth_bad == 0,
+    check("nested: depth grows by 1 per level", depth_bad == 0,
           (unsigned long)depth_bad, 0);
   }
 
