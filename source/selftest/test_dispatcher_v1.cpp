@@ -22,6 +22,7 @@
 //       載ること (A→B→C)。BAD_OBJECT / BAD_METHOD / UNDECLARED_METHOD / NO_STACK。
 //   10. RUN_FOR (9): dispatch 段を積まず GRANT を直接撃つこと。NO_TIME / NOT_RUNNABLE 変換。
 //   11. SET_BUDGET (12): dispatch 段を積まず m_budget を書くこと。範囲外は何もしない。
+//   16. ecall フレームの目印 (入口 / 戻り) と、切替えをまたいだ文脈の不変 (RUN_FOR/YIELD)。
 //   15. in-place call (2026-10-22 ABI): frame をコピーしない・ヘッダ無し・レジスタは呼び先へ通り抜け、
 //       戻りで a0/a1 以外は消える (8a/8d/8e)。余白不足は NO_STACK、重なる返り trap フレーム (15a/15b)。
 
@@ -1197,6 +1198,10 @@ static void run_dispatcher_tests() {
       assert(headers[i] == reinterpret_cast<uintptr_t>(cur) + sizeof(KERNEL::FRAME));
       const auto *h = (const ARCH::call_header_t *)headers[i];
       assert(h->prev == (i == 0 ? 0 : headers[i - 1]) && h->pc == A_PC + 0x10 * i);
+      // callee の窓の上端は前の段のヘッダの下端: 呼び先 (と次の枠) はそれより下にあり、前の段の
+      // ヘッダ (戻り pc・caller の識別) の領域へは届かない。
+      assert(i == 0 || (headers[i] + sizeof(ARCH::call_header_t) <=
+                        ARCH::call_window_top((const ARCH::call_header_t *)headers[i - 1])));
       // 呼び先は自分のスタックを 400 バイト使ってから次の ecall をする (窓は枠の下端まで)。
       cur = reinterpret_cast<KERNEL::FRAME *>(reinterpret_cast<uint8_t *>(cur) - 400);
       ctx->sp = cur;
@@ -1220,6 +1225,76 @@ static void run_dispatcher_tests() {
     assert(thread.call_stack.call_count == 0 && cur == frame);
     printf("  15c. %u nested CALL_METHOD, all in-place (headers chained by prev, window top = header): every return resumes the caller with registers cleared: PASS\n",
            (unsigned)LEVELS);
+  }
+
+  // -------------------------------------------------------------------------
+  // 16. ecall 入口が caller のレジスタを保存しない (ECALL のフレームは a0-a7/mepc/mstatus/目印だけ)
+  //     経路でも、スレッド切替えをまたいで文脈が壊れないこと。出口はフレームの mcause (目印) で選ぶ。
+  // -------------------------------------------------------------------------
+  {
+    // 16a. 目印: 呼び先の入口は RV32_TAG_ENTRY (s*/gp/tp を通す出口)、戻った caller の再開フレームは
+    //      RV32_TAG_ECALL (a0/a1 以外を消す出口)、入口を作らない trap 内 API の応答は目印を変えない。
+    fresh(ROOT_APP_ID, true);
+    frame->mcause = RV32_TAG_ECALL; // 入口 asm が書く
+    frame->mepc = A_PC;
+    frame->a0 = (uintptr_t)object_api::GET_CURRENT_OBJECT;
+    kernel_instance.svc_dispatch(ctx);
+    assert(frame->mcause == RV32_TAG_ECALL && frame->a1 == ROOT_APP_ID);
+    frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+    frame->a1 = B_ID;
+    frame->a2 = 0;
+    frame->a3 = 1;
+    kernel_instance.svc_dispatch(ctx);
+    assert(ctx->sp == frame && frame->mcause == RV32_TAG_ENTRY);
+    frame->mcause = RV32_TAG_ECALL; // 呼び先の return stub の ecall (入口 asm が書く)
+    frame->a0 = (uintptr_t)primitive::RETURN;
+    frame->a1 = 1;
+    frame->a2 = 0x66;
+    frame->a3 = 0;
+    frame->a4 = RETURN_STUB_MARKER;
+    kernel_instance.svc_dispatch(ctx);
+    assert(ctx->sp == frame && frame->mcause == RV32_TAG_ECALL && frame->a1 == 0x66);
+    assert(frame->mepc == A_PC);
+    // エラー応答 (入れなかった) も入口の目印にならない。
+    frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+    frame->a1 = KERNEL_OBJECT::OBJECT_COUNT;
+    frame->a2 = 0;
+    kernel_instance.svc_dispatch(ctx);
+    assert(frame->mcause == RV32_TAG_ECALL && frame->a0 == (uintptr_t)object_error::BAD_OBJECT);
+
+    // 16b. 貸し手 A (thread 0) が ecall で RUN_FOR → 借り手 B (thread 1) へ切替え → B が ecall で
+    //      YIELD → A へ戻る。A のフレームは切替えの間まったく変わらず (mepc・目印・文脈の sp)、
+    //      B の初期フレーム (全レジスタ復元で戻る目印 0) は A の RUN_FOR で触られない。
+    fresh(ROOT_APP_ID, true);
+    assert(kernel_instance.thread_state(1) == thread_state::READY);
+    auto *ctx_b = kernel_instance.thread_context(1);
+    KERNEL::FRAME *frame_b_init = ctx_b->sp;
+    KERNEL::FRAME b_before = *frame_b_init;
+    frame->mcause = RV32_TAG_ECALL;
+    frame->mepc = A_PC + 4;
+    frame->a0 = (uintptr_t)object_api::RUN_FOR;
+    frame->a1 = 1;
+    frame->a2 = 5000;
+    kernel_instance.svc_dispatch(ctx);
+    assert(kernel_instance.current_thread_id() == 1);
+    assert(kernel_instance.thread_context(0)->sp == frame); // A の文脈は ecall フレームを指したまま
+    assert(frame->mcause == RV32_TAG_ECALL && frame->mepc == A_PC + 4); // A の再開点は動かない
+    assert(ctx_b->sp == frame_b_init && __builtin_memcmp(&b_before, frame_b_init, sizeof(b_before)) == 0);
+    assert(frame_b_init->mcause == 0); // B の初めての実行は全レジスタ復元の出口
+    // B が ecall で YIELD する (入口 asm が目印・mepc・mstatus を書く)。
+    frame_b_init->mcause = RV32_TAG_ECALL;
+    frame_b_init->mepc = 0x42060040;
+    frame_b_init->a0 = (uintptr_t)object_api::YIELD;
+    kernel_instance.svc_dispatch(ctx_b);
+    assert(kernel_instance.current_thread_id() == 0);
+    assert(kernel_instance.thread_context(0)->sp == frame);
+    assert(frame->mcause == RV32_TAG_ECALL && frame->mepc == A_PC + 4 && ctx->privileged);
+    assert(frame->a0 == (uintptr_t)object_error::OK && frame->a1 == (uintptr_t)grant_end::YIELDED);
+    // B は次に走るとき ECALL の出口 (a0/a1 = (OK, 0)) で再開し、再開点も動かない。
+    assert(kernel_instance.thread_context(1)->sp == frame_b_init);
+    assert(frame_b_init->mcause == RV32_TAG_ECALL && frame_b_init->mepc == 0x42060040);
+    assert(frame_b_init->a0 == (uintptr_t)object_error::OK && frame_b_init->a1 == 0);
+    printf("  16. ecall frames across thread switches: entry/return tags (ENTRY after call, ECALL after return/native API), lender and borrower resume points and tags unchanged across RUN_FOR/YIELD, borrower's initial full frame untouched: PASS\n");
   }
 
   // 後始末
