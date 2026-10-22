@@ -1,7 +1,11 @@
 #include "shizuku/kernel.hpp"
+#include "arch/riscv/ecall_table.hpp"
 #include "arch/riscv/trap_route.hpp"
+#include "shizuku/svc_attributes.hpp"
 #include "chips/esp32_c5/systimer.hpp"
 #include "chips/esp32_c5/trap_api.hpp"
+
+#include <array>
 
 #ifndef SHIZUKU_ESP_BLE_IRQ_LATENCY_DIAG
 #if defined(SHIZUKU_C5_BLE) && SHIZUKU_C5_BLE
@@ -198,7 +202,76 @@ void run_pending_switch() {
   auto &kernel = shizuku::kernel_instance;
   kernel.pendsv_dispatch(kernel.current_context());
 }
+// ---- M-mode ECALL: 例外入口 (arch/riscv/rv32_trap.S) が a0 の番号で shizuku_rv32_ecall_table を引いて
+// 直接入る。route_trap の ecall 分岐 (mepc += 4 は asm 入口へ移した) と lambda の前後処理を、番号
+// ごとの処理 (Body) の前後に付けたもの。割込み・例外は従来どおり shizuku_rv32_trap_dispatch。
+using ecall_fn = arch::exception_frame_t *(*)(arch::exception_frame_t *);
+template <class Body>
+inline arch::exception_frame_t *ecall_run(arch::exception_frame_t *frame, Body body) {
+  const uint32_t previous_mstatus = active_mstatus;
+  active_mstatus = frame->mstatus;
+  shizuku_c5_trap_depth = shizuku_c5_trap_depth + 1;
+  shizuku_c5_trap_diag[1] = frame->mcause;
+  shizuku_c5_trap_diag[2] = frame->mepc - 4;  // diag は ECALL 命令の PC (frame の mepc は次の命令)
+  shizuku_c5_trap_diag[3] = frame->mtval;
+  // ECALL from inside the kernel must never overwrite the current thread.
+  if (shizuku_c5_trap_depth != 1) stop(0xE003);
+  if ((frame->mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) stop(0xE004);
+  auto &kernel = shizuku::kernel_instance;
+  auto *context = kernel.current_context();
+  frame_to_context(*frame, *context);
+  shizuku_c5_trap_diag[4] = shizuku_c5_trap_diag[4] + 1;
+  body(kernel, context);
+  run_pending_switch();
+  context = kernel.current_context();
+  // 呼び先の入口フレームは s*/gp/tp を caller の値のまま通す出口を使うので、この trap の中で
+  // 別のスレッドへ切り替わってはならない。
+  if (frame->mcause == RV32_TAG_ENTRY && context->sp != frame) stop(0xE00B);
+  context_to_frame(*context);
+  auto *result = context->sp;
+  active_mstatus = previous_mstatus;
+  shizuku_c5_trap_depth = shizuku_c5_trap_depth - 1;
+  return result;
 }
+// trap 内で直接処理する API (svc_attributes の mode == handler)。native の経路に立てていれば Body、
+// 立てていない (kobj 本人・専用の親ハンドラ配下) か Body が false なら従来どおり svc_dispatch /
+// svc_forward に回る (svc_entry)。
+template <bool (shizuku::KERNEL::*Body)(shizuku::KERNEL::CONTEXT *)>
+arch::exception_frame_t *ecall_native(arch::exception_frame_t *frame) {
+  return ecall_run(frame, [](auto &kernel, auto *context) {
+    kernel.template svc_entry<Body>(context);
+  });
+}
+// それ以外の番号 (thread mode の API・kobj 本人の primitive・objectland の raw 配送・範囲外)。
+arch::exception_frame_t *ecall_other(arch::exception_frame_t *frame) {
+  return ecall_run(frame, [](auto &kernel, auto *context) { kernel.svc_dispatch(context); });
+}
+constexpr auto make_ecall_table() {
+  using K = shizuku::KERNEL;
+  using shizuku::object_api;
+  std::array<ecall_fn, RV32_ECALL_TABLE_ENTRIES> t{};
+  t.fill(&ecall_other);
+  t[(unsigned)object_api::EXIT_METHOD] = &ecall_native<&K::svc_exit_method>;
+  t[(unsigned)object_api::CALL_METHOD] = &ecall_native<&K::svc_call_method>;
+  t[(unsigned)object_api::GET_CURRENT_OBJECT] = &ecall_native<&K::svc_get_current>;
+  t[(unsigned)object_api::GET_CALLER_OBJECT] = &ecall_native<&K::svc_get_caller>;
+  t[(unsigned)object_api::YIELD] = &ecall_native<&K::svc_yield>;
+  t[(unsigned)object_api::RUN_FOR] = &ecall_native<&K::svc_run_for>;
+  t[(unsigned)object_api::SET_BUDGET] = &ecall_native<&K::svc_set_budget>;
+  t[(unsigned)object_api::FORWARD_CHILD_EXIT] = &ecall_native<&K::svc_forward_child_exit>;
+  t[(unsigned)object_api::CALL_METHOD_DESCRIPTOR] = &ecall_native<&K::svc_call_descriptor>;
+  return t;
+}
+}
+// 番号 → 処理関数の表 (asm 入口が a0 で引く)。表の内容が svc_attributes の handler 集合と一致することを縛る。
+extern "C" const std::array<ecall_fn, RV32_ECALL_TABLE_ENTRIES> shizuku_rv32_ecall_table = make_ecall_table();
+static_assert(shizuku::ports::riscv::ecall_table_consistent(
+                  make_ecall_table(), shizuku::svc_attributes.size(), &ecall_other,
+                  [](size_t id) {
+                    const auto *a = shizuku::svc_attribute_for(id);
+                    return a != nullptr && a->mode == shizuku::svc_mode::handler;
+                  }),
+              "shizuku_rv32_ecall_table must match svc_attributes (mode == handler)");
 extern "C" arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_frame_t *frame) {
   const uint32_t previous_mstatus = active_mstatus;
   active_mstatus = frame->mstatus;

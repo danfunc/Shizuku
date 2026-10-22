@@ -29,7 +29,15 @@ assert '  j shizuku_rv32_trap_entry\n.endr' in vectors
 assert 'shizuku_rv32_trap_entry:' in asm and '.option norvc' in asm
 assert 'csrrw t0, mscratch, zero\n  beqz t0, 1f\n  mv sp, t0' in asm
 assert 'sw t0, 0(sp)' in asm and 'lw t0, 0(sp)\n' in asm
-assert asm.index('call shizuku_rv32_trap_dispatch') < asm.index('csrw mscratch, t0')
+# 呼ぶ関数は t1 経由 (割込み・例外 = shizuku_rv32_trap_dispatch、ECALL = 番号の表の要素)。
+assert 'la t1, shizuku_rv32_trap_dispatch\n.Lrv32_save_done:' in asm
+assert asm.index('jalr t1') < asm.index('csrw mscratch, t0')
+# ECALL: mepc を asm で進め (route_trap の ecall 枝に頼らない)、a0 の番号で表を引き、範囲外は 0 番。
+ecall = asm.split('.Lrv32_full_save:')[0]
+assert 'addi t0, t0, 4\n  sw t0, RV32_F_MEPC(sp)' in ecall
+assert 'li t0, RV32_ECALL_TABLE_ENTRIES\n  bltu a0, t0, .Lrv32_ecall_in_range\n  li a0, 0\n' in ecall
+assert 'slli a0, a0, 2\n  la t1, shizuku_rv32_ecall_table\n  add t1, t1, a0\n  lw t1, 0(t1)\n  j .Lrv32_save_done' in ecall
+assert '#define RV32_ECALL_TABLE_ENTRIES 34' in layout
 assert 'mv sp, a0\n  j shizuku_rv32_restore' in asm
 assert 'shizuku_rv32_restore:' in asm and 'call shizuku_rv32_return_failed' in asm
 assert 'shizuku_rv32_return_stub:' in asm and 'shizuku_rv32_first_return:' in asm
@@ -56,6 +64,13 @@ assert 'kernel.timer_expired()' in trap_src
 assert 'run_pending_switch()' in trap_src
 assert 'reg_write(c6::SYSTIMER_INT_CLR, c6::TARGET0_INT_BIT)' in trap_src
 assert 'shizuku_c6_timer_diag' in trap_src
+# ECALL は番号の表から直接入る。表は svc_attributes の handler 集合と static_assert で一致させ、
+# ECALL の経路でも stack probe (1024 回に 1 回) を保つ。
+assert 'shizuku_rv32_ecall_table = make_ecall_table()' in trap_src
+assert 'ecall_table_consistent(' in trap_src
+assert trap_src.count('ecall_native<&K::svc_') == 9
+ecall_run = trap_src.split('inline arch::exception_frame_t *ecall_run(')[1].split('template <bool (shizuku::KERNEL::*Body)')[0]
+assert 'check_stack_canary(0u)' in ecall_run and 'kStackProbeInterval' in ecall_run
 
 boot_src = (root / 'modules/esp_idf_support/c6/early_boot.cpp').read_text()
 assert 'shizuku_c6_thread1_diag' in boot_src

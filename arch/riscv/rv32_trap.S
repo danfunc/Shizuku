@@ -38,11 +38,23 @@ shizuku_rv32_trap_entry:
   sw a6, RV32_F_A6(sp)
   sw a7, RV32_F_A7(sp)
   csrr t0, mepc
+  // ECALL は常に 32 ビット命令 (C 拡張が有効でも): 戻り先は次の命令。
+  addi t0, t0, 4
   sw t0, RV32_F_MEPC(sp)
   csrr t0, mstatus
   sw t0, RV32_F_MSTATUS(sp)
   li t0, RV32_TAG_ECALL
   sw t0, RV32_F_MCAUSE(sp)
+  // 番号 (a0、frame に保存済みなので壊してよい) で表を引き、各 API の処理へ直接入る。
+  // 範囲外は 0 番 (thread mode の API・primitive・raw 配送を決める共通の入口)。
+  li t0, RV32_ECALL_TABLE_ENTRIES
+  bltu a0, t0, .Lrv32_ecall_in_range
+  li a0, 0
+.Lrv32_ecall_in_range:
+  slli a0, a0, 2
+  la t1, shizuku_rv32_ecall_table
+  add t1, t1, a0
+  lw t1, 0(t1)
   j .Lrv32_save_done
 .Lrv32_full_save:
   sw t1, RV32_F_T1(sp)
@@ -82,7 +94,10 @@ shizuku_rv32_trap_entry:
   sw t0, RV32_F_MCAUSE(sp)
   csrr t0, mtval
   sw t0, RV32_F_MTVAL(sp)
+  // 割込み・例外 (ECALL 以外) は chip の共通の入口 (route_trap) へ。t1 は保存済みなので使ってよい。
+  la t1, shizuku_rv32_trap_dispatch
 .Lrv32_save_done:
+  // t1 = 呼ぶ関数 (ECALL は番号の表の要素、それ以外は shizuku_rv32_trap_dispatch)。引数は frame。
   mv a0, sp
   // mscratch != 0 outside traps: dedicated kernel stack top.
   // mscratch == 0 inside traps: nested traps keep the interrupted kernel stack.
@@ -94,7 +109,7 @@ shizuku_rv32_trap_entry:
   addi sp, sp, -16
   sw t0, 0(sp)
   sw a0, 4(sp)
-  call shizuku_rv32_trap_dispatch
+  jalr t1
   lw t0, 0(sp)
   // Restore only after dispatch. Nested returns write zero, outer returns top.
   csrw mscratch, t0

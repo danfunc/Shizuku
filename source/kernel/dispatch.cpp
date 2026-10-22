@@ -690,12 +690,12 @@ template <> SHIZUKU_HOT bool KERNEL::svc_set_budget(KERNEL::CONTEXT *context) {
 }
 
 template <> SHIZUKU_HOT bool KERNEL::svc_call_descriptor(KERNEL::CONTEXT *context) {
-  THREAD &thread = current_thread();
   FRAME *frame = context->sp;
 #if !defined(__riscv)
   ARCH::set_result(*frame, (uintptr_t)object_error::UNKNOWN_API, 0);
   return true;
 #else
+  THREAD &thread = current_thread();
   const uint32_t thread_id = current_thread_id();
   const uint32_t caller_id = (uint32_t)current_object(thread_id);
   const uint32_t index = (uint32_t)ARCH::arg(*frame, 1);

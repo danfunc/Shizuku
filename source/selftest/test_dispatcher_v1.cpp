@@ -1297,6 +1297,165 @@ static void run_dispatcher_tests() {
     printf("  16. ecall frames across thread switches: entry/return tags (ENTRY after call, ECALL after return/native API), lender and borrower resume points and tags unchanged across RUN_FOR/YIELD, borrower's initial full frame untouched: PASS\n");
   }
 
+  // -------------------------------------------------------------------------
+  // 17. ecall の直接入口 (svc_entry): RV32 の例外入口は a0 の番号の表からこれを呼ぶ。
+  //     native の経路に立てていれば svc_dispatch と同じ結果、立てていなければ svc_dispatch へ回る。
+  // -------------------------------------------------------------------------
+  {
+    assert(!kernel_instance.grant_active() && kernel_instance.current_thread_id() == 0);
+    // 17a. 経路の判定: 一般オブジェクト + root 宛て = native、dedicated 親ハンドラ配下 / kobj 本人 = native でない。
+    fresh(ROOT_APP_ID, true);
+    assert(kernel_instance.svc_native_route());
+    kernel_instance.set_thread_ledger(0, ledger, 32, CHILD_ID, (uint32_t)object_kind::PLAIN,
+                                      CUSTOM_HANDLER_ID, CUSTOM_HANDLER_ENTRY);
+    assert(!kernel_instance.svc_native_route());
+    as_kobj_a();
+    assert(!kernel_instance.svc_native_route());
+    printf("  17a. svc_native_route: plain object under root == true, under a dedicated handler == false, kobj itself == false: PASS\n");
+
+    // 17b. GET_CURRENT / GET_CALLER / CALL_METHOD / EXIT_METHOD を entry から (dispatch 段なし)。
+    fresh(ROOT_APP_ID, true);
+    frame->mcause = RV32_TAG_ECALL;
+    frame->mepc = A_PC;
+    frame->a0 = (uintptr_t)object_api::GET_CURRENT_OBJECT;
+    kernel_instance.svc_entry<&KERNEL::svc_get_current>(ctx);
+    assert(frame->a0 == (uintptr_t)object_error::OK && frame->a1 == ROOT_APP_ID);
+    frame->a0 = (uintptr_t)object_api::GET_CALLER_OBJECT;
+    kernel_instance.svc_entry<&KERNEL::svc_get_caller>(ctx);
+    assert(frame->a0 == (uintptr_t)object_error::OK && frame->a1 == (uintptr_t)KERNEL_OBJECT::NO_OBJECT);
+    assert(kernel_instance.current_depth() == 0);
+    mark_regs(frame, 0x600);
+    frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+    frame->a1 = B_ID;
+    frame->a2 = 0;
+    frame->a3 = 0x21;
+    kernel_instance.svc_entry<&KERNEL::svc_call_method>(ctx);
+    assert(kernel_instance.current_depth() == 1 && count_dispatch_frames() == 0);
+    assert(thread.ledger[0].via == KERNEL::LEDGER_CALL && thread.ledger[0].object == B_ID);
+    assert(ARCH::frame_pc(*ctx->sp) == ENTRY_B && ARCH::arg(*ctx->sp, 0) == 0x21);
+    assert(ctx->sp == frame && frame->mcause == RV32_TAG_ENTRY); // 呼び先の入口の目印
+    frame->mcause = RV32_TAG_ECALL;
+    frame->a0 = (uintptr_t)object_api::GET_CALLER_OBJECT;
+    kernel_instance.svc_entry<&KERNEL::svc_get_caller>(ctx);
+    assert(frame->a1 == ROOT_APP_ID); // 本当の呼び出し元 (kobj ではない)
+    frame->a0 = (uintptr_t)object_api::EXIT_METHOD;
+    frame->a1 = 0;
+    frame->a2 = 0x22;
+    frame->a3 = 0;
+    frame->a4 = 0;
+    kernel_instance.svc_entry<&KERNEL::svc_exit_method>(ctx);
+    assert(kernel_instance.current_depth() == 0 && count_dispatch_frames() == 0);
+    assert(ctx->sp == frame && frame->a0 == (uintptr_t)object_error::OK && frame->a1 == 0x22);
+    assert(frame->mepc == A_PC && regs_cleared(frame));
+    printf("  17b. svc_entry GET_CURRENT/GET_CALLER/CALL_METHOD/EXIT_METHOD: no dispatch frame, caller seen by callee == A, return value 0x22 with registers cleared: PASS\n");
+
+    // 17c. 本体が false を返す場合 (スレッドの最外のメソッドの EXIT_METHOD / 起点スレッドの YIELD) は
+    //      kobj へ配送 (dispatch 段 1 枚、宛先は root handler)。
+    fresh(ROOT_APP_ID, true);
+    frame->a0 = (uintptr_t)object_api::EXIT_METHOD;
+    frame->a1 = 0;
+    frame->a2 = 0x23;
+    frame->a3 = 0;
+    kernel_instance.svc_entry<&KERNEL::svc_exit_method>(ctx);
+    assert(kernel_instance.current_depth() == 1 && count_dispatch_frames() == 1);
+    assert(thread.ledger[0].via == KERNEL::LEDGER_DISPATCH);
+    assert(ARCH::frame_pc(*ctx->sp) == ROOT_HANDLER_ENTRY);
+    assert(ARCH::arg(*ctx->sp, 0) == (uintptr_t)object_api::EXIT_METHOD && ARCH::arg(*ctx->sp, 2) == 0x23);
+    fresh(ROOT_APP_ID, true);
+    frame->a0 = (uintptr_t)object_api::YIELD;
+    kernel_instance.svc_entry<&KERNEL::svc_yield>(ctx);
+    assert(kernel_instance.current_depth() == 1 && count_dispatch_frames() == 1);
+    assert(ARCH::frame_pc(*ctx->sp) == ROOT_HANDLER_ENTRY);
+    assert(ARCH::arg(*ctx->sp, 0) == (uintptr_t)object_api::YIELD);
+    printf("  17c. svc_entry outermost EXIT_METHOD and originating-thread YIELD (no lender) fall through to the kobj (one dispatch frame, pc = root handler): PASS\n");
+
+    // 17d. RUN_FOR / SET_BUDGET / YIELD (借り手) を entry から。
+    fresh(ROOT_APP_ID, true);
+    frame->a0 = (uintptr_t)object_api::RUN_FOR;
+    frame->a1 = 1;
+    frame->a2 = ARCH::TIMER_MIN_CYCLES - 1;
+    kernel_instance.svc_entry<&KERNEL::svc_run_for>(ctx);
+    assert(frame->a0 == (uintptr_t)object_error::NO_TIME && frame->a1 == 0);
+    frame->a0 = (uintptr_t)object_api::RUN_FOR;
+    frame->a1 = 3;
+    frame->a2 = 5000;
+    kernel_instance.svc_entry<&KERNEL::svc_run_for>(ctx);
+    assert(frame->a0 == (uintptr_t)object_error::NOT_RUNNABLE && frame->a1 == 0);
+    access::set_raw_budget(2, 111);
+    frame->a0 = (uintptr_t)object_api::SET_BUDGET;
+    frame->a1 = 2;
+    frame->a2 = 4321;
+    kernel_instance.svc_entry<&KERNEL::svc_set_budget>(ctx);
+    assert(access::budget(2) == 4321 && frame->a0 == (uintptr_t)object_error::OK);
+    assert(kernel_instance.current_depth() == 0);
+    frame->a0 = (uintptr_t)object_api::RUN_FOR;
+    frame->a1 = 1;
+    frame->a2 = 5000;
+    kernel_instance.svc_entry<&KERNEL::svc_run_for>(ctx);
+    assert(kernel_instance.current_thread_id() == 1 && kernel_instance.grant_active());
+    assert(frame->a0 == (uintptr_t)object_error::OK && frame->a1 == (uintptr_t)grant_end::YIELDED);
+    KERNEL::FRAME *borrower = ctx1->sp;
+    borrower->a0 = (uintptr_t)object_api::YIELD;
+    kernel_instance.svc_entry<&KERNEL::svc_yield>(ctx1);
+    assert(kernel_instance.current_thread_id() == 0 && !kernel_instance.grant_active());
+    assert(kernel_instance.ledger_size(1) == 0); // 借り手の台帳に dispatch 段なし
+    assert(borrower->a0 == (uintptr_t)object_error::OK && borrower->a1 == 0);
+    assert(frame->a0 == (uintptr_t)object_error::OK && frame->a1 == (uintptr_t)grant_end::YIELDED);
+    printf("  17d. svc_entry RUN_FOR (NO_TIME / NOT_RUNNABLE / grant), SET_BUDGET, borrower YIELD back to lender: no dispatch frame: PASS\n");
+
+    // 17e. FORWARD_CHILD_EXIT: PLAIN の出どころは NOT_PRIVILEGED、dedicated HANDLER からは 2 段 pop。
+    fresh(ROOT_APP_ID, true);
+    frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+    frame->a1 = B_ID;
+    frame->a2 = 0;
+    kernel_instance.svc_entry<&KERNEL::svc_call_method>(ctx);
+    assert(kernel_instance.current_depth() == 1);
+    ctx->sp->a0 = (uintptr_t)object_api::FORWARD_CHILD_EXIT;
+    ctx->sp->a1 = 0;
+    ctx->sp->a2 = 0x24;
+    kernel_instance.svc_entry<&KERNEL::svc_forward_child_exit>(ctx);
+    assert(kernel_instance.current_depth() == 1);
+    assert(ctx->sp->a0 == (uintptr_t)object_error::NOT_PRIVILEGED && ctx->sp->a1 == 0);
+    into_handler();
+    frame_h = ctx->sp;
+    frame_h->a0 = (uintptr_t)object_api::FORWARD_CHILD_EXIT;
+    frame_h->a1 = 0;
+    frame_h->a2 = 0x25;
+    frame_h->a3 = 0;
+    kernel_instance.svc_entry<&KERNEL::svc_forward_child_exit>(ctx);
+    assert(kernel_instance.current_depth() == 0 && ctx->sp == frame);
+    assert(frame->a0 == (uintptr_t)object_error::OK && frame->a1 == 0x25);
+    printf("  17e. svc_entry FORWARD_CHILD_EXIT: PLAIN origin NOT_PRIVILEGED (nothing popped), dedicated HANDLER origin pops 2 frames (value 0x25): PASS\n");
+
+    // 17f. native でない立場は番号に関係なく svc_dispatch へ回る:
+    //      dedicated 親ハンドラ配下の raw svc は無加工で配送、kobj 本人の SWITCH は primitive として処理。
+    kernel_instance.set_thread_ledger(0, ledger, 32, CHILD_ID, (uint32_t)object_kind::PLAIN,
+                                      CUSTOM_HANDLER_ID, CUSTOM_HANDLER_ENTRY);
+    ctx->sp = frame;
+    ctx->privileged = true;
+    frame->a0 = (uintptr_t)object_api::GET_CURRENT_OBJECT;
+    frame->a1 = B_ID;
+    frame->a3 = 0x5B;
+    kernel_instance.svc_entry<&KERNEL::svc_get_current>(ctx);
+    assert(kernel_instance.current_depth() == 1);
+    assert(thread.ledger[0].kind == (uint8_t)object_kind::HANDLER);
+    assert(ARCH::frame_pc(*ctx->sp) == CUSTOM_HANDLER_ENTRY);
+    assert(ARCH::arg(*ctx->sp, 0) == (uintptr_t)object_api::GET_CURRENT_OBJECT);
+    assert(ARCH::arg(*ctx->sp, 1) == B_ID && ARCH::arg(*ctx->sp, 3) == 0x5B);
+    as_kobj_a();
+    frame->a0 = (uintptr_t)primitive::SWITCH;
+    frame->a1 = 1;
+    kernel_instance.svc_entry<&KERNEL::svc_get_current>(ctx); // 番号は SWITCH。kobj 本人なので primitive
+    assert(frame->a0 == (uintptr_t)kernel_error::OK);
+    assert(kernel_instance.current_thread_id() == 1 && kernel_instance.grant_active());
+    assert(kernel_instance.thread_state(0) == thread_state::WAIT_GRANT);
+    assert(thread.call_stack.depth == 0); // primitive は dispatch 段を積まない
+    ctx1->sp->a0 = (uintptr_t)object_api::YIELD;
+    kernel_instance.svc_entry<&KERNEL::svc_yield>(ctx1);
+    assert(kernel_instance.current_thread_id() == 0 && !kernel_instance.grant_active());
+    printf("  17f. svc_entry from a dedicated-handler child delivers the raw svc unchanged; from the kobj itself runs the primitive (SWITCH grants, borrower YIELD returns): PASS\n");
+  }
+
   // 後始末
   thread.call_stack.depth = 0;
   thread.call_stack.call_count = 0;
