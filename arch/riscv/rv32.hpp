@@ -92,6 +92,15 @@ public:
     bool privileged = true;
     uintptr_t region_base = 0;
     uintptr_t region_limit = 0;
+    // in-place call で caller を再開するのに要る最小限。レジスタは持たない (ABI: 戻りで消える)。
+    struct call_resume_t {
+      uintptr_t sp;  // caller の SP (= trap フレームの直上)
+      uintptr_t pc;  // ecall の次の命令
+      uintptr_t region_base;
+      uintptr_t region_limit;
+      bool privileged;
+      bool valid; // この段が in-place call か (従来の段は false のまま)
+    };
   };
 
   using method_t = uintptr_t (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t,
@@ -177,6 +186,56 @@ public:
 
   static uintptr_t return_stub() {
     return reinterpret_cast<uintptr_t>(&shizuku_rv32_return_stub);
+  }
+
+  // ---- in-place call (2026-10-22 ABI: レジスタは全部 callee への入力) ----------------
+  // method call / descriptor call は caller の trap フレームをコピーせず、そのまま呼び先の
+  // 入口フレームにする (restore がそこから全レジスタを読む)。呼び先の SP は caller の SP と
+  // 同じ (フレームは restore で読み終えた死んだ領域で、呼び先のスタックがその上に重なる)。
+  // カーネルが決めるのは pc・ra・引数だけで、ほかは caller の値が通る。
+  static constexpr bool CALL_IN_PLACE = true;
+  using call_resume_t = typename context_t::call_resume_t;
+
+  // 呼び先の入口を作る前に、caller を再開するのに要る最小限を取る。frame は trap フレーム。
+  static call_resume_t call_resume_save(const context_t &context,
+                                        const exception_frame_t &frame) {
+    return {reinterpret_cast<uintptr_t>(context.sp) + sizeof(exception_frame_t),
+            frame.mepc, context.region_base, context.region_limit,
+            context.privileged, true};
+  }
+
+  // 戻り: caller の SP の直下に再開用フレームを作る。a0/a1 (戻り値) は呼び出し側が set_result で
+  // 書く。ほかのレジスタ (ra・gp・tp・s*・t*・a2-a7) は 0 にする — callee の値を caller に見せない。
+  // 呼び先が返ってきたときの trap フレームと重なることがある (返りの SP が caller の SP の
+  // すぐ下のとき) ので、呼び出し側は戻り値などを先に読んでおくこと。
+  static exception_frame_t *call_resume_frame(context_t &context,
+                                              const call_resume_t &resume) {
+    auto *frame = reinterpret_cast<exception_frame_t *>(
+        resume.sp - sizeof(exception_frame_t));
+    *frame = {};
+    frame->mepc = resume.pc;
+    context.sp = frame;
+    context.privileged = resume.privileged;
+    context.region_base = resume.region_base;
+    context.region_limit = resume.region_limit;
+    context.s0 = context.s1 = context.s2 = context.s3 = 0;
+    context.s4 = context.s5 = context.s6 = context.s7 = 0;
+    context.s8 = context.s9 = context.s10 = context.s11 = 0;
+    return frame;
+  }
+
+  // 呼び先の入口に要る余白: 返りの trap フレーム 1 枚ぶんに加え、呼び先がもう 1 回カーネルを
+  // 呼び返せること (トランポリン 1 枚 + fault 入口の退避 + ハンドラ連鎖)。call_frame_push の
+  // 余白と同じ構成要素から出す。
+  static bool call_inplace_has_room(const context_t &context) {
+    const uintptr_t limit = stack_limit(context);
+    if (limit == 0)
+      return true;
+    const uintptr_t sp = reinterpret_cast<uintptr_t>(context.sp) +
+                         sizeof(exception_frame_t);
+    return sp >= limit &&
+           sp - limit >= 2u * sizeof(exception_frame_t) + EXC_FRAME_MAX_BYTES +
+                             FAULT_CONTEXT_BYTES + CALL_HEADROOM;
   }
 
   // ---- ABI converter, callee 側 (shizuku/method_entry.hpp, shizuku/rv32_abi.hpp) ----

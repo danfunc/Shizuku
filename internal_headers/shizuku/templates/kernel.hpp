@@ -82,6 +82,9 @@ public:
   //    ARCH::normalize_frame で作業コピー側の調整を消してから積む。push はその結果を
   //    ARCH::psp_after_return で必ず検算する。
   //  ★識別情報は特権 call ledger に置く。pop は ledger を target depth まで落とす。
+  //  ★in-place call (ARCH::CALL_IN_PLACE、RV32 の CALL_METHOD / CALL_METHOD_DESCRIPTOR の浅い段) は
+  //    この幾何を使わない: caller の frame をコピーせずそのまま呼び先の入口にし、再開に要る最小限
+  //    (sp・pc・特権・窓) だけを thread.call_stack.resume に残す。ヘッダも積まない。
   struct call_frame_header {
     uintptr_t prev;       // 一つ外側のヘッダのアドレス (0 = 最外)
     uint32_t total_bytes; // 退避域の総バイト数 (8B 境界に丸め済み)
@@ -292,14 +295,22 @@ public:
 
 private:
   bool call_frame_push(THREAD &thread, CONTEXT *context, FRAME **frame);
-  bool call_frame_pop(THREAD &thread, CONTEXT *context, FRAME **frame);
+  // restore == false は in-place の段の「caller の frame を作り直す」を省く (複数段を落とすとき、
+  // 途中の段は再開しないので最後の 1 段だけ true にする)。ヘッダ式の段は常に文脈を戻す。
+  bool call_frame_pop(THREAD &thread, CONTEXT *context, FRAME **frame,
+                      bool restore = true);
+  // 台帳の上から count 段を落とす。最後に落とした段の caller が再開する。
+  void call_unwind(THREAD &thread, CONTEXT *context, FRAME **frame, uintptr_t count);
 
   // 台帳段を 1 つ積んで呼び先の入口へ向ける前半。通常 CALL と方法記述子の直接 call が
   // 共有する (積み方と戻りの床をそろえるため)。
+  // inplace == true: caller の frame をコピーせず、再開に要る最小限だけ identity に残して
+  // 呼び先を同じ frame の上で始める (ARCH が CALL_IN_PLACE を持つときだけ。持たなければ従来)。
   kernel_error enter_call(THREAD &thread, CONTEXT *context, FRAME **frame,
-                          const call_request &request, uint8_t via);
+                          const call_request &request, uint8_t via,
+                          bool inplace = false);
   kernel_error do_call(THREAD &thread, CONTEXT *context, FRAME **frame,
-                       const call_request &request);
+                       const call_request &request, bool inplace = false);
 
   kernel_error do_switch(uint32_t target);
   // cycles == GRANT_UNLIMITED は期限なし (SWITCH)。外側に期限があれば外側の残りでクランプされる。

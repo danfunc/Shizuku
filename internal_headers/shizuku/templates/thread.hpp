@@ -12,6 +12,21 @@ namespace templates {
 //   誰が誰の親かといった話は全部カーネルオブジェクトの側にある。
 //   ★2026-09-05: identity を文脈として持つこと自体は設計判断であって D1 違反ではない、
 //     と方針を緩めた。緩めていないのは「役を ID で代用しない」という一点。
+// in-place call (ABI: レジスタは全部 callee への入力、caller の frame をコピーしない) を持つ ARCH は
+// CONTEXT::call_resume_t に「caller を再開するのに要る最小限」(sp・pc・特権・窓・有効フラグ) を
+// 定義する。持たない ARCH (ARM) は場所を取らない空の型になる。
+// 再開状態は call_count の浅い段 N 個ぶんだけ持つ (スレッド数 × 段数ぶん RAM が増えるため)。
+// それより深い段、または in-place を持たない ARCH の段は従来の call_frame_push (frame を複製)。
+template <typename CONTEXT, uint32_t N> struct call_resume_store {
+  static constexpr bool enabled = false;
+};
+template <typename CONTEXT, uint32_t N>
+  requires requires { typename CONTEXT::call_resume_t; }
+struct call_resume_store<CONTEXT, N> {
+  static constexpr bool enabled = true;
+  typename CONTEXT::call_resume_t items[N]{};
+};
+
 template <typename CONTEXT> struct thread {
   static constexpr uint32_t CALL_IDENTITY_CAPACITY = 32;
   enum struct state_t : uint32_t {
@@ -39,10 +54,16 @@ template <typename CONTEXT> struct thread {
     uint32_t base_object_generation = 0;
     uint32_t current_call_generation = 0;
     uint32_t caller_generation = 0;
+    // call_count 番目の call (LEDGER_CALL / LEDGER_DESCRIPTOR_CALL の段) ごとに 1 つ。
     struct call_identity_snapshot {
       uint32_t previous_caller_object;
       uint32_t previous_caller_generation;
     } identity[CALL_IDENTITY_CAPACITY]{};
+    // in-place call の段 (call_count < INPLACE_DEPTH) の再開状態。resume.items[call_count] が
+    // valid ならその段は in-place で、戻りでは caller の frame を作り直し a0/a1 以外を消す。
+    // valid でなければ従来の段 (ヘッダに文脈を丸ごと退避)。
+    static constexpr uint32_t INPLACE_DEPTH = 4;
+    [[no_unique_address]] call_resume_store<CONTEXT, INPLACE_DEPTH> resume;
   };
 
   // ★state は CAS の対象なので 32bit 幅を固定する (ARCH::cas32 が uint32_t* で叩く)。

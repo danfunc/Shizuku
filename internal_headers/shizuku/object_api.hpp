@@ -37,6 +37,13 @@ enum struct object_api : uintptr_t {
   // a3 = 引数。戻り a1 = メソッドの戻り値。
   // ★svc_dispatch が trap 内で呼び先へ直接入る (kobj の中継なし)。呼び先から見た
   //   GET_CALLER_OBJECT は呼び出し元そのもの。
+  // ★レジスタ ABI (RV32、2026-10-22): caller の frame はコピーされず、呼び先の入口ではレジスタが
+  //   「全部 caller からの入力」として通る (引数 a0..、戻り口 ra、sp、pc だけがカーネルの決めた値)。
+  //   戻りでカーネルは a0 (error) / a1 (value) 以外を 0 に消す。だから caller は callee-saved・ra・
+  //   gp・tp を自分で退避・復元する (ARCH::syscall がやる)。呼び先は入口 stub
+  //   (shizuku::method_entry<ARCH, &fn>()) 経由で登録し、gp を自分のものへ入れる。
+  //   caller のスタックが浅い段 (call_count < 4) だけ。深い段は従来どおり frame を複製し、
+  //   レジスタも戻る。ARM は従来のまま。
   CALL_METHOD = 4,
   // 今どのオブジェクトとして走っているか / 誰に呼ばれたか。戻り a1 = オブジェクト ID。
   // ★identity はカーネルではなくカーネルオブジェクトの台帳から答える

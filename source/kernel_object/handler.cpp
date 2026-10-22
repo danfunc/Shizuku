@@ -150,10 +150,16 @@ static_assert(sizeof(KERNEL::call_ledger_entry) == 16,
               "call ledger entry must be 16 bytes on supported targets");
 static_assert(KERNEL_OBJECT::MAX_DEPTH <= KERNEL::THREAD::CALL_IDENTITY_CAPACITY,
               "per-thread call identity snapshot stack must cover MAX_DEPTH");
+// in-place call (RV32) は浅い段ごとに caller の再開状態を持つので、スレッド表がそのぶん太る。
+// 増分は型の大きさから出す (in-place を持たない ARM は空のメンバーで 0)。
+constexpr uintptr_t kInplaceResumeExtra =
+    KERNEL_OBJECT::THREAD_COUNT *
+    sizeof(templates::call_resume_store<KERNEL::CONTEXT,
+                                         KERNEL::THREAD::call_stack_t::INPLACE_DEPTH>);
 #if defined(SHIZUKU_C5_BLE)
-alignas(8) static uint8_t g_bookkeeping_storage[16 * 1024];
+alignas(8) static uint8_t g_bookkeeping_storage[16 * 1024 + kInplaceResumeExtra];
 #else
-alignas(8) static uint8_t g_bookkeeping_storage[65536];
+alignas(8) static uint8_t g_bookkeeping_storage[65536 + kInplaceResumeExtra];
 #endif
 static_assert(KERNEL::thread_record_bytes() * KERNEL_OBJECT::THREAD_COUNT +
                   sizeof(KERNEL_OBJECT::block) + KERNEL_OBJECT::BLOCK_ALIGN - 1 +

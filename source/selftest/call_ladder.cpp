@@ -596,8 +596,12 @@ uint32_t g_recur_calls = 0;
 uintptr_t g_recur_refused = (uintptr_t)object_error::UNKNOWN_API;
 uintptr_t g_recur_index = UINTPTR_MAX;
 constexpr uintptr_t RECUR_SETUP_KEY = 0x5E7;
-// 段の入口に要る余白 (rv32 call_entry_has_return_room の 2T + 残り)。診断と試験の判断に使う。
-constexpr uintptr_t RECUR_ENTRY_ROOM_BYTES = 1140;
+// 段の入口に要る余白 (rv32 call_inplace_has_return_room: 2 * trap フレーム + 最大例外フレーム
+// + fault 文脈 + ハンドラ連鎖の余白)。診断と試験の判断に使う。in-place call 以前は 1140
+// (複製した frame とヘッダぶんを含む 2 * 224 + 692)。
+constexpr uintptr_t RECUR_ENTRY_ROOM_BYTES =
+    2 * sizeof(ARCH::exception_frame_t) + ARCH::EXC_FRAME_MAX_BYTES +
+    ARCH::FAULT_CONTEXT_BYTES + ARCH::CALL_HEADROOM;
 
 uintptr_t desc_recur_fn(uintptr_t mode, uintptr_t, uintptr_t, uintptr_t) {
   if (mode == RECUR_SETUP_KEY) {
@@ -1158,7 +1162,7 @@ void call_ladder() {
       } else {
         stride = (first - shizuku_desc_recur_diag[measured]) / (measured - 1);
         room = first > limit ? first - limit : 0;
-        // 1140 = call_entry_has_return_room の 2T + 残り (rv32: 2*224 + 692)。
+        // RECUR_ENTRY_ROOM_BYTES = 段の入口に要る余白 (rv32: 2*144 + 144 + 68 + 256 = 756)。
         if (room < stride * KERNEL_OBJECT::MAX_DEPTH + RECUR_ENTRY_ROOM_BYTES)
           reason = 3; // 余白が足りない
       }
