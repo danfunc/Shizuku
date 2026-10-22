@@ -596,7 +596,7 @@ uint32_t g_recur_calls = 0;
 uintptr_t g_recur_refused = (uintptr_t)object_error::UNKNOWN_API;
 uintptr_t g_recur_index = UINTPTR_MAX;
 constexpr uintptr_t RECUR_SETUP_KEY = 0x5E7;
-// 段の入口に要る余白 (rv32 call_inplace_has_return_room: 2 * trap フレーム + 最大例外フレーム
+// 段の入口に要る余白 (rv32 call_header_has_room: 2 * trap フレーム + 最大例外フレーム
 // + fault 文脈 + ハンドラ連鎖の余白)。診断と試験の判断に使う。in-place call 以前は 1140
 // (複製した frame とヘッダぶんを含む 2 * 224 + 692)。
 constexpr uintptr_t RECUR_ENTRY_ROOM_BYTES =

@@ -113,49 +113,58 @@ template <class A> constexpr bool arch_call_in_place() {
     return false;
 }
 
-// in-place call の再開状態 (thread.call_stack.resume) の出し入れ。call_count の浅い段
-// (< INPLACE_DEPTH) だけが持つ。以下は arch_call_in_place<A>() が true の ARCH だけが実体を持つ。
-// このファイルの関数は明示特殊化 (テンプレートではない) で、捨てる枝も構文として通る必要があるため、
-// ARCH 固有の呼び出しはここ (依存名のテンプレート) に包む。
-template <class Thread> constexpr uint32_t inplace_depth() {
-  return Thread::call_stack_t::INPLACE_DEPTH;
-}
-template <class A, class Thread> bool inplace_eligible(const Thread &thread) {
-  return arch_call_in_place<A>() && thread.call_stack.call_count < inplace_depth<Thread>();
-}
-template <class A, class Thread, class Context>
-bool inplace_has_room(const Thread &, const Context &context) {
+// 呼出しの記録 (ヘッダ枠方式、ARCH::CALL_IN_PLACE) の出し入れ。このファイルの関数は明示特殊化
+// (テンプレートではない) で、使わない側の枝も構文として通る必要があるため、ARCH 固有の呼び出しは
+// ここ (依存名のテンプレート) に包む。
+template <class A, class Context>
+bool header_has_room_of(const Context &context) {
   if constexpr (arch_call_in_place<A>())
-    return A::call_inplace_has_room(context);
+    return A::call_header_has_room(context);
   else
     return false;
 }
-// 段 index の再開状態を取る (frame は trap フレーム = caller の全レジスタ入り)。
+// caller の枠にヘッダを書いて top を進める。caller の状態は frame (trap フレーム) と context から取る。
 template <class A, class Thread, class Context, class Frame>
-void inplace_save(Thread &thread, uint32_t index, const Context &context, const Frame &frame) {
-  if constexpr (arch_call_in_place<A>())
-    thread.call_stack.resume.items[index] = A::call_resume_save(context, frame);
-}
-// 従来の段 (frame を複製する call_frame_push) を積むときは、同じ段の再開状態を無効にしておく。
-template <class Thread> void inplace_clear(Thread &thread, uint32_t index) {
-  if constexpr (decltype(thread.call_stack.resume)::enabled) {
-    if (index < inplace_depth<Thread>())
-      thread.call_stack.resume.items[index].valid = false;
+bool header_push_of(Thread &thread, Context &context, Frame &frame, uint8_t via, uint32_t floor) {
+  if constexpr (arch_call_in_place<A>()) {
+    if (thread.ledger == nullptr || thread.call_stack.depth >= thread.ledger_capacity ||
+        !A::call_header_has_room(context))
+      return false;
+    auto *header = A::call_header_slot(context);
+    header->prev = thread.call_stack.top;
+    header->pc = frame.mepc;
+    header->caller_object = thread.call_stack.caller_object;
+    header->caller_generation = thread.call_stack.caller_generation;
+    header->region_base = context.region_base;
+    header->region_limit = context.region_limit;
+    header->unwind_floor = (uint16_t)floor;
+    header->via = via;
+    header->privileged = context.privileged ? 1 : 0;
+    header->reserved = 0;
+    thread.call_stack.top = reinterpret_cast<uintptr_t>(header);
+    thread.call_stack.depth++;
+    return true;
+  } else {
+    return false;
   }
 }
-template <class Thread> bool inplace_valid(const Thread &thread, uint32_t index) {
-  if constexpr (decltype(thread.call_stack.resume)::enabled)
-    return index < inplace_depth<Thread>() && thread.call_stack.resume.items[index].valid;
-  else
-    return false;
-}
-// 段 index の caller の frame を作り直す (a0/a1 以外は 0)。
-template <class A, class Thread, class Context>
-auto *inplace_resume(Thread &thread, uint32_t index, Context &context) {
-  if constexpr (arch_call_in_place<A>())
-    return A::call_resume_frame(context, thread.call_stack.resume.items[index]);
-  else
-    return static_cast<typename A::exception_frame_t *>(nullptr);
+// 先頭ヘッダを 1 つ落とす。restore なら caller の再開フレームを作って frame を差し替える。
+// is_call なら call 段が積む前の caller の識別を戻す。
+template <class A, class Thread, class Context, class Frame>
+void header_pop_of(Thread &thread, Context &context, Frame *&frame, bool is_call, bool restore) {
+  if constexpr (arch_call_in_place<A>()) {
+    auto *header = reinterpret_cast<typename A::call_header_t *>(thread.call_stack.top);
+    if (is_call) {
+      thread.call_stack.call_count--;
+      thread.call_stack.current_call_object = thread.call_stack.caller_object;
+      thread.call_stack.current_call_generation = thread.call_stack.caller_generation;
+      thread.call_stack.caller_object = header->caller_object;
+      thread.call_stack.caller_generation = header->caller_generation;
+    }
+    thread.call_stack.top = header->prev;
+    if (restore)
+      frame = A::call_resume(context, header);
+  }
 }
 
 // ISA 層の例外入口が退避先・復帰先として使う文脈。dispatch が現在スレッドを
@@ -195,6 +204,11 @@ extern "C" { volatile uint32_t shizuku_push_diag[6]; volatile uint32_t shizuku_p
 template <>
 SHIZUKU_HOT bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                              KERNEL::FRAME **frame) {
+  if (arch_call_in_place<ARCH>()) {
+    // ヘッダ枠方式: frame はコピーせず、caller の枠に書くだけ。via / floor はヘッダの参考値で、
+    // 呼び出し側が台帳へ書いたあとに合わせる (ここでは 0)。
+    return header_push_of<ARCH>(thread, *context, **frame, 0, 0);
+  }
   const uint32_t frame_bytes = ARCH::exc_frame_bytes(*context);
   const uint32_t stack_arg_bytes = ARCH::HANDLER_STACK_ARG_BYTES;
   uint32_t total = (uint32_t)sizeof(call_frame_header) + frame_bytes +
@@ -281,30 +295,30 @@ SHIZUKU_HOT bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT
 template <>
 SHIZUKU_HOT bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                             KERNEL::FRAME **frame, bool restore) {
+  if (thread.call_stack.top == 0)
+    return false;
   // 落とす段が call の段 (LEDGER_CALL / LEDGER_DESCRIPTOR_CALL) か。identity の復元が要る。
   const bool is_call =
       thread.call_stack.depth > 0 &&
       (thread.ledger[thread.call_stack.depth - 1].via == LEDGER_CALL ||
        thread.ledger[thread.call_stack.depth - 1].via == LEDGER_DESCRIPTOR_CALL);
-  // in-place の段にはヘッダが無い (frame を動かしていない)。caller の再開は resume に残した
-  // 最小限 (sp・pc・特権・窓) から frame を作り直す。レジスタは a0/a1 以外が消える。
-  const bool inplace = is_call && thread.call_stack.call_count != 0 &&
-                       inplace_valid(thread, thread.call_stack.call_count - 1);
-  uintptr_t previous = 0;
-  if (!inplace) {
-    if (thread.call_stack.top == 0)
-      return false;
-    // ★幾何は push 時に記録した値を読み戻す。再計算しない (I-5)。
-    // 元の例外フレームは退避域の中に元の位置のまま生きているので、文脈を丸ごと
-    // 戻すだけで復帰先が正しく決まる (書き戻しも再配置も不要)。
-    const call_frame_header *header = (const call_frame_header *)thread.call_stack.top;
-    previous = header->prev;
-    *context = header->saved;
-    *frame = context->sp;
+  if (is_call && thread.call_stack.call_count == 0)
+    BOARD::panic("call ledger count underflow");
+  if (arch_call_in_place<ARCH>()) {
+    // ヘッダ枠方式: ヘッダから caller の識別・pc・特権・窓を読み、最後の 1 段だけ caller の
+    // 再開フレームを caller の SP の直下に作る (a0/a1 以外は 0)。frame のコピーも戻しも無い。
+    header_pop_of<ARCH>(thread, *context, *frame, is_call, restore);
+    thread.call_stack.depth--;
+    return true;
   }
+  // ★幾何は push 時に記録した値を読み戻す。再計算しない (I-5)。
+  // 元の例外フレームは退避域の中に元の位置のまま生きているので、文脈を丸ごと
+  // 戻すだけで復帰先が正しく決まる (書き戻しも再配置も不要)。
+  const call_frame_header *header = (const call_frame_header *)thread.call_stack.top;
+  const uintptr_t previous = header->prev;
+  *context = header->saved;
+  *frame = context->sp;
   if (is_call) {
-    if (thread.call_stack.call_count == 0)
-      BOARD::panic("call ledger count underflow");
     thread.call_stack.call_count--;
     const uint32_t restore_index = thread.call_stack.call_count;
     thread.call_stack.current_call_object = thread.call_stack.caller_object;
@@ -313,11 +327,8 @@ SHIZUKU_HOT bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT 
         thread.call_stack.identity[restore_index].previous_caller_object;
     thread.call_stack.caller_generation =
         thread.call_stack.identity[restore_index].previous_caller_generation;
-    if (inplace && restore)
-      *frame = inplace_resume<ARCH>(thread, restore_index, *context);
   }
-  if (!inplace)
-    thread.call_stack.top = previous;
+  thread.call_stack.top = previous;
   thread.call_stack.depth--;
   return true;
 }
@@ -336,7 +347,7 @@ SHIZUKU_HOT void KERNEL::call_unwind(KERNEL::THREAD &thread, KERNEL::CONTEXT *co
 template <>
 SHIZUKU_HOT kernel_error KERNEL::enter_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                                 KERNEL::FRAME **frame,
-                                const call_request &request, uint8_t via, bool inplace) {
+                                const call_request &request, uint8_t via) {
   // ★偽装防止 (指摘4): 一般 call_request から KERNEL_OBJECT 種別や
   //   m_object_svc_handler_object を名乗ることは拒否する。
   if (request.callee_kind == (uint32_t)object_kind::KERNEL_OBJECT ||
@@ -345,33 +356,25 @@ SHIZUKU_HOT kernel_error KERNEL::enter_call(KERNEL::THREAD &thread, KERNEL::CONT
   }
   if (thread.call_stack.call_count >= KERNEL_OBJECT::MAX_DEPTH)
     return kernel_error::NO_STACK;
-  if (thread.call_stack.call_count >= THREAD::CALL_IDENTITY_CAPACITY)
-    return kernel_error::NO_STACK;
   const uint32_t unwind_floor = thread.call_stack.depth;
-  // in-place: caller の frame は動かさない。再開に要る最小限だけ resume に残し、呼び先は
-  // 同じ frame の上で始まる (レジスタは caller の値がそのまま通る)。戻りで frame を作り直す。
-  // 浅い段 (call_count < INPLACE_DEPTH) だけ。深い段と in-place を持たない ARCH は従来の
-  // call_frame_push (frame を複製してヘッダに退避)。
-  if (inplace && inplace_eligible<ARCH>(thread)) {
-    if (thread.ledger == nullptr || thread.call_stack.depth >= thread.ledger_capacity ||
-        unwind_floor > UINT16_MAX || !inplace_has_room<ARCH>(thread, *context))
-      return kernel_error::NO_STACK;
-    inplace_save<ARCH>(thread, thread.call_stack.call_count, *context, **frame);
-    thread.call_stack.identity[thread.call_stack.call_count] = {
-        thread.call_stack.caller_object, thread.call_stack.caller_generation};
-    thread.call_stack.depth++;
-  } else {
+  if (!arch_call_in_place<ARCH>()) {
     // 呼び先の普通の return は svc_dispatch 経由でもう 1 枚 call_frame_push する。
     // その 1 枚ぶんの余白を CALL 時に先取りする (全 arch 共通。2026-10-21 実機で
     // RV32 の OBJECT_DEEP が最深で return を断られ 0xE005 停止したため)。
+    // identity の退避先は固定配列 (ARM)。ヘッダ枠方式 (RV32) は上限なし (MAX_DEPTH は上で検査)。
+    if (thread.call_stack.call_count >= THREAD::CALL_IDENTITY_CAPACITY)
+      return kernel_error::NO_STACK;
     if (!ARCH::call_entry_has_return_room(*context, sizeof(call_frame_header)))
       return kernel_error::NO_STACK;
-    if (unwind_floor > UINT16_MAX || !call_frame_push(thread, context, frame))
-      return kernel_error::NO_STACK;
+  }
+  if (unwind_floor > UINT16_MAX ||
+      !(arch_call_in_place<ARCH>()
+            ? header_push_of<ARCH>(thread, *context, **frame, via, unwind_floor)
+            : call_frame_push(thread, context, frame)))
+    return kernel_error::NO_STACK;
+  if (!arch_call_in_place<ARCH>())
     thread.call_stack.identity[thread.call_stack.call_count] = {
         thread.call_stack.caller_object, thread.call_stack.caller_generation};
-    inplace_clear(thread, thread.call_stack.call_count);
-  }
   auto &entry = thread.ledger[thread.call_stack.depth - 1];
   entry = {request.callee_object, request.parent_handler_object,
            request.parent_handler_entry, (uint8_t)request.callee_kind,
@@ -391,7 +394,7 @@ SHIZUKU_HOT kernel_error KERNEL::enter_call(KERNEL::THREAD &thread, KERNEL::CONT
 template <>
 kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                              KERNEL::FRAME **frame,
-                             const call_request &request, bool inplace) {
+                             const call_request &request) {
   if (request.entry_pc == 0)
     return kernel_error::BAD_REQUEST;
 #if defined(SHIZUKU_RP2040)
@@ -401,8 +404,7 @@ kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
 #if defined(SHIZUKU_DEEP_DIAG)
   shizuku_push_diag_kind = 1; // do_call 経由の push
 #endif
-  const kernel_error error =
-      enter_call(thread, context, frame, request, LEDGER_CALL, inplace);
+  const kernel_error error = enter_call(thread, context, frame, request, LEDGER_CALL);
   if (error != kernel_error::OK)
     return error;
   // 戻り口は常にカーネルの 1 本。撃つ svc は同じでも、そこから出たときの**種別**で
@@ -666,7 +668,7 @@ template <> SHIZUKU_HOT void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
         return;
       }
       request.args[0] = ARCH::arg(*frame, 3);
-      const kernel_error entered = do_call(thread, context, &frame, request, /*inplace=*/true);
+      const kernel_error entered = do_call(thread, context, &frame, request);
       // 入れなかったときは台帳に段が残らない (frame もそのまま = 呼び出し元の svc フレーム)。
       if (entered != kernel_error::OK)
         ARCH::set_result(*frame, (uintptr_t)(entered == kernel_error::NO_STACK
@@ -725,7 +727,7 @@ template <> SHIZUKU_HOT void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
       shizuku_push_diag_kind = 3; // CALL_METHOD_DESCRIPTOR 経路 (riscv のみ)
 #endif
       const kernel_error entered = enter_call(thread, context, &frame, request,
-                                              LEDGER_DESCRIPTOR_CALL, /*inplace=*/true);
+                                              LEDGER_DESCRIPTOR_CALL);
       if (entered != kernel_error::OK) {
         ARCH::set_result(*frame, (uintptr_t)(entered == kernel_error::NO_STACK
                                                  ? object_error::NO_STACK
@@ -761,7 +763,9 @@ template <> SHIZUKU_HOT void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
   shizuku_push_diag_kind = 2; // svc_dispatch の通常 CALL 経路
 #endif
   if (unwind_floor > UINT16_MAX ||
-      !call_frame_push(thread, context, &frame)) {
+      !(arch_call_in_place<ARCH>()
+            ? header_push_of<ARCH>(thread, *context, *frame, LEDGER_DISPATCH, unwind_floor)
+            : call_frame_push(thread, context, &frame))) {
     // ★この拒否は object_api の呼出しへの答え。object 版 NO_STACK で返し、呼出し元が
     //   「どちらの push で断られたか」を区別しなくて済むようにする (KERNEL_ERROR_MARK は
     //   語彙を持たないエラー用に残す)。

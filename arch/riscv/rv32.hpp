@@ -84,6 +84,8 @@ public:
 
   // スレッド文脈 (callee-saved registers: sp, s0..s11)
   struct context_t {
+    // 呼出しの記録は user stack 上のヘッダ枠にある (thread.hpp: identity 配列を縮める目印)。
+    static constexpr bool CALL_HEADER_ON_STACK = true;
     exception_frame_t *sp = nullptr;
     uintptr_t s0 = 0, s1 = 0, s2 = 0, s3 = 0;
     uintptr_t s4 = 0, s5 = 0, s6 = 0, s7 = 0;
@@ -92,15 +94,6 @@ public:
     bool privileged = true;
     uintptr_t region_base = 0;
     uintptr_t region_limit = 0;
-    // in-place call で caller を再開するのに要る最小限。レジスタは持たない (ABI: 戻りで消える)。
-    struct call_resume_t {
-      uintptr_t sp;  // caller の SP (= trap フレームの直上)
-      uintptr_t pc;  // ecall の次の命令
-      uintptr_t region_base;
-      uintptr_t region_limit;
-      bool privileged;
-      bool valid; // この段が in-place call か (従来の段は false のまま)
-    };
   };
 
   using method_t = uintptr_t (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t,
@@ -188,46 +181,44 @@ public:
     return reinterpret_cast<uintptr_t>(&shizuku_rv32_return_stub);
   }
 
-  // ---- in-place call (2026-10-22 ABI: レジスタは全部 callee への入力) ----------------
-  // method call / descriptor call は caller の trap フレームをコピーせず、そのまま呼び先の
-  // 入口フレームにする (restore がそこから全レジスタを読む)。呼び先の SP は caller の SP と
-  // 同じ (フレームは restore で読み終えた死んだ領域で、呼び先のスタックがその上に重なる)。
-  // カーネルが決めるのは pc・ra・引数だけで、ほかは caller の値が通る。
+  // ---- 呼出しの記録 (design notes §5b、2026-10-22 ABI) ----------------------------
+  // 全ての ecall (CALL_METHOD / descriptor call / kobj への dispatch) は caller の trap フレームを
+  // コピーせず、そのまま呼び先の入口フレームにする。呼び先の SP は caller の ecall 時点の SP と
+  // 同じ。caller を再開するのに要る最小限は、caller stub が ecall の前に空けた枠
+  // [sp, sp + 32) (callee のスタックより上 = callee の窓の外) にカーネルが書く。
+  // カーネルが持つのは先頭ヘッダへのポインタ (call_stack.top) と深さだけ。
+  // 戻りでは caller の SP の直下に再開フレームを作り、a0/a1 (戻り値) 以外を消す。
   static constexpr bool CALL_IN_PLACE = true;
-  using call_resume_t = typename context_t::call_resume_t;
+  struct call_header_t {
+    uintptr_t prev;            // 一つ外側のヘッダのアドレス (0 = 最外)
+    uintptr_t pc;              // caller の再開 pc (ecall の次の命令)
+    uint32_t caller_object;    // この段を積む前の caller_object / generation (call の段が戻すもの)
+    uint32_t caller_generation;
+    uintptr_t region_base;     // caller の軸 B の窓
+    uintptr_t region_limit;
+    uint16_t unwind_floor;     // 参考値 (権威は特権の台帳。非特権スタック上の値は信用しない)
+    uint8_t via;               // 参考値
+    uint8_t privileged;        // caller の特権
+    uint32_t reserved;
+  };
+  // 実機 (32bit) では枠にちょうど収まること。host 試験 (64bit) は uintptr_t が太いので検査しない。
+  static_assert(sizeof(uintptr_t) != 4 || sizeof(call_header_t) == RV32_CALL_HEADER_BYTES);
+  static_assert(RV32_CALL_HEADER_BYTES == rv32_abi::CALL_HEADER_BYTES);
 
-  // 呼び先の入口を作る前に、caller を再開するのに要る最小限を取る。frame は trap フレーム。
-  static call_resume_t call_resume_save(const context_t &context,
-                                        const exception_frame_t &frame) {
-    return {reinterpret_cast<uintptr_t>(context.sp) + sizeof(exception_frame_t),
-            frame.mepc, context.region_base, context.region_limit,
-            context.privileged, true};
+  // ecall した caller の枠。trap フレーム (context.sp) の直上 = caller の ecall 時点の SP。
+  static call_header_t *call_header_slot(const context_t &context) {
+    return reinterpret_cast<call_header_t *>(
+        reinterpret_cast<uintptr_t>(context.sp) + sizeof(exception_frame_t));
   }
 
-  // 戻り: caller の SP の直下に再開用フレームを作る。a0/a1 (戻り値) は呼び出し側が set_result で
-  // 書く。ほかのレジスタ (ra・gp・tp・s*・t*・a2-a7) は 0 にする — callee の値を caller に見せない。
-  // 呼び先が返ってきたときの trap フレームと重なることがある (返りの SP が caller の SP の
-  // すぐ下のとき) ので、呼び出し側は戻り値などを先に読んでおくこと。
-  static exception_frame_t *call_resume_frame(context_t &context,
-                                              const call_resume_t &resume) {
-    auto *frame = reinterpret_cast<exception_frame_t *>(
-        resume.sp - sizeof(exception_frame_t));
-    *frame = {};
-    frame->mepc = resume.pc;
-    context.sp = frame;
-    context.privileged = resume.privileged;
-    context.region_base = resume.region_base;
-    context.region_limit = resume.region_limit;
-    context.s0 = context.s1 = context.s2 = context.s3 = 0;
-    context.s4 = context.s5 = context.s6 = context.s7 = 0;
-    context.s8 = context.s9 = context.s10 = context.s11 = 0;
-    return frame;
+  // 枠に書いたあと呼び先の窓の上端になるアドレス (= 枠の下端 = ecall 時点の SP)。
+  static uintptr_t call_window_top(const call_header_t *header) {
+    return reinterpret_cast<uintptr_t>(header);
   }
 
   // 呼び先の入口に要る余白: 返りの trap フレーム 1 枚ぶんに加え、呼び先がもう 1 回カーネルを
-  // 呼び返せること (トランポリン 1 枚 + fault 入口の退避 + ハンドラ連鎖)。call_frame_push の
-  // 余白と同じ構成要素から出す。
-  static bool call_inplace_has_room(const context_t &context) {
+  // 呼び返せること (トランポリン 1 枚 + fault 入口の退避 + ハンドラ連鎖)。
+  static bool call_header_has_room(const context_t &context) {
     const uintptr_t limit = stack_limit(context);
     if (limit == 0)
       return true;
@@ -236,6 +227,26 @@ public:
     return sp >= limit &&
            sp - limit >= 2u * sizeof(exception_frame_t) + EXC_FRAME_MAX_BYTES +
                              FAULT_CONTEXT_BYTES + CALL_HEADROOM;
+  }
+
+  // 戻り: ヘッダの枠の直下に caller の再開フレームを作る。a0/a1 (戻り値) は呼び出し側が set_result で
+  // 書く。ほかのレジスタは 0 にする — 呼び先の値を caller に見せない。呼び先が返ってきたときの
+  // trap フレームと重なることがある (返りの SP が caller の SP のすぐ下のとき) ので、呼び出し側は
+  // 戻り値などを先に読んでおくこと。ヘッダ自身はフレームの上にあり、重ならない。
+  static exception_frame_t *call_resume(context_t &context, const call_header_t *header) {
+    auto *frame = reinterpret_cast<exception_frame_t *>(
+        reinterpret_cast<uintptr_t>(header) - sizeof(exception_frame_t));
+    const uintptr_t pc = header->pc;
+    const uintptr_t region_base = header->region_base;
+    const uintptr_t region_limit = header->region_limit;
+    const bool privileged = header->privileged != 0;
+    *frame = {};
+    frame->mepc = pc;
+    context.sp = frame;
+    context.privileged = privileged;
+    context.region_base = region_base;
+    context.region_limit = region_limit;
+    return frame;
   }
 
   // ---- ABI converter, callee 側 (shizuku/method_entry.hpp, shizuku/rv32_abi.hpp) ----

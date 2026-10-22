@@ -42,8 +42,8 @@ enum struct object_api : uintptr_t {
   //   戻りでカーネルは a0 (error) / a1 (value) 以外を 0 に消す。だから caller は callee-saved・ra・
   //   gp・tp を自分で退避・復元する (ARCH::syscall がやる)。呼び先は入口 stub
   //   (shizuku::method_entry<ARCH, &fn>()) 経由で登録し、gp を自分のものへ入れる。
-  //   caller のスタックが浅い段 (call_count < 4) だけ。深い段は従来どおり frame を複製し、
-  //   レジスタも戻る。ARM は従来のまま。
+  //   全段で同じ (段数の上限は MAX_DEPTH だけ)。呼出しの記録 (戻り pc・caller の識別など) は
+  //   caller stub が ecall の前に空けた枠に書かれ、callee の窓の外にある。ARM は従来のまま。
   CALL_METHOD = 4,
   // 今どのオブジェクトとして走っているか / 誰に呼ばれたか。戻り a1 = オブジェクト ID。
   // ★identity はカーネルではなくカーネルオブジェクトの台帳から答える

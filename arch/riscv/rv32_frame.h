@@ -39,6 +39,9 @@
 #define RV32_F_RESERVED0 136
 #define RV32_F_RESERVED1 140
 #define RV32_FRAME_BYTES 144
+// 呼出しの記録 (call_header_t) を置く枠。ecall の前に caller stub が sp をこれだけ余分に下げ、
+// カーネルが枠 [sp, sp + RV32_CALL_HEADER_BYTES) に書く (design notes §5b)。
+#define RV32_CALL_HEADER_BYTES 32
 #define RV32_MSTATUS_MPP 0x1800
 #define RV32_MSTATUS_MPIE 0x80
 #endif

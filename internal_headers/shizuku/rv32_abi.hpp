@@ -15,6 +15,10 @@
 //  経由せず自前で ecall する側 (ESP-IDF 側の互換層) の両方がこのヘッダを使う。
 namespace shizuku::rv32_abi {
 
+// ecall 前に sp を下げる量: 呼出しの記録の枠 32 + gp/tp/s0 の退避 16。
+inline constexpr unsigned ECALL_RESERVE_BYTES = 48;
+inline constexpr unsigned CALL_HEADER_BYTES = 32;
+
 // ---- callee 側 ------------------------------------------------------------
 //  入口 stub。オブジェクトと同じ翻訳単位で template から生成されるので、
 //  __global_pointer$ はそのオブジェクト自身の値に解決される (カーネルは callee の gp を知らない)。
@@ -53,8 +57,11 @@ template <auto F> inline uintptr_t entry_address() {
 //  ★クラバーに s1–s11 を宣言すると、コンパイラは inline したこの箇所で本当に生きているものだけを
 //    関数の入口・出口で退避する (旧: カーネルが全部の s* を退避・復元していた)。
 //  ★gp は callee が自分のものへ入れ替えてよい (入口 stub)。ここで復元するのは caller 自身の値。
-//  ★スタックを一時的に 16 バイト使うが、asm の間はコンパイラの sp 相対アクセスは起きない
-//    (オペランドはすべてレジスタ)。
+//  ★ecall の前に sp を 48 バイト下げる。先頭 32 バイト [sp, sp+32) はカーネルが書く「呼出しの記録」
+//    (call_header_t、RV32_CALL_HEADER_BYTES) の枠で、残り 16 バイトに gp/tp/s0 を退避する。
+//    callee のスタックは ecall 時点の sp より下だけ (枠と退避域は callee の窓の外)。
+//    asm の間はコンパイラの sp 相対アクセスは起きない (オペランドはすべてレジスタ)。
+//    RV32_CALL_HEADER_BYTES を変えるときはここの 48 (= 枠 + 16) も合わせる (rv32.hpp に static_assert)。
 struct call_result {
   uintptr_t error;
   uintptr_t value;
@@ -78,15 +85,15 @@ struct call_result {
   register uintptr_t r_a6 asm("a6");
   register uintptr_t r_a7 asm("a7");
   asm volatile(
-      "addi sp, sp, -16\n"
-      "sw gp, 0(sp)\n"
-      "sw tp, 4(sp)\n"
-      "sw s0, 8(sp)\n"
+      "addi sp, sp, -48\n"
+      "sw gp, 32(sp)\n"
+      "sw tp, 36(sp)\n"
+      "sw s0, 40(sp)\n"
       "ecall\n"
-      "lw gp, 0(sp)\n"
-      "lw tp, 4(sp)\n"
-      "lw s0, 8(sp)\n"
-      "addi sp, sp, 16\n"
+      "lw gp, 32(sp)\n"
+      "lw tp, 36(sp)\n"
+      "lw s0, 40(sp)\n"
+      "addi sp, sp, 48\n"
       : "+r"(r_a0), "+r"(r_a1), "+r"(r_a2), "+r"(r_a3), "+r"(r_a4),
         "=r"(r_a5), "=r"(r_a6), "=r"(r_a7)
       :
@@ -108,15 +115,15 @@ struct call_result {
   register uintptr_t r_a6 asm("a6") = a6;
   register uintptr_t r_a7 asm("a7") = a7;
   asm volatile(
-      "addi sp, sp, -16\n"
-      "sw gp, 0(sp)\n"
-      "sw tp, 4(sp)\n"
-      "sw s0, 8(sp)\n"
+      "addi sp, sp, -48\n"
+      "sw gp, 32(sp)\n"
+      "sw tp, 36(sp)\n"
+      "sw s0, 40(sp)\n"
       "ecall\n"
-      "lw gp, 0(sp)\n"
-      "lw tp, 4(sp)\n"
-      "lw s0, 8(sp)\n"
-      "addi sp, sp, 16\n"
+      "lw gp, 32(sp)\n"
+      "lw tp, 36(sp)\n"
+      "lw s0, 40(sp)\n"
+      "addi sp, sp, 48\n"
       : "+r"(r_a0), "+r"(r_a1), "+r"(r_a2), "+r"(r_a3), "+r"(r_a4),
         "+r"(r_a5), "+r"(r_a6), "+r"(r_a7)
       :

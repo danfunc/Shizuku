@@ -113,6 +113,9 @@ shizuku_rv32_first_return:
 .global shizuku_rv32_return_stub
 .type shizuku_rv32_return_stub,@function
 shizuku_rv32_return_stub:
+  // 戻り口の ecall も caller stub と同じく呼出し記録の枠を空ける: スレッドの最外のメソッドが戻る
+  // 場合 (d == 0 && 呼出し段なし) は kobj の exit_thread へ dispatch 段が積まれ、その枠が要る。
+  addi sp, sp, -RV32_CALL_HEADER_BYTES
   // V2 RETURN(number=2, count=1, value=a0, error=0, return-stub marker).
   mv a2, a0
   li a0, 2

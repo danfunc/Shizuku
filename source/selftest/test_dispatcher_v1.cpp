@@ -361,8 +361,8 @@ static void run_dispatcher_tests() {
   assert(ARCH::arg(*ctx->sp, 1) == 0x1234);
   assert(ARCH::arg(*ctx->sp, 2) == 0x1000);
   assert(ARCH::arg(*ctx->sp, 3) == 0x2000);
-  const auto *header = (const KERNEL::call_frame_header *)thread.call_stack.top;
-  assert(header->saved.privileged == false); // Caller privilege preserved as unprivileged!
+  const auto *header = (const ARCH::call_header_t *)thread.call_stack.top;
+  assert(header->privileged == 0); // Caller privilege preserved as unprivileged!
 
   // Return from actor handler via primitive::RETURN (with RETURN_STUB_MARKER),
   // verifying caller's unprivileged context is restored upon frame pop.
@@ -379,16 +379,19 @@ static void run_dispatcher_tests() {
   // 宛先が root の戻りは、LEDGER_CALL / LEDGER_DESCRIPTOR_CALL のどちらの段でも handler を
   // 再入させず caller へ直接戻す。検証に落ちたら 1 枚も落とさず UNWIND_REJECTED を返す。
   // 専用親ハンドラ宛ては従来経路。
+  constexpr uintptr_t A_PC_6 = 0x42000200;
   auto arm_frame = [&](uint8_t via, uint16_t unwind_floor, ARCH::exception_frame_t *callee) {
     ctx->sp = frame;
     ctx->privileged = true;
-    static KERNEL::call_frame_header header;
-    header = {};
-    header.saved = *ctx; // 呼び出し元の文脈 (sp = frame)
-    thread.call_stack.top = (uintptr_t)&header;
+    // 呼出しの記録: caller (sp = frame + trap フレーム) の枠にヘッダを置く (caller stub が空けた枠)。
+    auto *header = ARCH::call_header_slot(*ctx);
+    *header = {};
+    header->pc = A_PC_6;
+    header->caller_object = (uint32_t)KERNEL_OBJECT::NO_OBJECT; // 呼び先を積む前の caller_object
+    header->privileged = 1;
+    thread.call_stack.top = (uintptr_t)header;
     thread.call_stack.depth = 1;
     thread.call_stack.call_count = 1;
-    thread.call_stack.identity[0] = {(uint32_t)KERNEL_OBJECT::NO_OBJECT, 0};
     thread.call_stack.caller_object = ROOT_APP_ID;
     thread.call_stack.current_call_object = LEAF_ID;
     thread.call_stack.caller_generation = 0;
@@ -539,9 +542,6 @@ static void run_dispatcher_tests() {
     f->s3 = MARK | (seed + 16); f->s4 = MARK | (seed + 17); f->s5 = MARK | (seed + 18);
     f->s6 = MARK | (seed + 19); f->s7 = MARK | (seed + 20); f->s8 = MARK | (seed + 21);
     f->s9 = MARK | (seed + 22); f->s10 = MARK | (seed + 23); f->s11 = MARK | (seed + 24);
-    ctx->s0 = f->s0; ctx->s1 = f->s1; ctx->s2 = f->s2; ctx->s3 = f->s3;
-    ctx->s4 = f->s4; ctx->s5 = f->s5; ctx->s6 = f->s6; ctx->s7 = f->s7;
-    ctx->s8 = f->s8; ctx->s9 = f->s9; ctx->s10 = f->s10; ctx->s11 = f->s11;
   };
   // 呼び先の入口で、引数と ra(戻り口)・pc 以外が caller の値のまま通っているか。
   auto regs_pass_through = [&](const KERNEL::FRAME *f, uintptr_t seed) {
@@ -556,7 +556,7 @@ static void run_dispatcher_tests() {
            f->s5 == (MARK | (seed + 18)) && f->s6 == (MARK | (seed + 19)) &&
            f->s7 == (MARK | (seed + 20)) && f->s8 == (MARK | (seed + 21)) &&
            f->s9 == (MARK | (seed + 22)) && f->s10 == (MARK | (seed + 23)) &&
-           f->s11 == (MARK | (seed + 24)) && ctx->s1 == f->s1 && ctx->s11 == f->s11;
+           f->s11 == (MARK | (seed + 24));
   };
   // 戻った caller から見て、a0/a1 以外が消えているか (ra・gp・tp・s*・t*・a2-a7)。
   auto regs_cleared = [&](const KERNEL::FRAME *f) {
@@ -565,8 +565,7 @@ static void run_dispatcher_tests() {
            f->a4 == 0 && f->a5 == 0 && f->a6 == 0 && f->a7 == 0 && f->gp == 0 &&
            f->tp == 0 && f->s0 == 0 && f->s1 == 0 && f->s2 == 0 && f->s3 == 0 &&
            f->s4 == 0 && f->s5 == 0 && f->s6 == 0 && f->s7 == 0 && f->s8 == 0 &&
-           f->s9 == 0 && f->s10 == 0 && f->s11 == 0 && ctx->s0 == 0 &&
-           ctx->s1 == 0 && ctx->s11 == 0;
+           f->s9 == 0 && f->s10 == 0 && f->s11 == 0;
   };
   constexpr uintptr_t A_PC = 0x42000100; // A が ecall した次の命令
 
@@ -592,11 +591,16 @@ static void run_dispatcher_tests() {
   assert(ARCH::frame_pc(*ctx->sp) == ENTRY_B);
   assert(ARCH::arg(*ctx->sp, 0) == 0x55); // 引数 a3 は呼び先の第 1 引数
   assert(ctx->sp == frame); // frame をコピーしない (in-place)
-  assert(thread.call_stack.top == 0); // call_frame_header も積まない
-  assert(thread.call_stack.resume.items[0].valid);
-  assert(thread.call_stack.resume.items[0].sp ==
-         reinterpret_cast<uintptr_t>(frame) + sizeof(KERNEL::FRAME));
-  assert(thread.call_stack.resume.items[0].pc == A_PC);
+  {
+    // 呼出しの記録は caller の枠 (trap フレームの直上 = caller の ecall 時点の SP) にある。
+    // カーネルが持つのはその先頭へのポインタと深さだけ。callee の窓の上端は枠の下端 (= 枠のアドレス)。
+    const auto *h = (const ARCH::call_header_t *)thread.call_stack.top;
+    assert((uintptr_t)h == reinterpret_cast<uintptr_t>(frame) + sizeof(KERNEL::FRAME));
+    assert(ARCH::call_window_top(h) == (uintptr_t)h);
+    assert(h->prev == 0 && h->pc == A_PC && h->privileged == 1);
+    assert(h->via == KERNEL::LEDGER_CALL && h->unwind_floor == 0);
+    assert(h->caller_object == 0 /* fresh() の caller_object */);
+  }
   // ra は 32bit レジスタ。host (64bit) では関数ポインタが切り詰められるので下位 32bit で比べる。
   assert(frame->ra == (uint32_t)ARCH::return_stub()); // 戻り口はカーネルが決める
   assert(regs_pass_through(frame, 0x100)); // ra・引数・pc 以外は caller の値が通る
@@ -616,11 +620,16 @@ static void run_dispatcher_tests() {
   assert(frame_b->a1 == B_ID);
 
   // 8c. B → C (C は非特権オブジェクト)。C から見た caller は B。
-  frame_b->a0 = (uintptr_t)object_api::CALL_METHOD;
-  frame_b->a1 = C_ID;
-  frame_b->a2 = 0;
-  frame_b->a3 = 0x66;
+  // B は自分のスタックを 400 バイト使ってから C を呼ぶ (呼出しの記録の枠は B の枠とは別)。
+  auto *frame_b_call = reinterpret_cast<KERNEL::FRAME *>(reinterpret_cast<uint8_t *>(frame_b) - 400);
+  ctx->sp = frame_b_call;
+  frame_b_call->mepc = ENTRY_B; // B が C を呼んだ点 (試験は ecall の +4 を模さない)
+  frame_b_call->a0 = (uintptr_t)object_api::CALL_METHOD;
+  frame_b_call->a1 = C_ID;
+  frame_b_call->a2 = 0;
+  frame_b_call->a3 = 0x66;
   kernel_instance.svc_dispatch(ctx);
+  frame_b = frame_b_call; // C から戻ったとき B が再開するのは、B が ecall した枠の直下
   assert(kernel_instance.current_depth() == 2);
   assert(count_dispatch_frames() == 0);
   assert(thread.ledger[1].via == KERNEL::LEDGER_CALL);
@@ -748,8 +757,8 @@ static void run_dispatcher_tests() {
   kernel_instance.svc_dispatch(ctx);
   assert(kernel_instance.current_depth() == 1);
   assert(ctx->privileged == false);
-  assert(thread.call_stack.top == 0 && thread.call_stack.resume.items[0].valid);
-  assert(thread.call_stack.resume.items[0].privileged == false); // caller の特権は台帳の側に残る
+  assert(thread.call_stack.top != 0);
+  assert(((const ARCH::call_header_t *)thread.call_stack.top)->privileged == 0); // caller の特権はヘッダに残る
   ctx->sp->a0 = (uintptr_t)primitive::RETURN;
   ctx->sp->a1 = 1;
   ctx->sp->a2 = 0x12;
@@ -1161,27 +1170,38 @@ static void run_dispatcher_tests() {
     printf("  15b. in-place return from a lower SP (frames overlap): resumes at the caller's SP with value 0x4B, registers cleared: PASS\n");
   }
 
-  // 15c. in-place は浅い段 (call_count < INPLACE_DEPTH) だけ。それより深い段は従来の
-  //      call_frame_push (frame を複製しヘッダに退避)。混在した鎖を最後まで巻き戻せる。
+  // 15c. 全段 in-place (段数の上限なし): 8 段 (旧: 浅い 4 段まで) の CALL_METHOD。各段は前の段の
+  //      callee が自分のスタックを 400 バイト使ってから ecall した、という形 (枠は段ごとに別の
+  //      アドレス)。ヘッダは prev でつながり、戻りは 8 段すべてで a0/a1 以外が消える。
   {
-    constexpr uint32_t DEPTH = KERNEL::THREAD::call_stack_t::INPLACE_DEPTH;
-    constexpr uint32_t LEVELS = DEPTH + 2;
+    constexpr uint32_t LEVELS = 8;
     fresh(ROOT_APP_ID, true);
     frame->mepc = A_PC;
     KERNEL::FRAME *cur = frame;
+    KERNEL::FRAME *frames[LEVELS];
+    uintptr_t headers[LEVELS];
     for (uint32_t i = 0; i < LEVELS; ++i) {
+      mark_regs(cur, 0x500 + 0x40 * i);
+      cur->mepc = A_PC + 0x10 * i;
       cur->a0 = (uintptr_t)object_api::CALL_METHOD;
       cur->a1 = B_ID;
       cur->a2 = 0;
       cur->a3 = i;
+      frames[i] = cur;
       kernel_instance.svc_dispatch(ctx);
       assert(kernel_instance.current_depth() == i + 1);
       assert(ARCH::arg(*ctx->sp, 0) == i);
-      assert((ctx->sp == cur) == (i < DEPTH)); // 浅い段は frame を動かさず、深い段は複製する
-      assert(thread.call_stack.resume.items[i < DEPTH ? i : 0].valid || i >= DEPTH);
-      cur = ctx->sp;
+      assert(ctx->sp == cur); // どの段も frame をコピーしない
+      assert(regs_pass_through(cur, 0x500 + 0x40 * i));
+      headers[i] = thread.call_stack.top;
+      assert(headers[i] == reinterpret_cast<uintptr_t>(cur) + sizeof(KERNEL::FRAME));
+      const auto *h = (const ARCH::call_header_t *)headers[i];
+      assert(h->prev == (i == 0 ? 0 : headers[i - 1]) && h->pc == A_PC + 0x10 * i);
+      // 呼び先は自分のスタックを 400 バイト使ってから次の ecall をする (窓は枠の下端まで)。
+      cur = reinterpret_cast<KERNEL::FRAME *>(reinterpret_cast<uint8_t *>(cur) - 400);
+      ctx->sp = cur;
     }
-    assert(thread.call_stack.top != 0 && thread.call_stack.call_count == LEVELS);
+    assert(thread.call_stack.call_count == LEVELS);
     for (uint32_t i = LEVELS; i-- > 0;) {
       cur->a0 = (uintptr_t)primitive::RETURN;
       cur->a1 = 1;
@@ -1190,15 +1210,16 @@ static void run_dispatcher_tests() {
       cur->a4 = RETURN_STUB_MARKER;
       kernel_instance.svc_dispatch(ctx);
       assert(kernel_instance.current_depth() == i);
+      assert(thread.call_stack.top == (i == 0 ? 0 : headers[i - 1]));
       cur = ctx->sp;
+      assert(cur == frames[i]); // 段 i を呼んだ caller の枠の直下で再開する
       assert(cur->a0 == (uintptr_t)object_error::OK && cur->a1 == 0x70 + i);
-      if (i < DEPTH)
-        assert(regs_cleared(cur)); // in-place の段の caller: a0/a1 以外は消える
+      assert(regs_cleared(cur)); // 全段で a0/a1 以外が消える
+      assert(cur->mepc == A_PC + 0x10 * i);
     }
-    assert(thread.call_stack.top == 0 && thread.call_stack.call_count == 0 && cur == frame);
-    assert(frame->mepc == A_PC);
-    printf("  15c. %u nested CALL_METHOD: first %u in-place (frame kept), deeper ones copy+header; all %u returns unwind, in-place callers see cleared registers: PASS\n",
-           (unsigned)LEVELS, (unsigned)DEPTH, (unsigned)LEVELS);
+    assert(thread.call_stack.call_count == 0 && cur == frame);
+    printf("  15c. %u nested CALL_METHOD, all in-place (headers chained by prev, window top = header): every return resumes the caller with registers cleared: PASS\n",
+           (unsigned)LEVELS);
   }
 
   // 後始末
