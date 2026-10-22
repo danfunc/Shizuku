@@ -22,6 +22,27 @@
 //  (ARM) は変換が要らないので F をそのまま返す。
 //  ★F は定数式の関数ポインタ。入口を実行時に選ぶ表では、表に stub を引いたものを入れる
 //    (表の初期化は実行時でよい。この関数は constexpr ではない)。
+
+// ---------------------------------------------------------------------------
+//  callee の戻りで、その関数が使ったレジスタだけを 0 にする (caller と callee は互いに信頼しない)
+// ---------------------------------------------------------------------------
+//  入口 stub は本体へ tail jump するので、stub は本体の戻りに介入できない。本体の関数に
+//  SHIZUKU_ZERO_USED_REGS を付けると、コンパイラが戻る直前に「その関数が使った caller-saved レジスタ」
+//  (t*, a2–a7 など。戻り値の a0 / a1 と ra・sp は除く) を 0 にする (GCC 11+ の
+//  zero_call_used_regs("used-gpr")。使っていないレジスタには何もしない = 全部消すより安い)。
+//    SHIZUKU_ZERO_USED_REGS uintptr_t my_method(uintptr_t a, uintptr_t, uintptr_t, uintptr_t) { ... }
+//  ・使えないコンパイラ (属性を知らない、RISC-V 以外) では何も付かない = ビルドは壊れない。
+//  ・SHIZUKU_NO_ZERO_USED_REGS を定義すると無効 (消す/消さないの比較用)。
+//  ・効いたかどうかは逆アセンブルで見る: 付けた関数の ret の直前に `mv xN, zero` / `li xN, 0` が並ぶ。
+#if !defined(SHIZUKU_NO_ZERO_USED_REGS) && defined(__riscv) && defined(__has_attribute)
+#  if __has_attribute(zero_call_used_regs)
+#    define SHIZUKU_ZERO_USED_REGS __attribute__((zero_call_used_regs("used-gpr")))
+#  endif
+#endif
+#ifndef SHIZUKU_ZERO_USED_REGS
+#  define SHIZUKU_ZERO_USED_REGS
+#endif
+
 namespace shizuku {
 
 template <class ARCH, auto F>

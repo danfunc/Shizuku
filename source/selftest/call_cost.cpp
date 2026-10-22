@@ -85,12 +85,12 @@ struct api_result {
 
 // 呼び先。**何もしない**。ここに仕事を入れると、測っているのが呼び出しの費用なのか
 // 仕事の費用なのか分からなくなる。
-uintptr_t cost_leaf(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+SHIZUKU_ZERO_USED_REGS uintptr_t cost_leaf(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
   return argument + 1;
 }
 
 // 1 段深いだけの相手。(4) との差が「1 段あたりの限界費用」になる。
-uintptr_t cost_nest(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+SHIZUKU_ZERO_USED_REGS uintptr_t cost_nest(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
   return call_method(OBJECT_COST_LEAF, argument).value;
 }
 
@@ -336,7 +336,7 @@ __attribute__((noinline)) uintptr_t op_desc2(uintptr_t) {
 
 // 2 段目の受け手。SETUP では自分の子 cost_dinner と、それへの記述子 (自分の表) を作る。
 // それ以外は記述子で cost_dinner を呼び、引数をそのまま渡す。
-uintptr_t cost_dnest(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+SHIZUKU_ZERO_USED_REGS uintptr_t cost_dnest(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
   if (argument == MODE_SETUP) {
     note_setup(api(object_api::CREATE_OBJECT, OBJECT_COST_DINNER,
                    method_entry<ARCH, &cost_leaf>()).error);
@@ -351,7 +351,7 @@ uintptr_t cost_dnest(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
 
 // 呼び手 (D)。SETUP では子 cost_dleaf / cost_dnest と、自分の表への記述子 2 本を作る。
 // MEASURE では D の中から記述子を撃って測る (撃つのが D なので、呼び手は D になる)。
-uintptr_t cost_driver(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+SHIZUKU_ZERO_USED_REGS uintptr_t cost_driver(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
   if (argument == MODE_SETUP) {
     note_setup(api(object_api::CREATE_OBJECT, OBJECT_COST_DLEAF,
                    method_entry<ARCH, &cost_leaf>()).error);
@@ -381,7 +381,7 @@ uintptr_t cost_driver(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
 
 // 作成の測定対象。中で**自分自身への記述子**を 1 つ作り、その API 往復の区間だけを測る
 // (自分自身への作成は作成権限で常に通る)。表は呼ぶ前に root が差し替えで空にしておく。
-uintptr_t cost_owner(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+SHIZUKU_ZERO_USED_REGS uintptr_t cost_owner(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   const uint32_t started = cycles_now<ARCH>();
   g_create_error =
       api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_COST_OWNER, 0).error;
