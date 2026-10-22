@@ -107,6 +107,13 @@ build:esp32c5_ble --//configs:ble_profile=controller_init
 build:esp32c5_ble --copt=-DSHIZUKU_C5_BLE=1
 build:esp32c5_ble --copt=-DSHIZUKU_ESP_BLE=1
 
+# カーネル .a を作る段階で 1 回だけ LTO (GCC の部分リンク。modules/esp_idf_support/firmware/kernel_lto.sh)。
+#   bazelisk build --config=esp32c6 --config=kernel_lto //modules/esp_idf_support/firmware:esp32c6
+# カーネルの .o だけ `-flto -ffat-lto-objects` (fat なので LTO の段を通さなくても使える)。
+# -O2 は esp32c6 / esp32c5 の per_file_copt が付ける。
+build:kernel_lto --define=shizuku_kernel_lto=1
+build:kernel_lto --per_file_copt=^source/(kernel|kernel_object|cpu_manager)/,^chips/esp32_c[56]/trap\.cpp$@-flto,-ffat-lto-objects
+
 # C6 BLE controller-init firmware uses the same isolated IDF BLE profile.
 build:esp32c6_ble --config=esp32c6
 build:esp32c6_ble --//configs:ble_profile=controller_init

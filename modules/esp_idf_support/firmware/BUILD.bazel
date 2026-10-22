@@ -8,9 +8,16 @@ config_setting(
     name = "esp_ble_prefer_1m_phy",
     define_values = {"SHIZUKU_ESP_BLE_PREFER_1M_PHY": "1"},
 )
+# --config=kernel_lto (.bazelrc): カーネルの .o を `-flto -ffat-lto-objects` でコンパイルし、
+# カーネル .a を作る段階で 1 回だけ LTO をかける (shizuku_kernel_lto)。
+config_setting(
+    name = "kernel_lto",
+    define_values = {"shizuku_kernel_lto": "1"},
+)
 exports_files([
     "main/early_diag.c",
     "build.sh",
+    "kernel_lto.sh",
     "build_ota_profile.sh",
     "collect_ota_artifacts.py",
 ])
@@ -26,17 +33,34 @@ sh_test(
     ],
 )
 
+# カーネルの .a を作る段階で 1 回だけ LTO をかけた .a (--config=kernel_lto のときだけ esp32c6 が使う)。
+#   Bazel の rv32_esp ツールチェーンの GCC (コンパイルと同じ版) で部分リンクする。
+#   bazelisk build --config=esp32c6 --config=kernel_lto //modules/esp_idf_support/firmware:shizuku_kernel_lto
+genrule(
+    name = "shizuku_kernel_lto",
+    srcs = ["//:shizuku_kernel"],
+    outs = ["libshizuku_kernel_lto.a"],
+    cmd = "ARCHIVE=; for f in $(locations //:shizuku_kernel); do case $$f in *libshizuku_kernel.a) ARCHIVE=$$f;; esac; done;" +
+          " $(location kernel_lto.sh) \"$(CC)\" \"$(AR)\" \"$(NM)\" $$ARCHIVE $@",
+    tools = [
+        "kernel_lto.sh",
+        "@bazel_tools//tools/cpp:current_cc_toolchain",
+    ],
+    toolchains = ["@bazel_tools//tools/cpp:current_cc_toolchain"],
+    target_compatible_with = ["@platforms//cpu:riscv32"],
+)
+
 # ESP32-C6: Bazel が作る libshizuku_kernel.a を ESP-IDF v6.1 の最終リンクへ渡し、
 # .bin を出すターゲット (idf.py build の薄いラッパ)。
 #   bazelisk build --config=esp32c6 //modules/esp_idf_support/firmware:esp32c6
 genrule(
     name = "esp32c6",
-    srcs = [
-        "//:shizuku_kernel",
-        ":esp32c6_project",
-    ],
+    srcs = select({
+        ":kernel_lto": [":shizuku_kernel_lto"],
+        "//conditions:default": ["//:shizuku_kernel"],
+    }) + [":esp32c6_project"],
     outs = ["shizuku_esp32c6.bin"],
-    cmd = "ARCHIVE=; for f in $(locations //:shizuku_kernel); do case $$f in *libshizuku_kernel.a) ARCHIVE=$$f;; esac; done;" +
+    cmd = "ARCHIVE=; for f in $(SRCS); do case $$f in *libshizuku_kernel.a|*libshizuku_kernel_lto.a) ARCHIVE=$$f;; esac; done;" +
           " $(location build.sh) $$ARCHIVE $@ esp-15.2.0_20251204",
     tools = ["build.sh"],
     tags = [
