@@ -68,15 +68,18 @@ struct api_result {
   uintptr_t value;
 };
 
-api_result api(object_api number, uintptr_t a1 = 0, uintptr_t a2 = 0,
-               uintptr_t a3 = 0) {
+// ★always_inline: ecall の caller 側 (ARCH::syscall) は s1–s11 を clobber 宣言している。普通の関数だと
+//   その関数自身が呼ばれるたびに s1–s11 を退避・復元する (psABI)。呼出し地点へ展開すれば、
+//   退避は展開先の関数の入口で 1 回。
+[[gnu::always_inline]] inline api_result api(object_api number, uintptr_t a1 = 0, uintptr_t a2 = 0,
+                                             uintptr_t a3 = 0) {
   const auto result = ARCH::syscall((uintptr_t)number, a1, a2, a3);
   if (result.error & KERNEL_ERROR_MARK)
     return {(uintptr_t)object_error::KERNEL_REFUSED, result.error};
   return {result.error, result.value};
 }
 
-api_result call_method(uintptr_t object, uintptr_t argument) {
+[[gnu::always_inline]] inline api_result call_method(uintptr_t object, uintptr_t argument) {
   return api(object_api::CALL_METHOD, object, METHOD_MAIN, argument);
 }
 
@@ -308,7 +311,7 @@ volatile uint32_t g_create_cycles = 0;
 volatile uintptr_t g_create_error = (uintptr_t)object_error::OK;
 
 // 記述子の呼出し。a2 だけ引数を渡し、残りは 0 (計測では 0、検算では 41)。
-api_result desc_call(uintptr_t index, uintptr_t argument) {
+[[gnu::always_inline]] inline api_result desc_call(uintptr_t index, uintptr_t argument) {
   const auto result = ARCH::syscall((uintptr_t)object_api::CALL_METHOD_DESCRIPTOR,
                                     index, argument, 0, 0, 0, 0, 0);
   if (result.error & KERNEL_ERROR_MARK)

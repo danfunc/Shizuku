@@ -283,8 +283,11 @@ struct api_result {
   uintptr_t value;
 };
 
-api_result api(object_api number, uintptr_t a1 = 0, uintptr_t a2 = 0,
-               uintptr_t a3 = 0) {
+// ★always_inline: ecall の caller 側 (ARCH::syscall) は s1–s11 を clobber 宣言している。普通の関数だと
+//   その関数自身が呼ばれるたびに s1–s11 を退避・復元する (psABI)。呼出し地点へ展開すれば、
+//   退避は展開先の関数の入口で 1 回 (ecall の数に比例しない)。
+[[gnu::always_inline]] inline api_result api(object_api number, uintptr_t a1 = 0, uintptr_t a2 = 0,
+                                             uintptr_t a3 = 0) {
   const auto result = ARCH::syscall((uintptr_t)number, a1, a2, a3);
   // ★カーネルが直接返した答え (印つき) は自分の語彙で読まない。取り違えると
   //   「別のエラーが起きた」ように見えて原因を見失う。
@@ -298,13 +301,13 @@ uintptr_t namer(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   return api(object_api::DECLARE_NAME, (uintptr_t) "namer").error;
 }
 
-api_result call_method(uintptr_t object, uintptr_t argument) {
+[[gnu::always_inline]] inline api_result call_method(uintptr_t object, uintptr_t argument) {
   return api(object_api::CALL_METHOD, object, METHOD_MAIN, argument);
 }
 
 // 記述子での呼出し。riscv では trap 内の直接処理に届く (a2..a7 = 1..6 を渡して、
 // 呼ばれた側に引数が全部届くことも検査する)。それ以外では UNKNOWN_API が返る。
-api_result call_descriptor(uintptr_t index) {
+[[gnu::always_inline]] inline api_result call_descriptor(uintptr_t index) {
 #if defined(__riscv)
   const auto result = ARCH::syscall((uintptr_t)object_api::CALL_METHOD_DESCRIPTOR,
                                     index, 1, 2, 3, 4, 5, 6);
