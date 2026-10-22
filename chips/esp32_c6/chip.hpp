@@ -4,13 +4,13 @@
 // ★ESP-IDF / pico-sdk を一切 include しない (chips の依存閉包はそれを含まない)。
 // ★fail-closed gate (SHIZUKU_C6_SKELETON_PERMITTED) はここに置かない。rv32_c6.hpp の互換入口に残す。
 #include <cstdint>
-#include "arch/riscv/rv32.hpp"
 
 // hot 経路 (CALL_METHOD_DESCRIPTOR とその RETURN) を IRAM へ置くための配置マクロ。
 // kernel 側の既定は shizuku/hot.hpp の空定義で、この chip 以外は変わらない。
 // 関数ごとに ".iram1.<N>" と一意の section 名にする (IDF の IRAM_ATTR と同じ方式)。
 // 同名 section に COMDAT のテンプレートと通常関数を混ぜると GCC が section type conflict で止まる。
 // リンカ側は ESP-IDF 標準の `*(.iram1 .iram1.*)` で拾う (この checkout 内の ld は未確認)。
+// ★arch/riscv/rv32.hpp (経由で rv32_abi.hpp の入口 stub) より**前**に定義する。後だと stub が空のまま展開される。
 #define SHIZUKU_CHIP_STR_(x) #x
 #define SHIZUKU_CHIP_STR(x) SHIZUKU_CHIP_STR_(x)
 #undef SHIZUKU_HOT
@@ -19,6 +19,8 @@
 #else
 #define SHIZUKU_HOT
 #endif
+
+#include "arch/riscv/rv32.hpp"
 
 namespace shizuku::chips::esp32_c6 {
 

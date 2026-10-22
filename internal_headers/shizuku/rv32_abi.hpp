@@ -1,6 +1,7 @@
 #ifndef SHIZUKU_RV32_ABI_HPP
 #define SHIZUKU_RV32_ABI_HPP
 #include <cstdint>
+#include "shizuku/hot.hpp"
 
 // ===========================================================================
 //  RV32 の ABI converter (2026-10-22 決定、.handoff/v3-design-notes.md §4/§5)
@@ -30,7 +31,8 @@ inline constexpr unsigned CALL_HEADER_BYTES = 32;
 //    - tp は触らない: メソッドは caller と同じスレッドで走るので、スレッドの TLS を指す
 //      caller の tp がそのまま正しい (オブジェクト単位の TLS は無い)。
 #if defined(__riscv)
-template <auto F> [[gnu::naked, gnu::used]] void method_stub_body() {
+// SHIZUKU_HOT: C6 では .iram1 へ置く (計測の区間に入る入口 stub)。他の chip / ISA では空。
+template <auto F> [[gnu::naked, gnu::used]] SHIZUKU_HOT void method_stub_body() {
   asm volatile(
       ".option push\n"
       ".option norelax\n"

@@ -214,4 +214,22 @@ assert 'set_irq_dispatch_hooks' in boot_src
 assert 'set_irq_dispatch_hooks' in api_src
 assert 'make_irq_dispatch_hooks' in api_src
 
+# 計測の区間に入る caller/callee を C6 だけ .iram1 へ置く (SHIZUKU_HOT)。
+# chip.hpp は rv32.hpp (経由で rv32_abi.hpp) より前に SHIZUKU_HOT を定義しないと stub が空に展開される。
+chip_src = (root / 'chips/esp32_c6/chip.hpp').read_text()
+assert chip_src.index('#define SHIZUKU_HOT ') < chip_src.index('#include "arch/riscv/rv32.hpp"')
+assert 'section(".iram1." SHIZUKU_CHIP_STR(__COUNTER__))' in chip_src
+abi_src = (root / 'internal_headers/shizuku/rv32_abi.hpp').read_text()
+assert '#include "shizuku/hot.hpp"' in abi_src
+assert 'template <auto F> [[gnu::naked, gnu::used]] SHIZUKU_HOT void method_stub_body()' in abi_src
+trap_src = (root / 'chips/esp32_c6/trap.cpp').read_text()
+assert 'SHIZUKU_HOT uint32_t plic_vector_mode::cycle_counter_read()' in trap_src
+call_src = (root / 'source/selftest/call_cost.cpp').read_text()
+for fn in ['cost_leaf', 'cost_nest', 'cost_dnest', 'cost_owner']:
+    assert re.search(r'SHIZUKU_HOT SHIZUKU_ZERO_USED_REGS uintptr_t ' + fn + r'\(', call_src), fn
+for fn in ['plain_callee', 'op_nothing', 'op_direct', 'op_svc', 'op_call', 'op_call2', 'op_desc1', 'op_desc2']:
+    assert re.search(r'SHIZUKU_HOT __attribute__\(\(noinline\)\) uintptr_t ' + fn + r'\(', call_src), fn
+assert 'SHIZUKU_HOT __attribute__((noinline)) stat_t measure(' in call_src
+assert '#include "shizuku/hot.hpp"' in call_src
+
 print('PASS: frame offsets, full saves/restores, CSR capture, vector slots, mscratch nesting, ring retention, timer/thread1 invariants')

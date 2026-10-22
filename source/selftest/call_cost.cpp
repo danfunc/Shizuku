@@ -25,6 +25,7 @@
 #include "shizuku/method_entry.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/selftest.hpp"
+#include "shizuku/hot.hpp"
 #if !defined(__riscv)
 #include "shizuku/service_profile.hpp"
 #include "shizuku/kernel_services.hpp"
@@ -85,18 +86,20 @@ struct api_result {
 
 // 呼び先。**何もしない**。ここに仕事を入れると、測っているのが呼び出しの費用なのか
 // 仕事の費用なのか分からなくなる。
-SHIZUKU_ZERO_USED_REGS uintptr_t cost_leaf(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+// ★SHIZUKU_HOT (C6 では .iram1): 計測の区間に入る呼び先・入口 stub は flash だと
+//   キャッシュ miss が費用に混ざるので、カーネルの hot 経路と同じく SRAM へ置く。C6 以外は空。
+SHIZUKU_HOT SHIZUKU_ZERO_USED_REGS uintptr_t cost_leaf(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
   return argument + 1;
 }
 
 // 1 段深いだけの相手。(4) との差が「1 段あたりの限界費用」になる。
-SHIZUKU_ZERO_USED_REGS uintptr_t cost_nest(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+SHIZUKU_HOT SHIZUKU_ZERO_USED_REGS uintptr_t cost_nest(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
   return call_method(OBJECT_COST_LEAF, argument).value;
 }
 
 // 素の関数呼び出しの比較用。★noinline を付けないと消える (消えたことに気づかず
 // 「関数呼び出しは 0 サイクル」と報告する事故になる)。
-__attribute__((noinline)) uintptr_t plain_callee(uintptr_t argument) {
+SHIZUKU_HOT __attribute__((noinline)) uintptr_t plain_callee(uintptr_t argument) {
   __asm__ volatile("" ::: "memory");
   return argument + 1;
 }
@@ -123,20 +126,20 @@ volatile uintptr_t g_sink = 0;
 //   引くべき分が引かれず、全部の値が水増しされる。
 using op_t = uintptr_t (*)(uintptr_t);
 
-__attribute__((noinline)) uintptr_t op_nothing(uintptr_t argument) {
+SHIZUKU_HOT __attribute__((noinline)) uintptr_t op_nothing(uintptr_t argument) {
   __asm__ volatile("" ::: "memory");
   return argument;
 }
-__attribute__((noinline)) uintptr_t op_direct(uintptr_t argument) {
+SHIZUKU_HOT __attribute__((noinline)) uintptr_t op_direct(uintptr_t argument) {
   return plain_callee(argument);
 }
-__attribute__((noinline)) uintptr_t op_svc(uintptr_t) {
+SHIZUKU_HOT __attribute__((noinline)) uintptr_t op_svc(uintptr_t) {
   return api(object_api::GET_CURRENT_OBJECT).value;
 }
-__attribute__((noinline)) uintptr_t op_call(uintptr_t argument) {
+SHIZUKU_HOT __attribute__((noinline)) uintptr_t op_call(uintptr_t argument) {
   return call_method(OBJECT_COST_LEAF, argument).value;
 }
-__attribute__((noinline)) uintptr_t op_call2(uintptr_t argument) {
+SHIZUKU_HOT __attribute__((noinline)) uintptr_t op_call2(uintptr_t argument) {
   return call_method(OBJECT_COST_NEST, argument).value;
 }
 
@@ -233,7 +236,7 @@ volatile shizuku_c6_call_cost_record_t shizuku_c6_call_cost_record = {};
 // ★op は関数ポインタで呼ぶ。(1) も同じ経路を通るので、ポインタ経由の分は
 //   差し引きで消える。インライン展開の差で不公平が出るのも防げる。
 template <typename A>
-__attribute__((noinline)) stat_t measure(op_t requested, uint32_t rounds) {
+SHIZUKU_HOT __attribute__((noinline)) stat_t measure(op_t requested, uint32_t rounds) {
   // ★volatile を 1 枚挟む。挟まないと measure(op_nothing, ...) のような
   //   「定数の関数ポインタ」をコンパイラが見抜いて呼び先ごとに特殊化し、
   //   (1) だけ別物の (軽い) コードになって対称性が壊れる。
@@ -327,16 +330,16 @@ void note_setup(uintptr_t error) {
 }
 
 // 記述子 1 段 / 2 段の 1 回ぶん (呼び手は D)。
-__attribute__((noinline)) uintptr_t op_desc1(uintptr_t) {
+SHIZUKU_HOT __attribute__((noinline)) uintptr_t op_desc1(uintptr_t) {
   return desc_call(g_desc1_index, 0).value;
 }
-__attribute__((noinline)) uintptr_t op_desc2(uintptr_t) {
+SHIZUKU_HOT __attribute__((noinline)) uintptr_t op_desc2(uintptr_t) {
   return desc_call(g_desc2_index, 0).value;
 }
 
 // 2 段目の受け手。SETUP では自分の子 cost_dinner と、それへの記述子 (自分の表) を作る。
 // それ以外は記述子で cost_dinner を呼び、引数をそのまま渡す。
-SHIZUKU_ZERO_USED_REGS uintptr_t cost_dnest(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+SHIZUKU_HOT SHIZUKU_ZERO_USED_REGS uintptr_t cost_dnest(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
   if (argument == MODE_SETUP) {
     note_setup(api(object_api::CREATE_OBJECT, OBJECT_COST_DINNER,
                    method_entry<ARCH, &cost_leaf>()).error);
@@ -381,7 +384,7 @@ SHIZUKU_ZERO_USED_REGS uintptr_t cost_driver(uintptr_t argument, uintptr_t, uint
 
 // 作成の測定対象。中で**自分自身への記述子**を 1 つ作り、その API 往復の区間だけを測る
 // (自分自身への作成は作成権限で常に通る)。表は呼ぶ前に root が差し替えで空にしておく。
-SHIZUKU_ZERO_USED_REGS uintptr_t cost_owner(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+SHIZUKU_HOT SHIZUKU_ZERO_USED_REGS uintptr_t cost_owner(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   const uint32_t started = cycles_now<ARCH>();
   g_create_error =
       api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_COST_OWNER, 0).error;
