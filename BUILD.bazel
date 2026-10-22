@@ -6,6 +6,18 @@
 #  合成 (firmware/main.cpp) の仕事。XNO 側は同じ 3 つを引いて**自分の合成**を書く。
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
+# RISC-V のカーネルは gp / tp に依存しない (2026-10-22 決定、.handoff/v3-design-notes.md §4)。
+# method call の入口ではレジスタを callee のものへ入れ直さず、gp / tp は callee 側の入口 stub が
+# 入れる。カーネルが gp 相対を使うと caller の gp (オブジェクトごとに違う) を踏んで壊れるので、
+# 構造で保証する: -mno-relax ならコンパイラもリンカも gp 相対 (R_RISCV_RELAX) を作らない。
+# ARM には効かせない。ESP-IDF 側と selftest / オブジェクトの翻訳単位は別アーカイブ・別ライブラリ。
+# ★//:shizuku_kernel* は selftest ソースを同じ .a に抱えるため、それらにも掛かる
+#   (genrule が .a を 1 本しか受け取らない制約)。
+RV_KERNEL_COPTS = select({
+    "@platforms//cpu:riscv32": ["-mno-relax"],
+    "//conditions:default": [],
+})
+
 # オブジェクト番号の生成。★**CMake とまったく同じスクリプトを呼ぶ** —
 # 番号を振る規則を 2 つ持つと、片方だけ直して番号がずれる。名前の一覧も
 # objects.list を共有するので、二重に書く場所がどこにも無い (D28)。
@@ -111,6 +123,7 @@ KERNEL_SRCS = [
 # 実体としてはライブラリ以外になりようがない。
 cc_library(
     name = "kernel",
+    copts = RV_KERNEL_COPTS,
     srcs = KERNEL_SRCS + [
         "source/kernel/services.cpp",
         "source/kernel/service_profile.cpp",
@@ -133,6 +146,7 @@ KERNEL_OBJECT_SRCS = [
 # 自体が D1 (カーネルはオブジェクトを知らない) の検算になる — 依存は一方向しかない。
 cc_library(
     name = "kernel_object",
+    copts = RV_KERNEL_COPTS,
     srcs = KERNEL_OBJECT_SRCS,
     visibility = ["//visibility:public"],
     deps = [":kernel"] + select({
@@ -202,6 +216,7 @@ cc_library(
 # ★--config=esp32c5 でだけ解決される (board=esp32_c5)。selftest は C6 と同じ 5 ladder の部分集合。
 cc_library(
     name = "shizuku_kernel_c5",
+    copts = RV_KERNEL_COPTS,
     srcs = KERNEL_SRCS + KERNEL_OBJECT_SRCS + C6_SELFTEST_SRCS + [
         "source/memory_manager/freestanding.cpp",
         "//modules/esp_idf_support/c5:early_boot.cpp",
@@ -228,6 +243,7 @@ cc_library(
 # implementation, but omit the C5 selftest ladders and their record runner.
 cc_library(
     name = "shizuku_kernel_c5_ble",
+    copts = RV_KERNEL_COPTS,
     srcs = KERNEL_SRCS + KERNEL_OBJECT_SRCS + [
         "source/memory_manager/freestanding.cpp",
         "//modules/esp_idf_support/c5:early_boot.cpp",
@@ -254,6 +270,7 @@ cc_library(
 # ★//modules/esp_idf_support/firmware:esp32c6 が ESP-IDF の最終リンクへ渡す。--config=esp32c6 でだけ解決される。
 cc_library(
     name = "shizuku_kernel",
+    copts = RV_KERNEL_COPTS,
     srcs = KERNEL_SRCS + KERNEL_OBJECT_SRCS + C6_SELFTEST_SRCS + [
         "source/selftest/call_cost.cpp",
         "source/memory_manager/freestanding.cpp",
