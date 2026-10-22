@@ -524,7 +524,7 @@ SHIZUKU_HOT [[gnu::always_inline]] inline arch::exception_frame_t *ecall_direct(
   if (__builtin_expect(shizuku_c6_trap_depth != 0, 0)) return ecall_fault_nested(frame);
   auto &kernel = shizuku::kernel_instance;
   auto &thread = kernel.current_thread();
-  if (__builtin_expect(!kernel.svc_native_route(), 0)) return ecall_other(frame);
+  if (__builtin_expect(!kernel.svc_native_route_of(thread), 0)) return ecall_other(frame);
   arch::context_t *context = thread.context;
   context->sp = frame;
   context->privileged = true;

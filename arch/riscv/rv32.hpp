@@ -198,10 +198,10 @@ public:
     uint32_t caller_generation;
     uintptr_t region_base;     // caller の軸 B の窓
     uintptr_t region_limit;
-    uint16_t unwind_floor;     // 参考値 (権威は特権の台帳。非特権スタック上の値は信用しない)
-    uint8_t via;               // 参考値
+    uint16_t unwind_floor;     // 書かない (台帳 thread.ledger が持つ。ここの値は不定)
+    uint8_t via;               // 書かない (同上)
     uint8_t privileged;        // caller の特権
-    uint32_t reserved;
+    uint32_t reserved;         // 書かない (枠の大きさを 32B に保つ詰め物)
   };
   // 実機 (32bit) では枠にちょうど収まること。host 試験 (64bit) は uintptr_t が太いので検査しない。
   static_assert(sizeof(uintptr_t) != 4 || sizeof(call_header_t) == RV32_CALL_HEADER_BYTES);

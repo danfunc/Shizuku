@@ -635,7 +635,7 @@ static void run_dispatcher_tests() {
     assert((uintptr_t)h == reinterpret_cast<uintptr_t>(frame) + sizeof(KERNEL::FRAME));
     assert(ARCH::call_window_top(h) == (uintptr_t)h);
     assert(h->prev == 0 && h->pc == A_PC && h->privileged == 1);
-    assert(h->via == KERNEL::LEDGER_CALL && h->unwind_floor == 0);
+    // via / unwind_floor はヘッダに書かない (台帳が持つ。上で thread.ledger[0] を検査済み)。
     assert(h->caller_object == 0 /* fresh() の caller_object */);
   }
   // ra は 32bit レジスタ。host (64bit) では関数ポインタが切り詰められるので下位 32bit で比べる。
@@ -855,7 +855,7 @@ static void run_dispatcher_tests() {
     assert(ctx->privileged == true);
     {
       const auto *h = (const ARCH::call_header_t *)thread.call_stack.top;
-      assert(h->via == KERNEL::LEDGER_DESCRIPTOR_CALL && h->pc == A_PC && h->privileged == 1 && h->prev == 0);
+      assert(h->pc == A_PC && h->privileged == 1 && h->prev == 0); // via は台帳 (上で検査済み) が持つ
     }
     frame->a0 = (uintptr_t)object_api::GET_CALLER_OBJECT;
     kernel_instance.svc_dispatch(ctx);

@@ -48,8 +48,10 @@ template <class A, class Context>
     return false;
 }
 // caller の枠にヘッダを書いて top を進める。caller の状態は frame (trap フレーム) と context から取る。
+// via / floor は台帳 (特権側) が持つので、非特権スタック上のヘッダには書かない (呼び出し側が台帳に書く)。
 template <class A, class Thread, class Context, class Frame>
-[[gnu::always_inline]] inline bool header_push_of(Thread &thread, Context &context, Frame &frame, uint8_t via, uint32_t floor) {
+[[gnu::always_inline]] inline bool header_push_of(Thread &thread, Context &context, Frame &frame, uint8_t /*via*/,
+                                                  uint32_t /*floor*/) {
   if constexpr (arch_call_in_place<A>()) {
     if (thread.ledger == nullptr || thread.call_stack.depth >= thread.ledger_capacity ||
         !A::call_header_has_room(context))
@@ -61,10 +63,7 @@ template <class A, class Thread, class Context, class Frame>
     header->caller_generation = thread.call_stack.caller_generation;
     header->region_base = context.region_base;
     header->region_limit = context.region_limit;
-    header->unwind_floor = (uint16_t)floor;
-    header->via = via;
     header->privileged = context.privileged ? 1 : 0;
-    header->reserved = 0;
     thread.call_stack.top = reinterpret_cast<uintptr_t>(header);
     thread.call_stack.depth++;
     return true;
@@ -166,10 +165,8 @@ template <class K, class KObj>
     header->caller_generation = stack.caller_generation;
     header->region_base = context.region_base;
     header->region_limit = context.region_limit;
-    header->unwind_floor = (uint16_t)depth;
-    header->via = via;
+    // unwind_floor / via はヘッダに書かない: 同じ値を台帳 (下の thread.ledger[depth]) が持つ。
     header->privileged = context.privileged ? 1 : 0;
-    header->reserved = 0;
     stack.top = reinterpret_cast<uintptr_t>(header);
     stack.depth = depth + 1;
     thread.ledger[depth] = {id, row.parent_handler_object, row.parent_handler_entry,

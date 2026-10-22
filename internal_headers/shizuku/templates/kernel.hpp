@@ -206,8 +206,9 @@ public:
   // 配下でもなく、親ハンドラが登録済み)。false のときは svc_dispatch へ回す (primitive・objectland の
   // raw 配送・未登録 panic はそこで従来どおり決まる)。
   // (定義はここ: RV32 の例外入口が 1 API = 1 関数の中へ展開する。)
-  bool svc_native_route() const {
-    const THREAD &thread = current_thread();
+  bool svc_native_route() const { return svc_native_route_of(current_thread()); }
+  // 同じ判定を、呼び出し側がすでに引いた現在スレッドに対して行う (current_thread() を引き直さない)。
+  bool svc_native_route_of(const THREAD &thread) const {
     if (thread.call_stack.depth != 0) {
       const auto &top = thread.ledger_top();
       if (top.kind == (uint8_t)object_kind::KERNEL_OBJECT &&

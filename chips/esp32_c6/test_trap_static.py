@@ -127,7 +127,7 @@ for forbidden in ('shizuku_c6_trap_diag', 'trap_depth =', 'active_frame', 'activ
     assert forbidden not in ecall_direct, forbidden
 assert 'kStackProbeInterval' in ecall_direct and 'trap_probe_interval_count' in ecall_direct
 assert 'return ecall_other(frame);' in ecall_direct  # 1024 回目は記帳つきの経路で probe する
-assert 'ecall_fault_nested(frame)' in ecall_direct and 'svc_native_route()' in ecall_direct
+assert 'ecall_fault_nested(frame)' in ecall_direct and 'svc_native_route_of(thread)' in ecall_direct
 assert 'stop(0xE003)' in trap_src.split('ecall_fault_nested(')[1].split('}')[0]
 # 遅い経路はどれも tail call (成功経路に関数呼出しを持たない): 本体の中で呼ぶのは return 付きだけ。
 import re as _re
