@@ -827,7 +827,8 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
 // ★ここが方針の中心。カーネルは「渡す機構」(バトン渡しと時限つきの貸し出し) しか
 //   持たず、どちらでどれだけ渡すかはここが決める:
 //     時限あり (既定) → 貸す。自分から返さないスレッドがいても期限で戻る
-//     時限 0          → バトン渡し。返ってこない可能性を承知で渡す相手だけに使う
+//     時限 0          → 無制限で貸す (SWITCH = GRANT(無制限))。期限では戻らないが、
+//                        借り手の YIELD では戻る。期限で取り上げたくない相手だけに使う
 // ★回転子から順に見る。自分の直後だけを見ると同じ相手ばかり選ばれて飢餓が出る。
 template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
 #if defined(SHIZUKU_CRASH_RECORD)
@@ -973,7 +974,7 @@ uintptr_t KERNEL_OBJECT::sleep_us(uintptr_t microseconds, object_error &error) {
              KERNEL::THREAD::state_t::SUSPENDED) {
     // 借り手として走っているなら、貸し手へ返すのが先 (又貸しはしない)。
     if (kernel_instance.grant_active()) {
-      ARCH::syscall((uintptr_t)primitive::SWITCH, 0);
+      ARCH::syscall((uintptr_t)primitive::SWITCH, kernel_instance.grant_lender());
       continue;
     }
     schedule(self); // 誰も居なければ締切まで空回りする
@@ -986,10 +987,10 @@ template <>
 uintptr_t KERNEL_OBJECT::yield(object_error &error) {
   (void)error;
   const uint32_t self = kernel_instance.current_thread_id();
-  // 借り手として走っているなら、譲る先を選ぶ権利は無い — 貸し手へ返すだけ
-  // (カーネルの SWITCH が対象を無視してそう振る舞う)。
+  // 借り手として走っているなら貸し手へ返すだけ。通常は svc_dispatch が trap 内で処理する
+  // (grant 段がある YIELD はここへ来ない)。ここへ来るのは起点のスレッドの YIELD。
   if (kernel_instance.grant_active()) {
-    ARCH::syscall((uintptr_t)primitive::SWITCH, 0);
+    ARCH::syscall((uintptr_t)primitive::SWITCH, kernel_instance.grant_lender());
     return 0;
   }
   return schedule(self) ? 1 : 0; // 誰も居なければ自分が続ける
@@ -1006,7 +1007,7 @@ template <> void KERNEL_OBJECT::exit_thread() {
   //   回収するのは schedule() — 走っていない相手だけを見て返す (D55)。
   kernel_instance.terminate(self);
   if (kernel_instance.grant_active()) {
-    ARCH::syscall((uintptr_t)primitive::SWITCH, 0); // 貸し手へ返す
+    ARCH::syscall((uintptr_t)primitive::SWITCH, kernel_instance.grant_lender()); // 貸し手へ返す
     return;
   }
   if (!schedule(self)) {

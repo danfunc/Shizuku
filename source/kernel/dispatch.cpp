@@ -439,13 +439,22 @@ template <> SHIZUKU_HOT void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
         id == (uintptr_t)object_api::CALL_METHOD ||
         id == (uintptr_t)object_api::GET_CURRENT_OBJECT ||
         id == (uintptr_t)object_api::GET_CALLER_OBJECT ||
+        id == (uintptr_t)object_api::YIELD ||
         id == (uintptr_t)object_api::RUN_FOR ||
         id == (uintptr_t)object_api::SET_BUDGET ||
+        id == (uintptr_t)object_api::FORWARD_CHILD_EXIT ||
         id == (uintptr_t)object_api::CALL_METHOD_DESCRIPTOR) {
       const auto *attr = svc_attribute_for(id);
       if (attr != nullptr && attr->mode == svc_mode::handler) {
         const bool privileged = !is_context_unprivileged(context);
-        if (!svc_permission_allows(id, privileged)) {
+        // FORWARD_CHILD_EXIT (parent_ledger 権限) の出どころ確認。発行元の段 (台帳の最上段、
+        // dispatch 段は積まれていない) が専用 HANDLER で、root kobj 本人ではないこと。
+        // 従来の forward_child_exit は dispatch 段の 1 つ下 (ledger_entry(thread, 1)) を見ていた。
+        const bool from_handler =
+            thread.call_stack.depth != 0 &&
+            thread.ledger_top().kind == (uint8_t)object_kind::HANDLER &&
+            thread.ledger_top().object != m_object_svc_handler_object;
+        if (!svc_permission_allows(id, privileged, false, from_handler)) {
           ARCH::set_result(*frame, (uintptr_t)object_error::NOT_PRIVILEGED, 0);
           return;
         }
@@ -459,17 +468,32 @@ template <> SHIZUKU_HOT void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
                            caller_object(current_thread_id()));
           return;
         }
-        // EXIT_METHOD (2): 戻り先の絶対深さ d を検証して current_depth - d 段を落とす。
-        //   a1 = d, a2 = value, a3 = error。非 KOBJ の return stub (a4 = RETURN_STUB_MARKER) は
+        // YIELD (8): CPU を渡してくれた相手 (grant 段の先頭の貸し手) へ返す。O(1)。
+        //   grant_unwind(YIELDED) で貸し手の応答 (OK, YIELDED) が書かれ、自分の応答 (OK, 0) は
+        //   次に実行権を貰って再開したときのために先に置いておく。
+        //   grant 段が無い (貸し手が居ない = 起点のスレッド) ときは、起点のスレッドがスケジューラ役
+        //   なので従来どおり kobj の schedule() へ転送する (下の dispatch に落ちる)。
+        if (id == (uintptr_t)object_api::YIELD) {
+          if (grant_active()) {
+            ARCH::set_result(*frame, (uintptr_t)object_error::OK, 0);
+            grant_unwind(grant_end::YIELDED);
+            return;
+          }
+        }
+        // EXIT_METHOD (2) / FORWARD_CHILD_EXIT (27): 戻り先の絶対深さ d を検証して
+        //   current_depth - d 段を落とす。27 は上の出どころ確認を通った専用 HANDLER からだけ。
+        //   a1 = d, a2 = value, a3 = error。非 KOBJ の return stub (a4 = RETURN_STUB_MARKER、2 のみ) は
         //   d を持たないので、台帳の unwind floor (= 呼び先を積む前の深さ) を d とする。
         //   検査は primitive RETURN と同じ (validate_return_depth)。弾いたら 1 枚も落とさず
         //   UNWIND_REJECTED + kernel_error を呼び出し元へ返す (従来の exit_method の reply と同じ)。
         //   従来は dispatch 段が 1 枚積まれていたため d == current_depth も通ったが、今は段が
         //   無いので d >= current_depth は DEPTH_MISMATCH で弾く。
-        if (id == (uintptr_t)object_api::EXIT_METHOD) {
+        if (id == (uintptr_t)object_api::EXIT_METHOD ||
+            id == (uintptr_t)object_api::FORWARD_CHILD_EXIT) {
           const uint32_t depth = thread.call_stack.depth;
           const uint32_t floor = current_unwind_floor();
-          const bool from_stub = ARCH::arg(*frame, 4) == RETURN_STUB_MARKER;
+          const bool from_stub = id == (uintptr_t)object_api::EXIT_METHOD &&
+                                 ARCH::arg(*frame, 4) == RETURN_STUB_MARKER;
           const uintptr_t d = from_stub ? (uintptr_t)floor : ARCH::arg(*frame, 1);
           // スレッドの最外のメソッドが戻ったとき (d == 0 かつ呼出し段なし) は「スレッドの
           // 終わり」で、次のスレッドの選び方に踏み込むので kobj の exit_thread に任せる

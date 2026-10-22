@@ -101,7 +101,9 @@ uint32_t plic_vector_mode::fault_status() { return 0; }
 void plic_vector_mode::fault_status_clear() {}
 uintptr_t plic_vector_mode::fault_address() { return 0; }
 void plic_vector_mode::timer_oneshot(unsigned int) {}
-uint32_t plic_vector_mode::timer_remaining(bool &) { return 0; }
+// 試験が「タイマの残り」を決める (既定 0 = 装填した刻みを撃ち切った)。
+volatile uint32_t g_timer_left = 0;
+uint32_t plic_vector_mode::timer_remaining(bool &) { return g_timer_left; }
 void plic_vector_mode::timer_cancel() {}
 void plic_vector_mode::pend_context_switch() {}
 template <>
@@ -301,13 +303,15 @@ static void run_dispatcher_tests() {
       0, ledger, 32, ROOT_APP_ID, (uint32_t)object_kind::PLAIN,
       ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
 
-  // 4a. YIELD (8): mode == svc_mode::thread
+  // 4a. YIELD (8) で grant 段が無い (貸し手が居ない = 起点のスレッド): trap では処理せず
+  //     従来どおり kobj (schedule) へ転送する。
+  assert(!kernel_instance.grant_active());
   frame->a0 = (uintptr_t)object_api::YIELD;
   kernel_instance.svc_dispatch(ctx);
   assert(kernel_instance.current_depth() == 1);
   assert(ARCH::frame_pc(*ctx->sp) == ROOT_HANDLER_ENTRY);
   assert(ARCH::arg(*ctx->sp, 0) == (uintptr_t)object_api::YIELD);
-  printf("  4a. mode=thread YIELD remains on actor dispatch path (depth=1, pc=root): PASS\n");
+  printf("  4a. YIELD without a grant frame is forwarded to kobj (depth=1, pc=root): PASS\n");
 
   thread.call_stack.depth = 0;
   thread.call_stack.top = 0;
@@ -493,14 +497,15 @@ static void run_dispatcher_tests() {
   // -------------------------------------------------------------------------
   // 7. svc_attributes: trap 内で処理する (mode == handler) 番号の集合
   // -------------------------------------------------------------------------
-  // ユーザー決定: 2, 4, 5, 6, 9, 12, 33 (8, 10, 11 はスケジューラ設計待ちで thread のまま。
+  // ユーザー決定: 2, 4, 5, 6, 8, 9, 12, 27, 33 (10, 11 はスケジューラ設計待ちで thread のまま。
   // 16, 18, 20, 29, 30, 31 は O(1) でない / 錠を取るので thread に戻した)。
   for (unsigned id = 1; id < 34; ++id) {
     const bool expect_handler = id == 2 || id == 4 || id == 5 || id == 6 ||
-                                id == 9 || id == 12 || id == 33;
+                                id == 8 || id == 9 || id == 12 || id == 27 ||
+                                id == 33;
     assert((svc_attribute_for(id)->mode == svc_mode::handler) == expect_handler);
   }
-  printf("  7. svc_attributes handler set == {2,4,5,6,9,12,33}: PASS\n");
+  printf("  7. svc_attributes handler set == {2,4,5,6,8,9,12,27,33}: PASS\n");
 
   // -------------------------------------------------------------------------
   // 8. CALL_METHOD (4) / EXIT_METHOD (2): A (base) → B → C
@@ -696,6 +701,8 @@ static void run_dispatcher_tests() {
   borrower_request.stack_base = (uintptr_t)borrower_stack;
   borrower_request.stack_bytes = sizeof(borrower_stack);
   borrower_request.object_id = B_ID;
+  borrower_request.parent_handler_object = ROOT_KOBJ_ID;
+  borrower_request.parent_handler_entry = ROOT_HANDLER_ENTRY;
   borrower_request.ledger = borrower_ledger;
   borrower_request.ledger_capacity = 32;
   const auto spawned = kernel_instance.spawn(borrower_request);
@@ -782,7 +789,8 @@ static void run_dispatcher_tests() {
   // 11. 専用親ハンドラ宛ての 2/4/9/12 は trap で奪わず従来どおり無加工で配送する
   // -------------------------------------------------------------------------
   for (object_api raw : {object_api::EXIT_METHOD, object_api::CALL_METHOD,
-                         object_api::RUN_FOR, object_api::SET_BUDGET}) {
+                         object_api::YIELD, object_api::RUN_FOR,
+                         object_api::SET_BUDGET, object_api::FORWARD_CHILD_EXIT}) {
     kernel_instance.set_thread_ledger(0, ledger, 32, CHILD_ID,
                                       (uint32_t)object_kind::PLAIN,
                                       CUSTOM_HANDLER_ID, CUSTOM_HANDLER_ENTRY);
@@ -802,6 +810,236 @@ static void run_dispatcher_tests() {
     printf("  11. raw SVC %u to dedicated parent handler delivered unchanged: PASS\n",
            (unsigned)raw);
   }
+
+  // -------------------------------------------------------------------------
+  // 12. YIELD (8): 借り手なら trap 内で貸し手へ返す (dispatch 段なし)
+  // -------------------------------------------------------------------------
+  // 貸し手 A = thread 0 (PLAIN, 特権)。借り手 = thread 1。
+  fresh(ROOT_APP_ID, true);
+  frame->a0 = (uintptr_t)object_api::RUN_FOR;
+  frame->a1 = 1;
+  frame->a2 = 5000;
+  kernel_instance.svc_dispatch(ctx);
+  assert(kernel_instance.current_thread_id() == 1 && kernel_instance.grant_active());
+  auto *ctx1 = kernel_instance.thread_context(1);
+  KERNEL::FRAME *frame1 = ctx1->sp;
+  assert(kernel_instance.current_depth() == 0); // 借り手 (thread 1) の台帳は空
+  frame1->a0 = (uintptr_t)object_api::YIELD;
+  kernel_instance.svc_dispatch(ctx1);
+  assert(kernel_instance.current_thread_id() == 0); // 貸し手へ戻った
+  assert(!kernel_instance.grant_active());
+  assert(kernel_instance.thread_state(0) == thread_state::RUNNING);
+  assert(kernel_instance.thread_state(1) == thread_state::READY);
+  assert(frame->a0 == (uintptr_t)object_error::OK);
+  assert(frame->a1 == (uintptr_t)grant_end::YIELDED); // 貸し手の RUN_FOR の戻り値
+  assert(frame1->a0 == (uintptr_t)object_error::OK && frame1->a1 == 0); // 借り手の YIELD の応答
+  assert(kernel_instance.thread_context(1)->sp == frame1);
+  assert(kernel_instance.ledger_size(1) == 0); // 借り手の台帳に dispatch 段は積まれていない
+  printf("  12. borrower YIELD returns to lender in trap (lender reply (OK,YIELDED), borrower reply (OK,0), lender RUNNING, borrower READY, no dispatch frame): PASS\n");
+
+  // -------------------------------------------------------------------------
+  // 13. SWITCH = GRANT(無制限) (primitive。kobj から撃つ)  A(kobj) → B(kobj) → C(plain)
+  // -------------------------------------------------------------------------
+  alignas(16) static uint8_t b_stack[2048];
+  alignas(8) static KERNEL::call_ledger_entry b_ledger[32];
+  KERNEL::spawn_request b_request{};
+  b_request.entry_pc = 0x42060000;
+  b_request.stack_base = (uintptr_t)b_stack;
+  b_request.stack_bytes = sizeof(b_stack);
+  b_request.object_id = ROOT_KOBJ_ID;
+  b_request.kind = (uint32_t)object_kind::KERNEL_OBJECT;
+  b_request.parent_handler_object = ROOT_KOBJ_ID;
+  b_request.parent_handler_entry = ROOT_HANDLER_ENTRY;
+  b_request.ledger = b_ledger;
+  b_request.ledger_capacity = 32;
+  const auto spawned_b = kernel_instance.spawn(b_request);
+  assert(spawned_b.error == kernel_error::OK && spawned_b.thread == 2);
+  auto *ctx2 = kernel_instance.thread_context(2);
+  KERNEL::FRAME *frame2 = ctx2->sp;
+  auto as_kobj_a = [&]() {
+    kernel_instance.set_thread_ledger(0, ledger, 32, ROOT_KOBJ_ID,
+                                      (uint32_t)object_kind::KERNEL_OBJECT,
+                                      ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+    ctx->sp = frame;
+    ctx->privileged = true;
+  };
+
+  // 13a. A の SWITCH(B): grant 段が積まれる。期限が無いので pendsv でも取り上げられない。
+  as_kobj_a();
+  frame->a0 = (uintptr_t)primitive::SWITCH;
+  frame->a1 = 2;
+  chips::esp32_c6::g_timer_left = 0;
+  kernel_instance.svc_dispatch(ctx);
+  assert(frame->a0 == (uintptr_t)kernel_error::OK);
+  assert(kernel_instance.current_thread_id() == 2 && kernel_instance.grant_active());
+  assert(kernel_instance.grant_lender() == 0);
+  assert(kernel_instance.thread_state(0) == thread_state::WAIT_GRANT); // READY ではなく貸し手として待つ
+  assert(kernel_instance.thread_state(2) == thread_state::RUNNING);
+  assert(thread.call_stack.depth == 0); // kobj の primitive は dispatch 段を積まない
+  kernel_instance.pendsv_dispatch(ctx);
+  assert(kernel_instance.current_thread_id() == 2 && kernel_instance.grant_active());
+  printf("  13a. SWITCH(B) from origin A: grant frame pushed (lender A WAIT_GRANT), unlimited (pendsv does not revoke): PASS\n");
+
+  // 13b. 借り手 B の SWITCH(C) は C への又貸し (A→B→C)。
+  frame2->a0 = (uintptr_t)primitive::SWITCH;
+  frame2->a1 = 1;
+  kernel_instance.svc_dispatch(ctx2);
+  assert(frame2->a0 == (uintptr_t)kernel_error::OK);
+  assert(kernel_instance.current_thread_id() == 1);
+  assert(kernel_instance.grant_lender() == 2);
+  assert(kernel_instance.thread_state(2) == thread_state::WAIT_GRANT);
+  assert(kernel_instance.thread_state(0) == thread_state::WAIT_GRANT);
+  printf("  13b. SWITCH(C) from borrower B: re-lend A->B->C (B WAIT_GRANT, lender of C == B): PASS\n");
+
+  // 13c. C の YIELD は B へ戻る (A へは戻らない)。B の SWITCH の戻りは (OK, YIELDED)。
+  frame1->a0 = (uintptr_t)object_api::YIELD;
+  kernel_instance.svc_dispatch(ctx1);
+  assert(kernel_instance.current_thread_id() == 2 && kernel_instance.grant_active());
+  assert(kernel_instance.grant_lender() == 0);
+  assert(frame2->a0 == (uintptr_t)kernel_error::OK && frame2->a1 == (uintptr_t)grant_end::YIELDED);
+  assert(kernel_instance.thread_state(2) == thread_state::RUNNING);
+  assert(kernel_instance.thread_state(1) == thread_state::READY);
+  assert(kernel_instance.thread_state(0) == thread_state::WAIT_GRANT);
+  printf("  13c. C YIELD returns to B (not A); B resumes with (OK,YIELDED), A still waiting: PASS\n");
+
+  // 13d. B (kobj) が貸し手 A を指して SWITCH すると 1 段巻き取られて A へ戻る (grant_lender())。
+  frame2->a0 = (uintptr_t)primitive::SWITCH;
+  frame2->a1 = kernel_instance.grant_lender();
+  kernel_instance.svc_dispatch(ctx2);
+  assert(kernel_instance.current_thread_id() == 0 && !kernel_instance.grant_active());
+  assert(kernel_instance.thread_state(0) == thread_state::RUNNING);
+  assert(kernel_instance.thread_state(2) == thread_state::READY);
+  assert(frame->a0 == (uintptr_t)kernel_error::OK && frame->a1 == (uintptr_t)grant_end::YIELDED);
+  printf("  13d. SWITCH(lender) unwinds one grant frame back to A (A reply (OK,YIELDED)): PASS\n");
+
+  // 13e. 有限の貸し出し (primitive GRANT 5000) の内側の SWITCH は外側の残りでクランプされる:
+  //      タイマが撃ち切ると C の段も B の段も 0 で、A まで一気に巻き取られる (EXPIRED)。
+  as_kobj_a();
+  frame->a0 = (uintptr_t)primitive::GRANT;
+  frame->a1 = 2;
+  frame->a2 = 5000;
+  chips::esp32_c6::g_timer_left = 5000; // 刻みはまだ減っていない
+  kernel_instance.svc_dispatch(ctx);
+  assert(kernel_instance.current_thread_id() == 2);
+  frame2->a0 = (uintptr_t)primitive::SWITCH;
+  frame2->a1 = 1;
+  kernel_instance.svc_dispatch(ctx2);
+  assert(frame2->a0 == (uintptr_t)kernel_error::OK); // B の残りは有限でも TIMER_MIN 以上
+  assert(kernel_instance.current_thread_id() == 1 && kernel_instance.grant_lender() == 2);
+  chips::esp32_c6::g_timer_left = 0; // 撃ち切った
+  kernel_instance.pendsv_dispatch(ctx);
+  assert(kernel_instance.current_thread_id() == 0 && !kernel_instance.grant_active());
+  assert(frame->a0 == (uintptr_t)kernel_error::OK && frame->a1 == (uintptr_t)grant_end::EXPIRED);
+  assert(frame2->a1 == (uintptr_t)grant_end::EXPIRED);
+  assert(kernel_instance.thread_state(1) == thread_state::READY);
+  assert(kernel_instance.thread_state(2) == thread_state::READY);
+  printf("  13e. SWITCH inside a finite GRANT is clamped to the outer remaining (expiry unwinds C and B to A, EXPIRED): PASS\n");
+
+  // 13f. 持ち分が尽きていれば SWITCH も断られる (GRANT_TOO_SMALL)。相手は claim されない。
+  as_kobj_a();
+  frame->a0 = (uintptr_t)primitive::GRANT;
+  frame->a1 = 2;
+  frame->a2 = 5000;
+  chips::esp32_c6::g_timer_left = 5000;
+  kernel_instance.svc_dispatch(ctx);
+  assert(kernel_instance.current_thread_id() == 2);
+  chips::esp32_c6::g_timer_left = 0; // B の持ち分を使い切った状態で SWITCH
+  frame2->a0 = (uintptr_t)primitive::SWITCH;
+  frame2->a1 = 1;
+  kernel_instance.svc_dispatch(ctx2);
+  assert(frame2->a0 == (uintptr_t)kernel_error::GRANT_TOO_SMALL);
+  assert(kernel_instance.current_thread_id() == 2);
+  assert(kernel_instance.thread_state(1) == thread_state::READY);
+  // 後始末: B (kobj) が貸し手 A へ SWITCH して戻る。
+  frame2->a0 = (uintptr_t)primitive::SWITCH;
+  frame2->a1 = kernel_instance.grant_lender();
+  kernel_instance.svc_dispatch(ctx2);
+  assert(kernel_instance.current_thread_id() == 0 && !kernel_instance.grant_active());
+  printf("  13f. SWITCH with no budget left is refused (GRANT_TOO_SMALL), target stays READY: PASS\n");
+
+  // 13g. EXIT_THREAD (kobj の exit_thread) の grant_active 側: terminate(self) のあと
+  //      SWITCH(grant_lender()) で貸し手へ返す。終わったスレッドは TERMINATED のまま、
+  //      貸し手の応答は (OK, YIELDED)。
+  as_kobj_a();
+  frame->a0 = (uintptr_t)primitive::SWITCH;
+  frame->a1 = 2;
+  kernel_instance.svc_dispatch(ctx);
+  assert(kernel_instance.current_thread_id() == 2 && kernel_instance.grant_active());
+  kernel_instance.terminate(2);
+  frame2->a0 = (uintptr_t)primitive::SWITCH;
+  frame2->a1 = kernel_instance.grant_lender();
+  kernel_instance.svc_dispatch(ctx2);
+  assert(kernel_instance.current_thread_id() == 0 && !kernel_instance.grant_active());
+  assert(kernel_instance.thread_state(2) == thread_state::TERMINATED);
+  assert(kernel_instance.thread_state(0) == thread_state::RUNNING);
+  assert(frame->a0 == (uintptr_t)kernel_error::OK && frame->a1 == (uintptr_t)grant_end::YIELDED);
+  printf("  13g. exit_thread-style return (terminate + SWITCH(lender)): borrower stays TERMINATED, lender resumes with (OK,YIELDED): PASS\n");
+
+  // -------------------------------------------------------------------------
+  // 14. FORWARD_CHILD_EXIT (27): 出どころが専用 HANDLER のときだけ、2 と同じ pop
+  // -------------------------------------------------------------------------
+  constexpr uint32_t D_ID = 44;
+  access::declare(D_ID, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(0x42070000), 0,
+                  CUSTOM_HANDLER_ID, CUSTOM_HANDLER_ENTRY);
+  auto into_handler = [&]() {
+    // A → D (親ハンドラは専用 HANDLER 42)。D の raw SVC が専用 HANDLER へ配送され、
+    // HANDLER 42 の段 (kind HANDLER, 親 = root) が積まれる。ctx->sp は HANDLER のフレーム。
+    fresh(ROOT_APP_ID, true);
+    frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+    frame->a1 = D_ID;
+    frame->a2 = 0;
+    frame->a3 = 0x21;
+    kernel_instance.svc_dispatch(ctx);
+    assert(kernel_instance.current_depth() == 1 && thread.ledger[0].handler_object == CUSTOM_HANDLER_ID);
+    ctx->sp->a0 = 77; // 専用 HANDLER への raw SVC
+    kernel_instance.svc_dispatch(ctx);
+    assert(kernel_instance.current_depth() == 2);
+    assert(thread.ledger[1].via == KERNEL::LEDGER_DISPATCH);
+    assert(thread.ledger[1].kind == (uint8_t)object_kind::HANDLER);
+    assert(thread.ledger[1].object == CUSTOM_HANDLER_ID);
+    assert(thread.ledger[1].handler_object == ROOT_KOBJ_ID);
+  };
+  // 14a. 正しい出どころ: HANDLER の段 + D の段の 2 枚を落として A へ (値 0x55, error 0)。
+  into_handler();
+  KERNEL::FRAME *frame_h = ctx->sp;
+  frame_h->a0 = (uintptr_t)object_api::FORWARD_CHILD_EXIT;
+  frame_h->a1 = 0;
+  frame_h->a2 = 0x55;
+  frame_h->a3 = 0;
+  kernel_instance.svc_dispatch(ctx);
+  assert(kernel_instance.current_depth() == 0);
+  assert(thread.call_stack.call_count == 0);
+  assert(ctx->sp == frame);
+  assert(frame->a0 == (uintptr_t)object_error::OK && frame->a1 == 0x55);
+  printf("  14a. FORWARD_CHILD_EXIT from dedicated HANDLER pops HANDLER+child frames in trap (depth 2->0, value 0x55): PASS\n");
+
+  // 14b. HANDLER でも root でもない出どころは NOT_PRIVILEGED。1 枚も落とさない。
+  fresh(ROOT_APP_ID, true);
+  frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+  frame->a1 = B_ID;
+  frame->a2 = 0;
+  kernel_instance.svc_dispatch(ctx); // 呼び先 B (PLAIN, 親 = root)
+  assert(kernel_instance.current_depth() == 1);
+  ctx->sp->a0 = (uintptr_t)object_api::FORWARD_CHILD_EXIT;
+  ctx->sp->a1 = 0;
+  ctx->sp->a2 = 0x56;
+  kernel_instance.svc_dispatch(ctx);
+  assert(kernel_instance.current_depth() == 1);
+  assert(ctx->sp->a0 == (uintptr_t)object_error::NOT_PRIVILEGED && ctx->sp->a1 == 0);
+  printf("  14b. FORWARD_CHILD_EXIT from a PLAIN object: NOT_PRIVILEGED, nothing popped: PASS\n");
+
+  // 14c. 戻り先が floor 未満なら HANDLER からでも UNWIND_REJECTED/DEPTH_MISMATCH。
+  into_handler();
+  frame_h = ctx->sp;
+  frame_h->a0 = (uintptr_t)object_api::FORWARD_CHILD_EXIT;
+  frame_h->a1 = 2; // >= depth
+  frame_h->a2 = 0x57;
+  frame_h->a3 = 0;
+  kernel_instance.svc_dispatch(ctx);
+  assert(kernel_instance.current_depth() == 2);
+  assert(frame_h->a0 == (uintptr_t)object_error::UNWIND_REJECTED);
+  assert(frame_h->a1 == (uintptr_t)kernel_error::DEPTH_MISMATCH);
+  printf("  14c. FORWARD_CHILD_EXIT with bad d: UNWIND_REJECTED/DEPTH_MISMATCH, nothing popped: PASS\n");
 
   // 後始末
   thread.call_stack.depth = 0;

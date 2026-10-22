@@ -23,6 +23,7 @@ template <> void KERNEL::grant_unwind(grant_end);
 template <> void KERNEL::arm_timer();
 template <> void KERNEL::grant_charge();
 template <> bool KERNEL::claim(uint32_t, kernel_error &);
+template <> kernel_error KERNEL::do_grant(uint32_t, uint64_t);
 template <> void KERNEL::set_recovery_thread(uint32_t);
 template <> void KERNEL::set_thread_storage(void *, uintptr_t);
 template <> void KERNEL::release(uint32_t);
@@ -205,35 +206,19 @@ template <> bool KERNEL::claim(uint32_t thread, kernel_error &error) {
   return true;
 }
 
+// SWITCH = GRANT(target, 無制限)。自分が持っている CPU 予算の全部を渡す: 外側に貸し手が
+// 居て期限があればその残りが (do_grant が外側の残りでクランプする)、起点のスレッドや
+// kernel object のように予算が無制限なら無制限で渡る。渡した側は WAIT_GRANT で待ち、
+// 借り手の YIELD (grant_unwind) か期限切れで戻ってくる。
+// ★以前の「借り手が撃つと対象を無視して貸し手へ返す」「起点が撃つと READY に戻るだけの
+//   バトン渡し」は無くなった。借り手の SWITCH(C) は C への又貸し (A→B→C) になる。
+//   貸し手へ返したいときは SWITCH(貸し手) か YIELD。
 template <> kernel_error KERNEL::do_switch(uint32_t target) {
-  const uint32_t core = BOARD::core_num();
-  // ★借り手として走っている最中の switch は「早めに返す」の意味にする。対象は見ない
-  //   — 借りた実行権を第三者へ又貸しできてしまうと、貸し手の期限が意味を失う。
-  if (m_grants[core].depth != 0) {
-    grant_unwind(grant_end::YIELDED);
-    return kernel_error::OK;
-  }
-  const uint32_t current = m_current[core];
-  if (target == current)
-    return kernel_error::OK; // 自分へ渡すのは何もしないのと同じ
-  kernel_error error = kernel_error::OK;
-  if (!claim(target, error))
-    return error;
-  m_current[core] = target;
-  // 渡した側は READY へ。release 以降、他コアが拾ってよい (自分の文脈の退避は
-  // 例外入口が済ませている)。
-  // ★★**RUNNING だったときだけ**戻す (D54)。無条件に READY を書くと、
-  //   デバッガが直前に立てた SUSPENDED を**上書きして復活させる** —
-  //   「止めたのに走り続ける」の経路の 1 つがこれだった。CAS にするのは、
-  //   状態を変えてよいのが「今 RUNNING である」場合に限るから。
-  ARCH::cas32(&m_threads[current].thread.state,
-              (uint32_t)THREAD::state_t::RUNNING,
-              (uint32_t)THREAD::state_t::READY);
-  return kernel_error::OK;
+  return do_grant(target, GRANT_UNLIMITED);
 }
 
 template <>
-kernel_error KERNEL::do_grant(uint32_t target, uint32_t cycles) {
+kernel_error KERNEL::do_grant(uint32_t target, uint64_t cycles) {
   const uint32_t core = BOARD::core_num();
   const uint32_t current = m_current[core];
   if (target == current)
@@ -332,6 +317,8 @@ template <> void KERNEL::grant_charge() {
       (wrapped || left == 0) ? m_armed[core] : (uint64_t)(m_armed[core] - left);
   for (uint32_t index = 0; index < grants.depth; ++index) {
     grant_frame &frame = grants.frames[index];
+    if (frame.remaining == GRANT_UNLIMITED)
+      continue; // 無制限の段は減らない
     frame.remaining = frame.remaining > used ? frame.remaining - used : 0;
   }
   m_armed[core] = wrapped ? 0 : left;
@@ -349,6 +336,12 @@ template <> void KERNEL::arm_timer() {
     return;
   }
   uint64_t chunk = grants.frames[grants.depth - 1].remaining;
+  if (chunk == GRANT_UNLIMITED) {
+    // 期限なし (SWITCH)。取り上げる相手が居ないのでタイマは要らない。
+    ARCH::timer_cancel();
+    m_armed[core] = 0;
+    return;
+  }
   // タイマは幅が有限なので、長い貸しは刻んで継ぎ足す (残量自体は変わらない)。
   if (chunk > ARCH::TIMER_MAX_CYCLES)
     chunk = ARCH::TIMER_MAX_CYCLES;

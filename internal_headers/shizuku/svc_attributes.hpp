@@ -18,10 +18,14 @@ struct svc_attribute {
 // In V3, when an SVC resolves to the root KernelObject handler (to_root == true),
 // svc_mode::handler selects direct kernel trap handling for synchronous bounded APIs
 // without pushing a dispatch frame: EXIT_METHOD (2), CALL_METHOD (4), GET_CURRENT_OBJECT (5),
-// GET_CALLER_OBJECT (6), RUN_FOR (9), SET_BUDGET (12) and CALL_METHOD_DESCRIPTOR (33).
+// GET_CALLER_OBJECT (6), YIELD (8), RUN_FOR (9), SET_BUDGET (12), FORWARD_CHILD_EXIT (27)
+// and CALL_METHOD_DESCRIPTOR (33).
 // Everything else stays svc_mode::thread (KernelObject actor dispatch), including the
 // APIs that loop over a count (STREAM_PUSH_N / STREAM_POP_N) and the scheduling ones
-// (YIELD / EXIT_THREAD / SLEEP_US) whose next-thread selection is not O(1) yet.
+// (EXIT_THREAD / SLEEP_US) whose next-thread selection is not O(1) yet.
+// YIELD is handled in the trap only while the thread is a borrower (a grant frame exists):
+// it returns to the lender. With no grant frame (the originating thread = scheduler) it,
+// like EXIT_METHOD from a thread's outermost method, falls through to the KernelObject.
 // Mode does NOT alter objectland raw routing: if a custom dedicated parent handler is
 // bound (to_root == false), raw SVC delivery to the registered parent is strictly preserved.
 inline constexpr auto svc_attributes = [] {
@@ -29,7 +33,7 @@ inline constexpr auto svc_attributes = [] {
   for (auto &v : a)
     v = {svc_permission::unprivileged_allowed, false, svc_mode::thread,
          svc_save_level::continuation, svc_authority::none};
-  for (unsigned i : {2u, 4u, 5u, 6u, 9u, 12u, 33u}) {
+  for (unsigned i : {2u, 4u, 5u, 6u, 8u, 9u, 12u, 27u, 33u}) {
     a[i].mode = svc_mode::handler;
     a[i].save_level = svc_save_level::minimal;
   }

@@ -279,6 +279,13 @@ public:
   }
   // 今このコアで実行権を借りて走っているか (借り手の yield は貸し手への早期復帰)。
   bool grant_active() const { return m_grants[BOARD::core_num()].depth != 0; }
+  // いま借り手として走っているときの、直近の貸し手 (grant_active() が真のときだけ有効)。
+  // 貸し手へ返すには SWITCH(grant_lender()) を撃つ (SWITCH は GRANT(無制限) なので、
+  // 貸し手に当たれば祖先返却として 1 段巻き取られる)。
+  uint32_t grant_lender() const {
+    const grant_stack &grants = m_grants[BOARD::core_num()];
+    return grants.frames[grants.depth - 1].lender;
+  }
 
   // タイマ例外から呼ばれる (期限の監視。切替そのものは最低優先度の遅延例外で行う)。
   void timer_expired();
@@ -295,7 +302,8 @@ private:
                        const call_request &request);
 
   kernel_error do_switch(uint32_t target);
-  kernel_error do_grant(uint32_t target, uint32_t cycles);
+  // cycles == GRANT_UNLIMITED は期限なし (SWITCH)。外側に期限があれば外側の残りでクランプされる。
+  kernel_error do_grant(uint32_t target, uint64_t cycles);
   // 貸した実行権を 1 段巻き取って貸し手へ戻す (期限切れ / 早期復帰の共通経路)。
   void grant_unwind(grant_end reason);
   // 今の刻みで使ったぶんを全段から引く。**貸し借りに触る前に必ず呼ぶ**。
@@ -316,9 +324,12 @@ private:
   //       黙って倍の仕事を意味するようになる。クロックで書けば意味が動かない
   //   ★対して SLEEP は µs のまま。あちらは壁時計の話 (「20ms 後に起こして」) で、
   //     仕事量ではない。**別の量なので単位を揃えてはいけない**。
+  // 期限なしの貸し出し (SWITCH = GRANT(無制限))。remaining がこの値の段はタイマを装填せず、
+  // 使ったぶんも引かない。外側が有限ならクランプされるので、有限の段の内側に無制限は現れない。
+  static constexpr uint64_t GRANT_UNLIMITED = ~(uint64_t)0;
   struct grant_frame {
     uint32_t lender;    // 貸し手 (WAIT_GRANT で待っている)
-    uint64_t remaining; // 残りクロック数 (外側でクランプ済み)
+    uint64_t remaining; // 残りクロック数 (外側でクランプ済み。GRANT_UNLIMITED = 無制限)
   };
   struct grant_stack {
     static constexpr uint32_t MAX_DEPTH = 8;
