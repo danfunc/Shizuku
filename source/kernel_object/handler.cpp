@@ -176,8 +176,8 @@ template <> void KERNEL_OBJECT::init() {
     m_object_name[id] = nullptr;
     for (uintptr_t method = 0; method < METHOD_COUNT; ++method)
       m_objects[id].methods[method] = nullptr;
-    for (auto &d : m_objects[id].method_descriptors)
-      d.valid = 0;
+    for (auto &d : m_descriptors[id])
+      d.target = nullptr;
   }
   for (uintptr_t thread = 0; thread < THREAD_COUNT; ++thread) {
     m_kill_pending[thread] = 0;
@@ -460,8 +460,10 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
                              current_instance_generation + 1u);
       }
       if (replace) {
-        for (auto &d : m_objects[id].method_descriptors) {
-          ARCH::store_release32(&d.valid, 0u);
+        // 差し替えた持ち主の記述子は全部無効 (target = nullptr)。呼び先を差し替えた場合は
+        // 呼び先の version (generation) が上がるので、世代照合で STALE になる。
+        for (auto &d : m_descriptors[id]) {
+          __atomic_store_n(&d.target, decltype(d.target)(nullptr), __ATOMIC_RELEASE);
         }
       }
       for (uintptr_t method = 1; method < METHOD_COUNT; ++method)
@@ -675,12 +677,11 @@ uintptr_t KERNEL_OBJECT::create_method_descriptor(uintptr_t target_id,
   }
   int free_slot = -1;
   for (int i = 0; i < (int)METHOD_DESCRIPTOR_CAPACITY; ++i) {
-    auto &candidate = m_objects[caller_id].method_descriptors[i];
-    bool valid = ARCH::load_acquire32(&candidate.valid) != 0;
-    if (valid && (candidate.target_object >= OBJECT_COUNT ||
-                  candidate.target_generation == 0 ||
-                  candidate.target_generation != ARCH::load_acquire32(
-                      &m_objects[candidate.target_object].generation))) {
+    auto &candidate = m_descriptors[caller_id][i];
+    const object_t *candidate_target = __atomic_load_n(&candidate.target, __ATOMIC_ACQUIRE);
+    bool valid = candidate_target != nullptr;
+    if (valid && (candidate.target_generation == 0 ||
+                  candidate.target_generation != row_version(*candidate_target))) {
       // Stale indices are never recycled within this owner generation: API 33
       // carries only the index, so reuse would turn an old handle into a new call.
       continue;
@@ -694,17 +695,13 @@ uintptr_t KERNEL_OBJECT::create_method_descriptor(uintptr_t target_id,
     error = object_error::NO_DESCRIPTOR; // 21
     return 0;
   }
-  auto &desc = m_objects[caller_id].method_descriptors[free_slot];
-  desc.target_object = (uint32_t)target_id;
+  auto &desc = m_descriptors[caller_id][free_slot];
   desc.target_entry = (uintptr_t)m_objects[target_id].methods[method_index];
   desc.target_generation = target_generation;
-  desc.owner_object = caller_id;
   desc.owner_generation = caller_generation;
-  desc.method_index = (uint32_t)method_index;
-  desc.flags = m_objects[target_id].flags;
-  desc.region_base = m_objects[target_id].region_base;
-  desc.region_limit = m_objects[target_id].region_limit;
-  ARCH::store_release32(&desc.valid, 1u);
+  // 公開は target を最後に release で書く (呼び側は target を acquire で読んでから他の欄を読む)。
+  // ここまでに target_id が created で methods[method_index] が非 null と確かめてある。
+  __atomic_store_n(&desc.target, (const object_t *)&m_objects[target_id], __ATOMIC_RELEASE);
   return (uintptr_t)free_slot;
 }
 

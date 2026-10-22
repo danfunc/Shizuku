@@ -158,6 +158,20 @@ entry = (root / 'internal_headers/shizuku/method_entry.hpp').read_text()
 assert '__has_attribute(zero_call_used_regs)' in entry and 'zero_call_used_regs("used-gpr")' in entry
 assert 'defined(__riscv)' in entry and '#  define SHIZUKU_ZERO_USED_REGS\n' in entry
 
+# 記述子の呼出し経路には object 表の行を id で引く式 (id × 行の大きさの乗算) が無い: 項目 (16 バイト) は
+# 呼び先の行へのポインタを持ち、表は [持ち主][index] の平坦配列、行は 128 バイトに揃えて id からシフトで引く。
+ko = (root / 'internal_headers/shizuku/templates/kernel_object.hpp').read_text()
+assert 'static constexpr uintptr_t OBJECT_ROW_ALIGN = 128;' in ko
+assert 'struct alignas(OBJECT_ROW_ALIGN) object_t' in ko
+assert 'sizeof(object_t) == OBJECT_ROW_ALIGN' in ko and 'sizeof(method_descriptor_entry) == 16' in ko
+assert 'method_descriptor_entry m_descriptors[OBJECT_COUNT][METHOD_DESCRIPTOR_CAPACITY];' in ko
+find_desc = ko.split('SHIZUKU_HOT const method_descriptor_entry *find_method_descriptor(')[1].split(
+    'SHIZUKU_HOT bool validate_method_descriptor')[0]
+assert 'm_objects[' not in find_desc and 'm_descriptors[caller_id][index]' in find_desc
+nc = (root / 'internal_headers/shizuku/native_call.hpp').read_text()
+call_desc = nc.split('inline void call_descriptor_in_place(')[1].split('// EXIT_METHOD (2, Forward')[0]
+assert 'callee_row' not in call_desc and 'kobj.row_id(row)' in call_desc
+
 boot_src = (root / 'modules/esp_idf_support/c6/early_boot.cpp').read_text()
 assert 'shizuku_c6_thread1_diag' in boot_src
 assert 'records[2]' in boot_src

@@ -166,39 +166,89 @@ public:
     return m_objects[object_id].parent_handler_object;
   }
 
-  // 方法記述子。CALL_METHOD_DESCRIPTOR の trap 内直接処理 (dispatch.cpp) が
-  // カーネル側から参照するため public に置く (記述子の表そのものは private のまま)。
-  struct method_descriptor_entry {
-    uint32_t target_object;
-    uintptr_t target_entry;
-    uint32_t target_generation;
-    uint32_t owner_object;
-    uint32_t owner_generation;
-    uint32_t method_index;
-    uint32_t flags;
+  // オブジェクト表の 1 行の整列 (バイト)。行の大きさを 2 の冪に揃えて、id から行を引くのを
+  // シフトだけにする (旧: 748 バイトの行で `li 0x2ec; mul` が CALL 1 回に 3 回出ていた)。
+  // 32 ビットの行は 108 バイトなので 128。METHOD_COUNT などを増やして収まらなくなったら、
+  // 下の static_assert が落ちる (その場合はここを次の 2 の冪にする)。
+  static constexpr uintptr_t OBJECT_ROW_ALIGN = 128;
+  static_assert((METHOD_DESCRIPTOR_CAPACITY & (METHOD_DESCRIPTOR_CAPACITY - 1)) == 0,
+                "descriptor capacity must be a power of two (index by shift)");
+private:
+  struct alignas(OBJECT_ROW_ALIGN) object_t {
+    bool created;
+    // ★名前はここではなく別配列に置く。object_t は呼び出し経路 (created / flags /
+    //   methods) で毎回触るので、経路に関係ない名前を混ぜてキャッシュ行を汚さない。
+
+    uint32_t flags; // OBJECT_* の宣言 (生成時に決まり、以後変わらない)
+    // ★**種別**。flags のビットではなく独立したフィールドとして持つ — 「役」は
+    //   属性の一つではなく、そのオブジェクトが何であるかそのものだから
+    //   (2026-09-05 に第 2 世代の形へ戻した。object_api.hpp の経緯を参照)。
+    //   HANDLER を名乗れるのは svc ハンドラを務めるオブジェクトだけで、これが
+    //   「プリミティブを撃てるのは誰か」を決める。
+    object_kind kind;
+    // ★生成者 (CREATE_OBJECT の発行元)。方法記述子の作成権限が「親・直接の子」を
+    //   引くために使う。ROOT / KERNEL_OBJECT 自身は生成されたものではないので NO_OBJECT。
+    uint32_t creator_object;
+    // ★kernel object の役を負うか。種別 (kind) とは別の軸で、ID では判定しない。
+    //   kind は dispatch の callee_kind の偽装防止のため変えない。
+    bool kernel_role;
+    // ★親 handling object の情報 (解決済み binding: Codex 指摘 5)
+    uint32_t parent_handler_object;
+    uintptr_t parent_handler_entry;
+    method_t methods[METHOD_COUNT];
+    // ★flags と違い、こちらは生成後に変わる (GRANT_REGION で書き換わる)。
+    //   軸 B (Q8)。0/0 = 窓なし。
     uint32_t region_base;
     uint32_t region_limit;
-    volatile uint32_t valid;
+    volatile uint32_t generation;
+    volatile uint32_t instance_generation;
   };
-  // 記述子の引きと検査 (index・作成者・所有者・世代・呼び先の生存と入口)。通れば表の行を返し、
-  // 通らなければ nullptr と error。コピーしないので trap 内の直接 call はこれを読む。
+  static_assert(sizeof(uintptr_t) != 4 || sizeof(object_t) == OBJECT_ROW_ALIGN,
+                "an object row must be exactly OBJECT_ROW_ALIGN bytes on 32-bit targets");
+public:
+  // 方法記述子 (caller が callee を呼ぶ入口)。caller の表の 1 項目で、呼出しに要るものは
+  //   「呼び先の行へのポインタ」「入口 pc」「持ち主の世代」「呼び先の世代 (version)」だけ。
+  //   種別・親ハンドラ・特権・窓・instance 世代は**呼び先の行から呼出し時に読む** (旧と同じ生きた値)。
+  //   行の位置はポインタが持つので、id × 行の大きさの乗算は要らない。
+  //   ★失効: 呼び先の version (generation) が変わると世代照合で STALE になる。version を上げるのは
+  //     CREATE_OBJECT の差し替え (handler.cpp の replace)、EXPORT_METHOD、GRANT_REGION の 3 つで、
+  //     種別・親ハンドラ・特権・窓・入口を書き換える所は全部この 3 つのどれかの中にある
+  //     (特権の旗 flags を書くのは生成 / 差し替えと SET_OBJECT_AFFINITY のみで、後者は特権の旗に触れない)。
+  //     持ち主の差し替えは持ち主の項目を全部 target = nullptr にする。
+  //   target == nullptr が「無効」(旧 valid == 0)。公開は target を最後に release で書く。
+  //   ★持ち主 (owner_object) は持たない: 表が持ち主の行ごとなので、項目の位置が持ち主を決める。
+  //   ★created / 入口 0 の検査は呼出し側に残さない: 作成 (create_method_descriptor) が
+  //     「呼び先が created、かつ methods[index] != nullptr」を確かめてから項目を公開し、
+  //     created は init 以外で false に戻らず、入口は項目に固定される。
+  struct method_descriptor_entry {
+    const object_t *target;
+    uint32_t owner_generation;
+    uint32_t target_generation;
+    uintptr_t target_entry;
+  };
+  static_assert(sizeof(uintptr_t) != 4 || sizeof(method_descriptor_entry) == 16,
+                "a descriptor entry must be 16 bytes on 32-bit targets");
+  // 行から id を求める (行は m_objects の要素。2 の冪の大きさなのでシフトで済む)。
+  template <class Row> uint32_t row_id(const Row &row) const {
+    return (uint32_t)(&row - m_objects);
+  }
+  // 行の version (generation) を読む。
+  template <class Row> uint32_t row_version(const Row &row) const {
+    return ARCH::load_acquire32(const_cast<volatile uint32_t *>(&row.generation));
+  }
+  // 記述子の引きと検査 (index・持ち主の世代・呼び先の version)。通れば項目を返し、通らなければ
+  // nullptr と error。コピーしないので trap 内の直接 call はこれを読む。
+  // 順序: index / 持ち主の範囲 (BAD) → 無効 (BAD) → 持ち主の世代 (STALE) → 呼び先の version (STALE)。
   SHIZUKU_HOT const method_descriptor_entry *find_method_descriptor(
       uint32_t caller_id, uint32_t index, uint32_t caller_generation,
       object_error &error) const {
-    if (index >= METHOD_DESCRIPTOR_CAPACITY) {
+    if (index >= METHOD_DESCRIPTOR_CAPACITY || caller_id >= OBJECT_COUNT_T) {
       error = object_error::BAD_DESCRIPTOR;
       return nullptr;
     }
-    if (caller_id >= OBJECT_COUNT_T || !m_objects[caller_id].created) {
-      error = object_error::BAD_DESCRIPTOR;
-      return nullptr;
-    }
-    const auto &desc = m_objects[caller_id].method_descriptors[index];
-    if (__atomic_load_n(&desc.valid, __ATOMIC_ACQUIRE) == 0) {
-      error = object_error::BAD_DESCRIPTOR;
-      return nullptr;
-    }
-    if (desc.owner_object != caller_id) {
+    const auto &desc = m_descriptors[caller_id][index];
+    const object_t *target = __atomic_load_n(&desc.target, __ATOMIC_ACQUIRE);
+    if (target == nullptr) {
       error = object_error::BAD_DESCRIPTOR;
       return nullptr;
     }
@@ -206,17 +256,9 @@ public:
       error = object_error::STALE_DESCRIPTOR;
       return nullptr;
     }
-    if (desc.target_object >= OBJECT_COUNT_T) {
-      error = object_error::BAD_DESCRIPTOR;
-      return nullptr;
-    }
-    if (desc.target_generation == 0 ||
-        desc.target_generation != object_version(desc.target_object)) {
+    const uint32_t version = row_version(*target);
+    if (version == 0 || desc.target_generation != version) {
       error = object_error::STALE_DESCRIPTOR;
-      return nullptr;
-    }
-    if (!m_objects[desc.target_object].created || desc.target_entry == 0) {
-      error = object_error::BAD_DESCRIPTOR;
       return nullptr;
     }
     error = object_error::OK;
@@ -343,36 +385,6 @@ private:
   // dispatcher の host 試験が、オブジェクト表とメソッド表を直接組み立てる。
   friend struct ::shizuku::selftest::dispatcher_test_access;
 
-  struct object_t {
-    bool created;
-    // ★名前はここではなく別配列に置く。object_t は呼び出し経路 (created / flags /
-    //   methods) で毎回触るので、経路に関係ない名前を混ぜてキャッシュ行を汚さない。
-
-    uint32_t flags; // OBJECT_* の宣言 (生成時に決まり、以後変わらない)
-    // ★**種別**。flags のビットではなく独立したフィールドとして持つ — 「役」は
-    //   属性の一つではなく、そのオブジェクトが何であるかそのものだから
-    //   (2026-09-05 に第 2 世代の形へ戻した。object_api.hpp の経緯を参照)。
-    //   HANDLER を名乗れるのは svc ハンドラを務めるオブジェクトだけで、これが
-    //   「プリミティブを撃てるのは誰か」を決める。
-    object_kind kind;
-    // ★生成者 (CREATE_OBJECT の発行元)。方法記述子の作成権限が「親・直接の子」を
-    //   引くために使う。ROOT / KERNEL_OBJECT 自身は生成されたものではないので NO_OBJECT。
-    uint32_t creator_object;
-    // ★kernel object の役を負うか。種別 (kind) とは別の軸で、ID では判定しない。
-    //   kind は dispatch の callee_kind の偽装防止のため変えない。
-    bool kernel_role;
-    // ★親 handling object の情報 (解決済み binding: Codex 指摘 5)
-    uint32_t parent_handler_object;
-    uintptr_t parent_handler_entry;
-    method_t methods[METHOD_COUNT];
-    // ★flags と違い、こちらは生成後に変わる (GRANT_REGION で書き換わる)。
-    //   軸 B (Q8)。0/0 = 窓なし。
-    uint32_t region_base;
-    uint32_t region_limit;
-    volatile uint32_t generation;
-    volatile uint32_t instance_generation;
-    method_descriptor_entry method_descriptors[METHOD_DESCRIPTOR_CAPACITY];
-  };
   // 名前の置き場。**コピーではなくポインタ**を持つ (kobj は文字列を触らない)。
   const char *m_object_name[OBJECT_COUNT_T];
   // ストリームの登録簿。番号は**こちらが割り当てる** (呼ぶ側が選ぶと、
@@ -513,6 +525,9 @@ private:
   uintptr_t owner_of(uintptr_t handle, object_error &error) const;
 
   object_t m_objects[OBJECT_COUNT];
+  // 記述子の表: [持ち主][index]。行の外に出した平坦な配列なので、持ち主の行を引かずに
+  // (持ち主 × 16 + index) × 16 バイトのシフトだけで項目に届く。
+  method_descriptor_entry m_descriptors[OBJECT_COUNT][METHOD_DESCRIPTOR_CAPACITY];
   // スレッドごとの「どのオブジェクトのために作ったか」。方針側の台帳なのでここ。
   uint16_t m_thread_object[THREAD_COUNT];
   // 停止要求が出ているスレッド。★要求と回収を分けるための旗 (D55)。

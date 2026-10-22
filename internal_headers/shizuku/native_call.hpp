@@ -228,6 +228,7 @@ template <class K, class KObj>
 
 // CALL_METHOD_DESCRIPTOR (33): a1 = 記述子の index, a2..a7 = 呼び先の引数 6 個 (a0..a5 へ渡る)。
 //   記述子の引きと呼び先の読み出し・台帳段の積みは表の錠の中 (区間は短く、syscall を含まない)。
+//   項目は呼び先の行へのポインタを持つので、object 表の行を id から引く乗算は無い。
 template <class K, class KObj>
 [[gnu::always_inline]] inline void call_descriptor_in_place(K &kernel,
                                                             typename K::THREAD &thread,
@@ -250,10 +251,11 @@ template <class K, class KObj>
       A::set_result(frame, (uintptr_t)error, 0);
       return;
     }
-    // 呼び先の行は錠の中で引く (find_method_descriptor が target_object の範囲と作成済みを検査済み)。
+    // 呼び先の行は項目が持つポインタ (行を id から引き直さない)。id は行の位置から求める (シフト)。
+    // 錠の中で読む。種別・親ハンドラ・特権・窓・instance 世代は行から呼出し時に読む (enter_in_place)。
+    const auto &row = *desc->target;
     const kernel_error entered =
-        enter_in_place(kernel, thread, context, kobj, desc->target_object,
-                       kobj.callee_row(desc->target_object), desc->target_entry,
+        enter_in_place(kernel, thread, context, kobj, kobj.row_id(row), row, desc->target_entry,
                        K::LEDGER_DESCRIPTOR_CALL);
     kobj.table_unlock_inline();
     if (entered != kernel_error::OK) {
