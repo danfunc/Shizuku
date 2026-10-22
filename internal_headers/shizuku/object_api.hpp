@@ -24,8 +24,10 @@ enum struct object_api : uintptr_t {
   //   載せる戻り口は常に RETURN を撃つが、同じ svc が誰から出たかで意味が変わる:
   //   ハンドラから出れば巻き戻しプリミティブ、オブジェクトから出れば経路判定で
   //   ここへ届き「メソッドが戻った」という知らせになる。非KOBJ return stub の専用
-  //   marker は dispatch が a1 を呼出し元の unwind floor に変換する。通常 API 呼出しは
-  //   a1 の d を保持し、何フレーム落とすかは KOBJ が current_depth - d で計算する。
+  //   marker は a1 を呼出し元の unwind floor に変換して扱う。通常 API 呼出しは a1 の d を
+  //   保持する。どちらも svc_dispatch が trap 内で current_depth - d 段を落とす (d の検査は
+  //   カーネルの RETURN と同じ)。KOBJ の exit_thread に回るのは、スレッドの最外のメソッドが
+  //   戻る場合 (d == 0 かつ呼出し段なし) だけ。
   EXIT_METHOD = 2,
   // 自分のメソッドを公開する。a1 = メソッド番号, a2 = 入口。
   // 誰のものとして登録するかは**発行元から導出**する (名乗らせない)。
@@ -33,6 +35,8 @@ enum struct object_api : uintptr_t {
   EXPORT_METHOD = 3,
   // 他オブジェクトのメソッドを呼ぶ。a1 = オブジェクト ID, a2 = メソッド番号,
   // a3 = 引数。戻り a1 = メソッドの戻り値。
+  // ★svc_dispatch が trap 内で呼び先へ直接入る (kobj の中継なし)。呼び先から見た
+  //   GET_CALLER_OBJECT は呼び出し元そのもの。
   CALL_METHOD = 4,
   // 今どのオブジェクトとして走っているか / 誰に呼ばれたか。戻り a1 = オブジェクト ID。
   // ★identity はカーネルではなくカーネルオブジェクトの台帳から答える
