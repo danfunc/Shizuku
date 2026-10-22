@@ -67,17 +67,20 @@ struct dispatcher_test_access {
                                  uintptr_t target_entry, uint32_t owner_generation,
                                  uint32_t target_generation) {
     auto &desc = kernel_object_instance.m_descriptors[owner][index];
-    desc.target_entry = target_entry;
-    desc.target_generation = target_generation;
-    desc.owner_generation = owner_generation;
-    // 作成 (create_method_descriptor) は「呼び先が created で入口が非 0」を確かめてから公開する。
-    // 試験の据え付けも同じ条件を満たさない項目は無効のまま (target = nullptr = BAD_DESCRIPTOR) にする。
+    // 作成 (create_method_descriptor) と同じ条件・同じ写しで据える。呼び先が created で入口が非 0 の
+    // ときだけ公開し、そうでなければ無効のまま (BAD_DESCRIPTOR)。
     const bool creatable = target < KERNEL_OBJECT::OBJECT_COUNT &&
                            kernel_object_instance.m_objects[target].created && target_entry != 0;
-    desc.target = creatable ? &kernel_object_instance.m_objects[target] : nullptr;
+    if (!creatable) {
+      KERNEL_OBJECT::invalidate_descriptor(desc);
+      return;
+    }
+    kernel_object_instance.publish_descriptor(desc, target, target_entry, owner_generation);
+    // 試験は呼び先の version を任意の値に据えて STALE を作るので、写した版を書き換える。
+    desc.target_generation = target_generation;
   }
   static void invalidate_descriptor(uint32_t owner, uint32_t index) {
-    kernel_object_instance.m_descriptors[owner][index].target = nullptr;
+    KERNEL_OBJECT::invalidate_descriptor(kernel_object_instance.m_descriptors[owner][index]);
   }
   static void set_version(uint32_t id, uint32_t generation) {
     kernel_object_instance.m_objects[id].generation = generation;
@@ -1023,9 +1026,10 @@ static void run_dispatcher_tests() {
   access::set_region(C_ID, 0, 0);
   printf("  8j. CALL_METHOD_DESCRIPTOR to an unprivileged target: privilege drops and the target window opens (0x1000..0x2000), return restores the caller's privilege and window: PASS\n");
 
-  // 8l. 記述子の項目は「呼び先の行へのポインタ + 入口 pc + 持ち主の世代 + 呼び先の version」だけ。
-  //     呼出しは乗算なしで (持ち主 × 16 + index) の項目から行へ届き、窓・特権・instance 世代は行から
-  //     呼出し時に読む。前計算した値が古くなる場所は無い (version を上げる 3 経路は世代照合で STALE)。
+  // 8l. 記述子の項目は呼出しに要る値を作成時に前計算した写しを持つ (入口・親の入口・種別・親・特権・窓・
+  //     instance 世代・持ち主と呼び先の世代)。呼出しは「index → 世代照合 → 写しで入る」だけで、行を引かない。
+  //     写しの元の値は version を上げる操作 (生成・差し替え・EXPORT_METHOD・GRANT_REGION) でしか変わらないので、
+  //     それ以外で写しが古くなる経路は無い。
   {
     auto desc_return = [&](uintptr_t value) {
       ctx->sp->a0 = (uintptr_t)primitive::RETURN;
@@ -1042,14 +1046,25 @@ static void run_dispatcher_tests() {
       frame->a2 = arg;
       kernel_instance.svc_dispatch(ctx);
     };
-    // (1) 窓は version を上げずに変わった行の値が次の呼出しから効く (項目に窓の写しは無い)。
+    // (1) 窓は前計算: 行の窓を version を上げずに変えても、項目の写し (据えた時点の窓 0x1000..0x2000) で入る。
+    //     窓を変える正規の経路 (GRANT_REGION) は version を上げるので STALE になり、据え直すと新しい窓で入る。
     access::set_region(C_ID, 0x3000, 0x4000);
     desc_call(ROOT_APP_ID, 4, 0x31);
     assert(kernel_instance.current_depth() == 1 && ctx->privileged == false);
-    assert(ctx->region_base == 0x3000 && ctx->region_limit == 0x4000);
+    assert(ctx->region_base == 0x1000 && ctx->region_limit == 0x2000);
     desc_return(0x32);
     assert(kernel_instance.current_depth() == 0 && ctx->privileged == true && frame->a1 == 0x32);
+    access::set_version(C_ID, 5); // GRANT_REGION 相当 (版を上げる)
+    desc_call(ROOT_APP_ID, 4, 0x38);
+    assert(frame->a0 == (uintptr_t)object_error::STALE_DESCRIPTOR && kernel_instance.current_depth() == 0);
+    access::declare_descriptor(ROOT_APP_ID, 4, C_ID, ENTRY_CD, 0, 5); // 据え直すと行の新しい窓を写す
+    desc_call(ROOT_APP_ID, 4, 0x39);
+    assert(kernel_instance.current_depth() == 1 && ctx->region_base == 0x3000 && ctx->region_limit == 0x4000);
+    desc_return(0x3a);
+    assert(kernel_instance.current_depth() == 0 && frame->a1 == 0x3a);
     access::set_region(C_ID, 0, 0);
+    access::set_version(C_ID, 4);
+    access::declare_descriptor(ROOT_APP_ID, 4, C_ID, ENTRY_CD, 0, 4);
     // (2) 呼び先の version が上がる (差し替え / EXPORT_METHOD / GRANT_REGION が上げる) と STALE。何も積まない。
     access::set_version(B_ID, 8);
     desc_call(ROOT_APP_ID, 3, 0x33);
@@ -1084,7 +1099,7 @@ static void run_dispatcher_tests() {
     access::invalidate_descriptor(ROOT_APP_ID, 14);
     access::invalidate_descriptor(ROOT_APP_ID, 15);
   }
-  printf("  8l. descriptor entry = row pointer + entry + 2 generations: window read live (no version bump needed), version bump -> STALE and nothing pushed (restored version passes again), per-owner tables (owner 7 index 13 != root index 13), uncreatable entries stay invalid: PASS\n");
+  printf("  8l. descriptor entry = precomputed window (a row window change without a version bump is not seen), version bump -> STALE and nothing pushed, re-declare picks up the new window, restored version passes again, per-owner tables (owner 7 index 13 != root index 13), uncreatable entries stay invalid: PASS\n");
 
   // 8k. 深さ上限と BAD_REQUEST が同時に成り立つ CALL_METHOD は、従来どおり NO_STACK を先に返す。
   //     (呼び先が root ハンドラの ID を名乗る場合の BAD_REQUEST → BAD_OBJECT より、深さの検査が先)
