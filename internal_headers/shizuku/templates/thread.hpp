@@ -53,6 +53,10 @@ template <typename CONTEXT> struct thread {
     uint32_t base_object_generation = 0;
     uint32_t current_call_generation = 0;
     uint32_t caller_generation = 0;
+    // [SHIZUKU_LEAN_LEDGER] 最内の call 段 (LEDGER_CALL / LEDGER_DESCRIPTOR_CALL) の台帳の添字 + 1
+    // (0 = call 段なし)。この版では current_call_* / caller_* / top は**更新しない** (台帳から導く:
+    // identity_object() などの読み出しを使うこと)。既定の版は使わない。
+    uint32_t call_top = 0;
     // call_count 番目の call (LEDGER_CALL / LEDGER_DESCRIPTOR_CALL の段) ごとに 1 つ (ARM)。
     // ヘッダ枠方式の ARCH ではヘッダが持つので使わない (1 要素に縮めてある)。
     struct call_identity_snapshot {
@@ -72,6 +76,21 @@ template <typename CONTEXT> struct thread {
     uint8_t kind;
     uint8_t via;
     uint16_t unwind_floor; // earliest depth this activation may return to
+#if defined(SHIZUKU_LEAN_LEDGER)
+    // ---- [SHIZUKU_LEAN_LEDGER] 戻りと識別の権威を 1 つの記録 (この特権メモリの台帳) に集める ----
+    //   既定の版は同じ情報を user stack 上のヘッダ (call_header_t)・台帳・call_stack の 3 か所に書く。
+    //   ヘッダは callee の窓の外でも、呼び元オブジェクトの別スレッドからは書ける (pc / sp / 特権 /
+    //   窓 / 識別 / 世代 / prev を偽装できる) ので権威にならない。この版はヘッダを書かず、戻りに要るものを
+    //   ここ (非特権から届かない特権メモリ) に置く。caller / current の識別は call 段の列から導く。
+    uint32_t generation;      // call 段: 入ったときの呼び先の instance 世代。dispatch 段: 0
+    uintptr_t ret_pc;         // この段から戻ったとき caller が再開する pc (ecall の次の命令)
+    uintptr_t ret_sp;         // caller の ecall 時点の SP (再開フレームはこの直下)
+    uintptr_t ret_region_base;  // caller の軸 B の窓
+    uintptr_t ret_region_limit;
+    uint16_t prev_call;       // この段を積む前の call_stack.call_top
+    uint8_t ret_privileged;   // caller の特権
+    uint8_t reserved;
+#endif
   };
   call_ledger_entry *ledger = nullptr;
   uint32_t ledger_capacity = 0;
@@ -81,6 +100,43 @@ template <typename CONTEXT> struct thread {
   uintptr_t base_handler_entry = 0;
   const call_ledger_entry &ledger_top() const {
     return ledger[call_stack.depth - 1];
+  }
+  // ---- 識別 (call 段の列から) ----------------------------------------------------------------
+  //   既定の版は call_stack のフィールドを読む。SHIZUKU_LEAN_LEDGER の版はそれらを更新しないので、
+  //   最内の call 段 (call_top) とその prev_call の鎖から導く。どちらの版でも同じ意味:
+  //     identity_*        : call 段が無ければ base、あればその段の呼び先 (今「自分」として走っているもの)
+  //     call_caller_*     : (前提 call_count != 0) その段を呼んだ側 = ひとつ外側の call 段の呼び先か base
+  uint32_t identity_object() const {
+#if defined(SHIZUKU_LEAN_LEDGER)
+    return call_stack.call_count != 0 ? ledger[call_stack.call_top - 1].object : base_object;
+#else
+    return call_stack.call_count != 0 ? call_stack.current_call_object : base_object;
+#endif
+  }
+  uint32_t identity_generation() const {
+#if defined(SHIZUKU_LEAN_LEDGER)
+    return call_stack.call_count != 0 ? ledger[call_stack.call_top - 1].generation
+                                      : call_stack.base_object_generation;
+#else
+    return call_stack.call_count != 0 ? call_stack.current_call_generation
+                                      : call_stack.base_object_generation;
+#endif
+  }
+  uint32_t call_caller_object() const {
+#if defined(SHIZUKU_LEAN_LEDGER)
+    const uint32_t previous = ledger[call_stack.call_top - 1].prev_call;
+    return previous != 0 ? ledger[previous - 1].object : base_object;
+#else
+    return call_stack.caller_object;
+#endif
+  }
+  uint32_t call_caller_generation() const {
+#if defined(SHIZUKU_LEAN_LEDGER)
+    const uint32_t previous = ledger[call_stack.call_top - 1].prev_call;
+    return previous != 0 ? ledger[previous - 1].generation : call_stack.base_object_generation;
+#else
+    return call_stack.caller_generation;
+#endif
   }
   uint32_t current_object() const {
     return call_stack.depth ? ledger_top().object : base_object;

@@ -307,9 +307,7 @@ public:
   }
   uint32_t current_object_generation() const {
     const THREAD &thread = current_thread();
-    return thread.call_stack.call_count != 0
-               ? thread.call_stack.current_call_generation
-               : thread.call_stack.base_object_generation;
+    return thread.identity_generation();
   }
   uint32_t current_unwind_floor() const {
     const THREAD &thread = current_thread();

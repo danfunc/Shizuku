@@ -68,7 +68,8 @@ assert sorted(re.findall(r'lw (\w+), RV32_F_(\w+)\(sp\)', exit_entry)) == sorted
     [('t0', 'MEPC'), ('t0', 'MSTATUS'), ('ra', 'RA')] + [(f'a{i}', f'A{i}') for i in range(8)])
 assert not re.findall(r'mv (\w+), zero', exit_entry)  # 入口も何も消さない
 assert exit_entry.rstrip().endswith('mret')
-call_resume = header.split('static exception_frame_t *call_resume(')[1].split('\n  }\n')[0]
+# 再開フレームを作るのは call_resume_at (ヘッダ版の call_resume も、SHIZUKU_LEAN_LEDGER の台帳版もここへ来る)。
+call_resume = header.split('static exception_frame_t *call_resume_at(')[1].split('\n  }\n')[0]
 assert 'frame->mcause = scrub ? RV32_TAG_ECALL_SCRUB : RV32_TAG_ECALL' in call_resume
 assert 'frame->mepc = pc' in call_resume
 assert '*frame = {}' not in call_resume

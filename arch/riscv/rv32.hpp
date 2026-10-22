@@ -243,12 +243,24 @@ public:
   [[gnu::always_inline]] static exception_frame_t *call_resume(context_t &context,
                                                                 const call_header_t *header,
                                                                 bool scrub) {
-    auto *frame = reinterpret_cast<exception_frame_t *>(
-        reinterpret_cast<uintptr_t>(header) - sizeof(exception_frame_t));
-    const uintptr_t pc = header->pc;
-    const uintptr_t region_base = header->region_base;
-    const uintptr_t region_limit = header->region_limit;
-    const bool privileged = header->privileged != 0;
+    return call_resume_at(context, header->pc, reinterpret_cast<uintptr_t>(header),
+                          header->privileged != 0, header->region_base, header->region_limit,
+                          scrub);
+  }
+
+  // caller の ecall 時点の SP (= 再開フレームの上端。ヘッダ枠方式ではヘッダ枠のアドレスと同じ)。
+  static uintptr_t call_return_sp(const context_t &context) {
+    return reinterpret_cast<uintptr_t>(context.sp) + sizeof(exception_frame_t);
+  }
+
+  // 再開フレームを sp の直下に作って context を caller の状態へ戻す。戻り先の値 (pc・sp・特権・窓) は
+  // 呼び出し側が権威のある所 (特権の台帳。SHIZUKU_LEAN_LEDGER) から読んで渡す。
+  [[gnu::always_inline]] static exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
+                                                                  uintptr_t sp, bool privileged,
+                                                                  uintptr_t region_base,
+                                                                  uintptr_t region_limit,
+                                                                  bool scrub) {
+    auto *frame = reinterpret_cast<exception_frame_t *>(sp - sizeof(exception_frame_t));
     frame->mepc = pc;
     frame->mstatus = 0; // 呼び出し側が特権・MPIE を足す
     frame->mcause = scrub ? RV32_TAG_ECALL_SCRUB : RV32_TAG_ECALL;

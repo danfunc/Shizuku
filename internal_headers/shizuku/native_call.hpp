@@ -56,6 +56,20 @@ template <class A, class Thread, class Context, class Frame>
     if (thread.ledger == nullptr || thread.call_stack.depth >= thread.ledger_capacity ||
         !A::call_header_has_room(context))
       return false;
+#if defined(SHIZUKU_LEAN_LEDGER)
+    // 戻りの権威は特権の台帳に置く (user stack にヘッダは書かない)。段の中身 (object・handler・kind・
+    // via・floor) は呼び出し側が depth - 1 の項目へ書く。ここでは戻りに要るものだけを書く。
+    auto &entry = thread.ledger[thread.call_stack.depth];
+    entry.generation = 0;
+    entry.ret_pc = frame.mepc;
+    entry.ret_sp = A::call_return_sp(context);
+    entry.ret_region_base = context.region_base;
+    entry.ret_region_limit = context.region_limit;
+    entry.prev_call = (uint16_t)thread.call_stack.call_top;
+    entry.ret_privileged = context.privileged ? 1 : 0;
+    thread.call_stack.depth++;
+    return true;
+#else
     auto *header = A::call_header_slot(context);
     header->prev = thread.call_stack.top;
     header->pc = frame.mepc;
@@ -67,6 +81,7 @@ template <class A, class Thread, class Context, class Frame>
     thread.call_stack.top = reinterpret_cast<uintptr_t>(header);
     thread.call_stack.depth++;
     return true;
+#endif
   } else {
     return false;
   }
@@ -110,12 +125,29 @@ template <class K>
   using A = typename K::ARCH;
   if constexpr (arch_call_in_place<A>()) {
     const uint32_t depth = thread.call_stack.depth;
+#if defined(SHIZUKU_LEAN_LEDGER)
+    // 戻りの権威は台帳の項目 (ret_*)。caller の識別は call_top を一つ外側の call 段へ戻すだけ。
+    const auto &entry = thread.ledger[depth - 1];
+    const uint8_t via = entry.via;
+    const bool is_call = via == K::LEDGER_CALL || via == K::LEDGER_DESCRIPTOR_CALL;
+    if (is_call && thread.call_stack.call_count == 0)
+      return false;
+    if (is_call) {
+      thread.call_stack.call_count--;
+      thread.call_stack.call_top = entry.prev_call;
+    }
+    if (restore)
+      frame = A::call_resume_at(context, entry.ret_pc, entry.ret_sp, entry.ret_privileged != 0,
+                                entry.ret_region_base, entry.ret_region_limit, scrub);
+    thread.call_stack.depth = depth - 1;
+#else
     const uint8_t via = thread.ledger[depth - 1].via;
     const bool is_call = via == K::LEDGER_CALL || via == K::LEDGER_DESCRIPTOR_CALL;
     if (is_call && thread.call_stack.call_count == 0)
       return false;
     header_pop_of<A>(thread, context, frame, is_call, restore, scrub);
     thread.call_stack.depth = depth - 1;
+#endif
   }
   return true;
 }
@@ -158,6 +190,29 @@ template <class K, class KObj, class Row>
         !A::call_header_has_room(context))
       return kernel_error::NO_STACK;
     typename K::FRAME &frame = *context.sp;
+#if defined(SHIZUKU_LEAN_LEDGER)
+    // 記帳は台帳の 1 項目だけ: 呼び先の同定 (object・handler・kind・via・floor・世代) と、この段から
+    // 戻るときの caller の再開点 (pc・sp・特権・窓) と、ひとつ外側の call 段への鎖 (prev_call)。
+    // user stack のヘッダは書かない。current / caller の識別は call 段の列から導く (call_top だけ更新)。
+    auto &entry = thread.ledger[depth];
+    entry.object = id;
+    entry.handler_object = row.parent_handler_object;
+    entry.handler_entry = row.parent_handler_entry;
+    entry.kind = (uint8_t)row.kind;
+    entry.via = via;
+    entry.unwind_floor = (uint16_t)depth;
+    entry.generation = kobj.instance_generation_of(row);
+    entry.ret_pc = frame.mepc;
+    entry.ret_sp = A::call_return_sp(context);
+    entry.ret_region_base = context.region_base;
+    entry.ret_region_limit = context.region_limit;
+    entry.prev_call = (uint16_t)stack.call_top;
+    entry.ret_privileged = context.privileged ? 1 : 0;
+    stack.depth = depth + 1;
+    stack.call_count = stack.call_count + 1;
+    stack.call_top = depth + 1;
+    A::set_entry(frame, entry_pc, A::return_stub());
+#else
     auto *header = A::call_header_slot(context);
     header->prev = stack.top;
     header->pc = frame.mepc;
@@ -179,6 +234,7 @@ template <class K, class KObj, class Row>
     stack.current_call_generation = kobj.instance_generation_of(row);
     stack.call_count = count + 1;
     A::set_entry(frame, entry_pc, A::return_stub());
+#endif
     A::set_priv(context, (row.flags & OBJECT_UNPRIVILEGED) == 0);
     A::set_region_window(context, row.region_base, row.region_limit);
     return kernel_error::OK;
@@ -237,11 +293,8 @@ template <class K, class KObj>
   using A = typename K::ARCH;
   if constexpr (arch_call_in_place<A>()) {
     typename K::FRAME &frame = *context.sp;
-    const auto &stack = thread.call_stack;
-    const uint32_t caller_id =
-        stack.call_count != 0 ? stack.current_call_object : thread.base_object;
-    const uint32_t caller_generation =
-        stack.call_count != 0 ? stack.current_call_generation : stack.base_object_generation;
+    const uint32_t caller_id = thread.identity_object();
+    const uint32_t caller_generation = thread.identity_generation();
     object_error error = object_error::OK;
     kobj.table_lock_inline();
     const auto *desc = kobj.find_method_descriptor(caller_id, (uint32_t)A::arg(frame, 1),

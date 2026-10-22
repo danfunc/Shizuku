@@ -121,9 +121,7 @@ template <> uintptr_t KERNEL::current_object(uint32_t thread_id) const {
   if (thread_id >= m_thread_count)
     return (uintptr_t)KERNEL_OBJECT::NO_OBJECT;
   const THREAD &thread = m_threads[thread_id].thread;
-  return thread.call_stack.call_count != 0
-             ? thread.call_stack.current_call_object
-             : thread.base_object;
+  return thread.identity_object();
 }
 
 template <> uintptr_t KERNEL::caller_object(uint32_t thread_id) const {
@@ -131,7 +129,7 @@ template <> uintptr_t KERNEL::caller_object(uint32_t thread_id) const {
     return (uintptr_t)KERNEL_OBJECT::NO_OBJECT;
   const THREAD &thread = m_threads[thread_id].thread;
   return thread.call_stack.call_count != 0
-             ? thread.call_stack.caller_object
+             ? thread.call_caller_object()
              : (uintptr_t)KERNEL_OBJECT::NO_OBJECT;
 }
 
@@ -233,8 +231,14 @@ SHIZUKU_HOT bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT
 template <>
 SHIZUKU_HOT bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                             KERNEL::FRAME **frame, bool restore, bool scrub) {
+#if defined(SHIZUKU_LEAN_LEDGER)
+  // 最内ヘッダへのポインタ (top) は持たない。落とす段があるかは深さで見る。
+  if (thread.call_stack.depth == 0)
+    return false;
+#else
   if (thread.call_stack.top == 0)
     return false;
+#endif
   if (arch_call_in_place<ARCH>()) {
     // ヘッダ枠方式: ヘッダから caller の識別・pc・特権・窓を読み、最後の 1 段だけ caller の
     // 再開フレームを caller の SP の直下に作る (a0/a1 以外は素通し。scrub のときは出口が消す)。
@@ -318,6 +322,22 @@ SHIZUKU_HOT kernel_error KERNEL::enter_call(KERNEL::THREAD &thread, KERNEL::CONT
     thread.call_stack.identity[thread.call_stack.call_count] = {
         thread.call_stack.caller_object, thread.call_stack.caller_generation};
   auto &entry = thread.ledger[thread.call_stack.depth - 1];
+#if defined(SHIZUKU_LEAN_LEDGER)
+  if (arch_call_in_place<ARCH>()) {
+    // header_push_of が戻りの権威 (ret_*・prev_call) を書いた。ここでは同定と世代だけを足し、
+    // 集成体の代入で消さない。identity (current / caller) は call 段の列から導く (call_top だけ更新)。
+    entry.object = request.callee_object;
+    entry.handler_object = request.parent_handler_object;
+    entry.handler_entry = request.parent_handler_entry;
+    entry.kind = (uint8_t)request.callee_kind;
+    entry.via = via;
+    entry.unwind_floor = (uint16_t)unwind_floor;
+    entry.generation = request.callee_generation;
+    thread.call_stack.call_count++;
+    thread.call_stack.call_top = thread.call_stack.depth;
+    return kernel_error::OK;
+  }
+#endif
   entry = {request.callee_object, request.parent_handler_object,
            request.parent_handler_entry, (uint8_t)request.callee_kind,
            via, (uint16_t)unwind_floor};

@@ -146,8 +146,13 @@ template <> uintptr_t KERNEL_OBJECT::handler_entry() {
 // ★カーネルの簿記に貸す記憶。**静的領域に置く**のが要点で、ここは region の外
 //   (= 特権のみ) なので非特権オブジェクトから届かない。用意するのはこちら
 //   (オブジェクトランド) で、置き場所の条件はカーネルが検査する。
+#if defined(SHIZUKU_LEAN_LEDGER)
+static_assert(sizeof(uintptr_t) != 4 || sizeof(KERNEL::call_ledger_entry) == 40,
+              "lean call ledger entry must be 40 bytes on 32-bit targets");
+#else
 static_assert(sizeof(KERNEL::call_ledger_entry) == 16,
               "call ledger entry must be 16 bytes on supported targets");
+#endif
 static_assert(KERNEL_OBJECT::MAX_DEPTH <= KERNEL::THREAD::CALL_IDENTITY_CAPACITY,
               "per-thread call identity snapshot stack must cover MAX_DEPTH");
 #if defined(SHIZUKU_C5_BLE)

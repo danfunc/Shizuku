@@ -43,7 +43,13 @@ public:
   static constexpr uintptr_t METHOD_COUNT = METHOD_COUNT_T;
   static constexpr uintptr_t METHOD_DESCRIPTOR_CAPACITY = 16;
   static constexpr uintptr_t MAX_DEPTH = MAX_DEPTH_T;
+#if defined(SHIZUKU_LEAN_LEDGER)
+  // 項目が 16B → 40B になるので、台帳の DRAM を抑えるため容量を MAX_DEPTH + 2 にする (旧は 2 倍。
+  // call 段の深さは MAX_DEPTH で別に縛られるので、足りない深さは NO_STACK で拒否される)。
+  static constexpr uint32_t LEDGER_CAPACITY = MAX_DEPTH + 2;
+#else
   static constexpr uint32_t LEDGER_CAPACITY = 2 * MAX_DEPTH + 2;
+#endif
   // ★スレッドを何本まで作れるかは**こちらが決める** (記憶を出すのがこちらなので)。
   static constexpr uintptr_t THREAD_COUNT = THREAD_COUNT_T;
   // 1 スレッドあたりのスタック。深さの上限も方針。
