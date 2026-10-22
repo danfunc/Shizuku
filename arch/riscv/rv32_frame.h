@@ -45,8 +45,16 @@
 // フレームの mcause に載せる出口の目印。ECALL のフレームはこの値になる (本物の例外コードは 11 =
 // M-mode ECALL と同じ値)。カーネルが呼び先の入口フレームを作ると RV32_TAG_ENTRY に書き換える。
 // それ以外の値 (割込み・例外・スレッドの初期フレーム = 0) は全レジスタを復元して戻る。
+//   RV32_TAG_ECALL       : ECALL の戻り (素通し)。mepc / mstatus / a0 / a1 / sp だけを戻し、ほかの
+//                          レジスタはカーネルを抜けた時点の値のまま (消さない。隠したい値の消去は
+//                          callee の責任、caller は a0 / a1 以外を信用しない)。
+//   RV32_TAG_ECALL_SCRUB : callee が自分の意思で戻らない巻き戻し (多段の EXIT_METHOD / RETURN、
+//                          FORWARD_CHILD_EXIT、別スレッドへ切り替わったあとの再開) の戻り。
+//                          出口は ra・t*・a2-a7・s* を 0 に消す (gp / tp は触らない)。
+//   RV32_TAG_ENTRY       : 呼び先の入口 (素通し)。ra と引数 a0-a7、pc、sp だけをカーネルが決める。
 #define RV32_TAG_ECALL 11
 #define RV32_TAG_ENTRY 0x100
+#define RV32_TAG_ECALL_SCRUB 0x101
 // M-mode ECALL を a0 の番号で直接振り分ける表 (shizuku_rv32_ecall_table、chip の trap.cpp が持つ) の
 // 要素数。object_api の番号 0..33 (svc_attributes の大きさ) と同じ。範囲外の番号は 0 番の要素
 // (= thread mode の API・primitive・raw 配送を従来どおり決める共通の入口) に落とす。

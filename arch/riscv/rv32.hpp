@@ -145,9 +145,8 @@ public:
     frame.a1 = args[1];
     frame.a2 = args[2];
     frame.a3 = args[3];
-    // Legacy four-argument methods must not inherit syscall a4/a5 values.
-    frame.a4 = 0;
-    frame.a5 = 0;
+    // a4 以降は書かない: レジスタは全部 caller からの入力として素通しする (callee は宣言した
+    // 引数以外を信用しない)。5 引数目 (a4) が要る呼び先は set_handler_args が書く。
   }
 
   static void set_args_6(exception_frame_t &frame, const uintptr_t *args) {
@@ -175,7 +174,8 @@ public:
   static void set_entry(exception_frame_t &frame, uintptr_t pc, uintptr_t lr) {
     frame.mepc = pc;
     frame.ra = lr;
-    // 呼び先の入口: 戻りの出口は引数 (a0-a5) と ra だけを入れ、s*/gp/tp は caller の値を通す。
+    // 呼び先の入口: 戻りの出口は引数 (a0-a7) と ra だけを入れ、ほかは消さず素通しする
+    // (s*/gp/tp は caller の値)。
     frame.mcause = RV32_TAG_ENTRY;
   }
 
@@ -189,7 +189,7 @@ public:
   // 同じ。caller を再開するのに要る最小限は、caller stub が ecall の前に空けた枠
   // [sp, sp + 32) (callee のスタックより上 = callee の窓の外) にカーネルが書く。
   // カーネルが持つのは先頭ヘッダへのポインタ (call_stack.top) と深さだけ。
-  // 戻りでは caller の SP の直下に再開フレームを作り、a0/a1 (戻り値) 以外を消す。
+  // 戻りでは caller の SP の直下に再開フレームを作る (a0/a1 以外は素通し。巻き戻しのときだけ消す)。
   static constexpr bool CALL_IN_PLACE = true;
   struct call_header_t {
     uintptr_t prev;            // 一つ外側のヘッダのアドレス (0 = 最外)
@@ -232,14 +232,17 @@ public:
   }
 
   // 戻り: ヘッダの枠の直下に caller の再開フレームを作る。a0/a1 (戻り値) は呼び出し側が set_result で
-  // 書く。呼び先の値を caller に見せない (a0/a1 以外は 0) のは目印 RV32_TAG_ECALL の出口
-  // (rv32_trap.S の .Lrv32_exit_ecall) の仕事で、そこが ra・t*・a2–a7・s* をレジスタ上で 0 にする。
-  // 出口が読むのは mepc / mstatus / a0 / a1 だけなので、フレームの残り (144B) は書かない
+  // 書く。出口が読むのは mepc / mstatus / a0 / a1 だけなので、フレームの残り (144B) は書かない
   // (旧: 全体を 0 で埋めていた)。呼び先が返ってきたときの trap フレームと重なることがある
   // (返りの SP が caller の SP のすぐ下のとき) ので、呼び出し側は戻り値などを先に読んでおくこと。
   // ヘッダ自身はフレームの上にあり、重ならない。
+  //   scrub = false : 目印 RV32_TAG_ECALL (素通し)。callee が自分で戻った普通の戻り (1 段)。
+  //   scrub = true  : 目印 RV32_TAG_ECALL_SCRUB。callee が自分の意思で戻らない巻き戻し (多段の
+  //                   EXIT_METHOD / RETURN、FORWARD_CHILD_EXIT)。出口 (rv32_trap.S の
+  //                   .Lrv32_exit_scrub) が ra・t*・a2–a7・s* をレジスタ上で 0 にする。
   [[gnu::always_inline]] static exception_frame_t *call_resume(context_t &context,
-                                                                const call_header_t *header) {
+                                                                const call_header_t *header,
+                                                                bool scrub) {
     auto *frame = reinterpret_cast<exception_frame_t *>(
         reinterpret_cast<uintptr_t>(header) - sizeof(exception_frame_t));
     const uintptr_t pc = header->pc;
@@ -248,12 +251,22 @@ public:
     const bool privileged = header->privileged != 0;
     frame->mepc = pc;
     frame->mstatus = 0; // 呼び出し側が特権・MPIE を足す
-    frame->mcause = RV32_TAG_ECALL; // 戻りの出口: a0/a1 以外を消す
+    frame->mcause = scrub ? RV32_TAG_ECALL_SCRUB : RV32_TAG_ECALL;
     context.sp = frame;
     context.privileged = privileged;
     context.region_base = region_base;
     context.region_limit = region_limit;
     return frame;
+  }
+
+  // 別のスレッドへ切り替わったあとの再開: 切り替わり先が ECALL で止まっていた (目印 RV32_TAG_ECALL)
+  // なら、出口でレジスタを消す目印 (RV32_TAG_ECALL_SCRUB) に替える。素通しの出口のままだと、切り替わる
+  // 前のスレッドの値 (s*・t*・a2–a7・ra) がそのスレッドに見えてしまう。それ以外の目印は変えない
+  // (全レジスタを復元して戻るフレームは自分の値、入口 ENTRY は同じ trap の中で切り替わらない)。
+  static void scrub_on_switch(context_t &resumed) {
+    exception_frame_t *frame = resumed.sp;
+    if (frame->mcause == RV32_TAG_ECALL)
+      frame->mcause = RV32_TAG_ECALL_SCRUB;
   }
 
   // ---- ABI converter, callee 側 (shizuku/method_entry.hpp, shizuku/rv32_abi.hpp) ----

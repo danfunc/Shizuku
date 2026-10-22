@@ -349,9 +349,11 @@ private:
   bool call_frame_push(THREAD &thread, CONTEXT *context, FRAME **frame);
   // restore == false は「caller の再開フレームを作る」を省く (複数段を落とすとき、途中の段は
   // 再開しないので最後の 1 段だけ true にする。ARM のコピー式は常に文脈を戻す)。
+  // scrub は再開フレームの目印 (RV32: 出口でレジスタを消すか。ARM のコピー式は使わない)。
   bool call_frame_pop(THREAD &thread, CONTEXT *context, FRAME **frame,
-                      bool restore = true);
+                      bool restore = true, bool scrub = false);
   // 台帳の上から count 段を落とす。最後に落とした段の caller が再開する。
+  // 2 段以上を一度に落とす巻き戻しは scrub の再開 (callee が自分の意思で戻らない)。
   void call_unwind(THREAD &thread, CONTEXT *context, FRAME **frame, uintptr_t count);
 
   // 台帳段を 1 つ積んで呼び先の入口へ向ける前半。通常 CALL と方法記述子の直接 call が

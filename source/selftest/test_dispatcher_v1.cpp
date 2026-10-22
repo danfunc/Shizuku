@@ -23,8 +23,11 @@
 //   10. RUN_FOR (9): dispatch 段を積まず GRANT を直接撃つこと。NO_TIME / NOT_RUNNABLE 変換。
 //   11. SET_BUDGET (12): dispatch 段を積まず m_budget を書くこと。範囲外は何もしない。
 //   16. ecall フレームの目印 (入口 / 戻り) と、切替えをまたいだ文脈の不変 (RUN_FOR/YIELD)。
+//   18. 戻りの出口の選び方: 素通し (RV32_TAG_ECALL) / 消去 (RV32_TAG_ECALL_SCRUB)。消去は
+//       2 段以上を一度に落とす EXIT_METHOD・RETURN、FORWARD_CHILD_EXIT、別スレッドの再開だけ。
 //   15. in-place call (2026-10-22 ABI): frame をコピーしない・ヘッダ無し・レジスタは呼び先へ通り抜け、
-//       戻りで a0/a1 以外は消える (8a/8d/8e)。余白不足は NO_STACK、重なる返り trap フレーム (15a/15b)。
+//       戻りは 1 段の普通の戻りなら素通し (RV32_TAG_ECALL)、2 段以上の巻き戻しと FORWARD_CHILD_EXIT は
+//       消去の出口 (RV32_TAG_ECALL_SCRUB、18)。余白不足は NO_STACK、重なる返り trap フレーム (15a/15b)。
 
 #define SHIZUKU_C6_SKELETON_PERMITTED 1
 #include "shizuku/svc_attributes.hpp"
@@ -558,8 +561,9 @@ static void run_dispatcher_tests() {
   };
 
   // ABI (2026-10-22): method call は caller の frame をコピーせず、レジスタは全部 callee への入力。
-  //   戻りでカーネルは a0/a1 (戻り値) 以外の caller 可視レジスタを消す。以下の補助は、
-  //   引数・戻り口・sp/pc 以外の全レジスタに印をつけ、通り抜けと消去を確かめる。
+  //   カーネルはルータに徹し、入口も戻りもレジスタを素通しする (消すのは callee が自分の意思で
+  //   戻らない巻き戻しだけ)。以下の補助は、引数・戻り口・sp/pc 以外の全レジスタに印をつけ、
+  //   通り抜けを確かめる。
   constexpr uintptr_t MARK = 0xA5000000u;
   auto mark_regs = [&](KERNEL::FRAME *f, uintptr_t seed) {
     f->ra = MARK | (seed + 1); f->t0 = MARK | (seed + 2); f->t1 = MARK | (seed + 3);
@@ -586,12 +590,17 @@ static void run_dispatcher_tests() {
            f->s9 == (MARK | (seed + 22)) && f->s10 == (MARK | (seed + 23)) &&
            f->s11 == (MARK | (seed + 24));
   };
-  // 戻った caller から見て、a0/a1 以外が消えるか。消すのは目印 RV32_TAG_ECALL の出口
-  // (rv32_trap.S .Lrv32_exit_ecall) で、再開フレームはその出口が読む mepc / mstatus / a0 / a1 と
-  // 目印だけを書く (フレームの残りは書かない)。出口がレジスタを消すことは test_trap_static.py が
-  // asm で確かめる。ここでは再開フレームが必ずその出口に乗ること (目印) を見る。
-  auto regs_cleared = [&](const KERNEL::FRAME *f) {
+  // 戻った caller の再開フレームが乗る出口 (目印)。カーネルはルータに徹し、普通の戻り (callee が自分で
+  // 戻る 1 段) は RV32_TAG_ECALL (素通し: a0/a1 以外を消さない) の出口に乗せ、callee が自分の意思で
+  // 戻らない巻き戻し (2 段以上の EXIT_METHOD / RETURN、FORWARD_CHILD_EXIT) だけ RV32_TAG_ECALL_SCRUB
+  // (a0/a1 以外を 0 に消す) の出口に乗せる。再開フレームは出口が読む mepc / mstatus / a0 / a1 と
+  // 目印だけを書く (フレームの残りは書かない)。出口がレジスタを消す/消さないことは
+  // test_trap_static.py が asm で確かめる。ここでは再開フレームが必ず正しい出口に乗ること (目印) を見る。
+  auto resumes_passthrough = [&](const KERNEL::FRAME *f) {
     return f->mcause == RV32_TAG_ECALL;
+  };
+  auto resumes_scrubbed = [&](const KERNEL::FRAME *f) {
+    return f->mcause == RV32_TAG_ECALL_SCRUB;
   };
   constexpr uintptr_t A_PC = 0x42000100; // A が ecall した次の命令
 
@@ -604,6 +613,8 @@ static void run_dispatcher_tests() {
   frame->a1 = B_ID;
   frame->a2 = 0;
   frame->a3 = 0x55;
+  frame->a4 = 0x44; // caller の入力 (呼び先の入口で 0 埋めされず、そのまま通る)
+  frame->a5 = 0x45;
   kernel_instance.svc_dispatch(ctx);
   assert(kernel_instance.current_depth() == 1);
   assert(count_dispatch_frames() == 0);
@@ -630,11 +641,14 @@ static void run_dispatcher_tests() {
   // ra は 32bit レジスタ。host (64bit) では関数ポインタが切り詰められるので下位 32bit で比べる。
   assert(frame->ra == (uint32_t)ARCH::return_stub()); // 戻り口はカーネルが決める
   assert(regs_pass_through(frame, 0x100)); // ra・引数・pc 以外は caller の値が通る
-  assert(frame->a1 == 0 && frame->a2 == 0 && frame->a3 == 0 && frame->a4 == 0 &&
-         frame->a5 == 0); // 引数 (a0..a3) 以外の a1-a5 は legacy 4 引数規約で 0
+  // 呼び先の引数は a0 だけをカーネルが決める。a1 以降は 0 埋めせず、caller の ecall 入力が素通し
+  // (呼び先は宣言した引数以外を信用しない)。a1 = 対象 ID、a2 = メソッド番号、a3 = 引数、
+  // a4/a5 は mark_regs が置いた caller の値のまま。
+  assert(frame->a1 == B_ID && frame->a2 == 0 && frame->a3 == 0x55);
+  assert(frame->a4 == 0x44 && frame->a5 == 0x45);
   assert(ctx->privileged == true); // B は特権オブジェクト
   KERNEL::FRAME *frame_b = ctx->sp;
-  printf("  8a. CALL_METHOD A->B: no dispatch frame, in-place (frame not copied, no header), registers pass through, ledger top = B via LEDGER_CALL, pc=B entry, arg0=0x55: PASS\n");
+  printf("  8a. CALL_METHOD A->B: no dispatch frame, in-place (frame not copied, no header), registers pass through (a1-a5 not zeroed), ledger top = B via LEDGER_CALL, pc=B entry, arg0=0x55: PASS\n");
 
   // 8b. B が GET_CALLER_OBJECT を撃つと本当の呼び出し元 A (kobj の ID 0 ではない)。
   frame_b->a0 = (uintptr_t)object_api::GET_CALLER_OBJECT;
@@ -692,7 +706,7 @@ static void run_dispatcher_tests() {
     assert(frame_c->a1 == (uintptr_t)kernel_error::DEPTH_MISMATCH);
   }
   // d = 1: C の 1 段だけ落として B へ戻る。値 a2 と error a3 は B のフレームに載る。
-  //     C の値 (印) は B に見えず、a0/a1 以外のレジスタは消える。B の pc は B が C を呼んだ点。
+  //     1 段の普通の戻りなので素通しの出口 (RV32_TAG_ECALL)。B の pc は B が C を呼んだ点。
   mark_regs(frame_c, 0x200);
   frame_c->a0 = (uintptr_t)object_api::EXIT_METHOD;
   frame_c->a1 = 1;
@@ -709,7 +723,7 @@ static void run_dispatcher_tests() {
   assert(ctx->sp == frame_b);
   assert(frame_b->a0 == (uintptr_t)object_error::OK);
   assert(frame_b->a1 == 0x32);
-  assert(regs_cleared(frame_b));
+  assert(resumes_passthrough(frame_b));
   assert(frame_b->mepc == ENTRY_B); // B が C を呼んだ時点の pc (試験は ecall の +4 を模さない)
   assert(ctx->privileged == true); // B の文脈 (特権) が戻る
   frame_b->a0 = (uintptr_t)object_api::GET_CALLER_OBJECT;
@@ -730,10 +744,10 @@ static void run_dispatcher_tests() {
   assert(ctx->sp == frame);
   assert(frame->a0 == (uintptr_t)object_error::OK);
   assert(frame->a1 == 0x44);
-  assert(regs_cleared(frame)); // B の値は A に見えない。A の値も戻らない (A が自分で復元する)
+  assert(resumes_passthrough(frame)); // B の値は A に見えない。A の値も戻らない (A が自分で復元する)
   assert(frame->mepc == A_PC); // A の ecall の次の命令から再開
   assert(thread.call_stack.current_call_object == ROOT_APP_ID);
-  printf("  8e. B return stub -> A directly (depth 0, value 0x44, no dispatch frame), registers other than a0/a1 cleared, resume pc = A_PC: PASS\n");
+  printf("  8e. B return stub -> A directly (depth 0, value 0x44, no dispatch frame), plain 1-level return resumes on the pass-through exit (RV32_TAG_ECALL), resume pc = A_PC: PASS\n");
 
   // 8f. エラー応答: (error, 0) を呼び出し元へ。段は積まれず、特権も変わらない。
   struct error_case {
@@ -855,10 +869,10 @@ static void run_dispatcher_tests() {
     kernel_instance.svc_dispatch(ctx);
     assert(kernel_instance.current_depth() == 0 && thread.call_stack.call_count == 0);
     assert(frame->a0 == (uintptr_t)object_error::OK && frame->a1 == 0x46);
-    assert(regs_cleared(frame) && frame->mepc == A_PC);
+    assert(resumes_passthrough(frame) && frame->mepc == A_PC);
     assert(thread.call_stack.current_call_object == ROOT_APP_ID);
   }
-  printf("  8h. CALL_METHOD_DESCRIPTOR A->B: lock word back to 0, no dispatch frame, ledger via=LEDGER_DESCRIPTOR_CALL, args a2..a7 -> a0..a5, GET_CALLER == A, return stub back to A (value 0x46, regs cleared): PASS\n");
+  printf("  8h. CALL_METHOD_DESCRIPTOR A->B: lock word back to 0, no dispatch frame, ledger via=LEDGER_DESCRIPTOR_CALL, args a2..a7 -> a0..a5, GET_CALLER == A, return stub back to A (value 0x46, pass-through exit): PASS\n");
 
   // 8i. 記述子のエラーは (error, 0)。段は積まれず、錠は必ず放される。
   access::declare_descriptor(ROOT_APP_ID, 6, B_ID, ENTRY_BD, 1, 7);        // 持ち主の世代が合わない
@@ -1350,13 +1364,13 @@ static void run_dispatcher_tests() {
     assert(kernel_instance.current_depth() == 0);
     assert(ctx->sp == frame); // 再開は caller の SP の直下 (呼び先の trap フレームの位置ではない)
     assert(frame->a0 == (uintptr_t)object_error::OK && frame->a1 == 0x4B);
-    assert(frame->mepc == A_PC && regs_cleared(frame));
-    printf("  15b. in-place return from a lower SP (frames overlap): resumes at the caller's SP with value 0x4B, registers cleared: PASS\n");
+    assert(frame->mepc == A_PC && resumes_passthrough(frame));
+    printf("  15b. in-place return from a lower SP (frames overlap): resumes at the caller's SP with value 0x4B, pass-through exit: PASS\n");
   }
 
   // 15c. 全段 in-place (段数の上限なし): 8 段 (旧: 浅い 4 段まで) の CALL_METHOD。各段は前の段の
   //      callee が自分のスタックを 400 バイト使ってから ecall した、という形 (枠は段ごとに別の
-  //      アドレス)。ヘッダは prev でつながり、戻りは 8 段すべてで a0/a1 以外が消える。
+  //      アドレス)。ヘッダは prev でつながり、戻りは 8 段すべてで素通しの出口 (1 段ずつの普通の戻り)。
   {
     constexpr uint32_t LEVELS = 8;
     fresh(ROOT_APP_ID, true);
@@ -1402,11 +1416,11 @@ static void run_dispatcher_tests() {
       cur = ctx->sp;
       assert(cur == frames[i]); // 段 i を呼んだ caller の枠の直下で再開する
       assert(cur->a0 == (uintptr_t)object_error::OK && cur->a1 == 0x70 + i);
-      assert(regs_cleared(cur)); // 全段で a0/a1 以外が消える
+      assert(resumes_passthrough(cur)); // 全段が 1 段の普通の戻り = 素通しの出口
       assert(cur->mepc == A_PC + 0x10 * i);
     }
     assert(thread.call_stack.call_count == 0 && cur == frame);
-    printf("  15c. %u nested CALL_METHOD, all in-place (headers chained by prev, window top = header): every return resumes the caller with registers cleared: PASS\n",
+    printf("  15c. %u nested CALL_METHOD, all in-place (headers chained by prev, window top = header): every 1-level return resumes the caller on the pass-through exit: PASS\n",
            (unsigned)LEVELS);
   }
 
@@ -1416,7 +1430,8 @@ static void run_dispatcher_tests() {
   // -------------------------------------------------------------------------
   {
     // 16a. 目印: 呼び先の入口は RV32_TAG_ENTRY (s*/gp/tp を通す出口)、戻った caller の再開フレームは
-    //      RV32_TAG_ECALL (a0/a1 以外を消す出口)、入口を作らない trap 内 API の応答は目印を変えない。
+    //      RV32_TAG_ECALL (素通しの出口。2 段以上の巻き戻しだけ RV32_TAG_ECALL_SCRUB、18)、入口を作らない
+    //      trap 内 API の応答は目印を変えない。
     fresh(ROOT_APP_ID, true);
     frame->mcause = RV32_TAG_ECALL; // 入口 asm が書く
     frame->mepc = A_PC;
@@ -1529,8 +1544,8 @@ static void run_dispatcher_tests() {
     kernel_instance.svc_entry<&KERNEL::svc_exit_method>(ctx);
     assert(kernel_instance.current_depth() == 0 && count_dispatch_frames() == 0);
     assert(ctx->sp == frame && frame->a0 == (uintptr_t)object_error::OK && frame->a1 == 0x22);
-    assert(frame->mepc == A_PC && regs_cleared(frame));
-    printf("  17b. svc_entry GET_CURRENT/GET_CALLER/CALL_METHOD/EXIT_METHOD: no dispatch frame, caller seen by callee == A, return value 0x22 with registers cleared: PASS\n");
+    assert(frame->mepc == A_PC && resumes_passthrough(frame));
+    printf("  17b. svc_entry GET_CURRENT/GET_CALLER/CALL_METHOD/EXIT_METHOD: no dispatch frame, caller seen by callee == A, return value 0x22 on the pass-through exit: PASS\n");
 
     // 17c. 本体が false を返す場合 (スレッドの最外のメソッドの EXIT_METHOD / 起点スレッドの YIELD) は
     //      kobj へ配送 (dispatch 段 1 枚、宛先は root handler)。
@@ -1637,6 +1652,121 @@ static void run_dispatcher_tests() {
     kernel_instance.svc_entry<&KERNEL::svc_yield>(ctx1);
     assert(kernel_instance.current_thread_id() == 0 && !kernel_instance.grant_active());
     printf("  17f. svc_entry from a dedicated-handler child delivers the raw svc unchanged; from the kobj itself runs the primitive (SWITCH grants, borrower YIELD returns): PASS\n");
+  }
+
+  // -------------------------------------------------------------------------
+  // 18. 戻りの出口の選び方: 素通し (RV32_TAG_ECALL) と消去 (RV32_TAG_ECALL_SCRUB)
+  //     消去は「経路」ではなく「巻き戻しの意味」で決まる: callee が自分の意思で戻らない
+  //     (2 段以上を一度に落とす EXIT_METHOD / RETURN、FORWARD_CHILD_EXIT) ときだけ。
+  //     1 段の普通の戻りは、どの経路 (return stub の RETURN、明示 d の EXIT_METHOD) でも素通し。
+  //     別スレッドへ切り替わった再開の目印替え (scrub_on_switch) は chips/*/trap.cpp が呼ぶので、
+  //     ここでは関数そのものの規則を見る (呼ぶ場所は test_trap_static.py が縛る)。
+  // -------------------------------------------------------------------------
+  {
+    // 18a. dedicated HANDLER の段 (深さ 2、floor 0) から d = 0 の EXIT_METHOD: 2 段を一度に落とす
+    //      巻き戻し → 消去の目印。呼出し元 A の再開は dispatch 段なし、値 0x71。
+    into_handler();
+    KERNEL::FRAME *frame_h2 = ctx->sp;
+    frame_h2->mcause = RV32_TAG_ECALL;
+    frame_h2->a0 = (uintptr_t)object_api::EXIT_METHOD;
+    frame_h2->a1 = 0;
+    frame_h2->a2 = 0x71;
+    frame_h2->a3 = 0;
+    frame_h2->a4 = 0;
+    kernel_instance.svc_dispatch(ctx);
+    assert(kernel_instance.current_depth() == 0 && thread.call_stack.call_count == 0);
+    assert(ctx->sp == frame);
+    assert(frame->a0 == (uintptr_t)object_error::OK && frame->a1 == 0x71);
+    assert(resumes_scrubbed(frame) && !resumes_passthrough(frame));
+    printf("  18a. EXIT_METHOD d=0 from depth 2 (2 frames at once): resume frame tagged RV32_TAG_ECALL_SCRUB (value 0x71): PASS\n");
+
+    // 18b. FORWARD_CHILD_EXIT は 1 段だけ落とす場合も消去 (親ハンドラが子を取り上げて戻す巻き戻し)。
+    into_handler();
+    frame_h2 = ctx->sp;
+    frame_h2->mcause = RV32_TAG_ECALL;
+    frame_h2->a0 = (uintptr_t)object_api::FORWARD_CHILD_EXIT;
+    frame_h2->a1 = 1; // HANDLER の段 1 枚だけ落として D へ戻る
+    frame_h2->a2 = 0x73;
+    frame_h2->a3 = 0;
+    kernel_instance.svc_dispatch(ctx);
+    assert(kernel_instance.current_depth() == 1 && thread.call_stack.call_count == 1);
+    assert(ctx->sp->a0 == (uintptr_t)object_error::OK && ctx->sp->a1 == 0x73);
+    assert(resumes_scrubbed(ctx->sp) && !resumes_passthrough(ctx->sp));
+    printf("  18b. FORWARD_CHILD_EXIT popping a single frame: resume frame still RV32_TAG_ECALL_SCRUB: PASS\n");
+
+    // 18c/18d. kobj の段 (thread mode の API を撃った dispatch 段) からの primitive RETURN。
+    //     B (A から CALL_METHOD、深さ 1) が自分のスタックを 400 バイト使ってから OBJECT_NAME を撃つ。
+    auto into_kobj_stage = [&]() {
+      fresh(ROOT_APP_ID, true);
+      frame->mepc = A_PC;
+      frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+      frame->a1 = B_ID;
+      frame->a2 = 0;
+      frame->a3 = 0x75;
+      kernel_instance.svc_dispatch(ctx);
+      assert(kernel_instance.current_depth() == 1 && ctx->sp == frame);
+      auto *frame_b2 = reinterpret_cast<KERNEL::FRAME *>(reinterpret_cast<uint8_t *>(frame) - 400);
+      ctx->sp = frame_b2;
+      frame_b2->mcause = RV32_TAG_ECALL;
+      frame_b2->mepc = ENTRY_B;
+      frame_b2->a0 = (uintptr_t)object_api::OBJECT_NAME;
+      frame_b2->a1 = ROOT_APP_ID;
+      kernel_instance.svc_dispatch(ctx);
+      assert(kernel_instance.current_depth() == 2);
+      assert(thread.ledger[1].via == KERNEL::LEDGER_DISPATCH);
+      assert(thread.ledger[1].kind == (uint8_t)object_kind::KERNEL_OBJECT);
+      assert(ARCH::frame_pc(*ctx->sp) == ROOT_HANDLER_ENTRY);
+      return frame_b2;
+    };
+    // 18c. kobj の段が目印付き (return stub) の RETURN で 1 段だけ戻る → B が素通しの出口で再開。
+    KERNEL::FRAME *frame_b2 = into_kobj_stage();
+    ctx->sp->mcause = RV32_TAG_ECALL;
+    ctx->sp->a0 = (uintptr_t)primitive::RETURN;
+    ctx->sp->a1 = 1;
+    ctx->sp->a2 = 0x74;
+    ctx->sp->a3 = 0;
+    ctx->sp->a4 = RETURN_STUB_MARKER;
+    kernel_instance.svc_dispatch(ctx);
+    assert(kernel_instance.current_depth() == 1 && ctx->sp == frame_b2);
+    assert(frame_b2->a0 == (uintptr_t)object_error::OK && frame_b2->a1 == 0x74);
+    assert(resumes_passthrough(frame_b2) && !resumes_scrubbed(frame_b2));
+    printf("  18c. kobj stage RETURN (return-stub marker, 1 frame): caller resumes on RV32_TAG_ECALL (pass-through), not scrubbed: PASS\n");
+
+    // 18d. 同じ段が明示の目標深さ 0 (count = 2) で戻る → A まで 2 段を一度に落とす巻き戻し = 消去。
+    into_kobj_stage();
+    ctx->sp->mcause = RV32_TAG_ECALL;
+    ctx->sp->a0 = (uintptr_t)primitive::RETURN;
+    ctx->sp->a1 = 2;
+    ctx->sp->a2 = 0x76;
+    ctx->sp->a3 = 0;
+    ctx->sp->a4 = 0; // 目標の深さ (marker ではない)
+    kernel_instance.svc_dispatch(ctx);
+    assert(kernel_instance.current_depth() == 0 && thread.call_stack.call_count == 0);
+    assert(ctx->sp == frame && frame->mepc == A_PC);
+    assert(frame->a0 == (uintptr_t)object_error::OK && frame->a1 == 0x76);
+    assert(resumes_scrubbed(frame) && !resumes_passthrough(frame));
+    printf("  18d. primitive RETURN to depth 0 from depth 2 (2 frames at once): resume frame tagged RV32_TAG_ECALL_SCRUB: PASS\n");
+
+    // 18e. 別スレッドへ切り替わったあとの再開: ECALL で止まっていたフレームだけ消去の目印に替える。
+    //      全レジスタを復元して戻るフレーム (0)、呼び先の入口 (ENTRY)、すでに消去のものは変えない。
+    KERNEL::FRAME parked = {};
+    ARCH::context_t resumed;
+    resumed.sp = &parked;
+    parked.mcause = RV32_TAG_ECALL;
+    ARCH::scrub_on_switch(resumed);
+    assert(parked.mcause == RV32_TAG_ECALL_SCRUB);
+    ARCH::scrub_on_switch(resumed); // 冪等
+    assert(parked.mcause == RV32_TAG_ECALL_SCRUB);
+    parked.mcause = 0;
+    ARCH::scrub_on_switch(resumed);
+    assert(parked.mcause == 0);
+    parked.mcause = RV32_TAG_ENTRY;
+    ARCH::scrub_on_switch(resumed);
+    assert(parked.mcause == RV32_TAG_ENTRY);
+    parked.mcause = 0x80000007u; // 割込みで保存された全レジスタのフレーム
+    ARCH::scrub_on_switch(resumed);
+    assert(parked.mcause == 0x80000007u);
+    printf("  18e. scrub_on_switch: only a frame parked at an ECALL (RV32_TAG_ECALL) becomes RV32_TAG_ECALL_SCRUB; full-restore frames / ENTRY / already-scrubbed untouched: PASS\n");
   }
 
   // 後始末

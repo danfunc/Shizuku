@@ -4,9 +4,12 @@
 //   - 割込み・例外 (ECALL 以外): 全レジスタ / CSR を保存し、全部復元して戻る (従来どおり)。
 //   - M-mode の ECALL: caller が自分で退避する ABI (rv32_abi.hpp) なので、入力 (a0-a7) と戻りに要る
 //     mepc / mstatus だけを保存する。戻りは「同じスレッドへ」も「切替え」も、戻す先の frame の
-//     mcause を見て出口を選ぶ: ECALL の戻り (RV32_TAG_ECALL) は a0/a1 以外を消し、呼び先の入口
-//     (RV32_TAG_ENTRY) は引数と ra だけを入れてほかは caller の値を通す。どちらも s*/gp/tp を
-//     復元しない (ECALL の caller はそれらを持ち越さない)。
+//     mcause を見て出口を選ぶ。カーネルはルータに徹し、レジスタは素通しする:
+//       RV32_TAG_ECALL       : ECALL の戻り。a0/a1 だけを入れ、ほかは消さない。
+//       RV32_TAG_ENTRY       : 呼び先の入口。引数 a0-a7 と ra だけを入れ、ほかは消さない。
+//       RV32_TAG_ECALL_SCRUB : callee が自分の意思で戻らない巻き戻し・別スレッドの再開。
+//                              a0/a1 以外 (ra・t*・a2-a7・s*) を 0 に消す。
+//     どの出口も s*/gp/tp を復元しない (ECALL の caller はそれらを持ち越さない)。
 // Placement is chip-owned: this body has no .section and is textually included by the
 // chip's vector wrapper inside the chip's linker section.
 .option push
@@ -121,6 +124,8 @@ shizuku_rv32_restore:
   beq t0, t1, .Lrv32_exit_ecall
   li t1, RV32_TAG_ENTRY
   beq t0, t1, .Lrv32_exit_entry
+  li t1, RV32_TAG_ECALL_SCRUB
+  beq t0, t1, .Lrv32_exit_scrub
   lw t0, RV32_F_MEPC(sp)
   csrw mepc, t0
   lw t0, RV32_F_MSTATUS(sp)
@@ -157,11 +162,26 @@ shizuku_rv32_restore:
   lw tp, RV32_F_TP(sp)
   addi sp, sp, RV32_FRAME_BYTES
   mret
-// ---- ECALL からの戻り (同じスレッドへ / 切替え先の ECALL 待ちスレッドへ共通)。
-//   a0/a1 (戻り値) と mepc/mstatus/sp だけを戻す。ra・t*・a2-a7・s* は 0 に消す (呼び先やカーネルの
-//   値を見せない)。gp/tp は触らない: caller stub が戻った直後に自分の値を入れ直すが、その 1 命令の間に
-//   割込みが入っても IDF 側の ISR が使う gp が壊れないように、ここでは 0 にしない。
+// ---- ECALL からの戻り (RV32_TAG_ECALL、素通し)。
+//   a0/a1 (戻り値) と mepc/mstatus/sp だけを戻す。ほかのレジスタには触らない (カーネルを抜けた時点の
+//   値のまま)。caller は a0/a1 以外を信用せず、自分の s*・ra・gp・tp を自分のスタックから戻す。
+//   callee の値を見せたくない callee は、自分の stub で消してから戻る。
 .Lrv32_exit_ecall:
+  lw t0, RV32_F_MEPC(sp)
+  csrw mepc, t0
+  lw t0, RV32_F_MSTATUS(sp)
+  csrw mstatus, t0
+  lw a0, RV32_F_A0(sp)
+  lw a1, RV32_F_A1(sp)
+  addi sp, sp, RV32_FRAME_BYTES
+  mret
+// ---- ECALL からの戻り (RV32_TAG_ECALL_SCRUB、消去)。
+//   callee が自分の意思で戻らない巻き戻し (多段の EXIT_METHOD / RETURN、FORWARD_CHILD_EXIT) と、
+//   別スレッドへ切り替わったあとの再開。a0/a1 と mepc/mstatus/sp だけを戻し、ra・t*・a2-a7・s* は
+//   0 に消す (取り上げられた callee や、切り替わる前のスレッドの値を見せない)。
+//   gp/tp は触らない: caller stub が戻った直後に自分の値を入れ直すが、その 1 命令の間に
+//   割込みが入っても IDF 側の ISR が使う gp が壊れないように、ここでは 0 にしない。
+.Lrv32_exit_scrub:
   lw t0, RV32_F_MEPC(sp)
   csrw mepc, t0
   lw t0, RV32_F_MSTATUS(sp)
@@ -196,10 +216,10 @@ shizuku_rv32_restore:
   mv s10, zero
   mv s11, zero
   mret
-// ---- 呼び先の入口 (CALL_METHOD / descriptor call / kobj への dispatch)。
-//   引数 a0-a5 と ra (戻り口)・mepc (入口)・sp だけをカーネルが決める。s*/gp/tp は caller の値の
-//   まま通す (カーネルの C は callee-saved を保ち、この経路では切替えが起きない)。t*・a6・a7 には
-//   カーネルの値が残っているので消す。
+// ---- 呼び先の入口 (RV32_TAG_ENTRY、素通し。CALL_METHOD / descriptor call / kobj への dispatch)。
+//   引数 a0-a7 と ra (戻り口)・mepc (入口)・sp だけをカーネルが決める。s*/gp/tp は caller の値の
+//   まま通す (カーネルの C は callee-saved を保ち、この経路では切替えが起きない)。t* にはカーネルの
+//   値が残るが消さない (「レジスタは全部 caller からの入力」、callee は宣言した引数以外を信用しない)。
 .Lrv32_exit_entry:
   lw t0, RV32_F_MEPC(sp)
   csrw mepc, t0
@@ -212,16 +232,9 @@ shizuku_rv32_restore:
   lw a3, RV32_F_A3(sp)
   lw a4, RV32_F_A4(sp)
   lw a5, RV32_F_A5(sp)
+  lw a6, RV32_F_A6(sp)
+  lw a7, RV32_F_A7(sp)
   addi sp, sp, RV32_FRAME_BYTES
-  mv t0, zero
-  mv t1, zero
-  mv t2, zero
-  mv t3, zero
-  mv t4, zero
-  mv t5, zero
-  mv t6, zero
-  mv a6, zero
-  mv a7, zero
   mret
 .size shizuku_rv32_trap_entry, .-shizuku_rv32_trap_entry
 .global shizuku_rv32_first_return

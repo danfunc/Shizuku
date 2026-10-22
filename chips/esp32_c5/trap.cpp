@@ -219,6 +219,7 @@ inline arch::exception_frame_t *ecall_run(arch::exception_frame_t *frame, Body b
   if ((frame->mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) stop(0xE004);
   auto &kernel = shizuku::kernel_instance;
   auto *context = kernel.current_context();
+  const auto *const entered = context;
   frame_to_context(*frame, *context);
   shizuku_c5_trap_diag[4] = shizuku_c5_trap_diag[4] + 1;
   body(kernel, context);
@@ -227,6 +228,8 @@ inline arch::exception_frame_t *ecall_run(arch::exception_frame_t *frame, Body b
   // 呼び先の入口フレームは s*/gp/tp を caller の値のまま通す出口を使うので、この trap の中で
   // 別のスレッドへ切り替わってはならない。
   if (frame->mcause == RV32_TAG_ENTRY && context->sp != frame) stop(0xE00B);
+  // 別のスレッドへ切り替わったなら、再開するスレッドの素通しの出口を消去の出口に替える。
+  if (context != entered) arch::scrub_on_switch(*context);
   context_to_frame(*context);
   auto *result = context->sp;
   active_mstatus = previous_mstatus;
@@ -289,6 +292,7 @@ extern "C" arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_f
     if ((frame->mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) stop(0xE004);
     auto &kernel = shizuku::kernel_instance;
     auto *context = kernel.current_context();
+    const auto *const entered = context;
     frame_to_context(*frame, *context);
     shizuku_c5_trap_diag[4] = shizuku_c5_trap_diag[4] + 1;
     kernel.svc_dispatch(context);
@@ -297,6 +301,7 @@ extern "C" arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_f
     // 呼び先の入口フレームは s*/gp/tp を caller の値のまま通す出口を使うので、この trap の中で
     // 別のスレッドへ切り替わってはならない。
     if (frame->mcause == RV32_TAG_ENTRY && context->sp != frame) stop(0xE00B);
+    if (context != entered) arch::scrub_on_switch(*context);
     context_to_frame(*context);
     result = context->sp;
   }, [&] {
@@ -306,6 +311,7 @@ extern "C" arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_f
     if ((frame->mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) stop(0xE004);
     auto &kernel = shizuku::kernel_instance;
     auto *context = kernel.current_context();
+    const auto *const entered = context;
     frame_to_context(*frame, *context);
     if (clic_index == c5::TIMER_CLIC_INDEX) {
       shizuku_c5_timer_diag[0] = shizuku_c5_timer_diag[0] + 1;
@@ -321,6 +327,8 @@ extern "C" arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_f
     }
     run_pending_switch();
     context = kernel.current_context();
+    // 予算切れの取り上げで貸し手へ戻る場合や、割込みで別のスレッドへ切り替わる場合もここ。
+    if (context != entered) arch::scrub_on_switch(*context);
     context_to_frame(*context);
     result = context->sp;
   }, [&] {

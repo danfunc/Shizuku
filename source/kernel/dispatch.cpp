@@ -232,14 +232,15 @@ SHIZUKU_HOT bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT
 
 template <>
 SHIZUKU_HOT bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
-                            KERNEL::FRAME **frame, bool restore) {
+                            KERNEL::FRAME **frame, bool restore, bool scrub) {
   if (thread.call_stack.top == 0)
     return false;
   if (arch_call_in_place<ARCH>()) {
     // ヘッダ枠方式: ヘッダから caller の識別・pc・特権・窓を読み、最後の 1 段だけ caller の
-    // 再開フレームを caller の SP の直下に作る (a0/a1 以外は 0)。frame のコピーも戻しも無い。
+    // 再開フレームを caller の SP の直下に作る (a0/a1 以外は素通し。scrub のときは出口が消す)。
+    // frame のコピーも戻しも無い。
     // (call の段の識別の戻しと underflow の検査は trap 内の EXIT_METHOD と共有: native_call.hpp)
-    if (!native::pop_in_place<KERNEL>(thread, *context, *frame, restore))
+    if (!native::pop_in_place<KERNEL>(thread, *context, *frame, restore, scrub))
       BOARD::panic("call ledger count underflow");
     return true;
   }
@@ -275,9 +276,11 @@ SHIZUKU_HOT bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT 
 template <>
 SHIZUKU_HOT void KERNEL::call_unwind(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                                      KERNEL::FRAME **frame, uintptr_t count) {
-  // 途中の段は再開しない。最後に落とす段の caller だけが走り出す。
+  // 途中の段は再開しない。最後に落とす段の caller だけが走り出す。2 段以上を一度に落とす
+  // 巻き戻しは callee が自分の意思で戻らないので、再開の出口でレジスタを消す (scrub)。
+  const bool scrub = count > 1;
   for (uintptr_t index = 0; index < count; ++index)
-    call_frame_pop(thread, context, frame, index + 1 == count);
+    call_frame_pop(thread, context, frame, index + 1 == count, scrub);
 }
 
 // 通常 CALL と方法記述子の直接 call が共有する前半。台帳段を via (LEDGER_CALL か

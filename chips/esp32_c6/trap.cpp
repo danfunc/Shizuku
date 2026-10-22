@@ -434,6 +434,7 @@ SHIZUKU_HOT inline arch::exception_frame_t *ecall_run(arch::exception_frame_t *f
   if ((frame->mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) stop(0xE004);
   auto &kernel = shizuku::kernel_instance;
   auto *context = kernel.current_context();
+  const auto *const entered = context;
   active_context = context;
   frame_to_context(*frame, *context);
   shizuku_c6_trap_diag[4] = shizuku_c6_trap_diag[4] + 1;
@@ -445,6 +446,8 @@ SHIZUKU_HOT inline arch::exception_frame_t *ecall_run(arch::exception_frame_t *f
   // 呼び先の入口フレーム (RV32_TAG_ENTRY) は s*/gp/tp を caller の値のまま通す出口を使うので、
   // この trap の中で別のスレッドへ切り替わってはならない (切り替わるとそれらは別のスレッドの値)。
   if (frame->mcause == RV32_TAG_ENTRY && context->sp != frame) stop(0xE00B);
+  // 別のスレッドへ切り替わったなら、再開するスレッドの素通しの出口を消去の出口に替える。
+  if (context != entered) arch::scrub_on_switch(*context);
   context_to_frame(*context);
   auto *result = context->sp;
   active_mstatus = previous_mstatus;
@@ -618,6 +621,7 @@ extern "C" SHIZUKU_HOT arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch:
     if ((frame->mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) stop(0xE004);
     auto &kernel = shizuku::kernel_instance;
     auto *context = kernel.current_context();
+    const auto *const entered = context;
     active_context = context;
     frame_to_context(*frame, *context);
     shizuku_c6_trap_diag[4] = shizuku_c6_trap_diag[4] + 1;
@@ -629,6 +633,7 @@ extern "C" SHIZUKU_HOT arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch:
     // 呼び先の入口フレーム (RV32_TAG_ENTRY) は s*/gp/tp を caller の値のまま通す出口を使うので、
     // この trap の中で別のスレッドへ切り替わってはならない (切り替わるとそれらは別のスレッドの値)。
     if (frame->mcause == RV32_TAG_ENTRY && context->sp != frame) stop(0xE00B);
+    if (context != entered) arch::scrub_on_switch(*context);
     context_to_frame(*context);
     result = context->sp;
   }, [&] {
@@ -649,6 +654,7 @@ extern "C" SHIZUKU_HOT arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch:
         plic_pulse_clear(1u << cpu_irq);
       auto &kernel = shizuku::kernel_instance;
       auto *context = kernel.current_context();
+      const auto *const entered = context;
       active_context = context;
       frame_to_context(*frame, *context);
       if (g_irq_dispatch_hooks.on_enter)
@@ -660,6 +666,7 @@ extern "C" SHIZUKU_HOT arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch:
       context = kernel.current_context();
       active_context = context;
       active_frame = context->sp;
+      if (context != entered) arch::scrub_on_switch(*context);
       context_to_frame(*context);
       result = context->sp;
       return;
@@ -670,6 +677,7 @@ extern "C" SHIZUKU_HOT arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch:
     reg_write(c6::SYSTIMER_INT_CLR, c6::TARGET0_INT_BIT);
     auto &kernel = shizuku::kernel_instance;
     auto *context = kernel.current_context();
+    const auto *const entered = context;
     active_context = context;
     frame_to_context(*frame, *context);
     kernel.timer_expired();
@@ -677,6 +685,8 @@ extern "C" SHIZUKU_HOT arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch:
     context = kernel.current_context();
     active_context = context;
     active_frame = context->sp;
+    // 予算切れの取り上げで貸し手へ戻る場合もここ (別のスレッドの再開)。
+    if (context != entered) arch::scrub_on_switch(*context);
     context_to_frame(*context);
     result = context->sp;
   }, [&] {

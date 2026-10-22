@@ -38,20 +38,44 @@ assert 'addi t0, t0, 4\n  sw t0, RV32_F_MEPC(sp)' in ecall
 assert 'li t0, RV32_ECALL_TABLE_ENTRIES\n  bltu a0, t0, .Lrv32_ecall_in_range\n  li a0, 0\n' in ecall
 assert 'slli a0, a0, 2\n  la t1, shizuku_rv32_ecall_table\n  add t1, t1, a0\n  lw t1, 0(t1)\n  j .Lrv32_save_done' in ecall
 assert '#define RV32_ECALL_TABLE_ENTRIES 34' in layout
-# ECALL の戻りの出口: 読むのは mepc / mstatus / a0 / a1 だけ。ra・t*・a2-a7・s* は全部 0 に消す
-# (gp / tp は caller stub が戻った直後に自分の値を入れ直すので触らない)。再開フレーム
-# (call_resume) はこの 4 つと目印だけを書くので、消去はこの出口の仕事。
-exit_ecall = asm.split('.Lrv32_exit_ecall:')[1].split('// ---- 呼び先の入口')[0]
+# 戻りの出口は 3 つ (カーネルはルータに徹し、レジスタは素通し。.handoff/v3-design-notes.md §5g):
+#   RV32_TAG_ECALL       ECALL の普通の戻り。mepc / mstatus / a0 / a1 だけを読み、何も消さない。
+#   RV32_TAG_ECALL_SCRUB callee が自分の意思で戻らない巻き戻し・別スレッドの再開。読むのは同じ 4 つで、
+#                        ra・t*・a2-a7・s* を全部 0 に消す (gp / tp は caller stub が戻った直後に自分の
+#                        値を入れ直すので触らない)。
+#   RV32_TAG_ENTRY       呼び先の入口。ra と a0-a7 を読み、何も消さない。
+# 再開フレーム (call_resume) は mepc / mstatus / 目印だけを書くので、消去はこの出口の仕事。
+assert '#define RV32_TAG_ECALL 11' in layout and '#define RV32_TAG_ENTRY 0x100' in layout
+assert '#define RV32_TAG_ECALL_SCRUB 0x101' in layout
+restore = asm.split('shizuku_rv32_restore:')[1].split('.Lrv32_exit_ecall:')[0]
+assert 'beq t0, t1, .Lrv32_exit_ecall' in restore and 'beq t0, t1, .Lrv32_exit_entry' in restore
+assert 'li t1, RV32_TAG_ECALL_SCRUB\n  beq t0, t1, .Lrv32_exit_scrub' in restore
+exit_ecall = asm.split('.Lrv32_exit_ecall:')[1].split('// ---- ECALL からの戻り (RV32_TAG_ECALL_SCRUB')[0]
 assert sorted(re.findall(r'lw (\w+), RV32_F_(\w+)\(sp\)', exit_ecall)) == sorted(
     [('t0', 'MEPC'), ('t0', 'MSTATUS'), ('a0', 'A0'), ('a1', 'A1')])
-cleared = set(re.findall(r'mv (\w+), zero', exit_ecall))
+assert not re.findall(r'mv (\w+), zero', exit_ecall)  # 素通しの出口は何も消さない
+assert exit_ecall.rstrip().endswith('mret')
+exit_scrub = asm.split('.Lrv32_exit_scrub:')[1].split('// ---- 呼び先の入口')[0]
+assert sorted(re.findall(r'lw (\w+), RV32_F_(\w+)\(sp\)', exit_scrub)) == sorted(
+    [('t0', 'MEPC'), ('t0', 'MSTATUS'), ('a0', 'A0'), ('a1', 'A1')])
+cleared = set(re.findall(r'mv (\w+), zero', exit_scrub))
 expected_cleared = {'ra', *(f't{i}' for i in range(7)), *(f'a{i}' for i in range(2, 8)),
                     *(f's{i}' for i in range(12))}
 assert cleared == expected_cleared, sorted(cleared ^ expected_cleared)
-assert exit_ecall.rstrip().endswith('mret')
+assert exit_scrub.rstrip().endswith('mret')
+exit_entry = asm.split('.Lrv32_exit_entry:')[1].split('.size shizuku_rv32_trap_entry')[0]
+assert sorted(re.findall(r'lw (\w+), RV32_F_(\w+)\(sp\)', exit_entry)) == sorted(
+    [('t0', 'MEPC'), ('t0', 'MSTATUS'), ('ra', 'RA')] + [(f'a{i}', f'A{i}') for i in range(8)])
+assert not re.findall(r'mv (\w+), zero', exit_entry)  # 入口も何も消さない
+assert exit_entry.rstrip().endswith('mret')
 call_resume = header.split('static exception_frame_t *call_resume(')[1].split('\n  }\n')[0]
-assert 'frame->mcause = RV32_TAG_ECALL' in call_resume and 'frame->mepc = pc' in call_resume
+assert 'frame->mcause = scrub ? RV32_TAG_ECALL_SCRUB : RV32_TAG_ECALL' in call_resume
+assert 'frame->mepc = pc' in call_resume
 assert '*frame = {}' not in call_resume
+# 別スレッドへ切り替わった再開は、ECALL で止まっていたフレームだけ消去の目印に替える。
+scrub_on_switch = header.split('static void scrub_on_switch(')[1].split('\n  }\n')[0]
+assert 'frame->mcause == RV32_TAG_ECALL' in scrub_on_switch
+assert 'frame->mcause = RV32_TAG_ECALL_SCRUB' in scrub_on_switch
 assert 'mv sp, a0\n  j shizuku_rv32_restore' in asm
 assert 'shizuku_rv32_restore:' in asm and 'call shizuku_rv32_return_failed' in asm
 assert 'shizuku_rv32_return_stub:' in asm and 'shizuku_rv32_first_return:' in asm
@@ -68,6 +92,14 @@ assert 'shizuku_esp_ble_' not in trap_src
 assert 'shizuku_freertos_' not in trap_src
 assert 'SHIZUKU_IRQ_DELAY_US' not in trap_src
 assert 'shizuku_rv32_trap_dispatch' in trap_src and 'shizuku_rv32_return_failed' in trap_src
+# 別のスレッドへ切り替わりうる出口 (ecall_run、ecall の svc_dispatch、周辺割込み、タイマー) は、
+# 再開するスレッドの素通しの出口を消去の出口に替える (切り替わる前のスレッドの値を見せない)。
+# 切替えが起きない ecall_direct には無い (上で context_to_frame を禁じている)。
+assert trap_src.count('const auto *const entered = context;') == 4
+assert trap_src.count('if (context != entered) arch::scrub_on_switch(*context);') == 4
+c5_src = (root / 'chips/esp32_c5/trap.cpp').read_text()
+assert c5_src.count('const auto *const entered = context;') == 3
+assert c5_src.count('if (context != entered) arch::scrub_on_switch(*context);') == 3
 board_src = (root / 'boards/esp32_c6/board_esp32_c6.cpp').read_text()
 api_src = (root / 'chips/esp32_c6/trap_api.hpp').read_text()
 assert 'void esp32_c6::init(uint32_t core)' in board_src

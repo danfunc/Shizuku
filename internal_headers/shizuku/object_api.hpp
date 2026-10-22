@@ -39,8 +39,11 @@ enum struct object_api : uintptr_t {
   //   GET_CALLER_OBJECT は呼び出し元そのもの。
   // ★レジスタ ABI (RV32、2026-10-22): caller の frame はコピーされず、呼び先の入口ではレジスタが
   //   「全部 caller からの入力」として通る (引数 a0..、戻り口 ra、sp、pc だけがカーネルの決めた値)。
-  //   戻りでカーネルは a0 (error) / a1 (value) 以外を 0 に消す。だから caller は callee-saved・ra・
-  //   gp・tp を自分で退避・復元する (ARCH::syscall がやる)。呼び先は入口 stub
+  //   戻りでカーネルが決めるのは a0 (error) / a1 (value) / sp / pc だけで、ほかのレジスタは素通し
+  //   (callee の値が残る。隠したい callee は自分の stub で消してから戻る)。ただし callee が自分の
+  //   意思で戻らない巻き戻し (2 段以上の EXIT_METHOD、FORWARD_CHILD_EXIT) と、別スレッドへ切り替わった
+  //   あとの再開だけは、カーネルが a0 / a1 以外を 0 に消す。だから caller は a0 / a1 以外を信用せず、
+  //   callee-saved・ra・gp・tp を自分で退避・復元する (ARCH::syscall がやる)。呼び先は入口 stub
   //   (shizuku::method_entry<ARCH, &fn>()) 経由で登録し、gp を自分のものへ入れる。
   //   全段で同じ (段数の上限は MAX_DEPTH だけ)。呼出しの記録 (戻り pc・caller の識別など) は
   //   caller stub が ecall の前に空けた枠に書かれ、callee の窓の外にある。ARM は従来のまま。

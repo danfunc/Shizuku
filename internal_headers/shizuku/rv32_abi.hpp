@@ -9,7 +9,9 @@
 //    - callee の入口でカーネルが決めるのは pc / ra (戻り口) / sp / 引数 (a0–a5) だけ。
 //      ほかのレジスタ (t*, s*, gp, tp, a6, a7) は caller の値のまま通る。
 //    - 戻りでカーネルが保つのは sp / pc / 戻り値 (a0 = error, a1 = value) だけ。ほかの
-//      レジスタは 0 に消される (callee の値を caller に見せない)。
+//      レジスタは素通し (callee の値が残る。見せたくない callee が自分で消す)。callee が自分の
+//      意思で戻らない巻き戻し (2 段以上の EXIT_METHOD、FORWARD_CHILD_EXIT) と、別スレッドへ
+//      切り替わったあとの再開だけは、カーネルが 0 に消す (arch/riscv/rv32_frame.h の目印)。
 //    - だから callee-saved レジスタ・ra・gp・tp は caller が自分で退避・復元する。
 //  ISA ごとに別実装 (ARM の converter は別)。ARCH の層 (arch/riscv/rv32.hpp) と、ARCH を
 //  経由せず自前で ecall する側 (ESP-IDF 側の互換層) の両方がこのヘッダを使う。

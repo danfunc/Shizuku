@@ -7,6 +7,8 @@
 //  ここに置く理由: 1 API = 1 関数にするため。RV32 の例外入口 (番号の表から直接入る関数) と
 //  カーネル (svc_dispatch 経由・host 試験) の両方が同じ本体を使い、前者はこれを自分の中へ
 //  展開する (always_inline)。検査の中身と順序は kernel_object 経由だった頃と同じ。
+//  レジスタは素通し (arch/riscv/rv32_frame.h の目印): 戻りで消すのは callee が自分の意思で戻らない
+//  巻き戻し (2 段以上の EXIT_METHOD、FORWARD_CHILD_EXIT) だけで、普通の 1 段の戻りは消さない。
 //  ヘッダ枠方式でない ARCH (ARM) ではこの本体は使わない (if constexpr で落ちる)。
 #include <cstdint>
 #include "shizuku/kernel_abi.hpp"
@@ -71,9 +73,11 @@ template <class A, class Thread, class Context, class Frame>
   }
 }
 // 先頭ヘッダを 1 つ落とす。restore なら caller の再開フレームを作って frame を差し替える。
-// is_call なら call 段が積む前の caller の識別を戻す。
+// is_call なら call 段が積む前の caller の識別を戻す。scrub は再開フレームの目印 (出口でレジスタを
+// 消すか): callee が自分の意思で戻らない巻き戻しのときだけ true。
 template <class A, class Thread, class Context, class Frame>
-[[gnu::always_inline]] inline void header_pop_of(Thread &thread, Context &context, Frame *&frame, bool is_call, bool restore) {
+[[gnu::always_inline]] inline void header_pop_of(Thread &thread, Context &context, Frame *&frame, bool is_call, bool restore,
+                                                 bool scrub) {
   if constexpr (arch_call_in_place<A>()) {
     auto *header = reinterpret_cast<typename A::call_header_t *>(thread.call_stack.top);
     if (is_call) {
@@ -85,7 +89,7 @@ template <class A, class Thread, class Context, class Frame>
     }
     thread.call_stack.top = header->prev;
     if (restore)
-      frame = A::call_resume(context, header);
+      frame = A::call_resume(context, header, scrub);
   }
 }
 
@@ -98,11 +102,12 @@ enum class status : uint8_t { DONE, FORWARD, CORRUPT };
 
 // 台帳の最上段を 1 つ落とす (call の段なら識別を戻す)。ヘッダ枠方式 ARCH 専用。
 // 前提: depth >= 1 (呼び出し側が戻り先 d と count を検査済み)。call の段なのに call_count == 0 なら
-// 何も変えず false (不変条件の破れ)。
+// 何も変えず false (不変条件の破れ)。scrub は header_pop_of を見よ。
 template <class K>
 [[gnu::always_inline]] inline bool pop_in_place(typename K::THREAD &thread,
                                                 typename K::CONTEXT &context,
-                                                typename K::FRAME *&frame, bool restore) {
+                                                typename K::FRAME *&frame, bool restore,
+                                                bool scrub) {
   using A = typename K::ARCH;
   if constexpr (arch_call_in_place<A>()) {
     const uint32_t depth = thread.call_stack.depth;
@@ -110,19 +115,23 @@ template <class K>
     const bool is_call = via == K::LEDGER_CALL || via == K::LEDGER_DESCRIPTOR_CALL;
     if (is_call && thread.call_stack.call_count == 0)
       return false;
-    header_pop_of<A>(thread, context, frame, is_call, restore);
+    header_pop_of<A>(thread, context, frame, is_call, restore, scrub);
     thread.call_stack.depth = depth - 1;
   }
   return true;
 }
 
 // 台帳の上から count 段を落とす。最後に落とした段の caller だけが再開する。
+// 再開の目印は、2 段以上を一度に落とす (callee が自分の意思で戻らない巻き戻し) か forced_scrub
+// (FORWARD_CHILD_EXIT) のとき消去 (RV32_TAG_ECALL_SCRUB)、1 段の普通の戻りのときは素通し。
 template <class K>
 [[gnu::always_inline]] inline bool unwind_in_place(typename K::THREAD &thread,
                                                    typename K::CONTEXT &context,
-                                                   typename K::FRAME *&frame, uintptr_t count) {
+                                                   typename K::FRAME *&frame, uintptr_t count,
+                                                   bool forced_scrub) {
+  const bool scrub = forced_scrub || count > 1;
   for (uintptr_t index = 0; index < count; ++index)
-    if (!pop_in_place<K>(thread, context, frame, index + 1 == count))
+    if (!pop_in_place<K>(thread, context, frame, index + 1 == count, scrub))
       return false;
   return true;
 }
@@ -213,13 +222,9 @@ template <class K, class KObj>
                     0);
       return;
     }
-    // 呼び先の引数は a0 = argument だけ (a1–a3 は 0)。a4/a5 は set_args と同じく 0。
+    // 呼び先の引数は a0 = argument だけ。a1 以降は書かない (caller の入力のまま素通し。
+    // 呼び先は宣言した引数以外を信用しない)。
     frame.a0 = argument;
-    frame.a1 = 0;
-    frame.a2 = 0;
-    frame.a3 = 0;
-    frame.a4 = 0;
-    frame.a5 = 0;
   }
 }
 
@@ -317,7 +322,8 @@ template <class K, bool Forward>
     // 戻りの再開フレームは今の trap フレームと重なりうるので、戻り値は先に読んでおく。
     const uintptr_t value = A::arg(*frame, 2);
     const uintptr_t error = A::arg(*frame, 3);
-    if (!unwind_in_place<K>(thread, context, frame, count))
+    // FORWARD_CHILD_EXIT は親ハンドラが子を取り上げて戻す巻き戻しなので、1 段でも消去の目印。
+    if (!unwind_in_place<K>(thread, context, frame, count, Forward))
       return status::CORRUPT;
     A::set_result(*frame, error, value);
     return status::DONE;
