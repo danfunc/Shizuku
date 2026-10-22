@@ -85,6 +85,8 @@ build:esp32c6 --action_env=PATH
 # ESP-IDF 側は -Og のまま (上の `--copt=-Og` の後に付くので後勝ち)。ARM (RP) は変えない。
 # 戻すときは `--per_file_copt=^source/(kernel|kernel_object|cpu_manager)/@-Og` を足す。
 build:esp32c6 --per_file_copt=^source/(kernel|kernel_object|cpu_manager)/,^chips/esp32_c6/trap\.cpp$@-O2
+# C6 のカーネルは既定で部分リンク LTO。比較時は esp32c6 の後に kernel_no_lto を指定する。
+build:esp32c6 --config=kernel_lto
 
 # ---------------------------------------------------------------------------
 # ESP32-C5 (RV32, CLIC) — C6 と同じ rv32_esp ツールチェーン / platform。board だけが違う。
@@ -113,6 +115,8 @@ build:esp32c5_ble --copt=-DSHIZUKU_ESP_BLE=1
 # -O2 は esp32c6 / esp32c5 の per_file_copt が付ける。
 build:kernel_lto --define=shizuku_kernel_lto=1
 build:kernel_lto --per_file_copt=^source/(kernel|kernel_object|cpu_manager)/,^chips/esp32_c[56]/trap\.cpp$@-flto,-ffat-lto-objects
+build:kernel_no_lto --define=shizuku_kernel_lto=0
+build:kernel_no_lto --per_file_copt=^source/(kernel|kernel_object|cpu_manager)/,^chips/esp32_c[56]/trap\.cpp$@-fno-lto
 
 # C6 BLE controller-init firmware uses the same isolated IDF BLE profile.
 build:esp32c6_ble --config=esp32c6

@@ -58,7 +58,7 @@ globals "${LTO[@]}" "${VEC[@]}" > "$WORK/before.txt"
 #    -ffunction-sections / -fdata-sections / -fno-common: コード生成の option は LTO では**リンクの
 #    コマンドラインのものが効く**ので、コンパイル時と同じものをここにも渡す (ツールチェーンの既定)。
 "$CC" -flto -flto-partition=none -r -flinker-output=nolto-rel -nostdlib \
-    -march=rv32imac_zicsr_zifencei -mabi=ilp32 -O2 -ffunction-sections -fdata-sections -fno-common \
+    -march=rv32imac_zicsr_zifencei -mabi=ilp32 -mno-relax -O2 -ffunction-sections -fdata-sections -fno-common \
     -o "$WORK/kernel_lto.o" "${LTO[@]}" "${VEC[@]}" || fail "部分リンク失敗"
 
 # 4. 検査。
