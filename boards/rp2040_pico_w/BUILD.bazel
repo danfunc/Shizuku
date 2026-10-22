@@ -2,14 +2,6 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(default_visibility = ["//visibility:public"])
 
-exports_files(["board_rp2040.cpp"])
-
-filegroup(
-    name = "board_src",
-    srcs = ["board_rp2040.cpp"],
-    visibility = ["//visibility:public"],
-)
-
 cc_library(
     name = "headers",
     hdrs = ["rp2040_pico_w.hpp"],

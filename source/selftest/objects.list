@@ -30,4 +30,17 @@ binding_unpriv
 compat_h
 compat_c
 compat_gc
-c6_stage1_probe
+desc_test
+desc_owner
+desc_relay
+desc_kernel
+desc_child
+desc_grandchild
+desc_recur
+desc_relay_target
+# call_cost の記述子計測 (riscv 限定)。呼び手 D が子 dleaf / dnest を作り、dnest が子 dinner を作る。
+cost_driver
+cost_dleaf
+cost_dnest
+cost_dinner
+cost_owner

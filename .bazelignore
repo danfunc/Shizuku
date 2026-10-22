@@ -1,0 +1,3 @@
+.cache
+# 作業記録・退避物 (git 管理外)。中に古い BUILD.bazel のコピーがあり、ローカルの bazel query //... を壊す。
+.handoff

@@ -7,7 +7,7 @@ namespace shizuku {
 namespace templates {
 
 // コアの初期化と (将来の) per-core 状態。arch (ISA) と chip (SoC の定義) と board を
-// 型パラメータで受ける (docs/03_porting_policy.md D2)。スレッドと実行文脈はカーネル本体が持つ。
+// 型パラメータで受ける (docs/record/kernel_v2_record.typ D2)。スレッドと実行文脈はカーネル本体が持つ。
 // ★CHIP は型だけ受ける (CHIP_T に concept は課さない)。振る舞いは変えない。
 template <typename ARCH_T, typename CHIP_T, typename BOARD_T, uintptr_t CORE_COUNT_T>
   requires shizuku::concepts::arch_requires<ARCH_T> &&

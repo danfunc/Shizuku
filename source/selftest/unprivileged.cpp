@@ -13,6 +13,7 @@
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/object_api.hpp"
+#include "shizuku/method_entry.hpp"
 #include "shizuku/selftest.hpp"
 #include "shizuku/svc_attributes.hpp"
 
@@ -27,9 +28,9 @@ namespace {
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
-inline constexpr const uintptr_t &OBJECT_UNPRIV_PROBE = object_id::unpriv_probe;
-inline constexpr const uintptr_t &OBJECT_PRIV_PROBE = object_id::priv_probe;
-inline constexpr const uintptr_t &OBJECT_TRESPASSER = object_id::trespasser;
+constexpr uintptr_t OBJECT_UNPRIV_PROBE = object_id::unpriv_probe;
+constexpr uintptr_t OBJECT_PRIV_PROBE = object_id::priv_probe;
+constexpr uintptr_t OBJECT_TRESPASSER = object_id::trespasser;
 constexpr uintptr_t METHOD_MAIN = 0;
 
 // 自分の CONTROL を読んで返すだけ。触るのはレジスタと自分のスタックのみ。
@@ -72,9 +73,9 @@ void unprivileged_probe() {
   // 同じコードを 2 つのオブジェクトとして登録する。**片方だけ非特権を宣言**する
   // ので、差が出れば「宣言が効いた」ことの証拠になる (対照実験)。
   ARCH::syscall((uintptr_t)object_api::CREATE_OBJECT, OBJECT_UNPRIV_PROBE,
-                (uintptr_t)&probe, OBJECT_UNPRIVILEGED);
+                method_entry<ARCH, &probe>(), OBJECT_UNPRIVILEGED);
   ARCH::syscall((uintptr_t)object_api::CREATE_OBJECT, OBJECT_PRIV_PROBE,
-                (uintptr_t)&probe, 0);
+                method_entry<ARCH, &probe>(), 0);
 
   const auto unprivileged =
       ARCH::syscall((uintptr_t)object_api::CALL_METHOD, OBJECT_UNPRIV_PROBE,
@@ -128,7 +129,7 @@ void unprivileged_probe() {
   {
     const auto faults_before = kernel_instance.faults().count;
     ARCH::syscall((uintptr_t)object_api::CREATE_OBJECT, OBJECT_TRESPASSER,
-                  (uintptr_t)&trespass, OBJECT_UNPRIVILEGED);
+                  method_entry<ARCH, &trespass>(), OBJECT_UNPRIVILEGED);
     // ★**別スレッドで**走らせる。落ちるのはスレッド単位なので、呼び出しで試すと
     //   自分ごと止まってテストの続きが走れない。
     const auto spawned = ARCH::syscall((uintptr_t)object_api::SPAWN,

@@ -37,17 +37,17 @@ namespace objects {
 //      ★今はまだ server も特権のまま — CDC を直に叩いているため (D42 残の
 //        「CDC をストリームとして扱う」が入ると、ここが本当に非特権にできる)。
 //        **構造だけ先に分けてある**。確かめていないことを「できる」と書かない。
-inline constexpr const uintptr_t &GDB_SERVER_OBJECT = object_id::gdb_stub;
+constexpr uintptr_t GDB_SERVER_OBJECT = object_id::gdb_stub;
 // 自コアのデバッグハードウェアを面倒見る側。コアの数だけスレッドを起こす。
-inline constexpr const uintptr_t &GDB_AGENT_OBJECT = object_id::gdb_agent;
+constexpr uintptr_t GDB_AGENT_OBJECT = object_id::gdb_agent;
 // 覗かれる側。★デバッグのために特別なことは何もしていない普通のオブジェクト。
-inline constexpr const uintptr_t &DEBUGGEE_OBJECT = object_id::debuggee;
+constexpr uintptr_t DEBUGGEE_OBJECT = object_id::debuggee;
 
 // 覗かれる側 (debuggee) と stub を起こす。0 = 成功。
 // ★external_target を渡すと、合成の debuggee を作らずそのスレッドを対象にする
 //   (2026-08-24 デモ用: 実在するスレッド — 例えば LED を叩く blink — を
 //   attach するだけで止められることを目で見るため)。既定は今まで通り
-//   合成の debuggee (docs/05_handoff.md の `break debuggee_step` はこちら前提)。
+//   合成の debuggee (削除済みの docs/05_handoff.md (ce5b304) の `break debuggee_step` はこちら前提)。
 constexpr uint32_t NO_EXTERNAL_TARGET = 0xFFFFFFFFu;
 uint32_t start_gdb_stub(uint32_t external_target = NO_EXTERNAL_TARGET);
 

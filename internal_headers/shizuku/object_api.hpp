@@ -24,8 +24,10 @@ enum struct object_api : uintptr_t {
   //   載せる戻り口は常に RETURN を撃つが、同じ svc が誰から出たかで意味が変わる:
   //   ハンドラから出れば巻き戻しプリミティブ、オブジェクトから出れば経路判定で
   //   ここへ届き「メソッドが戻った」という知らせになる。非KOBJ return stub の専用
-  //   marker は dispatch が a1 を呼出し元の unwind floor に変換する。通常 API 呼出しは
-  //   a1 の d を保持し、何フレーム落とすかは KOBJ が current_depth - d で計算する。
+  //   marker は a1 を呼出し元の unwind floor に変換して扱う。通常 API 呼出しは a1 の d を
+  //   保持する。どちらも svc_dispatch が trap 内で current_depth - d 段を落とす (d の検査は
+  //   カーネルの RETURN と同じ)。KOBJ の exit_thread に回るのは、スレッドの最外のメソッドが
+  //   戻る場合 (d == 0 かつ呼出し段なし) だけ。
   EXIT_METHOD = 2,
   // 自分のメソッドを公開する。a1 = メソッド番号, a2 = 入口。
   // 誰のものとして登録するかは**発行元から導出**する (名乗らせない)。
@@ -33,6 +35,18 @@ enum struct object_api : uintptr_t {
   EXPORT_METHOD = 3,
   // 他オブジェクトのメソッドを呼ぶ。a1 = オブジェクト ID, a2 = メソッド番号,
   // a3 = 引数。戻り a1 = メソッドの戻り値。
+  // ★svc_dispatch が trap 内で呼び先へ直接入る (kobj の中継なし)。呼び先から見た
+  //   GET_CALLER_OBJECT は呼び出し元そのもの。
+  // ★レジスタ ABI (RV32、2026-10-22): caller の frame はコピーされず、呼び先の入口ではレジスタが
+  //   「全部 caller からの入力」として通る (引数 a0..、戻り口 ra、sp、pc だけがカーネルの決めた値)。
+  //   戻りでカーネルが決めるのは a0 (error) / a1 (value) / sp / pc だけで、ほかのレジスタは素通し
+  //   (callee の値が残る。隠したい callee は自分の stub で消してから戻る)。ただし callee が自分の
+  //   意思で戻らない巻き戻し (2 段以上の EXIT_METHOD、FORWARD_CHILD_EXIT) と、別スレッドへ切り替わった
+  //   あとの再開だけは、カーネルが a0 / a1 以外を 0 に消す。だから caller は a0 / a1 以外を信用せず、
+  //   callee-saved・ra・gp・tp を自分で退避・復元する (ARCH::syscall がやる)。呼び先は入口 stub
+  //   (shizuku::method_entry<ARCH, &fn>()) 経由で登録し、gp を自分のものへ入れる。
+  //   全段で同じ (段数の上限は MAX_DEPTH だけ)。呼出しの記録 (戻り pc・caller の識別など) は
+  //   caller stub が ecall の前に空けた枠に書かれ、callee の窓の外にある。ARM は従来のまま。
   CALL_METHOD = 4,
   // 今どのオブジェクトとして走っているか / 誰に呼ばれたか。戻り a1 = オブジェクト ID。
   // ★identity はカーネルではなくカーネルオブジェクトの台帳から答える
@@ -98,7 +112,7 @@ enum struct object_api : uintptr_t {
   //   DMA チャネルはカーネル側が握る (MPU を素通りするのでオブジェクトへ渡さない)。
   STREAM_CONNECT = 22,
   // ★軸 B (メモリ到達範囲) を**オブジェクト単位で動的に**開示する
-  // (docs/03_porting_policy.md Q8)。a1 = 対象オブジェクト ID, a2 = base (XIP
+  // (docs/record/kernel_v2_record.typ Q8)。a1 = 対象オブジェクト ID, a2 = base (XIP
   // アドレス), a3 = limit (内包)。対象オブジェクトへの CALL_METHOD/SPAWN の
   // たびに、この窓が読み専用で開く (a2=a3=0 で閉じる)。
   // ★呼び出しを基準にしない — 「誰が呼んだか」ではなく「対象オブジェクトが
@@ -129,7 +143,15 @@ enum struct object_api : uintptr_t {
   STREAM_PUSH_N = 29,  // a1 = ID, a2 = push_request* → value = 件数
   STREAM_POP_N = 30,   // a1 = ID, a2 = pop_request* → value = 件数
   STREAM_AVAILABLE = 31, // a1 = ID → value = available (capacity で飽和)
+  // ABI: a1=target object, a2=method index; returns caller-owned descriptor index.
+  // Thread-mode API. Creation authority (kernel_object.hpp create_method_descriptor):
+  //   the caller may create a descriptor for itself, its creator (parent), or its
+  //   directly created object (child). A caller holding the kernel role
+  //   (kernel_role, not the object kind) may target any object. Siblings and
+  //   deeper relatives get NOT_PRIVILEGED.
   CREATE_METHOD_DESCRIPTOR = 32,
+  // ABI: a1=descriptor index, a2-a7=up to six register arguments (RISC-V).
+  // The intended path uses creation-time authorization and a bounded lookup.
   CALL_METHOD_DESCRIPTOR = 33,
   // 専用ハンドラ (HANDLER) が配下の子オブジェクトの終了を Root KOBJ へ転送する。
   // a1 = 絶対戻り先深さ d, a2 = 戻り値, a3 = エラーコード。
@@ -146,6 +168,9 @@ constexpr uintptr_t OBJECT_PRIVILEGED = 1u << 0;
 //   誰かを乗っ取る行為なので特権オブジェクトだけが立てられる。立てないときの
 //   既定は「既にあるなら断る」— 番号の衝突を無音で失敗させないため (D28)。
 constexpr uintptr_t OBJECT_REPLACE = 1u << 31;
+// Fixed per-owner descriptor table size. Creation beyond this limit returns
+// object_error::NO_DESCRIPTOR; indices are local to the creating object.
+constexpr uintptr_t METHOD_DESCRIPTOR_CAPACITY = 16;
 // ★非特権で走らせる。触れるのは region に張られた場所 (コードとヒープ) だけになり、
 //   静的データもペリフェラルもカーネルの簿記も見えなくなる。
 //   したがって非特権で走れるオブジェクトは「状態をヒープに置き、標準ライブラリを

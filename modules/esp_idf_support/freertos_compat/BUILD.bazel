@@ -1,4 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -17,3 +17,18 @@ cc_library(
 )
 
 exports_files(["compat_test.cpp", "compat_header_c_test.c"])
+
+# Compile the domain with each firmware profile's actual table layout.
+[
+    cc_test(
+        name = name,
+        srcs = ["compat.cpp", "compat.hpp", "queue_storage_test.cpp"],
+        local_defines = defines,
+        copts = ["-std=c++20"],
+    )
+    for name, defines in [
+        ("queue_storage_c6_test", ["SHIZUKU_FREERTOS_COMPAT_TINY=1", "SHIZUKU_ESP32_C6=1"]),
+        ("queue_storage_c5_test", ["SHIZUKU_FREERTOS_COMPAT_TINY=1"]),
+        ("queue_storage_default_test", []),
+    ]
+]

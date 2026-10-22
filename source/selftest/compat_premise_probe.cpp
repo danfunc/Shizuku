@@ -11,6 +11,7 @@
 #include "shizuku/kernel_object.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/object_api.hpp"
+#include "shizuku/method_entry.hpp"
 #include "shizuku/selftest.hpp"
 
 namespace shizuku {
@@ -33,9 +34,9 @@ namespace {
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
-inline constexpr const uintptr_t &OBJ_H = object_id::compat_h;   // 互換役の HANDLER
-inline constexpr const uintptr_t &OBJ_C = object_id::compat_c;   // H の子
-inline constexpr const uintptr_t &OBJ_GC = object_id::compat_gc; // 「H が子の要求で作った」孫
+constexpr uintptr_t OBJ_H = object_id::compat_h;   // 互換役の HANDLER
+constexpr uintptr_t OBJ_C = object_id::compat_c;   // H の子
+constexpr uintptr_t OBJ_GC = object_id::compat_gc; // 「H が子の要求で作った」孫
 
 constexpr uintptr_t CMD_SETUP = 0x01;
 constexpr uintptr_t CMD_RECREATE = 0x02;
@@ -116,17 +117,17 @@ uintptr_t handler_entry(uintptr_t a0, uintptr_t a1, uintptr_t a2,
   g_h_unwind_floor = (uint32_t)unwind_floor;
   if (a0 == CMD_SETUP) { // H 自身が最初の呼出しになる文脈で子を作る
     const auto res = api(object_api::CREATE_OBJECT, OBJ_C,
-                         (uintptr_t)&child_main, 0);
+                         method_entry<ARCH, &child_main>(), 0);
     return res.error == 0 ? res.value : 0;
   }
   if (a0 == CMD_RECREATE) { // テストで一時reparentしたCをHの子へ戻す
     const auto res = api(object_api::CREATE_OBJECT, OBJ_C,
-                         (uintptr_t)&child_main, OBJECT_REPLACE);
+                         method_entry<ARCH, &child_main>(), OBJECT_REPLACE);
     return res.error == 0 ? res.value : 0;
   }
   if (a0 == CMD_MKGC) { // 子の svc を H が受けている最中に孫を作る
     const auto res = api(object_api::CREATE_OBJECT, OBJ_GC,
-                         (uintptr_t)&gc_main, 0);
+                         method_entry<ARCH, &gc_main>(), 0);
     return res.error == 0 ? res.value : (0xE000u | (res.error & 0xFFu));
   }
   if (a0 == CMD_WHO)
@@ -163,7 +164,7 @@ void compat_premise_probe() {
 
   // ---- 準備: H (HANDLER) と、H が root 文脈で作る子 C ------------------
   const auto res_h = api(object_api::CREATE_OBJECT, OBJ_H,
-                         (uintptr_t)&handler_entry,
+                         method_entry<ARCH, &handler_entry>(),
                          KERNEL_OBJECT::INTERNAL_FLAG_HANDLER | OBJECT_REPLACE);
   check("setup: create H with INTERNAL_FLAG_HANDLER", res_h.error == 0,
         res_h.error, 0);
@@ -258,7 +259,7 @@ void compat_premise_probe() {
     // registry now says KOBJ; the interposition helper must not trust shape
     // alone or allow a mismatched parent to unwind frames.
     const auto wrong_parent = api(object_api::CREATE_OBJECT, OBJ_C,
-                                  (uintptr_t)&child_main, OBJECT_REPLACE);
+                                  method_entry<ARCH, &child_main>(), OBJECT_REPLACE);
     check("(b) root replacement changes registered parent to KOBJ",
           wrong_parent.error == 0 &&
               kernel_object_instance.object_parent_handler(OBJ_C) ==

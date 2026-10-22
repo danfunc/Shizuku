@@ -1,6 +1,7 @@
 #ifndef SHIZUKU_TEMPLATES_KERNEL_OBJECT_HPP
 #define SHIZUKU_TEMPLATES_KERNEL_OBJECT_HPP
 #include <cstdint>
+#include "shizuku/hot.hpp"
 #include "shizuku/kernel_abi.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/stream.hpp"
@@ -8,6 +9,7 @@
 namespace shizuku {
 namespace selftest {
 struct compat_probe_access;
+struct dispatcher_test_access;
 }
 namespace templates {
 
@@ -41,7 +43,13 @@ public:
   static constexpr uintptr_t METHOD_COUNT = METHOD_COUNT_T;
   static constexpr uintptr_t METHOD_DESCRIPTOR_CAPACITY = 16;
   static constexpr uintptr_t MAX_DEPTH = MAX_DEPTH_T;
+#if defined(SHIZUKU_LEAN_LEDGER)
+  // 項目が 16B → 40B になるので、台帳の DRAM を抑えるため容量を MAX_DEPTH + 2 にする (旧は 2 倍。
+  // call 段の深さは MAX_DEPTH で別に縛られるので、足りない深さは NO_STACK で拒否される)。
+  static constexpr uint32_t LEDGER_CAPACITY = MAX_DEPTH + 2;
+#else
   static constexpr uint32_t LEDGER_CAPACITY = 2 * MAX_DEPTH + 2;
+#endif
   // ★スレッドを何本まで作れるかは**こちらが決める** (記憶を出すのがこちらなので)。
   static constexpr uintptr_t THREAD_COUNT = THREAD_COUNT_T;
   // 1 スレッドあたりのスタック。深さの上限も方針。
@@ -154,6 +162,9 @@ public:
   //   公開 flags (object_api.hpp) には置かず、ROOT_OBJECT / KERNEL_OBJECT 本人による
   //   create_object 時のみ受理される。一般オブジェクトの指定は NOT_PRIVILEGED で拒否。
   static constexpr uintptr_t INTERNAL_FLAG_HANDLER = 1u << 2;
+  // ★kernel object の役 (kernel_role) の付与。HANDLER と同じく信頼済みの生成者
+  //   (ROOT_OBJECT か kernel_role を持つオブジェクト) だけが立てられる。
+  static constexpr uintptr_t INTERNAL_FLAG_KERNEL_ROLE = 1u << 3;
 
   uint32_t object_parent_handler(uint32_t object_id) const {
     if (object_id >= OBJECT_COUNT_T || !m_objects[object_id].created)
@@ -161,24 +172,15 @@ public:
     return m_objects[object_id].parent_handler_object;
   }
 
+  // オブジェクト表の 1 行の整列 (バイト)。行の大きさを 2 の冪に揃えて、id から行を引くのを
+  // シフトだけにする (旧: 748 バイトの行で `li 0x2ec; mul` が CALL 1 回に 3 回出ていた)。
+  // 32 ビットの行は 108 バイトなので 128。METHOD_COUNT などを増やして収まらなくなったら、
+  // 下の static_assert が落ちる (その場合はここを次の 2 の冪にする)。
+  static constexpr uintptr_t OBJECT_ROW_ALIGN = 128;
+  static_assert((METHOD_DESCRIPTOR_CAPACITY & (METHOD_DESCRIPTOR_CAPACITY - 1)) == 0,
+                "descriptor capacity must be a power of two (index by shift)");
 private:
-  // The compatibility probe inspects a suspended thread's private ledger
-  // shape without exposing that inspection through the object API.
-  friend struct ::shizuku::selftest::compat_probe_access;
-
-  struct method_descriptor_entry {
-    uint32_t target_object;
-    uintptr_t target_entry;
-    uint32_t target_generation;
-    uint32_t owner_object;
-    uint32_t method_index;
-    uint32_t flags;
-    uint32_t region_base;
-    uint32_t region_limit;
-    volatile uint32_t valid;
-  };
-
-  struct object_t {
+  struct alignas(OBJECT_ROW_ALIGN) object_t {
     bool created;
     // ★名前はここではなく別配列に置く。object_t は呼び出し経路 (created / flags /
     //   methods) で毎回触るので、経路に関係ない名前を混ぜてキャッシュ行を汚さない。
@@ -190,6 +192,12 @@ private:
     //   HANDLER を名乗れるのは svc ハンドラを務めるオブジェクトだけで、これが
     //   「プリミティブを撃てるのは誰か」を決める。
     object_kind kind;
+    // ★生成者 (CREATE_OBJECT の発行元)。方法記述子の作成権限が「親・直接の子」を
+    //   引くために使う。ROOT / KERNEL_OBJECT 自身は生成されたものではないので NO_OBJECT。
+    uint32_t creator_object;
+    // ★kernel object の役を負うか。種別 (kind) とは別の軸で、ID では判定しない。
+    //   kind は dispatch の callee_kind の偽装防止のため変えない。
+    bool kernel_role;
     // ★親 handling object の情報 (解決済み binding: Codex 指摘 5)
     uint32_t parent_handler_object;
     uintptr_t parent_handler_entry;
@@ -198,9 +206,191 @@ private:
     //   軸 B (Q8)。0/0 = 窓なし。
     uint32_t region_base;
     uint32_t region_limit;
-    uint32_t generation;
-    method_descriptor_entry method_descriptors[METHOD_DESCRIPTOR_CAPACITY];
+    volatile uint32_t generation;
+    volatile uint32_t instance_generation;
   };
+  static_assert(sizeof(uintptr_t) != 4 || sizeof(object_t) == OBJECT_ROW_ALIGN,
+                "an object row must be exactly OBJECT_ROW_ALIGN bytes on 32-bit targets");
+public:
+  // 方法記述子 (caller が callee を呼ぶ入口)。caller の表の 1 項目で、呼出しに要るものは
+  //   「呼び先の行へのポインタ」「入口 pc」「持ち主の世代」「呼び先の世代 (version)」だけ。
+  //   種別・親ハンドラ・特権・窓・instance 世代は**呼び先の行から呼出し時に読む** (旧と同じ生きた値)。
+  //   行の位置はポインタが持つので、id × 行の大きさの乗算は要らない。
+  //   ★失効: 呼び先の version (generation) が変わると世代照合で STALE になる。version を上げるのは
+  //     CREATE_OBJECT の差し替え (handler.cpp の replace)、EXPORT_METHOD、GRANT_REGION の 3 つで、
+  //     種別・親ハンドラ・特権・窓・入口を書き換える所は全部この 3 つのどれかの中にある
+  //     (特権の旗 flags を書くのは生成 / 差し替えと SET_OBJECT_AFFINITY のみで、後者は特権の旗に触れない)。
+  //     持ち主の差し替えは持ち主の項目を全部 target = nullptr にする。
+  //   target == nullptr が「無効」(旧 valid == 0)。公開は target を最後に release で書く。
+  //   ★持ち主 (owner_object) は持たない: 表が持ち主の行ごとなので、項目の位置が持ち主を決める。
+  //   ★created / 入口 0 の検査は呼出し側に残さない: 作成 (create_method_descriptor) が
+  //     「呼び先が created、かつ methods[index] != nullptr」を確かめてから項目を公開し、
+  //     created は init 以外で false に戻らず、入口は項目に固定される。
+  struct method_descriptor_entry {
+    const object_t *target;
+    uint32_t owner_generation;
+    uint32_t target_generation;
+    uintptr_t target_entry;
+  };
+  static_assert(sizeof(uintptr_t) != 4 || sizeof(method_descriptor_entry) == 16,
+                "a descriptor entry must be 16 bytes on 32-bit targets");
+  // 行から id を求める (行は m_objects の要素。2 の冪の大きさなのでシフトで済む)。
+  template <class Row> uint32_t row_id(const Row &row) const {
+    return (uint32_t)(&row - m_objects);
+  }
+  // 行の version (generation) を読む。
+  template <class Row> uint32_t row_version(const Row &row) const {
+    return ARCH::load_acquire32(const_cast<volatile uint32_t *>(&row.generation));
+  }
+  // 記述子の引きと検査 (index・持ち主の世代・呼び先の version)。通れば項目を返し、通らなければ
+  // nullptr と error。コピーしないので trap 内の直接 call はこれを読む。
+  // 順序: index / 持ち主の範囲 (BAD) → 無効 (BAD) → 持ち主の世代 (STALE) → 呼び先の version (STALE)。
+  SHIZUKU_HOT const method_descriptor_entry *find_method_descriptor(
+      uint32_t caller_id, uint32_t index, uint32_t caller_generation,
+      object_error &error) const {
+    if (index >= METHOD_DESCRIPTOR_CAPACITY || caller_id >= OBJECT_COUNT_T) {
+      error = object_error::BAD_DESCRIPTOR;
+      return nullptr;
+    }
+    const auto &desc = m_descriptors[caller_id][index];
+    const object_t *target = __atomic_load_n(&desc.target, __ATOMIC_ACQUIRE);
+    if (target == nullptr) {
+      error = object_error::BAD_DESCRIPTOR;
+      return nullptr;
+    }
+    if (desc.owner_generation != caller_generation) {
+      error = object_error::STALE_DESCRIPTOR;
+      return nullptr;
+    }
+    const uint32_t version = row_version(*target);
+    if (version == 0 || desc.target_generation != version) {
+      error = object_error::STALE_DESCRIPTOR;
+      return nullptr;
+    }
+    error = object_error::OK;
+    return &desc;
+  }
+  SHIZUKU_HOT bool validate_method_descriptor(uint32_t caller_id,
+                                              uint32_t index,
+                                              uint32_t caller_generation,
+                                              method_descriptor_entry &out_desc,
+                                              object_error &error) const {
+    const auto *desc =
+        find_method_descriptor(caller_id, index, caller_generation, error);
+    if (desc == nullptr)
+      return false;
+    out_desc = *desc;
+    return true;
+  }
+  // そのオブジェクトを走らせるときの保護指定 (PROTECTION_*)。直接 call (記述子経路) も
+  // 通常の CALL と同じく、呼び先オブジェクトの設定を呼び出し時に引く。
+  uint32_t object_protection(uintptr_t id) const;
+  uint32_t object_generation(uintptr_t id) const {
+    return id < OBJECT_COUNT_T
+               ? ARCH::load_acquire32(const_cast<volatile uint32_t *>(
+                     &m_objects[id].instance_generation))
+               : 0;
+  }
+  uint32_t object_version(uintptr_t id) const {
+    return id < OBJECT_COUNT_T
+               ? ARCH::load_acquire32(const_cast<volatile uint32_t *>(
+                     &m_objects[id].generation))
+               : 0;
+  }
+  // 呼び先 1 件ぶんの CALL 要求 (種別・親ハンドラ・保護・窓)。CALL_METHOD と
+  // 方法記述子の直接 call が同じ引き方をするよう、ここでだけ作る。
+  call_request callee_request(uintptr_t id, uintptr_t entry_pc) const;
+
+  // ---- trap 内 (svc_dispatch) で直接処理する API の部品 ----------------------
+  //  CALL_METHOD / SET_BUDGET は dispatch 段も kobj 再入も経由せず、カーネルの svc
+  //  ハンドラがここを直接読み書きする (D1 廃止済み: カーネルと kobj の密結合は許容)。
+  //  どちらも待たず・syscall を撃たず・ループしない。錠は取らない (kobj 経由だった
+  //  従来も取っていなかった。表の書き換えと競っても、古い値で 1 回呼ぶだけ)。
+
+  // (id, method) から呼び先の CALL 要求を O(1) で引く。OK 以外のとき request は触らない。
+  // 判定と順序は従来と同じ: BAD_OBJECT → BAD_METHOD → UNDECLARED_METHOD。
+  SHIZUKU_HOT object_error method_call_request(uintptr_t id, uintptr_t method,
+                                               call_request &request) const {
+    if (id >= OBJECT_COUNT_T || !m_objects[id].created)
+      return object_error::BAD_OBJECT;
+    if (method >= METHOD_COUNT_T)
+      return object_error::BAD_METHOD;
+    const method_t entry = m_objects[id].methods[method];
+    if (entry == nullptr)
+      return object_error::UNDECLARED_METHOD; // 未 export は panic ではなくエラー
+    request = callee_request(id, (uintptr_t)entry);
+    return object_error::OK;
+  }
+  // 呼び先の表の 1 行 (読み取り専用)。trap 内の直接 call (CALL_METHOD / CALL_METHOD_DESCRIPTOR) が
+  // call_request を組まずに、台帳段と入口フレームへ行の値を直接書く (種別・世代・親ハンドラ・保護・窓は
+  // callee_request と同じ引き方)。行の型は非公開なので auto で受ける。前提: id < OBJECT_COUNT_T。
+  SHIZUKU_HOT const auto &callee_row(uintptr_t id) const { return m_objects[id]; }
+  // method 表の引き (method_call_request と同じ判定と順序: BAD_OBJECT → BAD_METHOD → UNDECLARED_METHOD)。
+  // OK のとき入口を返し、そうでなければ nullptr と error。
+  SHIZUKU_HOT method_t find_method(uintptr_t id, uintptr_t method, object_error &error) const {
+    if (id >= OBJECT_COUNT_T || !m_objects[id].created) {
+      error = object_error::BAD_OBJECT;
+      return nullptr;
+    }
+    if (method >= METHOD_COUNT_T) {
+      error = object_error::BAD_METHOD;
+      return nullptr;
+    }
+    const method_t entry = m_objects[id].methods[method];
+    if (entry == nullptr) {
+      error = object_error::UNDECLARED_METHOD; // 未 export は panic ではなくエラー
+      return nullptr;
+    }
+    error = object_error::OK;
+    return entry;
+  }
+  // find_method の行つき版: 表の行 (呼び先の id の行) も一緒に返す。呼び出し側がその行を台帳段・入口フレームの
+  // 書き出しにそのまま使えるので、id から行のアドレス (id × 行の大きさ) を作り直さない。判定と順序は
+  // find_method と同じ。OK のとき行を返して entry に入口を入れ、そうでなければ nullptr と error。
+  SHIZUKU_HOT const auto *find_method_row(uintptr_t id, uintptr_t method, object_error &error,
+                                          method_t &entry) const {
+    const auto *row = id < OBJECT_COUNT_T ? &m_objects[id] : nullptr;
+    if (row == nullptr || !row->created) {
+      error = object_error::BAD_OBJECT;
+      return decltype(row)(nullptr);
+    }
+    if (method >= METHOD_COUNT_T) {
+      error = object_error::BAD_METHOD;
+      return decltype(row)(nullptr);
+    }
+    entry = row->methods[method];
+    if (entry == nullptr) {
+      error = object_error::UNDECLARED_METHOD; // 未 export は panic ではなくエラー
+      return decltype(row)(nullptr);
+    }
+    error = object_error::OK;
+    return row;
+  }
+  // 行から世代を読む (object_generation(id) と同じ読み方。id の範囲検査は行を引いた側が済ませている)。
+  template <class Row> uint32_t instance_generation_of(const Row &row) const {
+    return ARCH::load_acquire32(const_cast<volatile uint32_t *>(&row.instance_generation));
+  }
+  // 表の錠の inline 版 (table_lock / table_unlock と同じ CAS。区間は短く syscall を含まない)。
+  // trap 内の直接 call が関数呼出しなしで取る。診断用の breadcrumb は付けない。
+  SHIZUKU_HOT void table_lock_inline() {
+    while (!ARCH::cas32(&m_table_lock, 0u, 1u)) {
+    }
+  }
+  SHIZUKU_HOT void table_unlock_inline() { ARCH::store_release32(&m_table_lock, 0u); }
+  // スケジューラが後でそのスレッドを選んだときに渡す量の既定値 [クロック]。範囲外は
+  // 従来どおり黙って何もしない。★権限検査は無い (誰でも任意スレッドの量を書ける。従来のまま)。
+  void set_budget(uintptr_t thread, uintptr_t cycles) {
+    if (thread < THREAD_COUNT_T)
+      m_budget[thread] = (uint32_t)cycles;
+  }
+
+private:
+  // The compatibility probe inspects a suspended thread's private ledger
+  // shape without exposing that inspection through the object API.
+  friend struct ::shizuku::selftest::compat_probe_access;
+  // dispatcher の host 試験が、オブジェクト表とメソッド表を直接組み立てる。
+  friend struct ::shizuku::selftest::dispatcher_test_access;
+
   // 名前の置き場。**コピーではなくポインタ**を持つ (kobj は文字列を触らない)。
   const char *m_object_name[OBJECT_COUNT_T];
   // ストリームの登録簿。番号は**こちらが割り当てる** (呼ぶ側が選ぶと、
@@ -261,39 +451,6 @@ private:
                           object_error &error);
   uintptr_t create_method_descriptor(uintptr_t target_id, uintptr_t method_index,
                                      object_error &error);
-  bool validate_method_descriptor(uint32_t caller_id, uint32_t index,
-                                    method_descriptor_entry &out_desc,
-                                    object_error &error) const {
-    if (index >= METHOD_DESCRIPTOR_CAPACITY) {
-      error = object_error::BAD_DESCRIPTOR;
-      return false;
-    }
-    if (caller_id >= OBJECT_COUNT_T || !m_objects[caller_id].created) {
-      error = object_error::BAD_DESCRIPTOR;
-      return false;
-    }
-    const auto &desc = m_objects[caller_id].method_descriptors[index];
-    if (__atomic_load_n(&desc.valid, __ATOMIC_ACQUIRE) == 0) {
-      error = object_error::BAD_DESCRIPTOR;
-      return false;
-    }
-    if (desc.owner_object != caller_id) {
-      error = object_error::BAD_DESCRIPTOR;
-      return false;
-    }
-    if (desc.target_generation == 0 ||
-        desc.target_generation != m_objects[desc.target_object].generation) {
-      error = object_error::STALE_DESCRIPTOR;
-      return false;
-    }
-    if (!m_objects[desc.target_object].created || desc.target_entry == 0) {
-      error = object_error::BAD_DESCRIPTOR;
-      return false;
-    }
-    out_desc = desc;
-    error = object_error::OK;
-    return true;
-  }
   // 名乗り。★保持して返すだけで、比較はしない (D26)。
   uintptr_t declare_name(uintptr_t name, object_error &error);
   // ---- ストリームの制御プレーン ------------------------------------------
@@ -326,11 +483,8 @@ private:
                          object_error &error);
   uintptr_t yield(object_error &error);
   uintptr_t sleep_us(uintptr_t microseconds, object_error &error);
-  uintptr_t run_for(uintptr_t thread, uintptr_t cycles, object_error &error);
   void exit_thread();
   uintptr_t kill_thread(uintptr_t thread, object_error &error);
-  // そのオブジェクトを走らせるときの保護指定 (PROTECTION_*)。
-  uint32_t object_protection(uintptr_t id) const;
   // そのオブジェクトのスレッドを走らせてよいコア (0 = どこでもよい)。
   uint32_t object_affinity(uintptr_t id) const;
   // ★軸 B (Q8)。呼び出し元ではなく**対象オブジェクトの性質**として引く —
@@ -353,8 +507,6 @@ private:
                                 object_error &error);
   uintptr_t export_method(uintptr_t method, uintptr_t entry,
                           object_error &error);
-  uintptr_t call_method(uintptr_t id, uintptr_t method, uintptr_t argument,
-                        object_error &error);
   void exit_method(uintptr_t target_depth, uintptr_t value, uintptr_t error);
   // 専用ハンドラ (HANDLER) からの子オブジェクトのメソッド終了転送 (重大指摘 2)
   void forward_child_exit(uintptr_t target_depth, uintptr_t value,
@@ -379,6 +531,9 @@ private:
   uintptr_t owner_of(uintptr_t handle, object_error &error) const;
 
   object_t m_objects[OBJECT_COUNT];
+  // 記述子の表: [持ち主][index]。行の外に出した平坦な配列なので、持ち主の行を引かずに
+  // (持ち主 × 16 + index) × 16 バイトのシフトだけで項目に届く。
+  method_descriptor_entry m_descriptors[OBJECT_COUNT][METHOD_DESCRIPTOR_CAPACITY];
   // スレッドごとの「どのオブジェクトのために作ったか」。方針側の台帳なのでここ。
   uint16_t m_thread_object[THREAD_COUNT];
   // 停止要求が出ているスレッド。★要求と回収を分けるための旗 (D55)。

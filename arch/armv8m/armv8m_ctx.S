@@ -1,5 +1,5 @@
-// ARMv8-M (Cortex-M33) の文脈退避・復帰。参照実装 (latest_ver_from_flight_robocon
-// svc_asm_handler.S) の実機検証済みコードを移植したもの。シンボル名だけ
+// ARMv8-M (Cortex-M33) の文脈退避・復帰。旧参照実装 (svc_asm_handler.S) の
+// 実機検証済みコードを移植したもの。シンボル名だけ
 // shizuku_* に付け替えてある。
 .syntax unified
 .cpu cortex-m33

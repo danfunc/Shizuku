@@ -5,7 +5,7 @@
 namespace shizuku {
 namespace concepts {
 
-// arch = ISA 依存層の要件 (docs/03_porting_policy.md D2, PORT §5.1)。
+// arch = ISA 依存層の要件 (docs/record/kernel_v2_record.typ D2, PORT §5.1)。
 // ISA ごとに書き直すのはこの concept を満たすクラス 1 つ (+ 文脈退避 asm) だけ。
 //
 // ★意味の契約 (関数を「用意したが意味が違う」形の破れを防ぐため、ここに明記する):
@@ -41,6 +41,9 @@ namespace concepts {
 //                       「実際に積まれる量」から算術で出すために使う
 // - CALL_HEADROOM     : 呼び出しフレームを積むときスタック下限の手前に残す余裕 [byte]。
 //                       呼び先のプロローグが下限を割らないだけの幅を取ること
+// - call_entry_has_return_room :
+//                       CALL 時点で、呼び先の戻りの dispatch が積む 1 枚ぶんの余白が
+//                       残るか。カーネルは CALL 時にこれを必ず問う (ARCH 側の式で答える)
 // - cas32 / store_release32 / load_acquire32 :
 //                       マルチコア atomic の継ぎ目 (DESIGN §14.5.3)。同一ベンダでも
 //                       チップで実現手段が真逆になるため、必ずここを経由する
@@ -81,6 +84,7 @@ concept arch_requires =
       { ARCH::set_priv(context, flag) };
       { ARCH::stack_limit_set(context, address) };
       { ARCH::stack_limit(const_context) } -> std::same_as<uintptr_t>;
+      { ARCH::call_entry_has_return_room(const_context, value) } -> std::same_as<bool>;
       { ARCH::HAS_CYCLE_COUNTER } -> std::convertible_to<bool>;
       requires(!bool(ARCH::HAS_CYCLE_COUNTER)) || requires {
         { ARCH::cycle_counter_enable() } -> std::same_as<bool>;

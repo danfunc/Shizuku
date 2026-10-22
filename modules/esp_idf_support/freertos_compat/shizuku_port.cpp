@@ -1,4 +1,5 @@
 #include "shizuku_port.hpp"
+#include "shizuku/rv32_abi.hpp"
 #include <atomic>
 
 extern "C" void shizuku_esp_ble_note_task_started(uint32_t task_id) __attribute__((weak));
@@ -112,13 +113,10 @@ bool shizuku_port::pending_yield_from_isr() { return g_reschedule_pending.load(s
 bool shizuku_port::consume_reschedule_pending() { return g_reschedule_pending.exchange(false,std::memory_order_acq_rel); }
 uintptr_t shizuku_port::call(shizuku::object_api api,uintptr_t a1,uintptr_t a2,uintptr_t a3,uintptr_t *value) {
 #if defined(__riscv)
-  register uintptr_t a0 asm("a0")=static_cast<uintptr_t>(api);
-  register uintptr_t a1r asm("a1")=a1;
-  register uintptr_t a2r asm("a2")=a2;
-  register uintptr_t a3r asm("a3")=a3;
-  asm volatile("ecall" : "+r"(a0), "+r"(a1r) : "r"(a2r), "r"(a3r) : "memory");
-  if(value)*value=a1r;
-  return a0;
+  // カーネルが保つのは sp / pc / a0 / a1 だけ (shizuku/rv32_abi.hpp)。退避・復元は ecall の中。
+  const auto result=shizuku::rv32_abi::ecall(static_cast<uintptr_t>(api),a1,a2,a3,0);
+  if(value)*value=result.value;
+  return result.error;
 #else
   if(g_host_syscall_hook)return g_host_syscall_hook(api,a1,a2,a3,value);
   (void)api;(void)a1;(void)a2;(void)a3;if(value)*value=0;return static_cast<uintptr_t>(shizuku::object_error::KERNEL_REFUSED);
@@ -185,7 +183,7 @@ bool shizuku_port::spawn(void (*entry)(void *),void *arg,uint32_t stack,uint32_t
     for(;object_id<=last;++object_id) {
       uintptr_t created=0;
       error=call(shizuku::object_api::CREATE_OBJECT,object_id,
-                 reinterpret_cast<uintptr_t>(&plain_task_entry),0,&created);
+                 shizuku::rv32_abi::entry_address<&shizuku_port::plain_task_entry>(),0,&created);
       if(error==0&&created==object_id)break;
     }
     if(object_id>last){packet={};return false;}

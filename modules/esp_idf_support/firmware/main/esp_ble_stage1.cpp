@@ -37,6 +37,11 @@ extern "C" BaseType_t shizuku_freertos_compat_set_ble_scheduler_boost(
 #if defined(SHIZUKU_ESP32_C6)
 extern "C" void shizuku_c6_mark_boot_phase(uint32_t phase);
 #endif
+// Provided by ble_ota only in the OTA profile. Weak references resolve to null
+// otherwise, so the FFF0-only build keeps its current GATT and GAP behavior.
+extern "C" int shizuku_esp_ota_register_service(void) __attribute__((weak));
+extern "C" int shizuku_esp_ota_gap_event(struct ble_gap_event *event) __attribute__((weak));
+extern "C" int shizuku_esp_ota_mark_running_app_valid(void) __attribute__((weak));
 
 namespace {
 constexpr uint32_t kHeapRegionDiagCapacity = 16;
@@ -1069,6 +1074,19 @@ void shizuku_esp_ble_on_reset(int reason) {
     shizuku_esp_ble_diag.nimble_last_reset_reason = reason;
 }
 
+// Accepts a pending OTA image once the host is synced and advertising. The
+// call runs at most once per boot; ESP_ERR_INVALID_STATE means the running
+// image was not pending verification, so it is the normal case and stays quiet.
+void shizuku_esp_ble_mark_running_app_valid_once(void) {
+    static bool done = false;
+    if (done || !shizuku_esp_ota_mark_running_app_valid) return;
+    done = true;
+    const int rc = shizuku_esp_ota_mark_running_app_valid();
+    if (rc != 0 && rc != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW("esp_ble", "mark_running_app_valid failed: %d", rc);
+    }
+}
+
 void shizuku_esp_ble_on_sync(void) {
     shizuku_esp_ble_diag.nimble_sync_count =
         shizuku_esp_ble_diag.nimble_sync_count + 1u;
@@ -1104,11 +1122,19 @@ void shizuku_esp_ble_on_sync(void) {
         shizuku_esp_ble_diag.stage = 0x38;
         shizuku_esp_ble_schedule_adv_retry(250);
         asm volatile("fence rw,rw" ::: "memory");
+    } else {
+        shizuku_esp_ble_mark_running_app_valid_once();
     }
 }
 
 int shizuku_esp_ble_gap_event(struct ble_gap_event *event, void *) {
     if (!event) return 0;
+    if (shizuku_esp_ota_gap_event) {
+        // BLE_HS_EBUSY: the OTA owner already holds another link and terminates
+        // this one, so the FFF0 session must not start for it.
+        const int ota_rc = shizuku_esp_ota_gap_event(event);
+        if (event->type == BLE_GAP_EVENT_CONNECT && ota_rc == BLE_HS_EBUSY) return 0;
+    }
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         shizuku_esp_ble_record_gap_event(BLE_GAP_EVENT_CONNECT,
@@ -2022,6 +2048,15 @@ extern "C" [[noreturn]] void shizuku_esp_ble_stage1_start(void)
         shizuku_esp_ble_diag.stage = 0x37;
         asm volatile("fence rw,rw" ::: "memory");
         shizuku_esp_ble_cooperative_wait();
+    }
+    // NUS and OTA services join the same GATT table before the host task starts.
+    if (shizuku_esp_ota_register_service) {
+        const int ota_gatt_rc = shizuku_esp_ota_register_service();
+        if (ota_gatt_rc != 0) {
+            shizuku_esp_ble_diag.stage = 0x37;
+            asm volatile("fence rw,rw" ::: "memory");
+            shizuku_esp_ble_cooperative_wait();
+        }
     }
 
     const uint32_t host_tasks_before = shizuku_esp_ble_diag.task_create_successes;

@@ -1,0 +1,33 @@
+load("@hedron_compile_commands//:refresh_compile_commands.bzl", "refresh_compile_commands")
+
+# 既定ターゲット: RP2350 / Pico 2 W
+refresh_compile_commands(
+    name = "refresh_compile_commands",
+    targets = {
+        "//firmware:shizuku_uf2": "--config=rp2350_pico2_w",
+    },
+)
+
+# 切り替え用: RP2040 / XIAO
+refresh_compile_commands(
+    name = "refresh_compile_commands_rp2040",
+    targets = {
+        "//firmware:shizuku_uf2": "--config=rp2040_xiao",
+    },
+)
+
+# 切り替え用: ESP32-C6
+refresh_compile_commands(
+    name = "refresh_compile_commands_c6",
+    targets = {
+        "//:shizuku_kernel": "--config=esp32c6",
+    },
+)
+
+# 切り替え用: RP2350 v3gw profile
+refresh_compile_commands(
+    name = "refresh_compile_commands_v3gw",
+    targets = {
+        "//firmware:shizuku_uf2": "--config=rp2350_pico2_w --config=v3gw",
+    },
+)

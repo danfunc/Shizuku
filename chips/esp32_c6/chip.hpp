@@ -4,13 +4,20 @@
 // ★ESP-IDF / pico-sdk を一切 include しない (chips の依存閉包はそれを含まない)。
 // ★fail-closed gate (SHIZUKU_C6_SKELETON_PERMITTED) はここに置かない。rv32_c6.hpp の互換入口に残す。
 #include <cstdint>
-#ifndef SHIZUKU_EXP_C6_STAGE1
-#define SHIZUKU_EXP_C6_STAGE1 1
-#endif
 #include "arch/riscv/rv32.hpp"
 
-#ifndef SHIZUKU_RAM_TEXT
-#define SHIZUKU_RAM_TEXT __attribute__((section(".iram1.text")))
+// hot 経路 (CALL_METHOD_DESCRIPTOR とその RETURN) を IRAM へ置くための配置マクロ。
+// kernel 側の既定は shizuku/hot.hpp の空定義で、この chip 以外は変わらない。
+// 関数ごとに ".iram1.<N>" と一意の section 名にする (IDF の IRAM_ATTR と同じ方式)。
+// 同名 section に COMDAT のテンプレートと通常関数を混ぜると GCC が section type conflict で止まる。
+// リンカ側は ESP-IDF 標準の `*(.iram1 .iram1.*)` で拾う (この checkout 内の ld は未確認)。
+#define SHIZUKU_CHIP_STR_(x) #x
+#define SHIZUKU_CHIP_STR(x) SHIZUKU_CHIP_STR_(x)
+#undef SHIZUKU_HOT
+#if defined(__riscv)
+#define SHIZUKU_HOT __attribute__((section(".iram1." SHIZUKU_CHIP_STR(__COUNTER__))))
+#else
+#define SHIZUKU_HOT
 #endif
 
 namespace shizuku::chips::esp32_c6 {
@@ -21,18 +28,13 @@ namespace shizuku::chips::esp32_c6 {
 struct plic_vector_mode {
   // M-only pilot の policy 値 (従来値のまま。generic arch からは IntMode 経由で参照)。
   static constexpr uint32_t CALL_HEADROOM = 256;
-  // ESP32-C6 TRM Version 1.2 Chapter 1 (page 42, 53-54) & ESP-IDF (SOC_CPU_HAS_CSR_PC=1):
-  // mpcer(0x7E0)/mpcmr(0x7E1) による custom PCCR (mpccr=0x7E2) サイクルカウンタを有効化。
-  // M-mode 専用 (段0 candidate: M-only)。非特権 U-mode 0x802 は未検証・未実装のため不使用。
+  // M-only パイロット向けサイクルカウンタ (CSR 0x7E0/0x7E1/0x7E2)。U-mode は未検証。
   static constexpr bool HAS_CYCLE_COUNTER = true;
   static constexpr uint32_t TIMER_MAX_CYCLES = 0xFFFFFFFF;
   static constexpr uint32_t TIMER_MIN_CYCLES = 100;
 
   static bool cycle_counter_enable();
   static uint32_t cycle_counter_read();
-
-  static bool is_kstack_address(uintptr_t addr);
-  static uintptr_t kstack_limit();
 
   static bool in_interrupt();
   static bool current_priv();

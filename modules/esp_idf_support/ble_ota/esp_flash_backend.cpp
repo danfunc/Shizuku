@@ -31,7 +31,7 @@ bool begin(void *opaque, uint32_t total_bytes, uint32_t, xno::ota::protocol::Mod
   s->handle_open = true;
   s->image_validated = false;
   s->commit_acknowledged = false;
-  s->lifecycle = after_begin(true);
+  s->lifecycle = xno::ota::after_begin(true);
   return true;
 }
 
@@ -58,22 +58,22 @@ bool validate(void *opaque, uint32_t total_bytes) {
   const esp_err_t rc = esp_ota_end(s->handle);
   s->handle_open = false; // esp_ota_end consumes the handle on both outcomes.
   if (rc != ESP_OK) {
-    s->lifecycle = after_validate(s->lifecycle, false);
+    s->lifecycle = xno::ota::after_validate(s->lifecycle, false);
     return false;
   }
   s->image_validated = true;
-  s->lifecycle = after_validate(s->lifecycle, true);
+  s->lifecycle = xno::ota::after_validate(s->lifecycle, true);
   return true;
 }
 
 bool activate(void *opaque) {
   auto *s = static_cast<flash_session *>(opaque);
   if (!s || !s->partition || !s->image_validated || !s->commit_acknowledged ||
-      !may_activate(s->lifecycle))
+      !xno::ota::may_activate(s->lifecycle))
     return false;
   if (esp_ota_set_boot_partition(s->partition) != ESP_OK)
     return false;
-  s->lifecycle = phase::activated;
+  s->lifecycle = xno::ota::phase::activated;
   return true;
 }
 
@@ -88,7 +88,7 @@ void abort(void *opaque) {
   s->image_bytes = 0;
   s->image_validated = false;
   s->commit_acknowledged = false;
-  s->lifecycle = after_abort();
+  s->lifecycle = xno::ota::after_abort();
 }
 
 } // namespace

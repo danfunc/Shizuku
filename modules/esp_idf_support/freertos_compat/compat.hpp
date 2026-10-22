@@ -17,7 +17,12 @@ constexpr uint64_t kForeverRecheckTicks = 1;
 // It keeps headroom for 8 PLAIN task slots and 24 synchronization objects.
 constexpr size_t kMaxTasks = 8, kMaxObjects = 24, kMaxWaiters = 4;
 // NimBLE's NPL event-queue length is controller supplied, not a fixed small count.
+#if defined(SHIZUKU_ESP32_C6)
+// OTA RX: two 518-byte packets. 1036 is already a multiple of four.
+constexpr size_t kQueueStorageBytes = 1036;
+#else
 constexpr size_t kQueueStorageBytes = 1024;
+#endif
 #else
 constexpr size_t kMaxTasks = 16, kMaxObjects = 32, kMaxWaiters = 16;
 constexpr size_t kQueueStorageBytes = 1024;

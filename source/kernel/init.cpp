@@ -14,6 +14,7 @@ template <> void KERNEL::init() {
   m_thread_count = 0;
   for (uintptr_t core = 0; core < CORE_COUNT; ++core) {
     m_current[core] = 0;
+    m_current_thread[core] = nullptr; // set_thread_storage が渡されたら張る
     m_armed[core] = 0;
   }
   m_step_target = NO_STEP_TARGET;
@@ -42,14 +43,14 @@ template <> void KERNEL::bootstrap(
   thread.context = &m_threads[0].context;
   set_thread_ledger(0, ledger, ledger_capacity, 1,
                     (uint32_t)object_kind::PLAIN,
-                    m_object_svc_handler_object, m_object_svc_handler);
+                    m_object_svc_handler_object, m_object_svc_handler, 1);
   // ★ブートスレッドは一般オブジェクトとして走り出す。svc はトランポリンを通って
   //   ハンドラへ届く (ここを HANDLER にすると、ブート直後の svc がハンドラを
   //   経由せずプリミティブとして解釈されてしまう)。
   thread.set_state(THREAD::state_t::RUNNING);
   ARCH::stack_limit_set(*thread.context, limit);
   ARCH::set_priv(*thread.context, true);
-  m_current[BOARD::core_num()] = 0;
+  set_current(BOARD::core_num(), 0);
 
   // スレッドスタックへ移って entry を呼ぶ (戻らない)。以後このスレッドは
   // 「フレームを 1 枚も積んでいない」= ハンドラの枠の外なので、撃った svc は
@@ -76,7 +77,7 @@ void KERNEL::bootstrap_secondary(uint32_t thread, void (*entry)(),
   adopted.context = &m_threads[thread].context;
   set_thread_ledger(thread, ledger, ledger_capacity, 1,
                     (uint32_t)object_kind::PLAIN,
-                    m_object_svc_handler_object, m_object_svc_handler);
+                    m_object_svc_handler_object, m_object_svc_handler, 1);
   // ★このコアでしか走らせない。他コアが拾うと、今この CPU が走らせている文脈を
   //   別コアが同時に走らせることになる (claim の CAS は「READY を取る」ための
   //   ものであって、既に走っているものは守れない)。
@@ -84,7 +85,7 @@ void KERNEL::bootstrap_secondary(uint32_t thread, void (*entry)(),
   adopted.set_state(THREAD::state_t::RUNNING);
   ARCH::stack_limit_set(*adopted.context, limit);
   ARCH::set_priv(*adopted.context, true);
-  m_current[BOARD::core_num()] = thread;
+  set_current(BOARD::core_num(), thread);
 
   ARCH::enter_thread_mode(top, limit, entry);
 }

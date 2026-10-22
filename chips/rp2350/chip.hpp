@@ -5,10 +5,6 @@
 // ★名前は k 接頭辞にする (SDK の XIP_BASE / SRAM_END はマクロ)。
 #include <cstdint>
 
-#ifndef SHIZUKU_RAM_TEXT
-#define SHIZUKU_RAM_TEXT __attribute__((section(".time_critical.text")))
-#endif
-
 namespace shizuku::chips::rp2350 {
 struct chip {
   // RP2350 は Cortex-M33 x2 (この構成)

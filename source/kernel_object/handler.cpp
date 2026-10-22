@@ -9,25 +9,15 @@
 //    RETURN count にし、kernel が ledger の floor と照合する。
 #include "shizuku/kernel.hpp"
 #include "shizuku/kernel_object.hpp"
+#include "shizuku/method_entry.hpp"
 #include "shizuku/svc_attributes.hpp"
+#include "shizuku/hot.hpp"
 #if defined(SHIZUKU_CRASH_RECORD)
 #include "shizuku/objects/usb_cdc.hpp"
 #endif
 
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
 extern "C" void shizuku_boot_trace_phase(uint32_t);
-#endif
-
-#if defined(SHIZUKU_C6_STAGE05_TRACE) && SHIZUKU_C6_STAGE05_TRACE
-extern "C" void shizuku_c6_stage05_hook_handler(void);
-#endif
-
-#ifndef SHIZUKU_STAGE05_CPP_ATTR
-#if defined(SHIZUKU_C6_STAGE05_IRAM_CPP) && SHIZUKU_C6_STAGE05_IRAM_CPP
-#define SHIZUKU_STAGE05_CPP_ATTR __attribute__((section(".iram1.text")))
-#else
-#define SHIZUKU_STAGE05_CPP_ATTR
-#endif
 #endif
 
 namespace shizuku {
@@ -51,12 +41,9 @@ static_assert((uintptr_t)object_api::EXIT_METHOD == (uintptr_t)primitive::RETURN
 // 実装より前に使う (下の入口が handle を呼ぶ) ので、特殊化の宣言を先に置く。
 // これが無いと暗黙の実体化が先に起きて「実体化後の特殊化」になる。
 template <>
-SHIZUKU_STAGE05_CPP_ATTR
 uintptr_t KERNEL_OBJECT::handle(uintptr_t, uintptr_t, uintptr_t, uintptr_t,
                                 uintptr_t);
-template <>
-SHIZUKU_STAGE05_CPP_ATTR
-uintptr_t KERNEL_OBJECT::current_object(uint32_t) const;
+template <> uintptr_t KERNEL_OBJECT::current_object(uint32_t) const;
 template <> uintptr_t KERNEL_OBJECT::caller_object(uint32_t) const;
 template <> void KERNEL_OBJECT::init();
 template <> uintptr_t KERNEL_OBJECT::handler_entry();
@@ -76,9 +63,6 @@ uintptr_t KERNEL_OBJECT::set_object_affinity(uintptr_t, uintptr_t,
                                              object_error &);
 template <>
 uintptr_t KERNEL_OBJECT::export_method(uintptr_t, uintptr_t, object_error &);
-template <>
-uintptr_t KERNEL_OBJECT::call_method(uintptr_t, uintptr_t, uintptr_t,
-                                     object_error &);
 template <> void KERNEL_OBJECT::exit_method(uintptr_t, uintptr_t, uintptr_t);
 template <> uintptr_t KERNEL_OBJECT::return_to_depth(uint32_t, uintptr_t,
                                                      uintptr_t);
@@ -89,8 +73,6 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t, uintptr_t, uintptr_t,
                                       object_error &);
 template <> uintptr_t KERNEL_OBJECT::yield(object_error &);
 template <> uintptr_t KERNEL_OBJECT::sleep_us(uintptr_t, object_error &);
-template <>
-uintptr_t KERNEL_OBJECT::run_for(uintptr_t, uintptr_t, object_error &);
 template <> void KERNEL_OBJECT::exit_thread();
 template <>
 uintptr_t KERNEL_OBJECT::kill_thread(uintptr_t thread, object_error &error);
@@ -149,7 +131,6 @@ template <> bool KERNEL_OBJECT::arena_release(arena &, uintptr_t);
 //   参照実装はこれを callee-saved レジスタで渡し、C の引数へ変換する naked シムを
 //   必要としていた — push 順と引数位置の対応を何度も間違えた箇所なので、構造ごと
 //   無くすのが正しい。
-SHIZUKU_STAGE05_CPP_ATTR
 uintptr_t handler_entry_point(uintptr_t a0, uintptr_t a1, uintptr_t a2,
                               uintptr_t a3, uintptr_t unwind_floor) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
@@ -159,14 +140,21 @@ uintptr_t handler_entry_point(uintptr_t a0, uintptr_t a1, uintptr_t a2,
 }
 
 template <> uintptr_t KERNEL_OBJECT::handler_entry() {
-  return (uintptr_t)&handler_entry_point;
+  return method_entry<KERNEL::ARCH, &handler_entry_point>();
 }
 
 // ★カーネルの簿記に貸す記憶。**静的領域に置く**のが要点で、ここは region の外
 //   (= 特権のみ) なので非特権オブジェクトから届かない。用意するのはこちら
 //   (オブジェクトランド) で、置き場所の条件はカーネルが検査する。
+#if defined(SHIZUKU_LEAN_LEDGER)
+static_assert(sizeof(uintptr_t) != 4 || sizeof(KERNEL::call_ledger_entry) == 40,
+              "lean call ledger entry must be 40 bytes on 32-bit targets");
+#else
 static_assert(sizeof(KERNEL::call_ledger_entry) == 16,
               "call ledger entry must be 16 bytes on supported targets");
+#endif
+static_assert(KERNEL_OBJECT::MAX_DEPTH <= KERNEL::THREAD::CALL_IDENTITY_CAPACITY,
+              "per-thread call identity snapshot stack must cover MAX_DEPTH");
 #if defined(SHIZUKU_C5_BLE)
 alignas(8) static uint8_t g_bookkeeping_storage[16 * 1024];
 #else
@@ -184,14 +172,17 @@ template <> void KERNEL_OBJECT::init() {
   for (uintptr_t id = 0; id < OBJECT_COUNT; ++id) {
     m_objects[id].created = false;
     m_objects[id].flags = 0;
+    m_objects[id].creator_object = (uint32_t)NO_OBJECT;
+    m_objects[id].kernel_role = (id == KERNEL_OBJECT_ID);
     m_objects[id].region_base = 0;
     m_objects[id].region_limit = 0;
-    m_objects[id].generation = 0;
+    ARCH::store_release32(&m_objects[id].generation, 0u);
+    ARCH::store_release32(&m_objects[id].instance_generation, 0u);
     m_object_name[id] = nullptr;
     for (uintptr_t method = 0; method < METHOD_COUNT; ++method)
       m_objects[id].methods[method] = nullptr;
-    for (auto &d : m_objects[id].method_descriptors)
-      d.valid = 0;
+    for (auto &d : m_descriptors[id])
+      d.target = nullptr;
   }
   for (uintptr_t thread = 0; thread < THREAD_COUNT; ++thread) {
     m_kill_pending[thread] = 0;
@@ -234,6 +225,8 @@ template <> void KERNEL_OBJECT::init() {
   arena_init(m_objects_arena, (uintptr_t)heap.value(), OBJECT_ARENA_BYTES);
   // KERNEL_OBJECT (0) とブートアプリ ROOT_OBJECT (1) は最初から在るものとして扱う。
   m_objects[KERNEL_OBJECT_ID].created = true;
+  ARCH::store_release32(&m_objects[KERNEL_OBJECT_ID].generation, 1u);
+  ARCH::store_release32(&m_objects[KERNEL_OBJECT_ID].instance_generation, 1u);
   m_object_name[KERNEL_OBJECT_ID] = "kernel_object";
   // ★svc ハンドラを務めるのはこのオブジェクト = 種別は HANDLER。カーネルが
   //   「0 番だから」で決めるのではなく、**こちらが役として宣言する**。
@@ -242,6 +235,8 @@ template <> void KERNEL_OBJECT::init() {
   m_objects[KERNEL_OBJECT_ID].parent_handler_object = (uint32_t)KERNEL_OBJECT_ID;
   m_objects[KERNEL_OBJECT_ID].parent_handler_entry = handler_entry();
   m_objects[ROOT_OBJECT].created = true;
+  ARCH::store_release32(&m_objects[ROOT_OBJECT].generation, 1u);
+  ARCH::store_release32(&m_objects[ROOT_OBJECT].instance_generation, 1u);
   m_object_name[ROOT_OBJECT] = "root";
   m_objects[ROOT_OBJECT].kind = object_kind::PLAIN;
   m_objects[ROOT_OBJECT].parent_handler_object = (uint32_t)KERNEL_OBJECT_ID;
@@ -372,18 +367,33 @@ template <> uintptr_t KERNEL_OBJECT::return_to_depth(uint32_t target_depth,
   return result.error;
 }
 
+// ---- 診断専用 (挙動不変) ------------------------------------------------------
+// create_object が失敗 return する直前の最後の error と、その生成者・番号。
+// sysbus から llvm-nm -C で引けるよう外部リンケージにしてある (static だと読めない)。
+extern "C" {
+__attribute__((used)) volatile uint32_t shizuku_kobj_last_create_error = 0;
+__attribute__((used)) volatile uint32_t shizuku_kobj_last_create_creator = 0;
+__attribute__((used)) volatile uint32_t shizuku_kobj_last_create_id = 0;
+}
+static void note_create_failure(uintptr_t id, uint32_t creator, object_error error) {
+  shizuku_kobj_last_create_error = (uint32_t)error;
+  shizuku_kobj_last_create_creator = creator;
+  shizuku_kobj_last_create_id = (uint32_t)id;
+}
+
 template <>
 uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
                                        uintptr_t flags, object_error &error) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(421);
 #endif
-  if (id >= OBJECT_COUNT || id == KERNEL_OBJECT_ID || id == ROOT_OBJECT) {
-    error = object_error::BAD_OBJECT;
-    return 0;
-  }
   const uint32_t creator =
       (uint32_t)current_object(kernel_instance.current_thread_id());
+  if (id >= OBJECT_COUNT || id == KERNEL_OBJECT_ID || id == ROOT_OBJECT) {
+    error = object_error::BAD_OBJECT;
+    note_create_failure(id, creator, error);
+    return 0;
+  }
   const bool is_privileged =
       (object_protection(creator) == PROTECTION_PRIVILEGED);
 
@@ -394,6 +404,17 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
           creator == ROOT_OBJECT || creator == KERNEL_OBJECT_ID, false, flags,
           INTERNAL_FLAG_HANDLER)) {
     error = object_error::NOT_PRIVILEGED;
+    note_create_failure(id, creator, error);
+    return 0;
+  }
+
+  // ★kernel 役の付与は ROOT か kernel 役の生成者だけ (HANDLER と同じ信頼の根)。
+  //   一般オブジェクトが立てようとしたら、枠も表も触らずに NOT_PRIVILEGED で拒否する。
+  const bool is_kernel_role = (flags & INTERNAL_FLAG_KERNEL_ROLE) != 0;
+  if (is_kernel_role && creator != ROOT_OBJECT &&
+      !m_objects[creator].kernel_role) {
+    error = object_error::NOT_PRIVILEGED;
+    note_create_failure(id, creator, error);
     return 0;
   }
 
@@ -408,23 +429,50 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     shizuku_boot_trace_phase(422);
 #endif
+    // 世代が尽きたら作成/差し替え/export を拒否 (fail-closed)。再利用させない
+    const uint32_t current_generation =
+        ARCH::load_acquire32(&m_objects[id].generation);
+    const uint32_t current_instance_generation =
+        ARCH::load_acquire32(&m_objects[id].instance_generation);
+    if (replace && current_generation == UINT32_MAX) {
+      error = object_error::BAD_OBJECT;
+      note_create_failure(id, creator, error);
+      return 0;
+    }
+    if (replace && current_instance_generation == UINT32_MAX) {
+      error = object_error::BAD_OBJECT;
+      note_create_failure(id, creator, error);
+      return 0;
+    }
+    // ★差し替えても kernel 役は引き継ぐ (番号ではなく役で判定するので、差し替え後の
+    //   新しい中身も同じ扱いになる)。付与の要求が無くても、旧い役は消えない。
+    const bool kept_kernel_role =
+        m_objects[id].created && m_objects[id].kernel_role;
     if (!m_objects[id].created || replace) {
       m_objects[id].created = true;
+      // 生成者は差し替えのたびに記録し直す (旧 creator の権限を新しい中身へ残さない)。
+      m_objects[id].creator_object = (uint32_t)creator;
+      m_objects[id].kernel_role = kept_kernel_role || is_kernel_role;
       m_objects[id].flags =
-          (uint32_t)(flags & ~(OBJECT_REPLACE | INTERNAL_FLAG_HANDLER));
-      if (!m_objects[id].generation || replace) {
-        if (m_objects[id].generation < UINT32_MAX) {
-          ++m_objects[id].generation;
-        } else {
-          m_objects[id].generation = UINT32_MAX;
-        }
-        if (m_objects[id].generation == 0) m_objects[id].generation = 1;
+          (uint32_t)(flags & ~(OBJECT_REPLACE | INTERNAL_FLAG_HANDLER |
+                               INTERNAL_FLAG_KERNEL_ROLE));
+      if (current_generation == 0 || replace) {
+        ARCH::store_release32(&m_objects[id].generation,
+                             current_generation + 1u);
+      }
+      if (current_instance_generation == 0 || replace) {
+        ARCH::store_release32(&m_objects[id].instance_generation,
+                             current_instance_generation + 1u);
       }
       if (replace) {
-        for (auto &d : m_objects[id].method_descriptors) {
-          d.valid = 0;
+        // 差し替えた持ち主の記述子は全部無効 (target = nullptr)。呼び先を差し替えた場合は
+        // 呼び先の version (generation) が上がるので、世代照合で STALE になる。
+        for (auto &d : m_descriptors[id]) {
+          __atomic_store_n(&d.target, decltype(d.target)(nullptr), __ATOMIC_RELEASE);
         }
       }
+      for (uintptr_t method = 1; method < METHOD_COUNT; ++method)
+        m_objects[id].methods[method] = nullptr;
       // 最初のメソッドは生成側が与える (オブジェクト自身はまだ走っていないので
       // 自分では登録できない)。以後は EXPORT_METHOD で自分が増やす。
       m_objects[id].methods[0] = (method_t)entry;
@@ -470,6 +518,7 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
         "[KOBJ] object %lu is already taken by '%s' — create refused\n",
         (unsigned long)id, taken_by != nullptr ? taken_by : "(unnamed)");
     error = object_error::ALREADY_EXISTS;
+    note_create_failure(id, creator, error);
     return 0;
   }
 }
@@ -479,7 +528,7 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
 //   直に呼ばない」オブジェクトだけで (静的データもペリフェラルも region の外 =
 //   特権のみになるため。DESIGN §11.2.2)、今それを満たすのは宣言した相手だけ。
 //   arena が入って既定を反転できるようになるまでは、opt-in にしておく。
-template <> uint32_t KERNEL_OBJECT::object_protection(uintptr_t id) const {
+template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::object_protection(uintptr_t id) const {
   return (m_objects[id].flags & OBJECT_UNPRIVILEGED) ? PROTECTION_UNPRIVILEGED
                                                      : PROTECTION_PRIVILEGED;
 }
@@ -508,10 +557,10 @@ uintptr_t KERNEL_OBJECT::set_object_affinity(uintptr_t id, uintptr_t cores,
   return 1;
 }
 
-template <> uint32_t KERNEL_OBJECT::object_region_base(uintptr_t id) const {
+template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::object_region_base(uintptr_t id) const {
   return m_objects[id].region_base;
 }
-template <> uint32_t KERNEL_OBJECT::object_region_limit(uintptr_t id) const {
+template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::object_region_limit(uintptr_t id) const {
   return m_objects[id].region_limit;
 }
 
@@ -541,8 +590,18 @@ uintptr_t KERNEL_OBJECT::grant_region(uintptr_t target, uintptr_t base,
   }
 #endif
   table_guard guard;
+  if (!m_objects[target].created) {
+    error = object_error::BAD_OBJECT;
+    return 0;
+  }
+  const uint32_t generation = ARCH::load_acquire32(&m_objects[target].generation);
+  if (generation == UINT32_MAX) {
+    error = object_error::BAD_OBJECT;
+    return 0;
+  }
   m_objects[target].region_base = (uint32_t)base;
   m_objects[target].region_limit = (uint32_t)limit;
+  ARCH::store_release32(&m_objects[target].generation, generation + 1u);
   return 1;
 }
 
@@ -557,12 +616,19 @@ uintptr_t KERNEL_OBJECT::export_method(uintptr_t method, uintptr_t entry,
     return 0;
   }
   table_guard guard;
-  m_objects[self].methods[method] = (method_t)entry;
-  if (m_objects[self].generation < UINT32_MAX) {
-    ++m_objects[self].generation;
-  } else {
-    m_objects[self].generation = UINT32_MAX;
+  if (self >= OBJECT_COUNT || !m_objects[self].created ||
+      kernel_instance.current_object_generation() != object_generation(self)) {
+    error = object_error::STALE_DESCRIPTOR;
+    return 0;
   }
+  // 世代が尽きたら作成/差し替え/export を拒否 (fail-closed)。再利用させない
+  const uint32_t generation = ARCH::load_acquire32(&m_objects[self].generation);
+  if (generation == UINT32_MAX) {
+    error = object_error::BAD_OBJECT;
+    return 0;
+  }
+  m_objects[self].methods[method] = (method_t)entry;
+  ARCH::store_release32(&m_objects[self].generation, generation + 1u);
   return self;
 }
 
@@ -570,6 +636,7 @@ template <>
 uintptr_t KERNEL_OBJECT::create_method_descriptor(uintptr_t target_id,
                                                    uintptr_t method_index,
                                                    object_error &error) {
+  table_guard guard;
   if (target_id >= OBJECT_COUNT || !m_objects[target_id].created) {
     error = object_error::BAD_OBJECT;
     return 0;
@@ -582,7 +649,9 @@ uintptr_t KERNEL_OBJECT::create_method_descriptor(uintptr_t target_id,
     error = object_error::UNDECLARED_METHOD;
     return 0;
   }
-  if (m_objects[target_id].generation == 0) {
+  const uint32_t target_generation =
+      ARCH::load_acquire32(&m_objects[target_id].generation);
+  if (target_generation == 0) {
     error = object_error::BAD_DESCRIPTOR;
     return 0;
   }
@@ -592,10 +661,37 @@ uintptr_t KERNEL_OBJECT::create_method_descriptor(uintptr_t target_id,
     error = object_error::BAD_OBJECT;
     return 0;
   }
-  table_guard guard;
+  const uint32_t caller_generation = kernel_instance.current_object_generation();
+  if (caller_generation != object_generation(caller_id)) {
+    error = object_error::STALE_DESCRIPTOR;
+    return 0;
+  }
+  // ★作成権限 (方針)。自分自身 / 親 (対象が呼び出し元の creator) / 直接の子 (呼び出し元が
+  //   対象の creator) は許可。呼び出し元が kernel 役 (kernel_role) を負うなら相手を問わず
+  //   許可 (役で判定し、ID では判定しない)。兄弟・孫・無関係は NOT_PRIVILEGED。
+  //   拒否はここで返すので、枠も表も副作用は無い (枠探索より前)。
+  //   NOT_PRIVILEGED を使うのは、既存の「権限の無い呼び出し」の拒否と同じ語彙に揃えるため。
+  const bool caller_is_kernel_role = m_objects[caller_id].kernel_role;
+  const bool permitted =
+      caller_is_kernel_role || target_id == caller_id ||
+      m_objects[caller_id].creator_object == target_id ||
+      m_objects[target_id].creator_object == caller_id;
+  if (!permitted) {
+    error = object_error::NOT_PRIVILEGED;
+    return 0;
+  }
   int free_slot = -1;
   for (int i = 0; i < (int)METHOD_DESCRIPTOR_CAPACITY; ++i) {
-    if (m_objects[caller_id].method_descriptors[i].valid == 0) {
+    auto &candidate = m_descriptors[caller_id][i];
+    const object_t *candidate_target = __atomic_load_n(&candidate.target, __ATOMIC_ACQUIRE);
+    bool valid = candidate_target != nullptr;
+    if (valid && (candidate.target_generation == 0 ||
+                  candidate.target_generation != row_version(*candidate_target))) {
+      // Stale indices are never recycled within this owner generation: API 33
+      // carries only the index, so reuse would turn an old handle into a new call.
+      continue;
+    }
+    if (!valid) {
       free_slot = i;
       break;
     }
@@ -604,79 +700,34 @@ uintptr_t KERNEL_OBJECT::create_method_descriptor(uintptr_t target_id,
     error = object_error::NO_DESCRIPTOR; // 21
     return 0;
   }
-  auto &desc = m_objects[caller_id].method_descriptors[free_slot];
-  desc.target_object = (uint32_t)target_id;
+  auto &desc = m_descriptors[caller_id][free_slot];
   desc.target_entry = (uintptr_t)m_objects[target_id].methods[method_index];
-  desc.target_generation = m_objects[target_id].generation;
-  desc.owner_object = caller_id;
-  desc.method_index = (uint32_t)method_index;
-  desc.flags = m_objects[target_id].flags;
-  desc.region_base = m_objects[target_id].region_base;
-  desc.region_limit = m_objects[target_id].region_limit;
-  ARCH::store_release32(&desc.valid, 1u);
+  desc.target_generation = target_generation;
+  desc.owner_generation = caller_generation;
+  // 公開は target を最後に release で書く (呼び側は target を acquire で読んでから他の欄を読む)。
+  // ここまでに target_id が created で methods[method_index] が非 null と確かめてある。
+  __atomic_store_n(&desc.target, (const object_t *)&m_objects[target_id], __ATOMIC_RELEASE);
   return (uintptr_t)free_slot;
 }
 
-template <>
-uintptr_t KERNEL_OBJECT::call_method(uintptr_t id, uintptr_t method,
-                                     uintptr_t argument, object_error &error) {
-  const uint32_t thread = kernel_instance.current_thread_id();
-  if (id >= OBJECT_COUNT || !m_objects[id].created) {
-    error = object_error::BAD_OBJECT;
-    return 0;
-  }
-  if (method >= METHOD_COUNT) {
-    error = object_error::BAD_METHOD;
-    return 0;
-  }
-  const method_t entry = m_objects[id].methods[method];
-  if (entry == nullptr) {
-    // 未 export は panic ではなくエラー (呼び出し元は待って再試行できる)。
-    error = object_error::UNDECLARED_METHOD;
-    return 0;
-  }
-  uint32_t call_count = 0;
-  for (uint32_t i = 0; i < kernel_instance.ledger_size(thread); ++i)
-    call_count += kernel_instance.ledger_entry(thread, i)->via == KERNEL::LEDGER_CALL;
-  if (call_count >= MAX_DEPTH) {
-    error = object_error::NO_STACK;
-    return 0;
-  }
-
+template <> SHIZUKU_HOT call_request KERNEL_OBJECT::callee_request(uintptr_t id, uintptr_t entry_pc) const {
   call_request request{};
-  request.entry_pc = (uintptr_t)entry;
+  request.entry_pc = entry_pc;
   request.callee_object = (uint32_t)id;                    // ★呼び先オブジェクトID
   request.callee_kind = (uint32_t)object_kind_of(id);      // ★呼び先の種別
+  request.callee_generation = object_generation(id);
   request.parent_handler_object = m_objects[id].parent_handler_object;
   request.parent_handler_entry = m_objects[id].parent_handler_entry;
   request.protection = object_protection(id);
   request.region_base = object_region_base(id);
   request.region_limit = object_region_limit(id);
-  request.args[0] = argument;
-
-  // CALL 段はカーネルが push する。失敗時は台帳に段が残らない。
-  const auto result =
-      ARCH::syscall((uintptr_t)primitive::CALL, (uintptr_t)&request);
-  // ★成功した場合、この syscall は呼び先が戻ってから返る。戻ってきた時点で
-  //   台帳は exit_method 側が既に戻している。
-  if (result.error != (uintptr_t)kernel_error::OK) {
-    error = result.error == (uintptr_t)kernel_error::NO_STACK
-                ? object_error::NO_STACK
-                : object_error::BAD_OBJECT;
-    return 0;
-  }
-  return result.value;
+  return request;
 }
 
 template <>
 void KERNEL_OBJECT::exit_method(uintptr_t target_depth, uintptr_t value,
                                 uintptr_t error) {
-  const uint32_t thread = kernel_instance.current_thread_id();
-
-  bool has_call = false;
-  for (uint32_t index = 0; index < kernel_instance.ledger_size(thread); ++index)
-    has_call |= kernel_instance.ledger_entry(thread, index)->via == KERNEL::LEDGER_CALL;
-  if (target_depth == 0 && !has_call) {
+  if (target_depth == 0 && kernel_instance.current_call_count() == 0) {
     exit_thread();
     return;
   }
@@ -748,6 +799,7 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
   request.stack_base = stack;
   request.stack_bytes = THREAD_STACK_BYTES;
   request.object_id = (uint32_t)id; // ★所属オブジェクトIDをカーネルに渡す
+  request.object_generation = object_generation(id);
   request.kind = (uint32_t)object_kind_of(id); // ★種別も同じく渡す
   request.parent_handler_object = m_objects[id].parent_handler_object;
   request.parent_handler_entry = m_objects[id].parent_handler_entry;
@@ -778,7 +830,8 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
 // ★ここが方針の中心。カーネルは「渡す機構」(バトン渡しと時限つきの貸し出し) しか
 //   持たず、どちらでどれだけ渡すかはここが決める:
 //     時限あり (既定) → 貸す。自分から返さないスレッドがいても期限で戻る
-//     時限 0          → バトン渡し。返ってこない可能性を承知で渡す相手だけに使う
+//     時限 0          → 無制限で貸す (SWITCH = GRANT(無制限))。期限では戻らないが、
+//                        借り手の YIELD では戻る。期限で取り上げたくない相手だけに使う
 // ★回転子から順に見る。自分の直後だけを見ると同じ相手ばかり選ばれて飢餓が出る。
 template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
 #if defined(SHIZUKU_CRASH_RECORD)
@@ -924,7 +977,7 @@ uintptr_t KERNEL_OBJECT::sleep_us(uintptr_t microseconds, object_error &error) {
              KERNEL::THREAD::state_t::SUSPENDED) {
     // 借り手として走っているなら、貸し手へ返すのが先 (又貸しはしない)。
     if (kernel_instance.grant_active()) {
-      ARCH::syscall((uintptr_t)primitive::SWITCH, 0);
+      ARCH::syscall((uintptr_t)primitive::SWITCH, kernel_instance.grant_lender());
       continue;
     }
     schedule(self); // 誰も居なければ締切まで空回りする
@@ -937,31 +990,13 @@ template <>
 uintptr_t KERNEL_OBJECT::yield(object_error &error) {
   (void)error;
   const uint32_t self = kernel_instance.current_thread_id();
-  // 借り手として走っているなら、譲る先を選ぶ権利は無い — 貸し手へ返すだけ
-  // (カーネルの SWITCH が対象を無視してそう振る舞う)。
+  // 借り手として走っているなら貸し手へ返すだけ。通常は svc_dispatch が trap 内で処理する
+  // (grant 段がある YIELD はここへ来ない)。ここへ来るのは起点のスレッドの YIELD。
   if (kernel_instance.grant_active()) {
-    ARCH::syscall((uintptr_t)primitive::SWITCH, 0);
+    ARCH::syscall((uintptr_t)primitive::SWITCH, kernel_instance.grant_lender());
     return 0;
   }
   return schedule(self) ? 1 : 0; // 誰も居なければ自分が続ける
-}
-
-template <>
-uintptr_t KERNEL_OBJECT::run_for(uintptr_t thread, uintptr_t cycles,
-                                 object_error &error) {
-  const auto result =
-      ARCH::syscall((uintptr_t)primitive::GRANT, thread, cycles);
-  if (result.error == (uintptr_t)kernel_error::GRANT_TOO_SMALL) {
-    // ★「相手が走れない」ではなく「こちらに配れる持ち分が無い」。区別しないと、
-    //   スケジューラが次の候補を延々と試して空回りする。
-    error = object_error::NO_TIME;
-    return 0;
-  }
-  if (result.error != (uintptr_t)kernel_error::OK) {
-    error = object_error::NOT_RUNNABLE;
-    return 0;
-  }
-  return result.value; // grant_end (0 = 期限切れ, 1 = 相手が返した)
 }
 
 // スレッドを終える。**このスレッドはもう走らない**ので、終える前に次の相手へ
@@ -975,7 +1010,7 @@ template <> void KERNEL_OBJECT::exit_thread() {
   //   回収するのは schedule() — 走っていない相手だけを見て返す (D55)。
   kernel_instance.terminate(self);
   if (kernel_instance.grant_active()) {
-    ARCH::syscall((uintptr_t)primitive::SWITCH, 0); // 貸し手へ返す
+    ARCH::syscall((uintptr_t)primitive::SWITCH, kernel_instance.grant_lender()); // 貸し手へ返す
     return;
   }
   if (!schedule(self)) {
@@ -1044,7 +1079,7 @@ uintptr_t KERNEL_OBJECT::kill_thread(uintptr_t thread, object_error &error) {
 // ★1 コアのときは無償だった相互排除を、2 コアでは明示的に取る (kernel_object.hpp)。
 //   区間は短く、**syscall を含まない**ものだけ。握ったまま実行権を手放すと、
 //   相手のコアが「走っていない持ち主」を待って回り続ける。
-template <> void KERNEL_OBJECT::table_lock() {
+template <> SHIZUKU_HOT void KERNEL_OBJECT::table_lock() {
   while (true) {
     if (ARCH::cas32(&m_table_lock, 0u, 1u)) {
 #if defined(SHIZUKU_CRASH_RECORD)
@@ -1061,7 +1096,7 @@ template <> void KERNEL_OBJECT::table_lock() {
   }
 }
 
-template <> void KERNEL_OBJECT::table_unlock() {
+template <> SHIZUKU_HOT void KERNEL_OBJECT::table_unlock() {
   ARCH::store_release32(&m_table_lock, 0u);
 #if defined(SHIZUKU_CRASH_RECORD)
   kobj_diag_mark(objects::boot_diag_breadcrumb::KOBJ_TABLE_UNLOCK);
@@ -1662,7 +1697,6 @@ uintptr_t KERNEL_OBJECT::memory_owner(uintptr_t handle, object_error &error) {
 }
 
 template <>
-SHIZUKU_STAGE05_CPP_ATTR
 uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
                                 uintptr_t a3, uintptr_t unwind_floor) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
@@ -1684,11 +1718,10 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
   case object_api::EXPORT_METHOD:
     value = export_method(a1, a2, error);
     break;
-  case object_api::CALL_METHOD:
-    value = call_method(a1, a2, a3, error);
-    break;
   case object_api::EXIT_METHOD:
     // a1 = absolute return depth, a2 = value, a3 = error.
+    // 通常の戻りは svc_dispatch が trap 内で直接処理する。ここへ来るのは、スレッドの
+    // 最外のメソッドが戻った場合 (d == 0 かつ呼出し段なし = スレッドの終わり) だけ。
     exit_method(a1, a2, a3);
     return 0;
   case object_api::FORWARD_CHILD_EXIT:
@@ -1696,9 +1729,6 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
     forward_child_exit(a1, a2, a3);
     return 0;
   case object_api::GET_CURRENT_OBJECT:
-#if defined(SHIZUKU_C6_STAGE05_TRACE) && SHIZUKU_C6_STAGE05_TRACE
-    shizuku_c6_stage05_hook_handler();
-#endif
     value = current_object(kernel_instance.current_thread_id());
     break;
   case object_api::GET_CALLER_OBJECT:
@@ -1709,9 +1739,6 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
     break;
   case object_api::YIELD:
     value = yield(error);
-    break;
-  case object_api::RUN_FOR:
-    value = run_for(a1, a2, error);
     break;
   case object_api::EXIT_THREAD:
     exit_thread();
@@ -1772,10 +1799,6 @@ uintptr_t KERNEL_OBJECT::handle(uintptr_t number, uintptr_t a1, uintptr_t a2,
     break;
   case object_api::KILL_THREAD:
     value = kill_thread(a1, error);
-    break;
-  case object_api::SET_BUDGET:
-    if (a1 < THREAD_COUNT)
-      m_budget[a1] = (uint32_t)a2;
     break;
   default:
     // ★未知の番号は**ここの語彙**。黙って捨てず必ずエラーで返す

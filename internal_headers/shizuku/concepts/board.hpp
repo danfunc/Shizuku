@@ -5,7 +5,7 @@
 namespace shizuku {
 namespace concepts {
 
-// board = ボード/SoC 依存層の要件 (docs/03_porting_policy.md D2, PORT §5)。
+// board = ボード/SoC 依存層の要件 (docs/record/kernel_v2_record.typ D2, PORT §5)。
 // コア識別・時刻・例外ハンドラの結線・診断出力・(将来) コア起動とクロック API。
 //
 // - init(core)     : 例外ハンドラ (svc/切替/タイマ) の登録と優先度設定。

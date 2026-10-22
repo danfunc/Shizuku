@@ -18,10 +18,7 @@ sh_test(
 
 cc_test(
     name = "c6_concepts_test",
-    srcs = [
-        "//chips/esp32_c6:test_c6_concepts.cpp",
-        "//chips/esp32_c6:stage05_trace.cpp",
-    ],
+    srcs = ["//chips/esp32_c6:test_c6_concepts.cpp"],
     copts = ["-std=c++20"],
     deps = [
         "//boards/esp32_c6:headers",
@@ -70,6 +67,8 @@ sh_test(
         "//chips/esp32_c6:trap.cpp",
         "//chips/esp32_c6:trap_api.hpp",
         "//chips/esp32_c6:stop_capture.hpp",
+        # 別スレッドへの切替え後の再開で消去の出口へ替える呼び出し (scrub_on_switch) が C5 にもあることを縛る。
+        "//chips/esp32_c5:trap.cpp",
         "//modules/esp_idf_support/c6:early_boot.cpp",
         "//modules/esp_idf_support/firmware:main/early_diag.c",
         "//:c6_test_headers",

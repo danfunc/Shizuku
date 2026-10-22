@@ -2,7 +2,7 @@
 //  呼び出しコストの実測 (svc 往復 / メソッド呼び出し 1 段)
 // ===========================================================================
 //  発表資料が「約 600 cycle」と主張してきた数字には、**測定コードも記録も
-//  リポジトリに存在しなかった** (docs/04_work_instructions.md:263 が
+//  リポジトリに存在しなかった** (削除済みの docs/04_work_instructions.md:263 (ce5b304) が
 //  「参照実装と同等のアプリなしベンチ (svc 往復 / CALL 往復のサイクル数) を記録」
 //  を未着手の TODO として残している)。これはその TODO を埋めるもの。
 //
@@ -15,13 +15,14 @@
 //      (5) 2 段ネスト     — (4) の 1 段あたりの限界費用を出すため
 //    (1) を引かないと、測定の費用が全部に上乗せされたまま比較することになる。
 //
-//  ★サイクルカウンタ (ARM では DWT CYCCNT、RISC-V では PCCR / cycle) を使う。**数えているのはコアのクロック**なので、クロックを変えても
+//  ★DWT CYCCNT を使う。**数えているのはコアのクロック**なので、クロックを変えても
 //    サイクル数は変わらない (µs へ直すときだけ board にクロックを訊く)。
 //  ★★min を採る。系は動いたまま (SysTick / USB / 2 コア目) 測っているので、
 //    平均には割り込みが混ざる。**割り込みの入らなかった 1 回**が知りたい値なので
 //    最小値を代表にし、平均も併記して「どれだけ揺れたか」が見えるようにする。
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_api.hpp"
+#include "shizuku/method_entry.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/selftest.hpp"
 #if !defined(__riscv)
@@ -37,11 +38,14 @@ namespace {
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
-inline constexpr const uintptr_t &OBJECT_COST_LEAF = object_id::cost_leaf;
-inline constexpr const uintptr_t &OBJECT_COST_NEST = object_id::cost_nest;
+constexpr uintptr_t OBJECT_COST_LEAF = object_id::cost_leaf;
+constexpr uintptr_t OBJECT_COST_NEST = object_id::cost_nest;
 constexpr uintptr_t METHOD_MAIN = 0;
+// 1 回の測定の標本数 (min と mean の母数)。記述子・作成の測定も同じ数に揃える。
+constexpr uint32_t ROUNDS = 2048;
+static_assert(ROUNDS >= 128, "call_cost sample rounds must be >= 128");
 
-// ★同期バリア (ARM では isb, RISC-V では fence) で挟む。挟まないとコンパイラとパイプラインが読み出しを前後へ動かせるので、
+// ★fence/isb で挟む。挟まないとコンパイラとパイプラインが読み出しを前後へ動かせるので、
 //   測っている区間が実際の区間とずれる。バリア自身の費用は (1) にも同じだけ乗るので
 //   引き算で消える。
 template <typename A> inline uint32_t cycles_now() {
@@ -49,11 +53,11 @@ template <typename A> inline uint32_t cycles_now() {
   __asm__ volatile("fence" ::: "memory");
   const uint32_t cycles = A::cycle_counter_read();
   __asm__ volatile("fence" ::: "memory");
+  return cycles;
 #else
   __asm__ volatile("isb" ::: "memory");
   const uint32_t cycles = A::cycle_counter_read();
   __asm__ volatile("isb" ::: "memory");
-#endif
   return cycles;
 #endif
 }
@@ -64,26 +68,29 @@ struct api_result {
   uintptr_t value;
 };
 
-api_result api(object_api number, uintptr_t a1 = 0, uintptr_t a2 = 0,
-               uintptr_t a3 = 0) {
+// ★always_inline: ecall の caller 側 (ARCH::syscall) は s1–s11 を clobber 宣言している。普通の関数だと
+//   その関数自身が呼ばれるたびに s1–s11 を退避・復元する (psABI)。呼出し地点へ展開すれば、
+//   退避は展開先の関数の入口で 1 回。
+[[gnu::always_inline]] inline api_result api(object_api number, uintptr_t a1 = 0, uintptr_t a2 = 0,
+                                             uintptr_t a3 = 0) {
   const auto result = ARCH::syscall((uintptr_t)number, a1, a2, a3);
   if (result.error & KERNEL_ERROR_MARK)
     return {(uintptr_t)object_error::KERNEL_REFUSED, result.error};
   return {result.error, result.value};
 }
 
-api_result call_method(uintptr_t object, uintptr_t argument) {
+[[gnu::always_inline]] inline api_result call_method(uintptr_t object, uintptr_t argument) {
   return api(object_api::CALL_METHOD, object, METHOD_MAIN, argument);
 }
 
 // 呼び先。**何もしない**。ここに仕事を入れると、測っているのが呼び出しの費用なのか
 // 仕事の費用なのか分からなくなる。
-uintptr_t cost_leaf(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+SHIZUKU_ZERO_USED_REGS uintptr_t cost_leaf(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
   return argument + 1;
 }
 
 // 1 段深いだけの相手。(4) との差が「1 段あたりの限界費用」になる。
-uintptr_t cost_nest(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+SHIZUKU_ZERO_USED_REGS uintptr_t cost_nest(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
   return call_method(OBJECT_COST_LEAF, argument).value;
 }
 
@@ -141,6 +148,88 @@ static_assert(std::is_same_v<decltype(stat_t::min), uint32_t> &&
               std::is_same_v<decltype(stat_t::mean), uint32_t>,
               "stat_t must have uint32_t min and mean for raw/net reporting");
 
+#if defined(__riscv)
+extern "C" {
+struct shizuku_c6_call_cost_record_t {
+  uint32_t magic;           // 0x434F5354 ("COST")
+  uint32_t version;         // 2
+  uint32_t rounds;          // 2048
+  uint32_t baseline_min;    // op_nothing
+  uint32_t baseline_mean;
+  uint32_t direct_raw_min;  // direct call
+  uint32_t direct_raw_mean;
+  uint32_t direct_net_min;
+  uint32_t direct_net_mean;
+  uint32_t svc_raw_min;     // svc round trip
+  uint32_t svc_raw_mean;
+  uint32_t svc_net_min;
+  uint32_t svc_net_mean;
+  uint32_t call1_raw_min;   // method call (1 hop)
+  uint32_t call1_raw_mean;
+  uint32_t call1_net_min;
+  uint32_t call1_net_mean;
+  uint32_t call2_raw_min;   // method call (2 hops)
+  uint32_t call2_raw_mean;
+  uint32_t call2_net_min;
+  uint32_t call2_net_mean;
+  uint32_t checked_ok;      // 1 if checked returns 42, else 0
+  uint32_t desc1_raw_min;   // descriptor call (1 hop): D -> cost_dleaf
+  uint32_t desc1_raw_mean;
+  uint32_t desc1_net_min;
+  uint32_t desc1_net_mean;
+  uint32_t desc2_raw_min;   // descriptor call (2 hops): D -> cost_dnest -> cost_dinner
+  uint32_t desc2_raw_mean;
+  uint32_t desc2_net_min;
+  uint32_t desc2_net_mean;
+  uint32_t create_desc_raw_min;  // create method descriptor (API 32), table emptied per sample
+  uint32_t create_desc_raw_mean;
+  uint32_t create_desc_net_min;
+  uint32_t create_desc_net_mean;
+  uint32_t create_desc_rounds;   // samples for create_desc
+  uint32_t desc_checked_ok;      // 1 if both descriptor calls return 42 and setup/create all succeeded
+};
+// ★レイアウトを固定する。記録を読む側 (ホスト) はこの並びを前提にしている。
+static_assert(sizeof(shizuku_c6_call_cost_record_t) == 144, "call_cost record size");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, magic) == 0, "magic");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, version) == 4, "version");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, rounds) == 8, "rounds");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, baseline_min) == 12, "baseline_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, baseline_mean) == 16, "baseline_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, direct_raw_min) == 20, "direct_raw_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, direct_raw_mean) == 24, "direct_raw_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, direct_net_min) == 28, "direct_net_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, direct_net_mean) == 32, "direct_net_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, svc_raw_min) == 36, "svc_raw_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, svc_raw_mean) == 40, "svc_raw_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, svc_net_min) == 44, "svc_net_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, svc_net_mean) == 48, "svc_net_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, call1_raw_min) == 52, "call1_raw_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, call1_raw_mean) == 56, "call1_raw_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, call1_net_min) == 60, "call1_net_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, call1_net_mean) == 64, "call1_net_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, call2_raw_min) == 68, "call2_raw_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, call2_raw_mean) == 72, "call2_raw_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, call2_net_min) == 76, "call2_net_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, call2_net_mean) == 80, "call2_net_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, checked_ok) == 84, "checked_ok");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, desc1_raw_min) == 88, "desc1_raw_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, desc1_raw_mean) == 92, "desc1_raw_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, desc1_net_min) == 96, "desc1_net_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, desc1_net_mean) == 100, "desc1_net_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, desc2_raw_min) == 104, "desc2_raw_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, desc2_raw_mean) == 108, "desc2_raw_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, desc2_net_min) == 112, "desc2_net_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, desc2_net_mean) == 116, "desc2_net_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, create_desc_raw_min) == 120, "create_desc_raw_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, create_desc_raw_mean) == 124, "create_desc_raw_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, create_desc_net_min) == 128, "create_desc_net_min");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, create_desc_net_mean) == 132, "create_desc_net_mean");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, create_desc_rounds) == 136, "create_desc_rounds");
+static_assert(__builtin_offsetof(shizuku_c6_call_cost_record_t, desc_checked_ok) == 140, "desc_checked_ok");
+volatile shizuku_c6_call_cost_record_t shizuku_c6_call_cost_record = {};
+}
+#endif
+
 // ★op は関数ポインタで呼ぶ。(1) も同じ経路を通るので、ポインタ経由の分は
 //   差し引きで消える。インライン展開の差で不公平が出るのも防げる。
 template <typename A>
@@ -168,72 +257,175 @@ __attribute__((noinline)) stat_t measure(op_t requested, uint32_t rounds) {
   return {best, (uint32_t)(total / rounds)};
 }
 
-// 引き算した結果を「サイクル / ナノ秒」で 1 行にする (raw/net の min/mean を併記)。
+// 引き算した結果を「サイクル」で 1 行にする。
 void report(const char *name, stat_t raw, stat_t baseline,
             uint32_t cycles_per_us) {
-  const uint32_t net = raw.min > baseline.min ? raw.min - baseline.min : 0;
-  const uint32_t net_mean =
-      raw.mean > baseline.mean ? raw.mean - baseline.mean : 0;
-  // ns = cycle * 1000 / (cycles/µs)。整数のまま計算する (FP を測定路に持ち込まない)。
-  const uint32_t ns = cycles_per_us ? (net * 1000u) / cycles_per_us : 0;
+  const uint32_t net_min = raw.min > baseline.min ? raw.min - baseline.min : 0;
+#if defined(__riscv)
+  // C6 / RISC-V: CPU周波数160MHz仮定のns換算をせず、cycles中心でraw/net min/meanを明示出力
+  // net mean は raw.mean - baseline.mean (underflow は 0 clamp、RAM record と完全一致)
+  const uint32_t net_mean = raw.mean > baseline.mean ? raw.mean - baseline.mean : 0;
+  (void)cycles_per_us;
   BOARD::diag_printf(
-      "[COST] %-22s net min %5lu cyc (%4lu ns)  net mean %5lu cyc  [raw min %lu  raw mean %lu]\n",
-      name, (unsigned long)net, (unsigned long)ns, (unsigned long)net_mean,
+      "[COST] %-22s net min %5lu cyc  mean %5lu cyc  [raw min %lu, mean %lu]\n",
+      name, (unsigned long)net_min, (unsigned long)net_mean,
       (unsigned long)raw.min, (unsigned long)raw.mean);
+#else
+  // 既存 ARM 他 arch: 従来通り baseline.min を引く挙動を維持
+  const uint32_t net_mean = raw.mean > baseline.min ? raw.mean - baseline.min : 0;
+  // ns = cycle * 1000 / (cycles/µs)。整数のまま計算する (FP を測定路に持ち込まない)。
+  const uint32_t ns = cycles_per_us ? (net_min * 1000u) / cycles_per_us : 0;
+  BOARD::diag_printf(
+      "[COST] %-22s min %5lu cyc (%4lu ns)  mean %5lu cyc  [raw min %lu, mean %lu]\n",
+      name, (unsigned long)net_min, (unsigned long)ns, (unsigned long)net_mean,
+      (unsigned long)raw.min, (unsigned long)raw.mean);
+#endif
 }
 
-#if defined(SHIZUKU_C6_STAGE05_TRACE) && SHIZUKU_C6_STAGE05_TRACE
-static void verify_c6_stage05_clock() {
-  // SYSTIMER unit 0 runs at 16 MHz from XTAL
-  // Wait for 16,000 SYSTIMER ticks (= 1,000 us = 1 ms) to independently compute HP CPU core frequency
-  const uint64_t s_start = shizuku::chips::esp32_c6::systimer_now();
-  uint32_t c_start = 0;
+
 #if defined(__riscv)
-  asm volatile("fence\n csrr %0, 0x7E2\n fence" : "=r"(c_start) :: "memory");
-#endif
+// ---- 記述子の計測 (riscv 限定。CALL_METHOD_DESCRIPTOR は trap 内の直接処理にだけある) --
+// 記述子は**呼び手 (current object) の表**から引かれ、作れるのは「自分自身・作成者・
+// 直接の子」への記述子だけ。root の表は call_ladder が 16 枠を埋め切っているので使えない。
+// そこで呼び手は専用の D (cost_driver) にし、D が子 cost_dleaf / cost_dnest を作って、
+// その先へ記述子を張る。2 段目の cost_dnest はさらに自分の子 cost_dinner へ張る。
+constexpr uintptr_t OBJECT_COST_DRIVER = object_id::cost_driver;
+constexpr uintptr_t OBJECT_COST_OWNER = object_id::cost_owner;
+constexpr uintptr_t OBJECT_COST_DLEAF = object_id::cost_dleaf;
+constexpr uintptr_t OBJECT_COST_DNEST = object_id::cost_dnest;
+constexpr uintptr_t OBJECT_COST_DINNER = object_id::cost_dinner;
+// main の引数の取り決め。測定の引数 (0 / 41) と衝突しない値を使う。
+constexpr uintptr_t MODE_SETUP = UINTPTR_MAX;
+constexpr uintptr_t MODE_MEASURE = UINTPTR_MAX - 1;
 
-  while ((shizuku::chips::esp32_c6::systimer_now() - s_start) < 16000ULL) {
-    asm volatile("" ::: "memory");
+// 下の index は呼び手の表を指す (g_dnest_index だけは cost_dnest の表)。
+volatile uintptr_t g_desc1_index = 0; // D -> cost_dleaf
+volatile uintptr_t g_desc2_index = 0; // D -> cost_dnest
+volatile uintptr_t g_dnest_index = 0; // cost_dnest -> cost_dinner
+volatile uintptr_t g_setup_error = (uintptr_t)object_error::OK;
+volatile uintptr_t g_desc1_value = 0;
+volatile uintptr_t g_desc2_value = 0;
+stat_t g_desc1_stat{};
+stat_t g_desc2_stat{};
+volatile uint32_t g_create_cycles = 0;
+volatile uintptr_t g_create_error = (uintptr_t)object_error::OK;
+
+// 記述子の呼出し。a2 だけ引数を渡し、残りは 0 (計測では 0、検算では 41)。
+[[gnu::always_inline]] inline api_result desc_call(uintptr_t index, uintptr_t argument) {
+  const auto result = ARCH::syscall((uintptr_t)object_api::CALL_METHOD_DESCRIPTOR,
+                                    index, argument, 0, 0, 0, 0, 0);
+  if (result.error & KERNEL_ERROR_MARK)
+    return {(uintptr_t)object_error::KERNEL_REFUSED, result.error};
+  return {result.error, result.value};
+}
+
+// 設定の最初の失敗だけを残す (後の成功で上書きしない)。
+void note_setup(uintptr_t error) {
+  if (error != (uintptr_t)object_error::OK &&
+      g_setup_error == (uintptr_t)object_error::OK)
+    g_setup_error = error;
+}
+
+// 記述子 1 段 / 2 段の 1 回ぶん (呼び手は D)。
+__attribute__((noinline)) uintptr_t op_desc1(uintptr_t) {
+  return desc_call(g_desc1_index, 0).value;
+}
+__attribute__((noinline)) uintptr_t op_desc2(uintptr_t) {
+  return desc_call(g_desc2_index, 0).value;
+}
+
+// 2 段目の受け手。SETUP では自分の子 cost_dinner と、それへの記述子 (自分の表) を作る。
+// それ以外は記述子で cost_dinner を呼び、引数をそのまま渡す。
+SHIZUKU_ZERO_USED_REGS uintptr_t cost_dnest(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+  if (argument == MODE_SETUP) {
+    note_setup(api(object_api::CREATE_OBJECT, OBJECT_COST_DINNER,
+                   method_entry<ARCH, &cost_leaf>()).error);
+    const api_result made =
+        api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_COST_DINNER, 0);
+    note_setup(made.error);
+    g_dnest_index = made.value;
+    return 0;
   }
+  return desc_call(g_dnest_index, argument).value;
+}
 
-  const uint64_t s_end = shizuku::chips::esp32_c6::systimer_now();
-  uint32_t c_end = 0;
-#if defined(__riscv)
-  asm volatile("fence\n csrr %0, 0x7E2\n fence" : "=r"(c_end) :: "memory");
-#endif
-
-  const uint32_t s_delta = (uint32_t)(s_end - s_start);
-  const uint32_t c_delta = c_end - c_start;
-
-  shizuku_c6_stage05_record.systimer_ticks = s_delta;
-  shizuku_c6_stage05_record.cpu_cycle_delta = c_delta;
-
-  if (s_delta > 0 && c_delta > 0) {
-    // MHz = (c_delta * 16) / s_delta
-    const uint32_t mhz = (uint32_t)(((uint64_t)c_delta * 16ULL + (s_delta / 2)) / s_delta);
-    shizuku_c6_stage05_record.cpu_mhz = mhz;
-    // ESP32-C6 CPU clock is typically 80, 120, or 160 MHz
-    if (mhz >= 40 && mhz <= 240) {
-      shizuku_c6_stage05_record.clock_verified = 1u;
-    } else {
-      shizuku_c6_stage05_record.clock_verified = 0u;
-    }
-  } else {
-    shizuku_c6_stage05_record.cpu_mhz = 0;
-    shizuku_c6_stage05_record.clock_verified = 0u;
+// 呼び手 (D)。SETUP では子 cost_dleaf / cost_dnest と、自分の表への記述子 2 本を作る。
+// MEASURE では D の中から記述子を撃って測る (撃つのが D なので、呼び手は D になる)。
+SHIZUKU_ZERO_USED_REGS uintptr_t cost_driver(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+  if (argument == MODE_SETUP) {
+    note_setup(api(object_api::CREATE_OBJECT, OBJECT_COST_DLEAF,
+                   method_entry<ARCH, &cost_leaf>()).error);
+    note_setup(api(object_api::CREATE_OBJECT, OBJECT_COST_DNEST,
+                   method_entry<ARCH, &cost_dnest>()).error);
+    const api_result desc1 =
+        api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_COST_DLEAF, 0);
+    note_setup(desc1.error);
+    g_desc1_index = desc1.value;
+    // 子の cost_dnest に自分の子と記述子を作らせる (その作成者は cost_dnest になる)。
+    note_setup(call_method(OBJECT_COST_DNEST, MODE_SETUP).error);
+    const api_result desc2 =
+        api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_COST_DNEST, 0);
+    note_setup(desc2.error);
+    g_desc2_index = desc2.value;
+    return 0;
   }
+  if (argument != MODE_MEASURE)
+    return 0;
+  g_desc1_stat = measure<ARCH>(op_desc1, ROUNDS);
+  g_desc2_stat = measure<ARCH>(op_desc2, ROUNDS);
+  // 検算: 引数 41 が両方の段を通って 42 に戻ること。
+  g_desc1_value = desc_call(g_desc1_index, 41).value;
+  g_desc2_value = desc_call(g_desc2_index, 41).value;
+  return 0;
+}
+
+// 作成の測定対象。中で**自分自身への記述子**を 1 つ作り、その API 往復の区間だけを測る
+// (自分自身への作成は作成権限で常に通る)。表は呼ぶ前に root が差し替えで空にしておく。
+SHIZUKU_ZERO_USED_REGS uintptr_t cost_owner(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  const uint32_t started = cycles_now<ARCH>();
+  g_create_error =
+      api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_COST_OWNER, 0).error;
+  const uint32_t ended = cycles_now<ARCH>();
+  g_create_cycles = ended - started;
+  return 0;
+}
+
+// 作成 1 回ぶん。差し替え (表を空にする) と呼び出しは計測の外。区間は cost_owner の中。
+uint32_t create_once(bool &ok) {
+  const api_result fresh = api(object_api::CREATE_OBJECT, OBJECT_COST_OWNER,
+                               method_entry<ARCH, &cost_owner>(), OBJECT_REPLACE);
+  const api_result ran = call_method(OBJECT_COST_OWNER, 0);
+  if (fresh.error != (uintptr_t)object_error::OK ||
+      ran.error != (uintptr_t)object_error::OK ||
+      g_create_error != (uintptr_t)object_error::OK)
+    ok = false;
+  return g_create_cycles;
+}
+
+// 作成の min / mean。標本ごとに空の表で作るので、枠の埋まり具合に依らない。
+stat_t measure_create(bool &ok) {
+  for (uint32_t warm = 0; warm < 32; ++warm)
+    create_once(ok);
+  uint32_t best = 0xFFFFFFFFu;
+  uint64_t total = 0;
+  for (uint32_t round = 0; round < ROUNDS; ++round) {
+    const uint32_t elapsed = create_once(ok);
+    if (elapsed < best)
+      best = elapsed;
+    total += elapsed;
+  }
+  return {best, (uint32_t)(total / ROUNDS)};
 }
 #endif
-
 
 // ★ARCH::HAS_CYCLE_COUNTER が false の arch ではこのテンプレートは実体化されない。
-//   カウンタの番地も有効化手順も arch 側にあり、ここにはハードウェア固有レジスタを知るコードが無い。
+//   CYCCNT の番地も有効化手順も arch 側にあり、ここには DWT を知るコードが無い。
 template <typename A> void bench() {
   BOARD::diag_printf("[COST] call cost bench start\n");
   if (!A::cycle_counter_enable()) {
     // ★測れないなら測れないと言う。0 を報告して数字があるように見せない。
-    BOARD::diag_printf("[COST] FAIL cycle counter is not counting - no numbers\n");
-    record_fail("COST cycle counter is not counting", 0, 1);
+    BOARD::diag_printf("[COST] FAIL DWT CYCCNT is not counting - no numbers\n");
+    record_fail("COST DWT CYCCNT is not counting", 0, 1);
     ++failed;
     return;
   }
@@ -254,12 +446,12 @@ template <typename A> void bench() {
 
   struct entry_t {
     uintptr_t object;
-    uintptr_t (*main)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
-  } const entries[] = {{OBJECT_COST_LEAF, cost_leaf},
-                       {OBJECT_COST_NEST, cost_nest}};
+    uintptr_t main; // 入口 stub (method_entry) のアドレス
+  } const entries[] = {{OBJECT_COST_LEAF, method_entry<ARCH, &cost_leaf>()},
+                       {OBJECT_COST_NEST, method_entry<ARCH, &cost_nest>()}};
   for (const entry_t &entry : entries) {
     const api_result created =
-        api(object_api::CREATE_OBJECT, entry.object, (uintptr_t)entry.main);
+        api(object_api::CREATE_OBJECT, entry.object, entry.main);
     if (created.error != (uintptr_t)object_error::OK) {
       BOARD::diag_printf("[COST] FAIL create object %lu: error %lu\n",
                           (unsigned long)entry.object,
@@ -271,13 +463,33 @@ template <typename A> void bench() {
 
   // ★ウォームアップは measure の中で行う (呼び出し経路そのものを温めるため)。
 
-  constexpr uint32_t ROUNDS = 2048;
-  static_assert(ROUNDS >= 128, "call_cost sample rounds must be >= 128");
   const stat_t nothing = measure<A>(op_nothing, ROUNDS);
   const stat_t direct = measure<A>(op_direct, ROUNDS);
   const stat_t svc = measure<A>(op_svc, ROUNDS);
   const stat_t call1 = measure<A>(op_call, ROUNDS);
   const stat_t call2 = measure<A>(op_call2, ROUNDS);
+
+#if defined(__riscv)
+  // 記述子の計測 (riscv 限定)。呼び手は D。作成は cost_owner を毎回差し替えて空の表で測る。
+  const api_result driver =
+      api(object_api::CREATE_OBJECT, OBJECT_COST_DRIVER, method_entry<ARCH, &cost_driver>());
+  const api_result owner =
+      api(object_api::CREATE_OBJECT, OBJECT_COST_OWNER, method_entry<ARCH, &cost_owner>());
+  if (driver.error != (uintptr_t)object_error::OK ||
+      owner.error != (uintptr_t)object_error::OK) {
+    BOARD::diag_printf("[COST] FAIL create descriptor bench objects: error %lu / %lu\n",
+                       (unsigned long)driver.error, (unsigned long)owner.error);
+    ++failed;
+    return;
+  }
+  call_method(OBJECT_COST_DRIVER, MODE_SETUP);
+  const uintptr_t setup_error = g_setup_error;
+  call_method(OBJECT_COST_DRIVER, MODE_MEASURE);
+  bool create_ok = true;
+  const stat_t desc1 = g_desc1_stat;
+  const stat_t desc2 = g_desc2_stat;
+  const stat_t create = measure_create(create_ok);
+#endif
 
   BOARD::diag_printf("[COST] harness baseline = %lu cyc (subtracted below)\n",
                      (unsigned long)nothing.min);
@@ -285,6 +497,11 @@ template <typename A> void bench() {
   report("svc round trip", svc, nothing, cycles_per_us);
   report("method call (1 hop)", call1, nothing, cycles_per_us);
   report("method call (2 hops)", call2, nothing, cycles_per_us);
+#if defined(__riscv)
+  report("desc call (1 hop)", desc1, nothing, cycles_per_us);
+  report("desc call (2 hops)", desc2, nothing, cycles_per_us);
+  report("create desc", create, nothing, cycles_per_us);
+#endif
 
   const auto net = [&](stat_t value) -> uint32_t {
     return value.min > nothing.min ? value.min - nothing.min : 0;
@@ -303,7 +520,7 @@ template <typename A> void bench() {
     return value.mean > nothing.mean ? value.mean - nothing.mean : 0;
   };
   shizuku_c6_call_cost_record.magic = 0x434F5354u;
-  shizuku_c6_call_cost_record.version = 1;
+  shizuku_c6_call_cost_record.version = 2;
   shizuku_c6_call_cost_record.rounds = ROUNDS;
   shizuku_c6_call_cost_record.baseline_min = nothing.min;
   shizuku_c6_call_cost_record.baseline_mean = nothing.mean;
@@ -323,6 +540,19 @@ template <typename A> void bench() {
   shizuku_c6_call_cost_record.call2_raw_mean = call2.mean;
   shizuku_c6_call_cost_record.call2_net_min = net_min(call2);
   shizuku_c6_call_cost_record.call2_net_mean = net_mean(call2);
+  shizuku_c6_call_cost_record.desc1_raw_min = desc1.min;
+  shizuku_c6_call_cost_record.desc1_raw_mean = desc1.mean;
+  shizuku_c6_call_cost_record.desc1_net_min = net_min(desc1);
+  shizuku_c6_call_cost_record.desc1_net_mean = net_mean(desc1);
+  shizuku_c6_call_cost_record.desc2_raw_min = desc2.min;
+  shizuku_c6_call_cost_record.desc2_raw_mean = desc2.mean;
+  shizuku_c6_call_cost_record.desc2_net_min = net_min(desc2);
+  shizuku_c6_call_cost_record.desc2_net_mean = net_mean(desc2);
+  shizuku_c6_call_cost_record.create_desc_raw_min = create.min;
+  shizuku_c6_call_cost_record.create_desc_raw_mean = create.mean;
+  shizuku_c6_call_cost_record.create_desc_net_min = net_min(create);
+  shizuku_c6_call_cost_record.create_desc_net_mean = net_mean(create);
+  shizuku_c6_call_cost_record.create_desc_rounds = ROUNDS;
 #endif
 
   // 1 段あたりの限界費用。1 段目には呼び出し元側の svc が 1 回だけ余分に入るので、
@@ -349,136 +579,71 @@ template <typename A> void bench() {
                        (unsigned long)checked.error,
                        (unsigned long)checked.value);
   }
-
-#if defined(SHIZUKU_C6_STAGE05_TRACE) && SHIZUKU_C6_STAGE05_TRACE
-  BOARD::diag_printf("[STAGE0.5] Starting stage 0.5 interval decomposition\n");
-  shizuku_c6_stage05_init(
-#if defined(SHIZUKU_C6_STAGE05_IRAM) && SHIZUKU_C6_STAGE05_IRAM
-      1u
-#else
-      0u
-#endif
-  );
-  verify_c6_stage05_clock();
-  shizuku_c6_stage05_calibrate_hooks();
-
-  // 校正中間値の診断出力
-  BOARD::diag_printf("[STAGE0.5] Hook Calibration Details:\n");
-  BOARD::diag_printf("[STAGE0.5]   csrr overhead      : min %lu cyc, mean %lu cyc\n",
-                     (unsigned long)shizuku_c6_stage05_calib_diag.csrr_min,
-                     (unsigned long)shizuku_c6_stage05_calib_diag.csrr_mean);
-  BOARD::diag_printf("[STAGE0.5]   hook_trap_entry    : net min %lu cyc (mean %lu cyc) [raw min %lu, mean %lu]\n",
-                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_te_net_min,
-                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_te_net_mean,
-                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_te_raw_min,
-                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_te_raw_mean);
-  BOARD::diag_printf("[STAGE0.5]   hook_svc_dispatch  : net min %lu cyc (mean %lu cyc) [raw min %lu, mean %lu]\n",
-                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_sd_net_min,
-                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_sd_net_mean,
-                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_sd_raw_min,
-                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_sd_raw_mean);
-  BOARD::diag_printf("[STAGE0.5]   hook_handler       : net min %lu cyc (mean %lu cyc) [raw min %lu, mean %lu]\n",
-                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_hd_net_min,
-                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_hd_net_mean,
-                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_hd_raw_min,
-                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_hd_raw_mean);
-  BOARD::diag_printf("[STAGE0.5]   hook_return_prep   : net min %lu cyc (mean %lu cyc) [raw min %lu, mean %lu]\n",
-                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_rp_net_min,
-                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_rp_net_mean,
-                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_rp_raw_min,
-                     (unsigned long)shizuku_c6_stage05_calib_diag.hook_rp_raw_mean);
-
-  // ウォームアップ
-  for (uint32_t warm = 0; warm < 16; ++warm) {
-    g_sink = op_svc(g_argument);
-  }
-
-  shizuku_c6_stage05_active = 1u;
-  constexpr uint32_t S05_ROUNDS = SHIZUKU_C6_STAGE05_ROUNDS;
-  for (uint32_t r = 0; r < S05_ROUNDS; ++r) {
-    shizuku_c6_stage05_current_sample.t0_caller_pre = cycles_now<A>();
-    g_sink = op_svc(g_argument);
-    shizuku_c6_stage05_current_sample.t7_caller_post = cycles_now<A>();
-    shizuku_c6_stage05_current_sample.t6_ret_restore_begin = shizuku_c6_stage05_t6;
-    shizuku_c6_stage05_record_sample((const shizuku_c6_stage05_sample_t *)&shizuku_c6_stage05_current_sample);
-  }
-  shizuku_c6_stage05_active = 0u;
-
-  shizuku_c6_stage05_finish();
-
-  static const char *const kNamesFrom[SHIZUKU_C6_STAGE05_INTERVAL_COUNT] = {
-      "caller_pre", "t1_trap_entry", "t2_c_dispatch", "t3_svc_dispatch",
-      "t5_return_prep", "t6_restore_begin", "t4_handler", "t1_ret_trap_entry",
-      "t2_ret_c_dispatch", "t3_ret_svc_dispatch", "t5_ret_return_prep", "t6_ret_restore_begin"
-  };
-  static const char *const kNamesTo[SHIZUKU_C6_STAGE05_INTERVAL_COUNT] = {
-      "t1_trap_entry", "t2_c_dispatch", "t3_svc_dispatch", "t5_return_prep",
-      "t6_restore_begin", "t4_handler", "t1_ret_trap_entry", "t2_ret_c_dispatch",
-      "t3_ret_svc_dispatch", "t5_ret_return_prep", "t6_ret_restore_begin", "caller_post"
-  };
-
-  BOARD::diag_printf("[STAGE0.5] === C6 Stage 0.5 Interval Breakdown ===\n");
-  BOARD::diag_printf("[STAGE0.5] Status: %s (code=%lu)\n",
-                     shizuku_c6_stage05_record.status == SHIZUKU_C6_STAGE05_STATUS_PASSED ? "PASSED" : "FAILED",
-                     (unsigned long)shizuku_c6_stage05_record.error_code);
-  BOARD::diag_printf("[STAGE0.5] Placement: %s\n",
-                     shizuku_c6_stage05_record.placement_mode == 1 ? "IRAM" : "FLASH");
-  BOARD::diag_printf("[STAGE0.5] HP CPU Clock: %lu MHz (%s, delta_cyc=%lu, delta_systimer=%lu)\n",
-                     (unsigned long)shizuku_c6_stage05_record.cpu_mhz,
-                     shizuku_c6_stage05_record.clock_verified ? "VERIFIED" : "UNKNOWN",
-                     (unsigned long)shizuku_c6_stage05_record.cpu_cycle_delta,
-                     (unsigned long)shizuku_c6_stage05_record.systimer_ticks);
-  BOARD::diag_printf("[STAGE0.5] Hook Calibration: single raw min %lu cyc (mean %lu cyc), total perturbation %lu cyc\n",
-                     (unsigned long)shizuku_c6_stage05_record.hook_single_raw_min,
-                     (unsigned long)shizuku_c6_stage05_record.hook_single_raw_mean,
-                     (unsigned long)shizuku_c6_stage05_record.total_perturbation);
-  BOARD::diag_printf("[STAGE0.5] Valid Samples: %lu / %lu\n",
-                     (unsigned long)shizuku_c6_stage05_record.rounds_completed,
-                     (unsigned long)shizuku_c6_stage05_record.rounds_requested);
-  BOARD::diag_printf("[STAGE0.5] Total Roundtrip: raw min %lu cyc (mean %lu cyc)  net min %lu cyc (mean %lu cyc)\n",
-                     (unsigned long)shizuku_c6_stage05_record.total_raw_min,
-                     (unsigned long)shizuku_c6_stage05_record.total_raw_mean,
-                     (unsigned long)shizuku_c6_stage05_record.total_net_min,
-                     (unsigned long)shizuku_c6_stage05_record.total_net_mean);
-  for (uint32_t i = 0; i < SHIZUKU_C6_STAGE05_INTERVAL_COUNT; ++i) {
-    BOARD::diag_printf("[STAGE0.5]   [%2lu] %-17s -> %-17s : raw min %5lu cyc (mean %5lu)  net min %5lu cyc (mean %5lu)\n",
-                       (unsigned long)i,
-                       kNamesFrom[i],
-                       kNamesTo[i],
-                       (unsigned long)shizuku_c6_stage05_record.intervals[i].raw_min,
-                       (unsigned long)shizuku_c6_stage05_record.intervals[i].raw_mean,
-                       (unsigned long)shizuku_c6_stage05_record.intervals[i].net_min,
-                       (unsigned long)shizuku_c6_stage05_record.intervals[i].net_mean);
-  }
-  BOARD::diag_printf("[STAGE0.5] === End Stage 0.5 Interval Breakdown ===\n");
-
-  if (shizuku_c6_stage05_record.status == SHIZUKU_C6_STAGE05_STATUS_PASSED) {
+#if defined(__riscv)
+  // 記述子の戻り値検証 (checked_ok と同じ流儀)。41 を渡して 42 が返ること、
+  // 設定と作成がすべて成功したこと。
+  const bool desc_ok = create_ok && setup_error == (uintptr_t)object_error::OK &&
+                       g_desc1_value == 42 && g_desc2_value == 42;
+  if (desc_ok) {
     ++passed;
-    BOARD::diag_printf("[STAGE0.5] PASS stage 0.5 interval breakdown complete and valid\n");
+    BOARD::diag_printf("[COST] PASS descriptor calls return 42, create ok\n");
   } else {
     ++failed;
-    BOARD::diag_printf("[STAGE0.5] FAIL stage 0.5 interval breakdown failed (code %lu)\n",
-                       (unsigned long)shizuku_c6_stage05_record.error_code);
+    record_fail("COST descriptor call returns 42", g_desc1_value, 42);
+    BOARD::diag_printf("[COST] FAIL descriptor: setup %lu desc1 %lu desc2 %lu create_ok %u\n",
+                       (unsigned long)setup_error, (unsigned long)g_desc1_value,
+                       (unsigned long)g_desc2_value, create_ok ? 1u : 0u);
   }
+  shizuku_c6_call_cost_record.desc_checked_ok = desc_ok ? 1u : 0u;
 #endif
   BOARD::diag_printf("[COST] call cost bench done\n");
 }
 
 } // namespace
 
-void call_cost() {
-#if SHIZUKU_KERNEL_SERVICE_PROFILE && !defined(__riscv)
+// ---- 試験的な遅延退避 (--config=abi_lazy_save, 既定は無効) の境界 ----------------------------------
+//   この翻訳単位は -fcall-used-s2 … -fcall-used-s11 つきでコンパイルされる (internal_headers/shizuku/
+//   rv32_abi.hpp の SHIZUKU_ABI_LAZY_SAVE)。つまり下の call_cost_body とその先の関数は s2–s11 を保たない。
+//   外 (selftest_runner.cpp / firmware/main.cpp) から呼ばれるのは call_cost() だけで、呼ぶ側は通常の ABI で
+//   s2–s11 が保たれると信じる。なので入口をこの 1 関数に絞り、ここで s2–s11 を退避・復元する。
+//   (ecall で入る callee は、呼んだ側が ecall の戻りで s を信用しないので境界は要らない。)
+#if defined(SHIZUKU_ABI_LAZY_SAVE)
+namespace {
+[[gnu::noinline, gnu::used]] void call_cost_body();
+}
+[[gnu::noinline]] void call_cost() {
+  asm volatile(
+      "addi sp, sp, -48\n"
+      "sw s2, 0(sp)\n sw s3, 4(sp)\n sw s4, 8(sp)\n sw s5, 12(sp)\n sw s6, 16(sp)\n"
+      "sw s7, 20(sp)\n sw s8, 24(sp)\n sw s9, 28(sp)\n sw s10, 32(sp)\n sw s11, 36(sp)\n"
+      "call %0\n"
+      "lw s2, 0(sp)\n lw s3, 4(sp)\n lw s4, 8(sp)\n lw s5, 12(sp)\n lw s6, 16(sp)\n"
+      "lw s7, 20(sp)\n lw s8, 24(sp)\n lw s9, 28(sp)\n lw s10, 32(sp)\n lw s11, 36(sp)\n"
+      "addi sp, sp, 48\n"
+      :
+      : "i"(&call_cost_body)
+      : "ra", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "a0", "a1", "a2", "a3", "a4", "a5", "a6",
+        "a7", "memory");
+}
+namespace {
+void call_cost_body()
+#else
+void call_cost()
+#endif
+{
+#if !defined(__riscv)
   service_profile::reset();
+#if SHIZUKU_KERNEL_SERVICE_PROFILE
   BOARD::diag_printf("[V3GW] COST includes compiled hooks; use normal build for untraced comparison\n");
 #endif
 #endif
   if constexpr (ARCH::HAS_CYCLE_COUNTER) {
     bench<ARCH>();
   } else {
-    BOARD::diag_printf("[COST] SKIP no cycle counter on this arch\n");
+    BOARD::diag_printf("[COST] SKIP no DWT cycle counter on this arch\n");
   }
-#if SHIZUKU_KERNEL_SERVICE_PROFILE && !defined(__riscv)
-  // HAS_CYCLE_COUNTER が false の arch (M0+ 等) でも、us timer を使って同じ syscall 経路をサンプリングする。
+#if !defined(__riscv) && SHIZUKU_KERNEL_SERVICE_PROFILE
+  // M0+ has no DWT, but still sample the same syscall path using the us timer.
   if constexpr (!ARCH::HAS_CYCLE_COUNTER)
     for(unsigned i=0;i<128;++i) ARCH::syscall((uintptr_t)object_api::GET_CURRENT_OBJECT);
   const auto v=service_profile::read();
@@ -493,6 +658,9 @@ void call_cost() {
       service_profile::cycles()?"cyc":"us");
 #endif
 }
+#if defined(SHIZUKU_ABI_LAZY_SAVE)
+} // namespace
+#endif
 
 } // namespace selftest
 } // namespace shizuku

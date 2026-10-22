@@ -23,6 +23,7 @@ template <> void KERNEL::grant_unwind(grant_end);
 template <> void KERNEL::arm_timer();
 template <> void KERNEL::grant_charge();
 template <> bool KERNEL::claim(uint32_t, kernel_error &);
+template <> kernel_error KERNEL::do_grant(uint32_t, uint64_t);
 template <> void KERNEL::set_recovery_thread(uint32_t);
 template <> void KERNEL::set_thread_storage(void *, uintptr_t);
 template <> void KERNEL::release(uint32_t);
@@ -52,12 +53,16 @@ template <> void KERNEL::set_thread_storage(void *memory, uintptr_t bytes) {
     m_threads[index].context = CONTEXT{};
     m_threads[index].thread.context = &m_threads[index].context;
   }
+  // 現在のスレッドのキャッシュを新しい表に張り直す (m_current は init で 0)。
+  for (uint32_t core = 0; core < CORE_COUNT; ++core)
+    m_current_thread[core] = m_current[core] < m_thread_count ? &m_threads[m_current[core]].thread
+                                                                : &m_threads[0].thread;
 }
 
 template <> void KERNEL::set_thread_ledger(
     uint32_t id, KERNEL::call_ledger_entry *memory, uint32_t capacity,
     uint32_t object, uint32_t kind, uint32_t handler_object,
-    uintptr_t handler_entry) {
+    uintptr_t handler_entry, uint32_t object_generation) {
   if (id >= m_thread_count || memory == nullptr || capacity == 0 ||
       (uintptr_t)memory >= BOARD::unprivileged_floor())
     BOARD::panic("call ledger must be privileged memory");
@@ -66,6 +71,7 @@ template <> void KERNEL::set_thread_ledger(
   thread.ledger_capacity = capacity;
   thread.call_stack = {};
   thread.base_object = object;
+  thread.call_stack.base_object_generation = object_generation;
   thread.base_kind = kind;
   thread.base_handler_object = handler_object;
   thread.base_handler_entry = handler_entry;
@@ -102,7 +108,8 @@ KERNEL::spawn_result KERNEL::spawn(const KERNEL::spawn_request &request) {
     BOARD::panic("spawn without call ledger");
   set_thread_ledger(index, request.ledger,
                     request.ledger_capacity, request.object_id, request.kind,
-                    request.parent_handler_object, request.parent_handler_entry);
+                    request.parent_handler_object, request.parent_handler_entry,
+                    request.object_generation);
   // ★既定は**全コア**。core0 固定を既定にすると「渡す機構が効いている」ことを
   //   確かめられない (決めた通りに動いただけになる)。固定したい相手は明示する。
   thread.affinity = request.affinity == 0
@@ -203,35 +210,19 @@ template <> bool KERNEL::claim(uint32_t thread, kernel_error &error) {
   return true;
 }
 
+// SWITCH = GRANT(target, 無制限)。自分が持っている CPU 予算の全部を渡す: 外側に貸し手が
+// 居て期限があればその残りが (do_grant が外側の残りでクランプする)、起点のスレッドや
+// kernel object のように予算が無制限なら無制限で渡る。渡した側は WAIT_GRANT で待ち、
+// 借り手の YIELD (grant_unwind) か期限切れで戻ってくる。
+// ★以前の「借り手が撃つと対象を無視して貸し手へ返す」「起点が撃つと READY に戻るだけの
+//   バトン渡し」は無くなった。借り手の SWITCH(C) は C への又貸し (A→B→C) になる。
+//   貸し手へ返したいときは SWITCH(貸し手) か YIELD。
 template <> kernel_error KERNEL::do_switch(uint32_t target) {
-  const uint32_t core = BOARD::core_num();
-  // ★借り手として走っている最中の switch は「早めに返す」の意味にする。対象は見ない
-  //   — 借りた実行権を第三者へ又貸しできてしまうと、貸し手の期限が意味を失う。
-  if (m_grants[core].depth != 0) {
-    grant_unwind(grant_end::YIELDED);
-    return kernel_error::OK;
-  }
-  const uint32_t current = m_current[core];
-  if (target == current)
-    return kernel_error::OK; // 自分へ渡すのは何もしないのと同じ
-  kernel_error error = kernel_error::OK;
-  if (!claim(target, error))
-    return error;
-  m_current[core] = target;
-  // 渡した側は READY へ。release 以降、他コアが拾ってよい (自分の文脈の退避は
-  // 例外入口が済ませている)。
-  // ★★**RUNNING だったときだけ**戻す (D54)。無条件に READY を書くと、
-  //   デバッガが直前に立てた SUSPENDED を**上書きして復活させる** —
-  //   「止めたのに走り続ける」の経路の 1 つがこれだった。CAS にするのは、
-  //   状態を変えてよいのが「今 RUNNING である」場合に限るから。
-  ARCH::cas32(&m_threads[current].thread.state,
-              (uint32_t)THREAD::state_t::RUNNING,
-              (uint32_t)THREAD::state_t::READY);
-  return kernel_error::OK;
+  return do_grant(target, GRANT_UNLIMITED);
 }
 
 template <>
-kernel_error KERNEL::do_grant(uint32_t target, uint32_t cycles) {
+kernel_error KERNEL::do_grant(uint32_t target, uint64_t cycles) {
   const uint32_t core = BOARD::core_num();
   const uint32_t current = m_current[core];
   if (target == current)
@@ -271,7 +262,7 @@ kernel_error KERNEL::do_grant(uint32_t target, uint32_t cycles) {
   // 貸し手は WAIT_GRANT。READY ではないので他コアに拾われず、復帰はこのコアの
   // 巻き取り経路 (期限 or 早期復帰) だけになる。
   m_threads[current].thread.set_state(THREAD::state_t::WAIT_GRANT);
-  m_current[core] = target;
+  set_current(core, target);
   arm_timer();
   return kernel_error::OK;
 }
@@ -295,7 +286,7 @@ template <> void KERNEL::grant_unwind(grant_end reason) {
   //   READY でないので拾われない。
   if (!m_threads[lender].thread.is_state(THREAD::state_t::SUSPENDED))
     m_threads[lender].thread.set_state(THREAD::state_t::RUNNING);
-  m_current[core] = lender;
+  set_current(core, lender);
   // 借り手を返す。走り終えていたらそのまま (終了させたスレッドを生き返らせない)。
   if (m_threads[borrower].thread.is_state(THREAD::state_t::RUNNING))
     ARCH::store_release32(&m_threads[borrower].thread.state,
@@ -330,6 +321,8 @@ template <> void KERNEL::grant_charge() {
       (wrapped || left == 0) ? m_armed[core] : (uint64_t)(m_armed[core] - left);
   for (uint32_t index = 0; index < grants.depth; ++index) {
     grant_frame &frame = grants.frames[index];
+    if (frame.remaining == GRANT_UNLIMITED)
+      continue; // 無制限の段は減らない
     frame.remaining = frame.remaining > used ? frame.remaining - used : 0;
   }
   m_armed[core] = wrapped ? 0 : left;
@@ -347,6 +340,12 @@ template <> void KERNEL::arm_timer() {
     return;
   }
   uint64_t chunk = grants.frames[grants.depth - 1].remaining;
+  if (chunk == GRANT_UNLIMITED) {
+    // 期限なし (SWITCH)。取り上げる相手が居ないのでタイマは要らない。
+    ARCH::timer_cancel();
+    m_armed[core] = 0;
+    return;
+  }
   // タイマは幅が有限なので、長い貸しは刻んで継ぎ足す (残量自体は変わらない)。
   if (chunk > ARCH::TIMER_MAX_CYCLES)
     chunk = ARCH::TIMER_MAX_CYCLES;
@@ -447,7 +446,7 @@ template <> void KERNEL::debug_dispatch(KERNEL::CONTEXT *context) {
   }
   kernel_error error = kernel_error::OK;
   if (m_recovery_thread < m_thread_count && claim(m_recovery_thread, error)) {
-    m_current[core] = m_recovery_thread;
+    set_current(core, m_recovery_thread);
     return;
   }
   // ★渡す先が無いなら**止めるのをやめる**。フォールトと違ってデバッグ事象は
@@ -543,7 +542,7 @@ template <> void KERNEL::fault_dispatch(KERNEL::CONTEXT *context) {
   shizuku_selftest_fault_phase(16, m_recovery_thread);
 #endif
   if (m_recovery_thread < m_thread_count && claim(m_recovery_thread, error)) {
-    m_current[core] = m_recovery_thread;
+    set_current(core, m_recovery_thread);
     return;
   }
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0

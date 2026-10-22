@@ -6,6 +6,7 @@
 #include "arch/riscv/pmp.hpp"
 #include "arch/riscv/rv32_frame.h"
 #include "shizuku/concepts/arch.hpp"
+#include "shizuku/rv32_abi.hpp"
 
 // 共通の RV32 trap 経路 (arch/riscv/rv32_trap.S) の入口・戻り口。
 // dispatch と failure は chips 側の C++ が定義する (shizuku_rv32_trap_dispatch / shizuku_rv32_return_failed)。
@@ -83,6 +84,8 @@ public:
 
   // スレッド文脈 (callee-saved registers: sp, s0..s11)
   struct context_t {
+    // 呼出しの記録は user stack 上のヘッダ枠にある (thread.hpp: identity 配列を縮める目印)。
+    static constexpr bool CALL_HEADER_ON_STACK = true;
     exception_frame_t *sp = nullptr;
     uintptr_t s0 = 0, s1 = 0, s2 = 0, s3 = 0;
     uintptr_t s4 = 0, s5 = 0, s6 = 0, s7 = 0;
@@ -118,13 +121,8 @@ public:
     return reinterpret_cast<uintptr_t>(context.sp) + sizeof(exception_frame_t);
   }
 
-  static void normalize_frame(exception_frame_t &frame) {
-#if defined(SHIZUKU_EXP_C6_STAGE1)
-    frame.reserved0 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&frame) + sizeof(exception_frame_t));
-#else
-    (void)frame;
+  static void normalize_frame(exception_frame_t &) {
     // RV32 ではハードウェアによる SP の奇数ワード自動調整等は存在しない
-#endif
   }
 
   // syscall ABI: a0..a4 = frame.a0..frame.a4 (source/kernel/dispatch.cpp:209, 218-239 と整合)
@@ -147,6 +145,8 @@ public:
     frame.a1 = args[1];
     frame.a2 = args[2];
     frame.a3 = args[3];
+    // a4 以降は書かない: レジスタは全部 caller からの入力として素通しする (callee は宣言した
+    // 引数以外を信用しない)。5 引数目 (a4) が要る呼び先は set_handler_args が書く。
   }
 
   static void set_args_6(exception_frame_t &frame, const uintptr_t *args) {
@@ -174,10 +174,121 @@ public:
   static void set_entry(exception_frame_t &frame, uintptr_t pc, uintptr_t lr) {
     frame.mepc = pc;
     frame.ra = lr;
+    // 呼び先の入口: 戻りの出口は引数 (a0-a7) と ra だけを入れ、ほかは消さず素通しする
+    // (s*/gp/tp は caller の値)。
+    frame.mcause = RV32_TAG_ENTRY;
   }
 
   static uintptr_t return_stub() {
     return reinterpret_cast<uintptr_t>(&shizuku_rv32_return_stub);
+  }
+
+  // ---- 呼出しの記録 (design notes §5b、2026-10-22 ABI) ----------------------------
+  // 全ての ecall (CALL_METHOD / descriptor call / kobj への dispatch) は caller の trap フレームを
+  // コピーせず、そのまま呼び先の入口フレームにする。呼び先の SP は caller の ecall 時点の SP と
+  // 同じ。caller を再開するのに要る最小限は、caller stub が ecall の前に空けた枠
+  // [sp, sp + 32) (callee のスタックより上 = callee の窓の外) にカーネルが書く。
+  // カーネルが持つのは先頭ヘッダへのポインタ (call_stack.top) と深さだけ。
+  // 戻りでは caller の SP の直下に再開フレームを作る (a0/a1 以外は素通し。巻き戻しのときだけ消す)。
+  static constexpr bool CALL_IN_PLACE = true;
+  struct call_header_t {
+    uintptr_t prev;            // 一つ外側のヘッダのアドレス (0 = 最外)
+    uintptr_t pc;              // caller の再開 pc (ecall の次の命令)
+    uint32_t caller_object;    // この段を積む前の caller_object / generation (call の段が戻すもの)
+    uint32_t caller_generation;
+    uintptr_t region_base;     // caller の軸 B の窓
+    uintptr_t region_limit;
+    uint16_t unwind_floor;     // 書かない (台帳 thread.ledger が持つ。ここの値は不定)
+    uint8_t via;               // 書かない (同上)
+    uint8_t privileged;        // caller の特権
+    uint32_t reserved;         // 書かない (枠の大きさを 32B に保つ詰め物)
+  };
+  // 実機 (32bit) では枠にちょうど収まること。host 試験 (64bit) は uintptr_t が太いので検査しない。
+  static_assert(sizeof(uintptr_t) != 4 || sizeof(call_header_t) == RV32_CALL_HEADER_BYTES);
+  static_assert(RV32_CALL_HEADER_BYTES == rv32_abi::CALL_HEADER_BYTES);
+
+  // ecall した caller の枠。trap フレーム (context.sp) の直上 = caller の ecall 時点の SP。
+  static call_header_t *call_header_slot(const context_t &context) {
+    return reinterpret_cast<call_header_t *>(
+        reinterpret_cast<uintptr_t>(context.sp) + sizeof(exception_frame_t));
+  }
+
+  // 枠に書いたあと呼び先の窓の上端になるアドレス (= 枠の下端 = ecall 時点の SP)。
+  static uintptr_t call_window_top(const call_header_t *header) {
+    return reinterpret_cast<uintptr_t>(header);
+  }
+
+  // 呼び先の入口に要る余白: 返りの trap フレーム 1 枚ぶんに加え、呼び先がもう 1 回カーネルを
+  // 呼び返せること (トランポリン 1 枚 + fault 入口の退避 + ハンドラ連鎖)。
+  static bool call_header_has_room(const context_t &context) {
+    const uintptr_t limit = stack_limit(context);
+    if (limit == 0)
+      return true;
+    const uintptr_t sp = reinterpret_cast<uintptr_t>(context.sp) +
+                         sizeof(exception_frame_t);
+    return sp >= limit &&
+           sp - limit >= 2u * sizeof(exception_frame_t) + EXC_FRAME_MAX_BYTES +
+                             FAULT_CONTEXT_BYTES + CALL_HEADROOM;
+  }
+
+  // 戻り: ヘッダの枠の直下に caller の再開フレームを作る。a0/a1 (戻り値) は呼び出し側が set_result で
+  // 書く。出口が読むのは mepc / mstatus / a0 / a1 だけなので、フレームの残り (144B) は書かない
+  // (旧: 全体を 0 で埋めていた)。呼び先が返ってきたときの trap フレームと重なることがある
+  // (返りの SP が caller の SP のすぐ下のとき) ので、呼び出し側は戻り値などを先に読んでおくこと。
+  // ヘッダ自身はフレームの上にあり、重ならない。
+  //   scrub = false : 目印 RV32_TAG_ECALL (素通し)。callee が自分で戻った普通の戻り (1 段)。
+  //   scrub = true  : 目印 RV32_TAG_ECALL_SCRUB。callee が自分の意思で戻らない巻き戻し (多段の
+  //                   EXIT_METHOD / RETURN、FORWARD_CHILD_EXIT)。出口 (rv32_trap.S の
+  //                   .Lrv32_exit_scrub) が ra・t*・a2–a7・s* をレジスタ上で 0 にする。
+  [[gnu::always_inline]] static exception_frame_t *call_resume(context_t &context,
+                                                                const call_header_t *header,
+                                                                bool scrub) {
+    return call_resume_at(context, header->pc, reinterpret_cast<uintptr_t>(header),
+                          header->privileged != 0, header->region_base, header->region_limit,
+                          scrub);
+  }
+
+  // caller の ecall 時点の SP (= 再開フレームの上端。ヘッダ枠方式ではヘッダ枠のアドレスと同じ)。
+  static uintptr_t call_return_sp(const context_t &context) {
+    return reinterpret_cast<uintptr_t>(context.sp) + sizeof(exception_frame_t);
+  }
+
+  // 再開フレームを sp の直下に作って context を caller の状態へ戻す。戻り先の値 (pc・sp・特権・窓) は
+  // 呼び出し側が権威のある所 (特権の台帳。SHIZUKU_LEAN_LEDGER) から読んで渡す。
+  [[gnu::always_inline]] static exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
+                                                                  uintptr_t sp, bool privileged,
+                                                                  uintptr_t region_base,
+                                                                  uintptr_t region_limit,
+                                                                  bool scrub) {
+    auto *frame = reinterpret_cast<exception_frame_t *>(sp - sizeof(exception_frame_t));
+    frame->mepc = pc;
+    frame->mstatus = 0; // 呼び出し側が特権・MPIE を足す
+    frame->mcause = scrub ? RV32_TAG_ECALL_SCRUB : RV32_TAG_ECALL;
+    context.sp = frame;
+    context.privileged = privileged;
+    context.region_base = region_base;
+    context.region_limit = region_limit;
+    return frame;
+  }
+
+  // 別のスレッドへ切り替わったあとの再開: 切り替わり先が ECALL で止まっていた (目印 RV32_TAG_ECALL)
+  // なら、出口でレジスタを消す目印 (RV32_TAG_ECALL_SCRUB) に替える。素通しの出口のままだと、切り替わる
+  // 前のスレッドの値 (s*・t*・a2–a7・ra) がそのスレッドに見えてしまう。それ以外の目印は変えない
+  // (全レジスタを復元して戻るフレームは自分の値、入口 ENTRY は同じ trap の中で切り替わらない)。
+  static void scrub_on_switch(context_t &resumed) {
+    exception_frame_t *frame = resumed.sp;
+    if (frame->mcause == RV32_TAG_ECALL)
+      frame->mcause = RV32_TAG_ECALL_SCRUB;
+  }
+
+  // ---- ABI converter, callee 側 (shizuku/method_entry.hpp, shizuku/rv32_abi.hpp) ----
+  // F の入口 stub (gp を自分の __global_pointer$ にしてから本体へ tail jump する)。
+  template <auto F> static void (*method_stub())() {
+#if defined(__riscv)
+    return &rv32_abi::method_stub_body<F>;
+#else
+    return reinterpret_cast<void (*)()>(F); // host 試験: stub を作れない
+#endif
   }
   // trap 深さの問い合わせは IntMode に委ねる。ECALL は割込みではない。
   static bool in_interrupt() { return IntMode::in_interrupt(); }
@@ -197,22 +308,26 @@ public:
     context.stack_limit = limit;
   }
 
-#if defined(SHIZUKU_EXP_C6_STAGE1)
-  static bool is_kstack_address(uintptr_t addr) {
-    return IntMode::is_kstack_address(addr);
-  }
-  static uintptr_t kstack_limit() {
-    return IntMode::kstack_limit();
-  }
-#endif
-
   static uintptr_t stack_limit(const context_t &context) {
-#if defined(SHIZUKU_EXP_C6_STAGE1)
-    if (IntMode::is_kstack_address(reinterpret_cast<uintptr_t>(context.sp))) {
-      return IntMode::kstack_limit();
-    }
-#endif
     return context.stack_limit;
+  }
+  // CALL 時に、戻りの dispatch が積む 1 枚ぶんの余白が残るか (dispatch.cpp の
+  // do_call)。RV32 はハード検出が無くソフト検査のみなので、戻りの余白を CALL 時に
+  // 先取りしないと、最深で return が NO_STACK に断られ止まる。
+  // 式は call_frame_push と同じ構成要素 (ヘッダ・実フレーム・余白) から出す。
+  static bool call_entry_has_return_room(const context_t &context,
+                                         uint32_t header_bytes) {
+    const uintptr_t limit = stack_limit(context);
+    if (limit == 0)
+      return true;
+    const uintptr_t frame_bytes = exc_frame_bytes(context);
+    const uintptr_t unaligned = header_bytes + frame_bytes + HANDLER_STACK_ARG_BYTES;
+    const uintptr_t total = (unaligned + 7u) & ~(uintptr_t)7u;
+    const uintptr_t dispatch_reserve = unaligned + EXC_FRAME_MAX_BYTES +
+                                       FAULT_CONTEXT_BYTES + CALL_HEADROOM;
+    const uintptr_t sp = reinterpret_cast<uintptr_t>(context.sp);
+    // total は呼び先のフレーム、もう 1 つの total は戻りの dispatch のフレーム。
+    return sp >= limit && sp - limit >= 2u * total + dispatch_reserve;
   }
 
   static void set_region_window(context_t &context, uintptr_t base,
@@ -238,38 +353,21 @@ public:
   }
 
 #if defined(__riscv)
-  static syscall_result syscall(uintptr_t number, uintptr_t a1 = 0,
+  // caller 側 ABI converter (shizuku/rv32_abi.hpp): カーネルは sp / pc / a0 / a1 以外を
+  // 保証しない。callee-saved・ra・gp・tp の退避と復元は ecall の中 (クラバー + 明示退避)。
+  [[gnu::always_inline]] static syscall_result syscall(uintptr_t number, uintptr_t a1 = 0,
                                 uintptr_t a2 = 0, uintptr_t a3 = 0,
                                 uintptr_t a4 = 0) {
-    register uintptr_t r_a0 asm("a0") = number;
-    register uintptr_t r_a1 asm("a1") = a1;
-    register uintptr_t r_a2 asm("a2") = a2;
-    register uintptr_t r_a3 asm("a3") = a3;
-    register uintptr_t r_a4 asm("a4") = a4;
-    asm volatile("ecall"
-                 : "+r"(r_a0), "+r"(r_a1)
-                 : "r"(r_a2), "r"(r_a3), "r"(r_a4)
-                 : "ra", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "a5", "a6", "a7", "memory");
-    return {r_a0, r_a1};
+    const auto result = rv32_abi::ecall(number, a1, a2, a3, a4);
+    return {result.error, result.value};
   }
 
-  static syscall_result syscall(uintptr_t number, uintptr_t a1,
+  [[gnu::always_inline]] static syscall_result syscall(uintptr_t number, uintptr_t a1,
                                 uintptr_t a2, uintptr_t a3,
                                 uintptr_t a4, uintptr_t a5,
                                 uintptr_t a6, uintptr_t a7) {
-    register uintptr_t r_a0 asm("a0") = number;
-    register uintptr_t r_a1 asm("a1") = a1;
-    register uintptr_t r_a2 asm("a2") = a2;
-    register uintptr_t r_a3 asm("a3") = a3;
-    register uintptr_t r_a4 asm("a4") = a4;
-    register uintptr_t r_a5 asm("a5") = a5;
-    register uintptr_t r_a6 asm("a6") = a6;
-    register uintptr_t r_a7 asm("a7") = a7;
-    asm volatile("ecall"
-                 : "+r"(r_a0), "+r"(r_a1)
-                 : "r"(r_a2), "r"(r_a3), "r"(r_a4), "r"(r_a5), "r"(r_a6), "r"(r_a7)
-                 : "memory");
-    return {r_a0, r_a1};
+    const auto result = rv32_abi::ecall(number, a1, a2, a3, a4, a5, a6, a7);
+    return {result.error, result.value};
   }
 #else
   // 非-RISC-V 環境でのホスト呼出しを成功に見せる no-op は禁止。未対応時リンク不能とする。
@@ -298,44 +396,7 @@ public:
     frame->a1 = frame->a2 = frame->a3 = frame->a4 = 0;
     frame->mstatus = context.privileged ? RV32_MSTATUS_MPP : 0;
     // MPIE stays clear until the interrupt matrix and timer are owned.
-#if defined(SHIZUKU_EXP_C6_STAGE1)
-    frame->reserved0 = (stack_top & ~static_cast<uintptr_t>(15));
     context.sp = frame;
-#else
-    context.sp = frame;
-#endif
-  }
-
-  // サイクルカウンタ処理は IntMode (チップ側) に委ねる。
-  static bool cycle_counter_enable() {
-    if constexpr (HAS_CYCLE_COUNTER) {
-      return IntMode::cycle_counter_enable();
-    } else {
-      return false;
-    }
-  }
-  static uint32_t cycle_counter_read() {
-    if constexpr (HAS_CYCLE_COUNTER) {
-      return IntMode::cycle_counter_read();
-    } else {
-      return 0;
-    }
-  }
-
-  // サイクルカウンタ処理は IntMode (チップ側) に委ねる。
-  static bool cycle_counter_enable() {
-    if constexpr (HAS_CYCLE_COUNTER) {
-      return IntMode::cycle_counter_enable();
-    } else {
-      return false;
-    }
-  }
-  static uint32_t cycle_counter_read() {
-    if constexpr (HAS_CYCLE_COUNTER) {
-      return IntMode::cycle_counter_read();
-    } else {
-      return 0;
-    }
   }
 
   // タイマ・割込み方式の処理は IntMode (チップ側) に委ねる。

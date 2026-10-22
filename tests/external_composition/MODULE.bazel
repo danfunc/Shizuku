@@ -1,7 +1,0 @@
-module(name = "external_composition_consumer", version = "0.0.1")
-
-bazel_dep(name = "shizuku")
-local_path_override(
-    module_name = "shizuku",
-    path = "../..",
-)

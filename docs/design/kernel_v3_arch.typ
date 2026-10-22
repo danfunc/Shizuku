@@ -307,7 +307,7 @@ namespace shizuku::kernel_services {
 - *SoC プラットフォーム機能の開示状況と分離*:
   - ESP32-C6: RV32IMAC (シングルコア, 16 PMP エントリ), PLIC / INTC。(confirmed via ESP32-C6 TRM v1.1)
   - ESP32-C3 / H2 / P4 / Hazard3: チップ固有のハート数、独自割込みコントローラ、タイマ仕様は一次資料 TRM 現物を直接開いて検証していないため、*未確認 (unknown)* として扱う。CLINT, PLIC, CLIC, タイマ, ハードウェアスピンロックは ISA ではなく platform / SoC 固有機構である。(unknown)
-- *トラップフレームの分離*: RISC-V のトラップはハードウェア自動スタッキングを行わない。全 31 本の GPR を常時一律に退避するのではなく、同期システムコール (`ecall`) では呼出し規約の caller-saved レジスタ (a0–a7, t0–t6, ra) のみを退避し、非同期割込みではプリエンプトに備えて完全退避を行う。`ecall` 復帰時は `mepc += 4` が必須 (`trap_route.hpp:16–19`)。(confirmed)
+- *トラップフレームの分離*: RISC-V のトラップはハードウェア自動スタッキングを行わない。全 31 本の GPR を常時一律に退避するのではなく、同期システムコール (`ecall`) では呼出し規約の caller-saved レジスタ (a0–a7, t0–t6, ra) のみを退避し、非同期割込みではプリエンプトに備えて完全退避を行う。`ecall` 復帰時は `mepc += 4` が必須で、M-mode の `ecall` は例外入口の asm (`rv32_trap.S` の ECALL 枝) が `mepc` を進め、a0 の番号で表 (`shizuku_rv32_ecall_table`) を引いて各 API の処理関数へ直接入る (割込み・例外と U-mode の `ecall` は従来どおり `trap_route.hpp:16–19` の `route_trap`)。切替えが起きない API (CALL_METHOD・記述子 call・EXIT_METHOD・FORWARD_CHILD_EXIT・GET_*・SET_BUDGET) の処理関数は 1 API = 1 関数で、本体 (`native_call.hpp`、always_inline) を展開し、`context_t` を組まず trap フレームを直接扱う。診断と入れ子の記帳 (`trap_diag`・`trap_depth`・`active_*`・`pend_flag`) は割込み・例外と、実行権を渡す API (YIELD・RUN_FOR など、切替えが起きうる経路) の側にだけ残し、遅い経路 (停止・kobj への転送) は tail call にして成功経路に `ra`・`s*` の退避を持たせない。戻りの再開フレームは `mepc`・`mstatus`・目印だけを書き、`a0`/`a1` 以外のレジスタの消去は出口 `.Lrv32_exit_ecall` が行う。(confirmed)
 
 ==== Cadence / Tensilica Xtensa (代表: ESP32 LX6, ESP32-S3 LX7, ESP32-S2)
 - *一次資料ステータス*:

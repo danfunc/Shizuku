@@ -3,7 +3,7 @@
 #include <cstdint>
 
 // ===========================================================================
-//  カーネル ABI — 機構だけの語彙 (docs/03_porting_policy.md D1 / DESIGN §7)
+//  カーネル ABI — 機構だけの語彙 (docs/record/kernel_v2_record.typ D1 / DESIGN §7)
 // ===========================================================================
 //  syscall の形: a0 = 番号, a1..a4 = 引数 / 戻り a0 = エラー (0 = 成功), a1 = 値。
 //
@@ -29,10 +29,11 @@ enum struct primitive : uintptr_t {
   // a1 = 落とす段数, a2 = 戻り値, a3 = エラーコード, a4 = 絶対戻り先深さ d。
   // d が unwind floor 未満、現在深さ以上、または count と不整合なら何も pop しない。
   RETURN = 2,
-  // a1 = 対象スレッド ID。実行権のバトンパス (期限なしの移譲)。
-  // ★貸している最中 (GRANT の借り手として走っている) にこれを撃つと、対象は
-  //   無視して**貸し手へ早期復帰**する。借り手の yield は「早めの return」であって
-  //   勝手に第三者へ渡す権利ではない。
+  // a1 = 対象スレッド ID。GRANT(対象, 自分の持つ予算の全部) と同じ。
+  // 外側に貸し手が居て期限があればその残りを、起点のスレッドや kernel object のように
+  // 予算が無制限なら無制限を渡す (外側でクランプされるので延長にはならない)。
+  // 渡した側は WAIT_GRANT で待ち、借り手の yield か期限切れで戻る。借り手が撃てば又貸し。
+  // 貸し手へ返すには、貸し手の ID を指す (祖先返却) か YIELD (svc_dispatch が処理する)。
   SWITCH = 3,
   // a1 = 対象スレッド ID, a2 = 期限 [µs]。時限つきで実行権を貸す。
   // 期限が来る (強制回収) か、借り手が yield する (早期復帰) と戻る。
@@ -85,9 +86,10 @@ struct call_request {
   // ★呼び先の**種別**。既定は PLAIN — ハンドラを務めるオブジェクトを呼ぶときだけ
   //   HANDLER を載せる。ここが「役」を運ぶ唯一の場所で、ID からは決めない。
   uint32_t callee_kind = (uint32_t)object_kind::PLAIN;
+  uint32_t callee_generation = 0;
   // ★軸 B (DESIGN §11.3)。呼び先が特権命令なしに読める追加の窓
   //   (region0/1 の外)。0/0 = 窓なし。**呼び出し元ではなく呼び先の性質**として
-  //   決まる値をここへ載せる (docs/03_porting_policy.md Q8)。
+  //   決まる値をここへ載せる (docs/record/kernel_v2_record.typ Q8)。
   uintptr_t region_base = 0;
   uintptr_t region_limit = 0;
   // ★解決済み親 handling object の情報 (thread コンテキストへ伝播)

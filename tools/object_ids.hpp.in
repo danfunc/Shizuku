@@ -1,29 +1,19 @@
+// ★このファイルはビルドシステムが生成する。手で編集しない。
+//   番号を振っているのは tools/gen_object_ids.py で、各コンポーネントは
+//   shizuku_declare_objects(<component> <name>...) で名前を宣言するだけ。
+//   **番号をどこにも書かない**ので、番号の衝突は起こり得ない (D28)。
 #ifndef SHIZUKU_OBJECT_IDS_HPP
 #define SHIZUKU_OBJECT_IDS_HPP
-#include <stdint.h>
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-// Canonical exported C ABI symbol 宣言 (C / C++ 共通)
-extern const uintptr_t shizuku_object_id_root;
-@SHIZUKU_OBJECT_ID_C_DECLS@
-extern const uintptr_t shizuku_object_id_count;
-
-#ifdef __cplusplus
-} // extern "C"
+#include <cstdint>
 
 namespace shizuku {
 namespace object_id {
 
-// C++ 参照 alias (定数参照バインディング、初期化コード不要)
-inline constexpr const uintptr_t &root = shizuku_object_id_root;
+// 0 はブートスレッドが名乗るオブジェクト。以降は宣言順。
+constexpr uintptr_t root = 0;
 @SHIZUKU_OBJECT_ID_BODY@
-inline constexpr const uintptr_t &count = shizuku_object_id_count;
+constexpr uintptr_t count = @SHIZUKU_OBJECT_ID_COUNT@;
 
 } // namespace object_id
 } // namespace shizuku
-#endif // __cplusplus
-
 #endif // SHIZUKU_OBJECT_IDS_HPP

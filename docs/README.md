@@ -7,25 +7,25 @@
 
 > Shizuku のリファクタリングと移植対応を行う。
 > **コード設計・書き方は現行リポジトリ (このリポジトリのルート以下) の組み方をベース**とし、
-> **機能面・設計面は `latest_ver_from_flight_robocon/` に保存されている資料を正しいもの**とする。
-> latest 以下には docs の形で設計方針が記載され、コード中にもコメントがあるので適宜参照する。
+> **機能面・設計面は `docs/design/kernel_v3.typ` と `docs/design/kernel_v3_arch.typ` に書かれた V3 カーネル設計を正しいもの**とする。
+> 旧 V2 カーネルの記録は `docs/record/kernel_v2_record.typ` にある。
 
 つまり:
-- **何を作るか** = `latest_ver_from_flight_robocon/flight_robocon_telemetory_sender/docs/SHIZUKU_DESIGN.md`
-  (以下 **DESIGN**) が規範。移し方は同 `SHIZUKU_REDESIGN_PORTABILITY.md` (以下 **PORT**) が規範
+- **何を作るか** = `docs/design/kernel_v3.typ`
+  (以下 **DESIGN**) が規範。ISA 展開と非依存核モデルは `docs/design/kernel_v3_arch.typ` (以下 **ARCH**) を参照
 - **どう書くか** = 現行リポジトリの骨格 (template + concepts、configs/ による型注入、
   modules/ による差し替え、`result<T>`、CMake 構成) を踏襲する
-- 参照実装 (`latest_.../kernel.cpp` ほか) は「実機検証済みの機構の宝庫」だが、
+- 旧参照実装 (削除済み) は「実機検証済みの機構の宝庫」だが、
   **設計としてはそのまま移植しない** (DESIGN §12 が明示する欠陥を含む)。
   機構 (フレーム幾何・CAS・優先度設計) は移植する。カーネルとオブジェクトの境界は
   D58 (2026-09-28) に従い、再登録によるホットスワップを要件として設計する
 
 ## 読み順
 
-1. [01_current_repo_survey.md](01_current_repo_survey.md) — 現行リポジトリの調査結果 (構成・流儀・**発見済みの不具合一覧**)
-2. [02_reference_survey.md](02_reference_survey.md) — 参照実装 (latest) の調査結果 (何がどこにあり、何が検証済みか)
-3. [03_porting_policy.md](03_porting_policy.md) — 方針: 設計文書の層構造を現リポジトリの流儀へどう写像するか、決定事項と未決事項
-4. [04_work_instructions.md](04_work_instructions.md) — **指示書**: フェーズ別の実装手順・受け入れ条件・地雷一覧
+1. [design/kernel_v3.typ](design/kernel_v3.typ) — 規範となる V3 カーネル設計 (DESIGN)
+2. [design/kernel_v3_arch.typ](design/kernel_v3_arch.typ) — ISA 展開と非依存核モデル (ARCH)
+3. [record/kernel_v2_record.typ](record/kernel_v2_record.typ) — V2 の記録と、決定 D 番号の正本 (削除した 03 から移した現行決定を含む)
+4. [record/legacy_docs_summary.typ](record/legacy_docs_summary.typ) — 削除した 01〜05 (V1/V2 期の調査・方針・指示書・引き継ぎ) の要約と、全文の見方
 
 DESIGN / PORT の 2 文書は長いが**全文読むこと** (特に DESIGN §7, §8, §11, §12, §17 と
 PORT §3, §4.5, §4.6, §5)。本 docs はそれらの要約 + 現リポジトリへの適用であり、代替ではない。
@@ -40,9 +40,10 @@ PORT §3, §4.5, §4.6, §5)。本 docs はそれらの要約 + 現リポジト�
   CMake は `-DSHIZUKU_ARCH=armv8m -DSHIZUKU_BOARD=rp2350_pico2` に変数が変わった)。
   変更はすべて**未コミット** (コミットはユーザー判断)
 - 次の作業 = 引き継ぎ書を参照。Phase 2 の D1 適用計画は 2026-09-28 に廃止された。
-  プリミティブは **REDISPATCH 廃止で 5 種に確定** (03 §3.6、2026-08-19 ユーザー決定)
+  プリミティブは **REDISPATCH 廃止で 5 種に確定** (D3)
+- 削除した 04 のフェーズ表と 05 の現在地は [record/legacy_docs_summary.typ](record/legacy_docs_summary.typ) に要約してある (2026-08-24 時点)
 
-## セッション中のユーザー決定 (詳細は 03)
+## セッション中のユーザー決定 (詳細は record/kernel_v2_record.typ)
 
 - **ビルドシステムは Bazel へ移行** (D15)。pico-sdk 2.2.0 が公式 Bazel サポートを
   同梱していることを確認済み。CMake は bring-up 完了まで並存
@@ -52,5 +53,4 @@ PORT §3, §4.5, §4.6, §5)。本 docs はそれらの要約 + 現リポジト�
 - **D1 を廃止し、ハンドラ/kobj の再登録によるホットスワップと密結合を許容** (D58,
   2026-09-28)。保護付き/カーネル空間オブジェクトの 2 種別を設ける
 
-- `05_handoff.md` — **次に触る人が最初に読む 1 枚**。今どこまで来ていて、何が壊れていて、どこを踏むと痛いか。推奨プロンプト付き。
 - `07_rust_and_cyrius_review.md` — D16 (言語) の再点検、Rust を入れるならの順序、n4mlz/Cyrius との比較 (2026-10-02)。

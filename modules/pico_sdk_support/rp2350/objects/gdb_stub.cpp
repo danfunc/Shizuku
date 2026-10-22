@@ -1,6 +1,6 @@
 #include <cstring>
 // ===========================================================================
-//  GDB stub — プローブ無しで止めて覗く (docs/03_porting_policy.md D40)
+//  GDB stub — プローブ無しで止めて覗く (docs/record/kernel_v2_record.typ D40)
 // ===========================================================================
 //  ★halting debug (SWD) はコアごと止めるが、こちらは DebugMonitor なので
 //    **止まるのは対象のスレッドだけ**。他は走り続ける (I-9)。
@@ -775,7 +775,7 @@ void do_continue() { resume_target(); }
 //   なく stub 自身が single-step で止まっていた (自己停止のガードは
 //   do_continue にしか無いので、そのまま GDB チャネルごと死んでいた —
 //   これが「2 回目以降の continue/stepi が固まる」の実体だった。
-//   docs/05_handoff.md の指示通り、生ログと debug_dispatch の実測で特定した)。
+//   削除済みの docs/05_handoff.md (ce5b304) の指示通り、生ログと debug_dispatch の実測で特定した)。
 //   MON_STEP は kernel_instance.arm_step で**予約**するだけにし、実際に
 //   立てるのは対象の文脈へ復帰する直前 (CTX_RESTORE) — カーネル側に移した。
 void do_step() {

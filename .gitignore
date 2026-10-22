@@ -6,6 +6,7 @@
 # ビルドに必須のドットファイルはここで明示的に戻す。
 !.bazelrc
 !.bazelversion
+!.bazelignore
 !.gitignore
 # ★ビルドと書き込みのタスクはここ (Cmd+Shift+B で焼ける)。CMake を捨てたので
 #   Pico 拡張のボタンの代わりになっている = リポジトリに要る。

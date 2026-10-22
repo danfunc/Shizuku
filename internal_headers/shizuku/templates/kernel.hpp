@@ -8,7 +8,7 @@ namespace shizuku {
 namespace templates {
 
 // ===========================================================================
-//  カーネル — 機構だけを持つ層 (docs/03_porting_policy.md D1 / DESIGN §7)
+//  カーネル — 機構だけを持つ層 (docs/record/kernel_v2_record.typ D1 / DESIGN §7)
 // ===========================================================================
 //  カーネルが知ること: スレッド / 文脈 / 特権 call ledger / 呼び出しフレームの push・pop /
 //    実行権
@@ -82,6 +82,10 @@ public:
   //    ARCH::normalize_frame で作業コピー側の調整を消してから積む。push はその結果を
   //    ARCH::psp_after_return で必ず検算する。
   //  ★識別情報は特権 call ledger に置く。pop は ledger を target depth まで落とす。
+  //  ★ARCH::CALL_IN_PLACE (RV32) の全ての ecall はこの幾何を使わない: caller の frame をコピーせず
+  //    そのまま呼び先の入口にし、呼出しの記録 (ARCH::call_header_t: 戻り pc・caller の識別・特権・窓・
+  //    prev) は caller stub が ecall の前に空けた枠 [sp, sp+32) にカーネルが書く (design notes §5b)。
+  //    カーネルが持つのは先頭ヘッダへのポインタ (call_stack.top) と深さだけ。
   struct call_frame_header {
     uintptr_t prev;       // 一つ外側のヘッダのアドレス (0 = 最外)
     uint32_t total_bytes; // 退避域の総バイト数 (8B 境界に丸め済み)
@@ -89,10 +93,15 @@ public:
     CONTEXT saved; // 呼び出し元の文脈まるごと (sp を含む = 元フレームの位置)
   };
   using call_ledger_entry = typename THREAD::call_ledger_entry;
-  static constexpr uint8_t LEDGER_CALL = 1, LEDGER_DISPATCH = 2;
+  // LEDGER_DESCRIPTOR_CALL は方法記述子の直接 call (CALL_METHOD_DESCRIPTOR) の段。
+  // 識別と戻りの扱い (identity の復元) は LEDGER_CALL と同じ。戻りも同じく EXIT_METHOD
+  // (svc_dispatch の trap 内処理) が解釈する。
+  static constexpr uint8_t LEDGER_CALL = 1, LEDGER_DISPATCH = 2,
+                           LEDGER_DESCRIPTOR_CALL = 3;
   void set_thread_ledger(uint32_t id, call_ledger_entry *memory,
                          uint32_t capacity, uint32_t object, uint32_t kind,
-                         uint32_t handler_object, uintptr_t handler_entry);
+                         uint32_t handler_object, uintptr_t handler_entry,
+                         uint32_t object_generation = 0);
   uint32_t ledger_size(uint32_t id) const {
     return m_threads[id].thread.call_stack.depth;
   }
@@ -153,6 +162,7 @@ public:
     uintptr_t stack_base;
     uintptr_t stack_bytes;
     uint32_t object_id = 0; // 所属オブジェクトID
+    uint32_t object_generation = 0;
     // ★そのスレッドが走り出すときの種別。CALL と同じく kobj が自分の台帳から
     //   申告する (既定は PLAIN)。
     uint32_t kind = (uint32_t)object_kind::PLAIN;
@@ -189,6 +199,58 @@ public:
   // ---- ISA 層 (例外入口) から呼ばれる ----
   CONTEXT *current_context();
   void svc_dispatch(CONTEXT *context);
+  // ---- ecall の直接入口 (arch の例外入口が、a0 の番号の表から呼ぶ) ------------------
+  //  svc_dispatch の枝を番号ごとに外へ出したもの。svc_dispatch 自身も同じ関数を呼ぶので、
+  //  どちらから入っても結果は同じ。巨大な svc_dispatch を通らずに、番号に対応する処理へ入る。
+  // 呼び出し元が root KernelObject 宛ての native API を撃てる立場か (kobj 本人でも、専用の親ハンドラ
+  // 配下でもなく、親ハンドラが登録済み)。false のときは svc_dispatch へ回す (primitive・objectland の
+  // raw 配送・未登録 panic はそこで従来どおり決まる)。
+  // (定義はここ: RV32 の例外入口が 1 API = 1 関数の中へ展開する。)
+  bool svc_native_route() const { return svc_native_route_of(current_thread()); }
+  // 同じ判定を、呼び出し側がすでに引いた現在スレッドに対して行う (current_thread() を引き直さない)。
+  bool svc_native_route_of(const THREAD &thread) const {
+    if (thread.call_stack.depth != 0) {
+      const auto &top = thread.ledger_top();
+      if (top.kind == (uint8_t)object_kind::KERNEL_OBJECT &&
+          top.object == m_object_svc_handler_object)
+        return false;
+      return top.handler_entry != 0 && top.handler_object == m_object_svc_handler_object;
+    }
+    if (thread.base_kind == (uint32_t)object_kind::KERNEL_OBJECT &&
+        thread.base_object == m_object_svc_handler_object)
+      return false;
+    return thread.base_handler_entry != 0 &&
+           thread.base_handler_object == m_object_svc_handler_object;
+  }
+  // オブジェクトランドの svc ハンドラ (root KernelObject) が名乗る ID。
+  uint32_t svc_handler_object() const { return m_object_svc_handler_object; }
+  // trap 内で直接処理する native API (svc_attributes の mode == handler)。前提: svc_native_route()。
+  // true = 処理した (応答を書いた)。false = kobj へ回す (svc_forward を呼ぶこと)。
+  bool svc_exit_method(CONTEXT *context);
+  bool svc_exit(CONTEXT *context, bool forward); // EXIT_METHOD と FORWARD_CHILD_EXIT の共通部
+  bool svc_call_method(CONTEXT *context);
+  bool svc_get_current(CONTEXT *context);
+  bool svc_get_caller(CONTEXT *context);
+  bool svc_yield(CONTEXT *context);
+  bool svc_run_for(CONTEXT *context);
+  bool svc_set_budget(CONTEXT *context);
+  bool svc_forward_child_exit(CONTEXT *context);
+  bool svc_call_descriptor(CONTEXT *context);
+  // 呼び出し元が kobj 本人のときの primitive (CALL / RETURN / SWITCH / GRANT)。
+  void svc_primitive(CONTEXT *context);
+  // 親ハンドラ (root KernelObject か専用ハンドラ) へ dispatch 段を積んで配送する。
+  void svc_forward(CONTEXT *context, bool service_gate);
+  // 番号の表から呼ぶ入口: native の経路に立てていれば Body で処理し、処理しなかった (false) なら
+  // kobj へ配送。立てていなければ svc_dispatch。
+  template <bool (kernel::*Body)(CONTEXT *)>
+  void svc_entry(CONTEXT *context) {
+    if (!svc_native_route()) {
+      svc_dispatch(context);
+      return;
+    }
+    if (!(this->*Body)(context))
+      svc_forward(context, false);
+  }
   void pendsv_dispatch(CONTEXT *context);
   // 保護違反やスタック上限違反で落ちたときの受け口。
   // ★**系を止めない**。落ちたのは 1 つのスレッドなので、そのスレッドだけを止めて
@@ -233,11 +295,20 @@ public:
   }
 
   uint32_t current_thread_id() const { return m_current[BOARD::core_num()]; }
-  THREAD &current_thread() { return m_threads[current_thread_id()].thread; }
+  // 現在のスレッドは 1 語のキャッシュ (m_current_thread) から引く: id × スレッド記録の大きさの
+  // 乗算と表の先頭の読みを ecall のたびに払わない。m_current を書く所は set_current だけ。
+  THREAD &current_thread() { return *m_current_thread[BOARD::core_num()]; }
   const THREAD &current_thread() const {
-    return m_threads[current_thread_id()].thread;
+    return *m_current_thread[BOARD::core_num()];
   }
   uint32_t current_depth() const { return current_thread().call_stack.depth; }
+  uint32_t current_call_count() const {
+    return current_thread().call_stack.call_count;
+  }
+  uint32_t current_object_generation() const {
+    const THREAD &thread = current_thread();
+    return thread.identity_generation();
+  }
   uint32_t current_unwind_floor() const {
     const THREAD &thread = current_thread();
     return thread.call_stack.depth ? thread.ledger_top().unwind_floor : 0;
@@ -264,19 +335,38 @@ public:
   }
   // 今このコアで実行権を借りて走っているか (借り手の yield は貸し手への早期復帰)。
   bool grant_active() const { return m_grants[BOARD::core_num()].depth != 0; }
+  // いま借り手として走っているときの、直近の貸し手 (grant_active() が真のときだけ有効)。
+  // 貸し手へ返すには SWITCH(grant_lender()) を撃つ (SWITCH は GRANT(無制限) なので、
+  // 貸し手に当たれば祖先返却として 1 段巻き取られる)。
+  uint32_t grant_lender() const {
+    const grant_stack &grants = m_grants[BOARD::core_num()];
+    return grants.frames[grants.depth - 1].lender;
+  }
 
   // タイマ例外から呼ばれる (期限の監視。切替そのものは最低優先度の遅延例外で行う)。
   void timer_expired();
 
 private:
   bool call_frame_push(THREAD &thread, CONTEXT *context, FRAME **frame);
-  bool call_frame_pop(THREAD &thread, CONTEXT *context, FRAME **frame);
+  // restore == false は「caller の再開フレームを作る」を省く (複数段を落とすとき、途中の段は
+  // 再開しないので最後の 1 段だけ true にする。ARM のコピー式は常に文脈を戻す)。
+  // scrub は再開フレームの目印 (RV32: 出口でレジスタを消すか。ARM のコピー式は使わない)。
+  bool call_frame_pop(THREAD &thread, CONTEXT *context, FRAME **frame,
+                      bool restore = true, bool scrub = false);
+  // 台帳の上から count 段を落とす。最後に落とした段の caller が再開する。
+  // 2 段以上を一度に落とす巻き戻しは scrub の再開 (callee が自分の意思で戻らない)。
+  void call_unwind(THREAD &thread, CONTEXT *context, FRAME **frame, uintptr_t count);
 
+  // 台帳段を 1 つ積んで呼び先の入口へ向ける前半。通常 CALL と方法記述子の直接 call が
+  // 共有する (積み方と戻りの床をそろえるため)。
+  kernel_error enter_call(THREAD &thread, CONTEXT *context, FRAME **frame,
+                          const call_request &request, uint8_t via);
   kernel_error do_call(THREAD &thread, CONTEXT *context, FRAME **frame,
                        const call_request &request);
 
   kernel_error do_switch(uint32_t target);
-  kernel_error do_grant(uint32_t target, uint32_t cycles);
+  // cycles == GRANT_UNLIMITED は期限なし (SWITCH)。外側に期限があれば外側の残りでクランプされる。
+  kernel_error do_grant(uint32_t target, uint64_t cycles);
   // 貸した実行権を 1 段巻き取って貸し手へ戻す (期限切れ / 早期復帰の共通経路)。
   void grant_unwind(grant_end reason);
   // 今の刻みで使ったぶんを全段から引く。**貸し借りに触る前に必ず呼ぶ**。
@@ -297,9 +387,12 @@ private:
   //       黙って倍の仕事を意味するようになる。クロックで書けば意味が動かない
   //   ★対して SLEEP は µs のまま。あちらは壁時計の話 (「20ms 後に起こして」) で、
   //     仕事量ではない。**別の量なので単位を揃えてはいけない**。
+  // 期限なしの貸し出し (SWITCH = GRANT(無制限))。remaining がこの値の段はタイマを装填せず、
+  // 使ったぶんも引かない。外側が有限ならクランプされるので、有限の段の内側に無制限は現れない。
+  static constexpr uint64_t GRANT_UNLIMITED = ~(uint64_t)0;
   struct grant_frame {
     uint32_t lender;    // 貸し手 (WAIT_GRANT で待っている)
-    uint64_t remaining; // 残りクロック数 (外側でクランプ済み)
+    uint64_t remaining; // 残りクロック数 (外側でクランプ済み。GRANT_UNLIMITED = 無制限)
   };
   struct grant_stack {
     static constexpr uint32_t MAX_DEPTH = 8;
@@ -311,6 +404,15 @@ private:
   thread_record *m_threads;
   uint32_t m_thread_count;
   uint32_t m_current[CORE_COUNT];
+  // m_current[core] が指すスレッドの記録 (m_threads[m_current[core]].thread) のキャッシュ。
+  // ★m_current と m_threads を変える所 (set_current / set_thread_storage / init) が一緒に更新する。
+  //   スレッド記憶が渡されるまでは nullptr。
+  THREAD *m_current_thread[CORE_COUNT];
+  // m_current と m_current_thread を必ず一緒に動かす (m_current を直接書かない)。
+  void set_current(uint32_t core, uint32_t id) {
+    m_current[core] = id;
+    m_current_thread[core] = &m_threads[id].thread;
+  }
   // ★予約は 1 件だけ (デバッガは 1 セッションしか繋がらない)。CORE_COUNT では
   //   なくコア非依存で持つ — どのコアが対象を復帰させるかは分からない
   //   (対象スレッドはどのコアでも走れるのが既定)。

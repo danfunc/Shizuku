@@ -3,6 +3,7 @@ load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 package(default_visibility = ["//visibility:public"])
 
 exports_files([
+    "ecall_table.hpp",
     "pmp.hpp",
     "rv32.hpp",
     "rv32_frame.h",
@@ -26,6 +27,7 @@ cc_library(
 cc_library(
     name = "pmp",
     hdrs = [
+        "ecall_table.hpp",
         "pmp.hpp",
         "trap_route.hpp",
     ],

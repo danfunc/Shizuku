@@ -42,7 +42,7 @@ extern "C" void shizuku_fault_dispatch(shizuku_armv8m_context *context) {
       reinterpret_cast<shizuku::KERNEL::CONTEXT *>(context));
 }
 
-// ★CTX_RESTORE の先頭から**あらゆる例外復帰**で呼ばれる (docs/05_handoff.md
+// ★CTX_RESTORE の先頭から**あらゆる例外復帰**で呼ばれる (削除済みの docs/05_handoff.md (ce5b304)
 //   の「2 回目以降の continue/stepi が固まる」の直し方)。復帰しようとしている
 //   文脈が GDB stub の予約した相手なら、ここで初めて MON_STEP を立てる。
 extern "C" void shizuku_arm_pending_step() {

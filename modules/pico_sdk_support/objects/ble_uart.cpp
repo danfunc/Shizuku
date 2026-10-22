@@ -1,7 +1,7 @@
 // ===========================================================================
 //  BLE UART (Nordic UART Service) — Shizuku オブジェクト版 (v1: 最小構成)
 // ===========================================================================
-//  移植元: flight_robocon_telemetory_sender/BLE_UART_DRIVER.cpp (旧 CMake
+//  移植元: 旧参照実装の BLE_UART_DRIVER.cpp (旧 CMake
 //  ビルド)。 v1 スコープ: advertise / pairing / notify・write / CI 強制 (15ms
 //  固定)。 ★ペアリング方式は CDC の実行時コマンドで切替 (既定 = NC
 //  必須、事故防止)。
@@ -63,6 +63,7 @@ extern "C" {
 #include "ble_uart.h" // pico_btstack_make_gatt_header() が生成
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_api.hpp"
+#include "shizuku/method_entry.hpp"
 #include "shizuku/objects/ble_uart.hpp"
 #if !defined(SHIZUKU_RP2040)
 #include "shizuku/objects/gdb_stub.hpp" // GDB リンクをストリームで運ぶ
@@ -530,8 +531,11 @@ call_result api(shizuku::object_api number, uintptr_t a1 = 0, uintptr_t a2 = 0,
   return {result.error, result.value};
 }
 
-uintptr_t export_method(method m, uintptr_t entry) {
-  return api(shizuku::object_api::EXPORT_METHOD, (uintptr_t)m, entry).error;
+// 入口は定数式の関数ポインタ F から入口 stub を引いて登録する (shizuku/method_entry.hpp)。
+template <auto F> uintptr_t export_method(method m) {
+  return api(shizuku::object_api::EXPORT_METHOD, (uintptr_t)m,
+             shizuku::method_entry<ARCH, F>())
+      .error;
 }
 
 // ---- セキュリティ / 接続状態 (旧実装 §「セキュリティ設定」「接続/通知状態」)
@@ -2057,30 +2061,24 @@ uintptr_t ble_uart_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   uintptr_t failures =
       api(shizuku::object_api::DECLARE_NAME, (uintptr_t)"ble_uart").error;
   failures +=
-      export_method(method::GET_RX_STREAM, (uintptr_t)&method_get_rx_stream);
+      export_method<&method_get_rx_stream>(method::GET_RX_STREAM);
   failures +=
-      export_method(method::SET_TX_STREAM, (uintptr_t)&method_set_tx_stream);
+      export_method<&method_set_tx_stream>(method::SET_TX_STREAM);
 #if !defined(SHIZUKU_RP2040)
-  failures += export_method(method::SET_GDB_STREAMS,
-                            (uintptr_t)&method_set_gdb_streams);
+  failures += export_method<&method_set_gdb_streams>(method::SET_GDB_STREAMS);
 #endif
-  failures += export_method(method::REQUEST_DISCONNECT,
-                            (uintptr_t)&method_request_disconnect);
+  failures += export_method<&method_request_disconnect>(method::REQUEST_DISCONNECT);
   failures +=
-      export_method(method::GET_OTA_STREAM, (uintptr_t)&method_get_ota_stream);
-  failures += export_method(method::GET_CH2_RX_STREAM,
-                            (uintptr_t)&method_get_ch2_rx_stream);
-  failures += export_method(method::SET_CH2_TX_STREAM,
-                            (uintptr_t)&method_set_ch2_tx_stream);
-  failures += export_method(method::GET_PAIRING_STATE,
-                            (uintptr_t)&method_get_pairing_state);
+      export_method<&method_get_ota_stream>(method::GET_OTA_STREAM);
+  failures += export_method<&method_get_ch2_rx_stream>(method::GET_CH2_RX_STREAM);
+  failures += export_method<&method_set_ch2_tx_stream>(method::SET_CH2_TX_STREAM);
+  failures += export_method<&method_get_pairing_state>(method::GET_PAIRING_STATE);
   failures +=
-      export_method(method::PAIRING_ANSWER, (uintptr_t)&method_pairing_answer);
-  failures += export_method(method::SET_PAIRING_LOCK,
-                            (uintptr_t)&method_set_pairing_lock);
+      export_method<&method_pairing_answer>(method::PAIRING_ANSWER);
+  failures += export_method<&method_set_pairing_lock>(method::SET_PAIRING_LOCK);
   failures +=
-      export_method(method::FORGET_BONDS, (uintptr_t)&method_forget_bonds);
-  failures += export_method(method::POLL, (uintptr_t)&poll_loop);
+      export_method<&method_forget_bonds>(method::FORGET_BONDS);
+  failures += export_method<&poll_loop>(method::POLL);
 
   const auto rx_created = api(shizuku::object_api::STREAM_CREATE,
                               sizeof(frame_t), 8, 0);
@@ -2147,7 +2145,8 @@ uint32_t register_ble_uart(uintptr_t object_id) {
   //   (SPAWN 元) が行うので、そのスレッドの core を決めるのはこの affinity。
   //   owner を core0 に固定しないと、chip を触るスレッドが core1 へ乗りうる。
   const auto created =
-      api(shizuku::object_api::CREATE_OBJECT, OBJECT, (uintptr_t)&ble_uart_main,
+      api(shizuku::object_api::CREATE_OBJECT, OBJECT,
+          shizuku::method_entry<ARCH, &ble_uart_main>(),
           shizuku::OBJECT_PRIVILEGED | shizuku::OBJECT_ON_CORE(0));
   const auto started = api(shizuku::object_api::CALL_METHOD, OBJECT, 0, 0);
   if (created.error != 0 || started.error != 0 || started.value != 0) {
@@ -2175,7 +2174,7 @@ uint32_t start_ble_uart(uintptr_t object_id) {
   usb_cdc_boot_diag_set_ble("poll-starting");
 #endif
   // ★method 0 (main) を起こしてはいけない — export して戻るだけ。ポーリングは
-  //   別スレッドで (apps/thermal.cpp の sampler と同じ形)。
+  //   別スレッドで (thermal の sampler と同じ形)。
   const auto spawned =
       api(shizuku::object_api::SPAWN, OBJECT, (uintptr_t)method::POLL, 0);
   if (spawned.error != 0) {

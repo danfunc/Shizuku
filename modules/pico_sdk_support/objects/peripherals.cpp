@@ -24,6 +24,7 @@
 #endif
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_api.hpp"
+#include "shizuku/method_entry.hpp"
 #include "shizuku/objects/peripherals.hpp"
 #if defined(SHIZUKU_BOOT_LOG_WAIT)
 #include "shizuku/objects/usb_cdc.hpp"
@@ -46,8 +47,9 @@ call_result api(object_api number, uintptr_t a1 = 0, uintptr_t a2 = 0,
   return {result.error, result.value};
 }
 
-uintptr_t export_method(uintptr_t method, uintptr_t entry) {
-  return api(object_api::EXPORT_METHOD, method, entry).error;
+// 入口は定数式の関数ポインタ F から入口 stub を引いて登録する (shizuku/method_entry.hpp)。
+template <auto F> uintptr_t export_method(uintptr_t method) {
+  return api(object_api::EXPORT_METHOD, method, method_entry<ARCH, F>()).error;
 }
 
 // ★自分で名乗る。誰として登録されるかは発行元から導出されるので、他人の名は騙れない。
@@ -126,15 +128,12 @@ uintptr_t bootsel_read(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 
 uintptr_t gpio_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   uintptr_t failures = declare_name("gpio");
-  failures += export_method((uintptr_t)gpio_method::CONFIGURE,
-                            (uintptr_t)&gpio_configure);
-  failures += export_method((uintptr_t)gpio_method::WRITE,
-                            (uintptr_t)&gpio_write);
+  failures += export_method<&gpio_configure>((uintptr_t)gpio_method::CONFIGURE);
+  failures += export_method<&gpio_write>((uintptr_t)gpio_method::WRITE);
   failures +=
-      export_method((uintptr_t)gpio_method::READ, (uintptr_t)&gpio_read);
+      export_method<&gpio_read>((uintptr_t)gpio_method::READ);
 #if defined(SHIZUKU_ENABLE_BOOTSEL)
-  failures += export_method((uintptr_t)gpio_method::BOOTSEL_READ_PRESSED,
-                            (uintptr_t)&bootsel_read);
+  failures += export_method<&bootsel_read>((uintptr_t)gpio_method::BOOTSEL_READ_PRESSED);
 #endif
   return failures; // 0 = 全部登録できた
 }
@@ -220,10 +219,10 @@ uintptr_t led_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   return LED_ABSENT; // ボードに LED が無い
 #endif
   uintptr_t failures = declare_name("led");
-  failures += export_method((uintptr_t)led_method::WRITE, (uintptr_t)&led_write);
-  failures += export_method((uintptr_t)led_method::READ, (uintptr_t)&led_read);
+  failures += export_method<&led_write>((uintptr_t)led_method::WRITE);
+  failures += export_method<&led_read>((uintptr_t)led_method::READ);
 #if defined(CYW43_WL_GPIO_LED_PIN)
-  failures += export_method((uintptr_t)led_method::POLL, (uintptr_t)&led_poll);
+  failures += export_method<&led_poll>((uintptr_t)led_method::POLL);
 #endif
   return failures;
 }
@@ -250,8 +249,7 @@ uintptr_t temperature_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   ::adc_init();
   ::adc_set_temp_sensor_enabled(true);
   ::adc_select_input(4); // ch4 = 内蔵温度センサ
-  failures += export_method((uintptr_t)temperature_method::READ,
-                            (uintptr_t)&temperature_read);
+  failures += export_method<&temperature_read>((uintptr_t)temperature_method::READ);
   return failures;
 }
 
@@ -288,10 +286,8 @@ uintptr_t spi_transfer_method(uintptr_t argument, uintptr_t, uintptr_t,
 
 uintptr_t spi_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   uintptr_t failures = declare_name("spi");
-  failures += export_method((uintptr_t)spi_method::CONFIGURE,
-                            (uintptr_t)&spi_configure);
-  failures += export_method((uintptr_t)spi_method::TRANSFER,
-                            (uintptr_t)&spi_transfer_method);
+  failures += export_method<&spi_configure>((uintptr_t)spi_method::CONFIGURE);
+  failures += export_method<&spi_transfer_method>((uintptr_t)spi_method::TRANSFER);
   return failures;
 }
 
@@ -395,14 +391,12 @@ uintptr_t i2c_write_read_method(uintptr_t argument, uintptr_t, uintptr_t,
 
 uintptr_t i2c_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   uintptr_t failures = declare_name("i2c");
-  failures += export_method((uintptr_t)i2c_method::CONFIGURE,
-                            (uintptr_t)&i2c_configure);
+  failures += export_method<&i2c_configure>((uintptr_t)i2c_method::CONFIGURE);
   failures +=
-      export_method((uintptr_t)i2c_method::WRITE, (uintptr_t)&i2c_write_method);
+      export_method<&i2c_write_method>((uintptr_t)i2c_method::WRITE);
   failures +=
-      export_method((uintptr_t)i2c_method::READ, (uintptr_t)&i2c_read_method);
-  failures += export_method((uintptr_t)i2c_method::WRITE_READ,
-                            (uintptr_t)&i2c_write_read_method);
+      export_method<&i2c_read_method>((uintptr_t)i2c_method::READ);
+  failures += export_method<&i2c_write_read_method>((uintptr_t)i2c_method::WRITE_READ);
   return failures;
 }
 
@@ -481,12 +475,13 @@ uint32_t register_peripherals() {
   struct entry_t {
     const char *name;
     uintptr_t object;
-    uintptr_t (*main)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
-  } const entries[] = {{"gpio", GPIO_OBJECT, gpio_main},
-                       {"spi", SPI_OBJECT, spi_main},
-                       {"i2c", I2C_OBJECT, i2c_main},
-                       {"led", LED_OBJECT, led_main},
-                       {"temperature", TEMPERATURE_OBJECT, temperature_main}};
+    uintptr_t main; // 入口 stub (method_entry) のアドレス
+  } const entries[] = {{"gpio", GPIO_OBJECT, method_entry<ARCH, &gpio_main>()},
+                       {"spi", SPI_OBJECT, method_entry<ARCH, &spi_main>()},
+                       {"i2c", I2C_OBJECT, method_entry<ARCH, &i2c_main>()},
+                       {"led", LED_OBJECT, method_entry<ARCH, &led_main>()},
+                       {"temperature", TEMPERATURE_OBJECT,
+                        method_entry<ARCH, &temperature_main>()}};
 
   uint32_t failures = 0;
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
@@ -507,7 +502,7 @@ uint32_t register_peripherals() {
     const uintptr_t flags = OBJECT_PRIVILEGED;
 #endif
     const call_result created = api(object_api::CREATE_OBJECT, entry.object,
-                                    (uintptr_t)entry.main, flags);
+                                    entry.main, flags);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     KERNEL::BOARD::boot_trace_stage(stage + 1u); // CREATE_OBJECT 復帰
     KERNEL::BOARD::boot_trace_stage(stage + 2u); // CALL_METHOD 直前
@@ -548,7 +543,7 @@ uint32_t register_peripherals() {
 
 uint32_t register_gpio() {
   const call_result created = api(object_api::CREATE_OBJECT, GPIO_OBJECT,
-                                  (uintptr_t)&gpio_main, OBJECT_PRIVILEGED);
+                                  method_entry<ARCH, &gpio_main>(), OBJECT_PRIVILEGED);
   const call_result started =
       api(object_api::CALL_METHOD, GPIO_OBJECT, 0, 0);
   const uint32_t failures = created.error != 0 || started.error != 0 ||

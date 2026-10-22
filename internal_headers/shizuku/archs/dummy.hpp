@@ -66,6 +66,10 @@ public:
   static void set_priv(context_t &, bool) {}
   static void stack_limit_set(context_t &, uintptr_t) {}
   static uintptr_t stack_limit(const context_t &) { return 0; }
+  // 下限を持たないので余白の検査は要らない (stack_limit == 0 と同じ扱い)。
+  static bool call_entry_has_return_room(const context_t &, uint32_t) {
+    return true;
+  }
   static bool cas32(volatile uint32_t *address, uint32_t expected,
                     uint32_t desired) {
     if (*address != expected)

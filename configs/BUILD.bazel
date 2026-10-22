@@ -1,7 +1,7 @@
 # config.hpp の生成 (CMake の configure_file と同じ内容になるよう保つ)。
 # TODO(Phase1 以降): 置換値を bazel/config の build setting に外出しする。
 load("@bazel_skylib//rules:expand_template.bzl", "expand_template")
-load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "int_flag", "string_flag")
+load("@bazel_skylib//rules:common_settings.bzl", "int_flag", "string_flag")
 load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@rules_cc//cc:defs.bzl", "cc_library")
 load("//configs:kit.bzl", "config_substitutions")
@@ -11,22 +11,6 @@ load(
     "CYW43_SCK_ACTUAL_KHZ",
     "CYW43_SPI_PROGRAM",
     "SYS_CLOCK_KHZ",
-)
-
-bool_flag(
-    name = "rp2040_cmake_profile",
-    build_setting_default = False,
-    visibility = ["//visibility:public"],
-)
-
-config_setting(
-    name = "rp2040_cmake_profile_pico",
-    constraint_values = ["@pico-sdk//bazel/constraint:rp2040"],
-    flag_values = {
-        ":board": "rp2040_pico",
-        ":rp2040_cmake_profile": "True",
-    },
-    visibility = ["//visibility:public"],
 )
 
 string_flag(
@@ -96,7 +80,6 @@ config_setting(
     flag_values = {
         ":board": "rp2040_pico",
         "@pico-sdk//bazel/config:PICO_BOARD": "pico",
-        ":rp2040_cmake_profile": "False",
     },
     visibility = ["//visibility:public"],
 )
@@ -211,7 +194,6 @@ expand_template(
     name = "config_hpp",
     out = "internal_headers/shizuku/config.hpp",
     substitutions = select({
-        ":rp2040_cmake_profile_pico": config_substitutions("armv6m", "rp2040", "rp2040_pico_w", sdk_free = True),
         # 型名は歴史的経緯で rp2040_pico_w だが、Pico / Pico W / XIAO 共通の
         # バックエンド (LED の選び方は peripherals.cpp と SDK のボードマクロ側)。
         ":rp2040": config_substitutions("armv6m", "rp2040", "rp2040_pico_w"),
@@ -226,7 +208,6 @@ expand_template(
         ":esp32_c6_ble": config_substitutions("rv32_c6", "esp32_c6", "esp32_c6", ble = True),
     }),
     template = "config_template.hpp.in",
-    visibility = ["//visibility:public"],
 )
 
 cc_library(
@@ -235,11 +216,12 @@ cc_library(
     includes = ["internal_headers"],
     visibility = ["//visibility:public"],
     deps = [
-        "//:core_headers",
+        "//:internal_headers",
     ] + select({
         ":esp32_c6": ["//chips/esp32_c6:headers", "//boards/esp32_c6:headers"],
         ":esp32_c5": ["//chips/esp32_c5:headers", "//boards/esp32_c5:headers"],
-        ":rp2040_cmake_profile_pico": ["//chips/rp2040:headers", "//boards/rp2040_pico_w:headers"],
+        ":esp32_c5_ble": ["//chips/esp32_c5:headers", "//boards/esp32_c5:headers"],
+        ":esp32_c6_ble": ["//chips/esp32_c6:headers", "//boards/esp32_c6:headers"],
         ":rp2040": ["//chips/rp2040:headers", "//modules/pico_sdk_support:headers"],
         ":rp2350": ["//chips/rp2350:headers", "//modules/pico_sdk_support:headers"],
         "//conditions:default": ["//modules/pico_sdk_support:headers"],

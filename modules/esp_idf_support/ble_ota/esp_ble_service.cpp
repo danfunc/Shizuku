@@ -22,9 +22,12 @@
 namespace {
 using namespace shizuku::esp_idf_support::ble_ota;
 using namespace xno::ota::protocol;
+using xno::ota::format_status;
+using xno::ota::phase;
+using xno::ota::status_delivery;
 constexpr uint32_t kMaxImageBytes = 0x1F0000u;
 constexpr uint16_t kRxMax = 512u;
-constexpr UBaseType_t kRxQueueDepth = 8u;
+constexpr UBaseType_t kRxQueueDepth = 2u;
 constexpr UBaseType_t kTxQueueDepth = 2u;
 constexpr TickType_t kIndicationTimeout = pdMS_TO_TICKS(5000u);
 
@@ -34,6 +37,8 @@ struct rx_packet {
   uint8_t reset;
   uint8_t bytes[kRxMax];
 };
+static_assert(sizeof(rx_packet) == 518);
+static_assert(kRxQueueDepth * sizeof(rx_packet) == 1036);
 struct tx_completion {
   uint16_t conn_handle;
   uint16_t attr_handle;
@@ -119,9 +124,9 @@ bool wait_for_commit_tx(uint16_t conn_handle, uint16_t attr_handle,
 int gatt_access(uint16_t conn_handle, uint16_t, struct ble_gatt_access_ctxt *ctxt,
                 void *) {
   if (!ctxt) return BLE_ATT_ERR_UNLIKELY;
-  // Default profile denies every characteristic write before reading or enqueueing.
-  // Only the explicit OTA-only test build define can open the host-tested gate.
-  const int gate_status = shizuku_esp_ota_gatt_access_status(ctxt->op);
+  // Denies every characteristic write before reading or enqueueing payload bytes.
+  // The gate lives in XNO; only the OTA-only test build define can open it.
+  const int gate_status = xno_ota_gatt_access_status(ctxt->op);
   if (gate_status != 0) return gate_status;
   if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
     if (!is_session_owner(conn_handle)) return BLE_ATT_ERR_INSUFFICIENT_AUTHOR;

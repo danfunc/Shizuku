@@ -1,0 +1,22 @@
+# 試験的 (既定は無効): ecall の caller 側の遅延退避。call_cost だけで測るための config。
+#
+# 使い方 (どちらか):
+#   (a) .bazelrc に `try-import %workspace%/tools/abi_lazy_save.bazelrc` を 1 行足し、
+#         rbuild ... build --config=esp32c6 --config=abi_lazy_save //modules/esp_idf_support/firmware:esp32c6
+#       (.bazelrc は編集を許可されていない作業者がいるので、取り込みは手で行う)
+#   (b) 取り込まず、下の --per_file_copt を 1 行そのままコマンドラインに渡す。
+#
+# 効果: source/selftest/call_cost.cpp **だけ** s2–s11 を「呼出しで壊れてよい (caller-saved)」として
+# コンパイルする (GCC の -fcall-used-s2 … -fcall-used-s11)。その翻訳単位の関数は入口で s2–s11 を
+# 退避しなくなり、生きている値だけが呼出しをまたぐところで退避される。-DSHIZUKU_ABI_LAZY_SAVE=1 を
+# **同じ翻訳単位にだけ** 付け、internal_headers/shizuku/rv32_abi.hpp の ecall wrapper が s1 を asm 内で
+# 退避する版 (別の inline 名前空間 lazy_save) に切り替わる。-D だけを全体に付けてはいけない
+# (flag と対でなければ ABI が食い違う)。
+#
+# ★危険: この TU の関数は s2–s11 を保たない。通常の ABI の TU から直接呼ばれる関数があると、呼んだ側が
+#   壊れる。外から呼ばれる入口は call_cost() だけで、call_cost.cpp の境界 (asm) が s2–s11 を退避・復元する。
+#   別の翻訳単位に広げるなら、その TU の外から呼ばれる関数を全部洗い、同じ境界を置くこと。
+#   ecall で入る callee は、呼ぶ側が ecall の戻りで s を信用しないので安全。
+#   LTO はこの TU には掛けない (掛けると ABI の違う関数が通常の TU へ inline されうる)。
+# GCC 専用 (clang に -fcall-used-* は無い。使えないコンパイラでは未知のオプションとしてエラーになる)。
+build:abi_lazy_save --per_file_copt=^source/selftest/call_cost\.cpp$@-DSHIZUKU_ABI_LAZY_SAVE=1,-fcall-used-s2,-fcall-used-s3,-fcall-used-s4,-fcall-used-s5,-fcall-used-s6,-fcall-used-s7,-fcall-used-s8,-fcall-used-s9,-fcall-used-s10,-fcall-used-s11

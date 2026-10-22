@@ -58,8 +58,3 @@ void irq_restore(irq_state state) {
 } // namespace shizuku::kernel_services
 
 #endif // ARM V2 backend; C6 definitions belong to its port
-
-// Genuine SDK-independent public C ABI for object_api::YIELD (index 8)
-extern "C" void shizuku_yield(void) {
-  shizuku::ARCH::syscall(static_cast<uintptr_t>(shizuku::object_api::YIELD));
-}

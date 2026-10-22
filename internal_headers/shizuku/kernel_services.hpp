@@ -17,6 +17,4 @@ void irq_restore(irq_state state);
 } // namespace shizuku::kernel_services
 // C6 port supplies the context hook in its own worktree; no guessed implementation.
 extern "C" bool shizuku_c6_in_isr();
-// Genuine SDK-independent public C ABI for object_api::YIELD (index 8)
-extern "C" void shizuku_yield(void);
 #endif

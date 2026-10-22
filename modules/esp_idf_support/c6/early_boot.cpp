@@ -1,6 +1,7 @@
 // Stage-2 / Stage-3 bootstrap for ESP32-C6. No IDF OS shim, heap or serial observer.
 #include "shizuku/kernel.hpp"
 #include "shizuku/kernel_object.hpp"
+#include "shizuku/method_entry.hpp"
 #include "chips/esp32_c6/chip.hpp"
 #include "chips/esp32_c6/trap_api.hpp"
 #include "chips/esp32_c6/selftest_record.h"
@@ -102,12 +103,6 @@ uintptr_t c6_combined_handler(uintptr_t a0, uintptr_t a1, uintptr_t a2,
   }
 }
 
-// Composition firmware entry and legacy selftest runner declarations (weakly linked)
-extern "C" {
-[[gnu::weak]] extern bool shizuku_firmware_entry(void);
-[[gnu::weak]] extern void shizuku_c6_run_selftests(void);
-}
-
 [[noreturn]] void thread0() {
   shizuku_c6_mark_boot_phase(0xC603u);
   // 1. 段2 diagnostic 初期化 & ECALL round-trip 検証
@@ -127,12 +122,7 @@ extern "C" {
   shizuku_c6_run_selftests();
 #endif
 
-  // 3. レガシー単体 selftest 経路 (shizuku_firmware_entry が無く、かつ runner がリンクされている場合のみ実行)
-  if (&shizuku_c6_run_selftests != nullptr) {
-    shizuku_c6_run_selftests();
-  }
-
-  // 4. 段2 thread1 スポーン (GRANT スイッチ試験用)
+  // 3. 段2 thread1 スポーン (GRANT スイッチ試験用)
   shizuku::KERNEL::spawn_request request{};
   request.entry_pc = reinterpret_cast<uintptr_t>(&thread1);
   request.protection = shizuku::PROTECTION_PRIVILEGED;
@@ -140,7 +130,7 @@ extern "C" {
   request.stack_bytes = sizeof(thread1_stack);
   request.object_id = 2;
   request.parent_handler_object = 0; // KERNEL_OBJECT_ID
-  request.parent_handler_entry = reinterpret_cast<uintptr_t>(&c6_combined_handler);
+  request.parent_handler_entry = shizuku::method_entry<shizuku::ARCH, &c6_combined_handler>();
   request.ledger = ledger1;
   request.ledger_capacity = 4;
   const auto spawned = shizuku::kernel_instance.spawn(request);
@@ -169,7 +159,7 @@ extern "C" [[noreturn]] void shizuku_c6_early_boot() {
   auto &kernel = shizuku::kernel_instance;
   kernel.init();
   shizuku::kernel_object_instance.init();
-  kernel.set_object_handler(reinterpret_cast<uintptr_t>(&c6_combined_handler), 0);
+  kernel.set_object_handler(shizuku::method_entry<shizuku::ARCH, &c6_combined_handler>(), 0);
   shizuku_c6_mark_boot_phase(0xC602u);
   const auto boot = shizuku::kernel_object_instance.lend_boot_stack();
   kernel.bootstrap(thread0, boot.base, boot.bytes, boot.ledger, boot.ledger_capacity);

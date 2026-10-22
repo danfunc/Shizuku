@@ -1,4 +1,4 @@
-"""CYW43 の gSPI クロックを clk_sys から導出する (docs/03_porting_policy.md D23)。
+"""CYW43 の gSPI クロックを clk_sys から導出する (docs/record/kernel_v2_record.typ D23)。
 
 ★分周比を直書きしない。SDK の CYW43_PIO_CLOCK_DIV_INT は 2 固定で clk_sys から
 算出しないので、clk_sys を上げると SPI も一緒に上がってチップが黙る (実測:

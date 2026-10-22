@@ -4,14 +4,6 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(default_visibility = ["//modules/pico_sdk_support:__subpackages__"])
 
-exports_files(["arch_glue_v6m.cpp"])
-
-filegroup(
-    name = "arch_glue_src",
-    srcs = ["arch_glue_v6m.cpp"],
-    visibility = ["//visibility:public"],
-)
-
 cc_library(
     name = "arch_glue",
     srcs = ["arch_glue_v6m.cpp"],
