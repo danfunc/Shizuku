@@ -138,15 +138,15 @@ template <class K>
 // 呼び先 id (入口 entry_pc) へ入る (enter_call + do_call の後半)。ヘッダ枠方式 ARCH 専用。
 //   台帳段を via で積み、戻りの床 (unwind floor) を積む前の深さに置く。呼び先の入口フレームは
 //   caller の trap フレームそのもので、入口・戻り口・特権・窓を書き換える (引数は呼び出し側)。
-//   値は call_request に組まず、呼び先の表の行 (kobj.callee_row) から書く場所で直接読む。
+//   値は call_request に組まず、呼び先の表の行 row から書く場所で直接読む。行は呼び出し側が引いたもの
+//   (id から行のアドレスを作り直さない)。前提: row は m_objects[id] で、id は範囲内・作成済み。
 //   入れなかったとき (BAD_REQUEST / NO_STACK) は何も書かない。
-template <class K, class KObj>
+template <class K, class KObj, class Row>
 [[gnu::always_inline]] inline kernel_error enter_in_place(
     K &kernel, typename K::THREAD &thread, typename K::CONTEXT &context, KObj &kobj,
-    uint32_t id, uintptr_t entry_pc, uint8_t via) {
+    uint32_t id, const Row &row, uintptr_t entry_pc, uint8_t via) {
   using A = typename K::ARCH;
   if constexpr (arch_call_in_place<A>()) {
-    const auto &row = kobj.callee_row(id);
     auto &stack = thread.call_stack;
     // ★偽装防止: 一般の呼び先が KERNEL_OBJECT 種別や root ハンドラの ID を名乗ることは拒否する。
     if (row.kind == object_kind::KERNEL_OBJECT || id == kernel.svc_handler_object())
@@ -176,7 +176,7 @@ template <class K, class KObj>
     stack.caller_generation =
         count == 0 ? stack.base_object_generation : stack.current_call_generation;
     stack.current_call_object = id;
-    stack.current_call_generation = kobj.object_generation(id);
+    stack.current_call_generation = kobj.instance_generation_of(row);
     stack.call_count = count + 1;
     A::set_entry(frame, entry_pc, A::return_stub());
     A::set_priv(context, (row.flags & OBJECT_UNPRIVILEGED) == 0);
@@ -199,8 +199,9 @@ template <class K, class KObj>
     typename K::FRAME &frame = *context.sp;
     const uintptr_t id = A::arg(frame, 1);
     object_error error;
-    const auto entry = kobj.find_method(id, A::arg(frame, 2), error);
-    if (entry == nullptr) {
+    typename KObj::method_t entry;
+    const auto *row = kobj.find_method_row(id, A::arg(frame, 2), error, entry);
+    if (row == nullptr) {
       A::set_result(frame, (uintptr_t)error, 0);
       return;
     }
@@ -210,7 +211,7 @@ template <class K, class KObj>
       return;
     }
     const uintptr_t argument = A::arg(frame, 3);
-    const kernel_error entered = enter_in_place(kernel, thread, context, kobj, (uint32_t)id,
+    const kernel_error entered = enter_in_place(kernel, thread, context, kobj, (uint32_t)id, *row,
                                                 (uintptr_t)entry, K::LEDGER_CALL);
     if (entered != kernel_error::OK) {
       A::set_result(frame, (uintptr_t)(entered == kernel_error::NO_STACK
@@ -249,8 +250,10 @@ template <class K, class KObj>
       A::set_result(frame, (uintptr_t)error, 0);
       return;
     }
+    // 呼び先の行は錠の中で引く (find_method_descriptor が target_object の範囲と作成済みを検査済み)。
     const kernel_error entered =
-        enter_in_place(kernel, thread, context, kobj, desc->target_object, desc->target_entry,
+        enter_in_place(kernel, thread, context, kobj, desc->target_object,
+                       kobj.callee_row(desc->target_object), desc->target_entry,
                        K::LEDGER_DESCRIPTOR_CALL);
     kobj.table_unlock_inline();
     if (entered != kernel_error::OK) {

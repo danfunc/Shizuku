@@ -296,6 +296,32 @@ public:
     error = object_error::OK;
     return entry;
   }
+  // find_method の行つき版: 表の行 (呼び先の id の行) も一緒に返す。呼び出し側がその行を台帳段・入口フレームの
+  // 書き出しにそのまま使えるので、id から行のアドレス (id × 行の大きさ) を作り直さない。判定と順序は
+  // find_method と同じ。OK のとき行を返して entry に入口を入れ、そうでなければ nullptr と error。
+  SHIZUKU_HOT const auto *find_method_row(uintptr_t id, uintptr_t method, object_error &error,
+                                          method_t &entry) const {
+    const auto *row = id < OBJECT_COUNT_T ? &m_objects[id] : nullptr;
+    if (row == nullptr || !row->created) {
+      error = object_error::BAD_OBJECT;
+      return decltype(row)(nullptr);
+    }
+    if (method >= METHOD_COUNT_T) {
+      error = object_error::BAD_METHOD;
+      return decltype(row)(nullptr);
+    }
+    entry = row->methods[method];
+    if (entry == nullptr) {
+      error = object_error::UNDECLARED_METHOD; // 未 export は panic ではなくエラー
+      return decltype(row)(nullptr);
+    }
+    error = object_error::OK;
+    return row;
+  }
+  // 行から世代を読む (object_generation(id) と同じ読み方。id の範囲検査は行を引いた側が済ませている)。
+  template <class Row> uint32_t instance_generation_of(const Row &row) const {
+    return ARCH::load_acquire32(const_cast<volatile uint32_t *>(&row.instance_generation));
+  }
   // 表の錠の inline 版 (table_lock / table_unlock と同じ CAS。区間は短く syscall を含まない)。
   // trap 内の直接 call が関数呼出しなしで取る。診断用の breadcrumb は付けない。
   SHIZUKU_HOT void table_lock_inline() {
