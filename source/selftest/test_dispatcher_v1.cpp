@@ -1475,6 +1475,8 @@ static void run_dispatcher_tests() {
     frame->a2 = 5000;
     kernel_instance.svc_dispatch(ctx);
     assert(kernel_instance.current_thread_id() == 1);
+    // 現在のスレッドの 1 語キャッシュ (m_current_thread) が m_current と一緒に動く: 借り手へ切り替わった。
+    assert(kernel_instance.current_context() == ctx_b && kernel_instance.current_thread().context == ctx_b);
     assert(kernel_instance.thread_context(0)->sp == frame); // A の文脈は ecall フレームを指したまま
     assert(frame->mcause == RV32_TAG_ECALL && frame->mepc == A_PC + 4); // A の再開点は動かない
     assert(ctx_b->sp == frame_b_init && __builtin_memcmp(&b_before, frame_b_init, sizeof(b_before)) == 0);
@@ -1485,6 +1487,7 @@ static void run_dispatcher_tests() {
     frame_b_init->a0 = (uintptr_t)object_api::YIELD;
     kernel_instance.svc_dispatch(ctx_b);
     assert(kernel_instance.current_thread_id() == 0);
+    assert(kernel_instance.current_context() == ctx && kernel_instance.current_thread().context == ctx); // 貸し手へ戻った
     assert(kernel_instance.thread_context(0)->sp == frame);
     assert(frame->mcause == RV32_TAG_ECALL && frame->mepc == A_PC + 4 && ctx->privileged);
     assert(frame->a0 == (uintptr_t)object_error::OK && frame->a1 == (uintptr_t)grant_end::YIELDED);

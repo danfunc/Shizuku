@@ -295,9 +295,11 @@ public:
   }
 
   uint32_t current_thread_id() const { return m_current[BOARD::core_num()]; }
-  THREAD &current_thread() { return m_threads[current_thread_id()].thread; }
+  // 現在のスレッドは 1 語のキャッシュ (m_current_thread) から引く: id × スレッド記録の大きさの
+  // 乗算と表の先頭の読みを ecall のたびに払わない。m_current を書く所は set_current だけ。
+  THREAD &current_thread() { return *m_current_thread[BOARD::core_num()]; }
   const THREAD &current_thread() const {
-    return m_threads[current_thread_id()].thread;
+    return *m_current_thread[BOARD::core_num()];
   }
   uint32_t current_depth() const { return current_thread().call_stack.depth; }
   uint32_t current_call_count() const {
@@ -404,6 +406,15 @@ private:
   thread_record *m_threads;
   uint32_t m_thread_count;
   uint32_t m_current[CORE_COUNT];
+  // m_current[core] が指すスレッドの記録 (m_threads[m_current[core]].thread) のキャッシュ。
+  // ★m_current と m_threads を変える所 (set_current / set_thread_storage / init) が一緒に更新する。
+  //   スレッド記憶が渡されるまでは nullptr。
+  THREAD *m_current_thread[CORE_COUNT];
+  // m_current と m_current_thread を必ず一緒に動かす (m_current を直接書かない)。
+  void set_current(uint32_t core, uint32_t id) {
+    m_current[core] = id;
+    m_current_thread[core] = &m_threads[id].thread;
+  }
   // ★予約は 1 件だけ (デバッガは 1 セッションしか繋がらない)。CORE_COUNT では
   //   なくコア非依存で持つ — どのコアが対象を復帰させるかは分からない
   //   (対象スレッドはどのコアでも走れるのが既定)。

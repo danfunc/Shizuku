@@ -108,7 +108,7 @@ static_assert(trap_api_table_consistent(),
 // ISA 層の例外入口が退避先・復帰先として使う文脈。dispatch が現在スレッドを
 // 差し替えれば、そのまま切替になる (退避後と復帰前の 2 回呼ばれる)。
 template <> KERNEL::CONTEXT *KERNEL::current_context() {
-  return m_threads[m_current[BOARD::core_num()]].thread.context;
+  return m_current_thread[BOARD::core_num()]->context;
 }
 
 template <> void KERNEL::set_object_handler(uintptr_t entry_pc,

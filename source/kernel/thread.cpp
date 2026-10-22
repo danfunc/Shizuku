@@ -53,6 +53,10 @@ template <> void KERNEL::set_thread_storage(void *memory, uintptr_t bytes) {
     m_threads[index].context = CONTEXT{};
     m_threads[index].thread.context = &m_threads[index].context;
   }
+  // 現在のスレッドのキャッシュを新しい表に張り直す (m_current は init で 0)。
+  for (uint32_t core = 0; core < CORE_COUNT; ++core)
+    m_current_thread[core] = m_current[core] < m_thread_count ? &m_threads[m_current[core]].thread
+                                                                : &m_threads[0].thread;
 }
 
 template <> void KERNEL::set_thread_ledger(
@@ -258,7 +262,7 @@ kernel_error KERNEL::do_grant(uint32_t target, uint64_t cycles) {
   // 貸し手は WAIT_GRANT。READY ではないので他コアに拾われず、復帰はこのコアの
   // 巻き取り経路 (期限 or 早期復帰) だけになる。
   m_threads[current].thread.set_state(THREAD::state_t::WAIT_GRANT);
-  m_current[core] = target;
+  set_current(core, target);
   arm_timer();
   return kernel_error::OK;
 }
@@ -282,7 +286,7 @@ template <> void KERNEL::grant_unwind(grant_end reason) {
   //   READY でないので拾われない。
   if (!m_threads[lender].thread.is_state(THREAD::state_t::SUSPENDED))
     m_threads[lender].thread.set_state(THREAD::state_t::RUNNING);
-  m_current[core] = lender;
+  set_current(core, lender);
   // 借り手を返す。走り終えていたらそのまま (終了させたスレッドを生き返らせない)。
   if (m_threads[borrower].thread.is_state(THREAD::state_t::RUNNING))
     ARCH::store_release32(&m_threads[borrower].thread.state,
@@ -442,7 +446,7 @@ template <> void KERNEL::debug_dispatch(KERNEL::CONTEXT *context) {
   }
   kernel_error error = kernel_error::OK;
   if (m_recovery_thread < m_thread_count && claim(m_recovery_thread, error)) {
-    m_current[core] = m_recovery_thread;
+    set_current(core, m_recovery_thread);
     return;
   }
   // ★渡す先が無いなら**止めるのをやめる**。フォールトと違ってデバッグ事象は
@@ -538,7 +542,7 @@ template <> void KERNEL::fault_dispatch(KERNEL::CONTEXT *context) {
   shizuku_selftest_fault_phase(16, m_recovery_thread);
 #endif
   if (m_recovery_thread < m_thread_count && claim(m_recovery_thread, error)) {
-    m_current[core] = m_recovery_thread;
+    set_current(core, m_recovery_thread);
     return;
   }
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0

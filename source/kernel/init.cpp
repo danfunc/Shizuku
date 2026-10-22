@@ -14,6 +14,7 @@ template <> void KERNEL::init() {
   m_thread_count = 0;
   for (uintptr_t core = 0; core < CORE_COUNT; ++core) {
     m_current[core] = 0;
+    m_current_thread[core] = nullptr; // set_thread_storage が渡されたら張る
     m_armed[core] = 0;
   }
   m_step_target = NO_STEP_TARGET;
@@ -49,7 +50,7 @@ template <> void KERNEL::bootstrap(
   thread.set_state(THREAD::state_t::RUNNING);
   ARCH::stack_limit_set(*thread.context, limit);
   ARCH::set_priv(*thread.context, true);
-  m_current[BOARD::core_num()] = 0;
+  set_current(BOARD::core_num(), 0);
 
   // スレッドスタックへ移って entry を呼ぶ (戻らない)。以後このスレッドは
   // 「フレームを 1 枚も積んでいない」= ハンドラの枠の外なので、撃った svc は
@@ -84,7 +85,7 @@ void KERNEL::bootstrap_secondary(uint32_t thread, void (*entry)(),
   adopted.set_state(THREAD::state_t::RUNNING);
   ARCH::stack_limit_set(*adopted.context, limit);
   ARCH::set_priv(*adopted.context, true);
-  m_current[BOARD::core_num()] = thread;
+  set_current(BOARD::core_num(), thread);
 
   ARCH::enter_thread_mode(top, limit, entry);
 }
