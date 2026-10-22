@@ -27,7 +27,7 @@ using xno::ota::phase;
 using xno::ota::status_delivery;
 constexpr uint32_t kMaxImageBytes = 0x1F0000u;
 constexpr uint16_t kRxMax = 512u;
-constexpr UBaseType_t kRxQueueDepth = 8u;
+constexpr UBaseType_t kRxQueueDepth = 2u;
 constexpr UBaseType_t kTxQueueDepth = 2u;
 constexpr TickType_t kIndicationTimeout = pdMS_TO_TICKS(5000u);
 
@@ -37,6 +37,8 @@ struct rx_packet {
   uint8_t reset;
   uint8_t bytes[kRxMax];
 };
+static_assert(sizeof(rx_packet) == 518);
+static_assert(kRxQueueDepth * sizeof(rx_packet) == 1036);
 struct tx_completion {
   uint16_t conn_handle;
   uint16_t attr_handle;
