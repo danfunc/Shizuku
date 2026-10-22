@@ -7,6 +7,7 @@
 //    通し番号を載せて、受け取った側が期待値と突き合わせる。
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_api.hpp"
+#include "shizuku/method_entry.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/selftest.hpp"
 #include "shizuku/stream.hpp"
@@ -197,13 +198,13 @@ void stream_ladder() {
   api(object_api::STREAM_DESTROY, overwrite_id);
 
 #if !(defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0)
-  api(object_api::CREATE_OBJECT, OBJECT_PRODUCER, (uintptr_t)&producer, 0);
-  api(object_api::CREATE_OBJECT, OBJECT_CONSUMER, (uintptr_t)&consumer, 0);
+  api(object_api::CREATE_OBJECT, OBJECT_PRODUCER, method_entry<ARCH, &producer>(), 0);
+  api(object_api::CREATE_OBJECT, OBJECT_CONSUMER, method_entry<ARCH, &consumer>(), 0);
   api(object_api::SPAWN, OBJECT_PRODUCER, METHOD_MAIN, 0);
   api(object_api::SPAWN, OBJECT_CONSUMER, METHOD_MAIN, 0);
 #else
   const api_result created_producer =
-      api(object_api::CREATE_OBJECT, OBJECT_PRODUCER, (uintptr_t)&producer, 0);
+      api(object_api::CREATE_OBJECT, OBJECT_PRODUCER, method_entry<ARCH, &producer>(), 0);
   SHIZUKU_PROG(20, (uint32_t)created_producer.error, (uint32_t)created_producer.value);
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
   BOARD::diag_printf("[SELFTEST_PROG] CREATE_OBJECT producer: error=%lu value=%lu\n",
@@ -211,7 +212,7 @@ void stream_ladder() {
                       (unsigned long)created_producer.value);
 #endif
   const api_result created_consumer =
-      api(object_api::CREATE_OBJECT, OBJECT_CONSUMER, (uintptr_t)&consumer, 0);
+      api(object_api::CREATE_OBJECT, OBJECT_CONSUMER, method_entry<ARCH, &consumer>(), 0);
   SHIZUKU_PROG(21, (uint32_t)created_consumer.error, (uint32_t)created_consumer.value);
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
   BOARD::diag_printf("[SELFTEST_PROG] CREATE_OBJECT consumer: error=%lu value=%lu\n",

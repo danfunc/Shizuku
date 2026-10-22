@@ -76,6 +76,7 @@ filegroup(
     srcs = [
         "internal_headers/shizuku/concepts/arch.hpp",
         "internal_headers/shizuku/kernel_abi.hpp",
+        "internal_headers/shizuku/rv32_abi.hpp",
         "internal_headers/shizuku/service_profile.hpp",
     ],
 )

@@ -9,6 +9,7 @@
 //    halting debug と同じものを作っただけになる。
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_api.hpp"
+#include "shizuku/method_entry.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/selftest.hpp"
 
@@ -88,7 +89,7 @@ void debug_ladder() {
   if (comparators == 0)
     return;
 
-  api(object_api::CREATE_OBJECT, OBJECT_TARGET, (uintptr_t)&debug_target, 0);
+  api(object_api::CREATE_OBJECT, OBJECT_TARGET, method_entry<ARCH, &debug_target>(), 0);
   const api_result spawned =
       api(object_api::SPAWN, OBJECT_TARGET, METHOD_MAIN, 0);
   check("debug: target spawned", spawned.error == 0,

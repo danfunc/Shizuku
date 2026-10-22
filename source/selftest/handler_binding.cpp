@@ -5,6 +5,7 @@
 #include "shizuku/kernel_object.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/object_api.hpp"
+#include "shizuku/method_entry.hpp"
 #include "shizuku/selftest.hpp"
 #include "shizuku/kernel_services.hpp"
 
@@ -103,19 +104,19 @@ uintptr_t handler_a_entry(uintptr_t a0, uintptr_t a1, uintptr_t a2,
   if (a0 == CMD_SETUP) {
     // 親ハンドラ A 自身が子 A を生成する (親から自動導出: 重大指摘 1, 3)
     const auto res = api(object_api::CREATE_OBJECT, OBJ_CHILD_A,
-                         (uintptr_t)&child_a_compute, 0);
+                         method_entry<ARCH, &child_a_compute>(), 0);
     return res.error == 0 ? res.value : 0;
   }
   if (a0 == CMD_SETUP_PRIMITIVE) {
     // 親ハンドラ A 自身が子 A を replace (親 binding を維持: 重大指摘 3)
     const auto res = api(object_api::CREATE_OBJECT, OBJ_CHILD_A,
-                         (uintptr_t)&child_a_try_primitive, OBJECT_REPLACE);
+                         method_entry<ARCH, &child_a_try_primitive>(), OBJECT_REPLACE);
     return res.error == 0 ? res.value : 0;
   }
   if (a0 == CMD_SETUP_COMPUTE) {
     // 親ハンドラ A 自身が子 A を compute に戻す (重大指摘 3)
     const auto res = api(object_api::CREATE_OBJECT, OBJ_CHILD_A,
-                         (uintptr_t)&child_a_compute, OBJECT_REPLACE);
+                         method_entry<ARCH, &child_a_compute>(), OBJECT_REPLACE);
     return res.error == 0 ? res.value : 0;
   }
   if (a0 == CMD_COMPUTE) {
@@ -166,7 +167,7 @@ uintptr_t handler_b_entry(uintptr_t a0, uintptr_t a1, uintptr_t a2,
                           uintptr_t a3, uintptr_t unwind_floor) {
   if (a0 == CMD_SETUP) {
     const auto res = api(object_api::CREATE_OBJECT, OBJ_CHILD_B,
-                         (uintptr_t)&child_b_compute, 0);
+                         method_entry<ARCH, &child_b_compute>(), 0);
     return res.error == 0 ? res.value : 0;
   }
   if (a0 == CMD_COMPUTE) {
@@ -199,13 +200,13 @@ void handler_binding_probe() {
   // 1. 特権オブジェクト (Root) による専用ハンドラ H_A, H_B の宣言
   // 信頼済み内部フラグ INTERNAL_FLAG_HANDLER を指定して生成 (重大指摘 1)
   const auto res_ha = api(object_api::CREATE_OBJECT, OBJ_PARENT_A,
-                          (uintptr_t)&handler_a_entry,
+                          method_entry<ARCH, &handler_a_entry>(),
                           KERNEL_OBJECT::INTERNAL_FLAG_HANDLER | OBJECT_REPLACE);
   check("create handler_a with INTERNAL_FLAG_HANDLER", res_ha.error == 0,
         res_ha.error, 0);
 
   const auto res_hb = api(object_api::CREATE_OBJECT, OBJ_PARENT_B,
-                          (uintptr_t)&handler_b_entry,
+                          method_entry<ARCH, &handler_b_entry>(),
                           KERNEL_OBJECT::INTERNAL_FLAG_HANDLER | OBJECT_REPLACE);
   check("create handler_b with INTERNAL_FLAG_HANDLER", res_hb.error == 0,
         res_hb.error, 0);
@@ -221,7 +222,7 @@ void handler_binding_probe() {
         KERNEL_OBJECT::KERNEL_OBJECT_ID);
 
   // 2. 一般オブジェクト (privileged) による INTERNAL_FLAG_HANDLER 宣言の偽装拒否 (重大指摘 1)
-  const auto res_u = api(object_api::CREATE_OBJECT, OBJ_UNPRIV, (uintptr_t)&unpriv_entry,
+  const auto res_u = api(object_api::CREATE_OBJECT, OBJ_UNPRIV, method_entry<ARCH, &unpriv_entry>(),
                          OBJECT_REPLACE);
   check("create privileged non-root object", res_u.error == 0, res_u.error, 0);
   const auto unpriv_res = call_method(OBJ_UNPRIV, 0, 0);

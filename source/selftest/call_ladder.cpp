@@ -13,6 +13,7 @@
 #include "shizuku/kernel_object.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/object_api.hpp"
+#include "shizuku/method_entry.hpp"
 #include "shizuku/selftest.hpp"
 #if defined(SHIZUKU_DEEP_DIAG) && defined(SHIZUKU_RP2040)
 #include "pico/time.h"
@@ -360,11 +361,12 @@ uintptr_t desc_legacy_probe(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 // ★EXPORT_METHOD は current_object (呼び出し中のオブジェクト) の表に入る。ルートから
 //   撃つとルート自身の表に入るので、対象オブジェクトの中から撃たせる。
 uintptr_t desc_export_fn(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
-  const uintptr_t entry = (uintptr_t)(g_desc_export_v2 ? &desc_target_fn_v2
-                                                        : &desc_target_fn);
+  const uintptr_t entry = g_desc_export_v2
+                              ? method_entry<ARCH, &desc_target_fn_v2>()
+                              : method_entry<ARCH, &desc_target_fn>();
   const api_result exported = api(object_api::EXPORT_METHOD, 1, entry);
   const api_result legacy = api(object_api::EXPORT_METHOD, 2,
-                                (uintptr_t)&desc_legacy_probe);
+                                method_entry<ARCH, &desc_legacy_probe>());
   return exported.error == (uintptr_t)object_error::OK &&
                  legacy.error == (uintptr_t)object_error::OK
              ? exported.value
@@ -383,7 +385,7 @@ uintptr_t desc_sibling_probe() {
       api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1).error;
   // 自分自身の表に 1 番を export してから、自分自身への記述子を作る (自分自身は常に許可)。
   const api_result exported =
-      api(object_api::EXPORT_METHOD, 1, (uintptr_t)&desc_target_fn);
+      api(object_api::EXPORT_METHOD, 1, method_entry<ARCH, &desc_target_fn>());
   const api_result self =
       api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_OWNER, 1);
   g_sibling_probe_index = self.error == (uintptr_t)object_error::OK
@@ -412,7 +414,7 @@ uintptr_t desc_grandchild_fn(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 // 子: 自分の子として孫を作る (孫の生成者は子)。
 uintptr_t desc_child_fn(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   g_grandchild_create_error =
-      api(object_api::CREATE_OBJECT, OBJECT_DESC_GRANDCHILD, (uintptr_t)&desc_grandchild_fn).error;
+      api(object_api::CREATE_OBJECT, OBJECT_DESC_GRANDCHILD, method_entry<ARCH, &desc_grandchild_fn>()).error;
   return 0;
 }
 
@@ -428,10 +430,10 @@ uintptr_t desc_kernel_fn(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 uintptr_t desc_hierarchy_probe() {
   // 役の付与は一般オブジェクトには拒否される (枠も子も作られない)。
   g_role_flag_error =
-      api(object_api::CREATE_OBJECT, OBJECT_DESC_CHILD, (uintptr_t)&desc_child_fn,
+      api(object_api::CREATE_OBJECT, OBJECT_DESC_CHILD, method_entry<ARCH, &desc_child_fn>(),
           KERNEL_OBJECT::INTERNAL_FLAG_KERNEL_ROLE).error;
   g_child_create_error =
-      api(object_api::CREATE_OBJECT, OBJECT_DESC_CHILD, (uintptr_t)&desc_child_fn).error;
+      api(object_api::CREATE_OBJECT, OBJECT_DESC_CHILD, method_entry<ARCH, &desc_child_fn>()).error;
   call_method(OBJECT_DESC_CHILD, 0); // 子を走らせる。子が孫を作る。
   // 直接の子 (生成者は自分) への作成は通る。
   const api_result child = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_CHILD, 0);
@@ -457,7 +459,7 @@ uintptr_t desc_make_index(uintptr_t mode, uintptr_t, uintptr_t, uintptr_t) {
 #endif
   // 自分の 1 番を自分の表に export してから、自分自身への記述子を作る (自己は常に許可)。
   // 兄弟 (DESC_TEST) への作成は作成権限の規則で拒否されるため、ここでは使わない。
-  const api_result exported = api(object_api::EXPORT_METHOD, 1, (uintptr_t)&desc_target_fn);
+  const api_result exported = api(object_api::EXPORT_METHOD, 1, method_entry<ARCH, &desc_target_fn>());
   if (exported.error != (uintptr_t)object_error::OK)
     return 0xDEAD0000u | (uint32_t)exported.error;
   const api_result made = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_OWNER, 1);
@@ -482,7 +484,7 @@ uintptr_t g_relay_desc_error = (uintptr_t)object_error::UNKNOWN_API;
 // B がこれを一度走らせてから、C への記述子を B の表に作る。
 uintptr_t desc_relay_target_fn(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   const api_result exported =
-      api(object_api::EXPORT_METHOD, 1, (uintptr_t)&desc_target_fn);
+      api(object_api::EXPORT_METHOD, 1, method_entry<ARCH, &desc_target_fn>());
   return exported.error == (uintptr_t)object_error::OK
              ? exported.value
              : 0xDEAD0000u | (uint32_t)exported.error;
@@ -502,7 +504,7 @@ uintptr_t desc_relay_fn(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   // 作成も記述子も親→直接の子の一般規則のまま通る (kernel 役は使わない)。
   g_relay_target_create_error =
       api(object_api::CREATE_OBJECT, OBJECT_DESC_RELAY_TARGET,
-          (uintptr_t)&desc_relay_target_fn)
+          method_entry<ARCH, &desc_relay_target_fn>())
           .error;
   if (g_relay_target_create_error != (uintptr_t)object_error::OK) {
     g_relay_depth_after = kernel_instance.current_depth();
@@ -629,13 +631,14 @@ void call_ladder() {
   // オブジェクトを作る。最初のメソッド (main) は生成側が与える。
   struct entry_t {
     uintptr_t object;
-    uintptr_t (*main)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
-  } const entries[] = {
-      {OBJECT_LEAF, leaf}, {OBJECT_NEST, nest}, {OBJECT_DEEP, deep}};
+    uintptr_t main; // 入口 stub (method_entry) のアドレス
+  } const entries[] = {{OBJECT_LEAF, method_entry<ARCH, &leaf>()},
+                       {OBJECT_NEST, method_entry<ARCH, &nest>()},
+                       {OBJECT_DEEP, method_entry<ARCH, &deep>()}};
 
   for (const entry_t &entry : entries) {
     const api_result created =
-        api(object_api::CREATE_OBJECT, entry.object, (uintptr_t)entry.main);
+        api(object_api::CREATE_OBJECT, entry.object, entry.main);
     check("create object", created.error == (uintptr_t)object_error::OK,
           (unsigned long)created.error, 0);
   }
@@ -671,7 +674,7 @@ void call_ladder() {
   // return_stub 回帰テスト: スクラッチレジスタ (r12/ip) 汚染下での通常 return
   {
     const api_result rep_res = api(object_api::CREATE_OBJECT, OBJECT_LEAF,
-                                   (uintptr_t)&leaf_dirty_scratch, OBJECT_REPLACE);
+                                   method_entry<ARCH, &leaf_dirty_scratch>(), OBJECT_REPLACE);
     check("return_stub: replace leaf with dirty scratch",
           rep_res.error == (uintptr_t)object_error::OK,
           (unsigned long)rep_res.error, 0);
@@ -687,7 +690,7 @@ void call_ladder() {
 
     // leaf を元に戻す (復元成功も検査)
     const api_result rst_res =
-        api(object_api::CREATE_OBJECT, OBJECT_LEAF, (uintptr_t)&leaf, OBJECT_REPLACE);
+        api(object_api::CREATE_OBJECT, OBJECT_LEAF, method_entry<ARCH, &leaf>(), OBJECT_REPLACE);
     check("return_stub: restore leaf",
           rst_res.error == (uintptr_t)object_error::OK,
           (unsigned long)rst_res.error, 0);
@@ -780,7 +783,7 @@ void call_ladder() {
   // ★名前は診断のためだけではない。番号の衝突が**声を出す**ようになるのが本命で、
   //   今日はそれが無かったせいで 2 回とも黙って別物が動いた。
   {
-    api(object_api::CREATE_OBJECT, OBJECT_NAMER, (uintptr_t)&namer, 0);
+    api(object_api::CREATE_OBJECT, OBJECT_NAMER, method_entry<ARCH, &namer>(), 0);
     const api_result named = api(object_api::CALL_METHOD, OBJECT_NAMER, 0, 0);
     check("name: the object named itself",
           named.error == 0 && named.value == 0, (unsigned long)named.value, 0);
@@ -799,7 +802,7 @@ void call_ladder() {
     //   別物が動き続けた。上のログに
     //   「[KOBJ] object <generated namer ID> is already taken by 'namer'」が出ていること。
     const api_result clash =
-        api(object_api::CREATE_OBJECT, OBJECT_NAMER, (uintptr_t)&namer, 0);
+        api(object_api::CREATE_OBJECT, OBJECT_NAMER, method_entry<ARCH, &namer>(), 0);
     check("name: a colliding id is refused, loudly",
           clash.error == (uintptr_t)object_error::ALREADY_EXISTS,
           (unsigned long)clash.error,
@@ -817,7 +820,7 @@ void call_ladder() {
   //   対象 (desc_test) の 1 番は対象自身の中で export させる (上の注釈を参照)。
   {
     const api_result target_made =
-        api(object_api::CREATE_OBJECT, OBJECT_DESC_TEST, (uintptr_t)&desc_export_fn);
+        api(object_api::CREATE_OBJECT, OBJECT_DESC_TEST, method_entry<ARCH, &desc_export_fn>());
     check("descriptor: create target object",
           target_made.error == (uintptr_t)object_error::OK,
           (unsigned long)target_made.error, 0);
@@ -830,7 +833,7 @@ void call_ladder() {
     // 別オブジェクトが自分の表に作った記述子の番号。ルートの表はまだ空 (ここまで
     // ルートは記述子を作っていない) なので、ルートの k 番を撃つと拒否されるのが正しい。
     const api_result owner_made =
-        api(object_api::CREATE_OBJECT, OBJECT_DESC_OWNER, (uintptr_t)&desc_make_index);
+        api(object_api::CREATE_OBJECT, OBJECT_DESC_OWNER, method_entry<ARCH, &desc_make_index>());
     check("descriptor: create owner object",
           owner_made.error == (uintptr_t)object_error::OK,
           (unsigned long)owner_made.error, 0);
@@ -859,7 +862,7 @@ void call_ladder() {
           (unsigned long)g_desc_calls, (unsigned long)foreign_calls);
 #endif
     const api_result owner_replaced = api(
-        object_api::CREATE_OBJECT, OBJECT_DESC_OWNER, (uintptr_t)&desc_make_index,
+        object_api::CREATE_OBJECT, OBJECT_DESC_OWNER, method_entry<ARCH, &desc_make_index>(),
         OBJECT_REPLACE);
     check("descriptor: replace owner invalidates its descriptor table",
           owner_replaced.error == (uintptr_t)object_error::OK,
@@ -916,7 +919,7 @@ void call_ladder() {
 
     // kernel 役の object K: ROOT が役付きで作り、K から兄弟と孫の両方への作成が通る。
     const api_result kernel_made = api(
-        object_api::CREATE_OBJECT, OBJECT_DESC_KERNEL, (uintptr_t)&desc_kernel_fn,
+        object_api::CREATE_OBJECT, OBJECT_DESC_KERNEL, method_entry<ARCH, &desc_kernel_fn>(),
         KERNEL_OBJECT::INTERNAL_FLAG_KERNEL_ROLE);
     check("descriptor: root creates kernel-role object",
           kernel_made.error == (uintptr_t)object_error::OK,
@@ -932,7 +935,7 @@ void call_ladder() {
 
     // K を OBJECT_REPLACE で差し替える (付与の要求なし)。役は引き継がれ、新しい K も同じ扱い。
     const api_result kernel_replaced = api(
-        object_api::CREATE_OBJECT, OBJECT_DESC_KERNEL, (uintptr_t)&desc_kernel_fn,
+        object_api::CREATE_OBJECT, OBJECT_DESC_KERNEL, method_entry<ARCH, &desc_kernel_fn>(),
         OBJECT_REPLACE);
     check("descriptor: replace kernel-role object",
           kernel_replaced.error == (uintptr_t)object_error::OK,
@@ -1064,7 +1067,7 @@ void call_ladder() {
     // OBJECT_REPLACE clears methods 1+; the new object must export them again.
     g_desc_export_v2 = false;
     const api_result replaced =
-        api(object_api::CREATE_OBJECT, OBJECT_DESC_TEST, (uintptr_t)&desc_export_fn, OBJECT_REPLACE);
+        api(object_api::CREATE_OBJECT, OBJECT_DESC_TEST, method_entry<ARCH, &desc_export_fn>(), OBJECT_REPLACE);
     check("descriptor: replace target bumps generation",
           replaced.error == (uintptr_t)object_error::OK,
           (unsigned long)replaced.error, 0);
@@ -1103,7 +1106,7 @@ void call_ladder() {
     // 上限までに走った段の数は MAX_DEPTH と一致する (CALL 段 1 本ぶんは ROOT からの call_method)。
     {
       const api_result recur_made =
-          api(object_api::CREATE_OBJECT, OBJECT_DESC_RECUR, (uintptr_t)&desc_recur_fn);
+          api(object_api::CREATE_OBJECT, OBJECT_DESC_RECUR, method_entry<ARCH, &desc_recur_fn>());
       check("descriptor: create recursion object",
             recur_made.error == (uintptr_t)object_error::OK,
             (unsigned long)recur_made.error, 0);
@@ -1292,7 +1295,7 @@ void call_ladder() {
       // 診断専用 (挙動不変): 作成前後の値を shizuku_desc_relay_diag に残す。
       shizuku_desc_relay_diag[0] = 0xD1A60001u;
       const api_result relay_made = api(
-          object_api::CREATE_OBJECT, OBJECT_DESC_RELAY, (uintptr_t)&desc_relay_fn);
+          object_api::CREATE_OBJECT, OBJECT_DESC_RELAY, method_entry<ARCH, &desc_relay_fn>());
       shizuku_desc_relay_diag[1] = (uint32_t)relay_made.error;
       shizuku_desc_relay_diag[2] = (uint32_t)relay_made.value;
       shizuku_desc_relay_diag[3] = (uint32_t)OBJECT_DESC_RELAY;

@@ -22,6 +22,7 @@
 //    最小値を代表にし、平均も併記して「どれだけ揺れたか」が見えるようにする。
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_api.hpp"
+#include "shizuku/method_entry.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/selftest.hpp"
 #if !defined(__riscv)
@@ -335,7 +336,7 @@ __attribute__((noinline)) uintptr_t op_desc2(uintptr_t) {
 uintptr_t cost_dnest(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
   if (argument == MODE_SETUP) {
     note_setup(api(object_api::CREATE_OBJECT, OBJECT_COST_DINNER,
-                   (uintptr_t)&cost_leaf).error);
+                   method_entry<ARCH, &cost_leaf>()).error);
     const api_result made =
         api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_COST_DINNER, 0);
     note_setup(made.error);
@@ -350,9 +351,9 @@ uintptr_t cost_dnest(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
 uintptr_t cost_driver(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
   if (argument == MODE_SETUP) {
     note_setup(api(object_api::CREATE_OBJECT, OBJECT_COST_DLEAF,
-                   (uintptr_t)&cost_leaf).error);
+                   method_entry<ARCH, &cost_leaf>()).error);
     note_setup(api(object_api::CREATE_OBJECT, OBJECT_COST_DNEST,
-                   (uintptr_t)&cost_dnest).error);
+                   method_entry<ARCH, &cost_dnest>()).error);
     const api_result desc1 =
         api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_COST_DLEAF, 0);
     note_setup(desc1.error);
@@ -389,7 +390,7 @@ uintptr_t cost_owner(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 // 作成 1 回ぶん。差し替え (表を空にする) と呼び出しは計測の外。区間は cost_owner の中。
 uint32_t create_once(bool &ok) {
   const api_result fresh = api(object_api::CREATE_OBJECT, OBJECT_COST_OWNER,
-                               (uintptr_t)&cost_owner, OBJECT_REPLACE);
+                               method_entry<ARCH, &cost_owner>(), OBJECT_REPLACE);
   const api_result ran = call_method(OBJECT_COST_OWNER, 0);
   if (fresh.error != (uintptr_t)object_error::OK ||
       ran.error != (uintptr_t)object_error::OK ||
@@ -442,12 +443,12 @@ template <typename A> void bench() {
 
   struct entry_t {
     uintptr_t object;
-    uintptr_t (*main)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
-  } const entries[] = {{OBJECT_COST_LEAF, cost_leaf},
-                       {OBJECT_COST_NEST, cost_nest}};
+    uintptr_t main; // 入口 stub (method_entry) のアドレス
+  } const entries[] = {{OBJECT_COST_LEAF, method_entry<ARCH, &cost_leaf>()},
+                       {OBJECT_COST_NEST, method_entry<ARCH, &cost_nest>()}};
   for (const entry_t &entry : entries) {
     const api_result created =
-        api(object_api::CREATE_OBJECT, entry.object, (uintptr_t)entry.main);
+        api(object_api::CREATE_OBJECT, entry.object, entry.main);
     if (created.error != (uintptr_t)object_error::OK) {
       BOARD::diag_printf("[COST] FAIL create object %lu: error %lu\n",
                           (unsigned long)entry.object,
@@ -468,9 +469,9 @@ template <typename A> void bench() {
 #if defined(__riscv)
   // 記述子の計測 (riscv 限定)。呼び手は D。作成は cost_owner を毎回差し替えて空の表で測る。
   const api_result driver =
-      api(object_api::CREATE_OBJECT, OBJECT_COST_DRIVER, (uintptr_t)&cost_driver);
+      api(object_api::CREATE_OBJECT, OBJECT_COST_DRIVER, method_entry<ARCH, &cost_driver>());
   const api_result owner =
-      api(object_api::CREATE_OBJECT, OBJECT_COST_OWNER, (uintptr_t)&cost_owner);
+      api(object_api::CREATE_OBJECT, OBJECT_COST_OWNER, method_entry<ARCH, &cost_owner>());
   if (driver.error != (uintptr_t)object_error::OK ||
       owner.error != (uintptr_t)object_error::OK) {
     BOARD::diag_printf("[COST] FAIL create descriptor bench objects: error %lu / %lu\n",

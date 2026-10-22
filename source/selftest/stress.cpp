@@ -16,6 +16,7 @@
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/object_api.hpp"
+#include "shizuku/method_entry.hpp"
 #include "shizuku/objects/peripherals.hpp"
 #include "shizuku/selftest.hpp"
 #if SHIZUKU_KERNEL_SERVICE_PROFILE
@@ -247,9 +248,9 @@ uint32_t stress_launch() {
   // ★blink は LED = CYW43 を叩く。CYW43 は**初期化したコアからしか触れない**ので
   //   core0 に固定する。実測でここを外すと、blink が core1 へ移った瞬間に
   //   pico-sdk の assert が発火してそのスレッドが止まった (系は継続した)。
-  syscall_value(object_api::CREATE_OBJECT, OBJECT_BLINK, (uintptr_t)&blink,
+  syscall_value(object_api::CREATE_OBJECT, OBJECT_BLINK, method_entry<ARCH, &blink>(),
                 OBJECT_ON_CORE(0));
-  syscall_value(object_api::CREATE_OBJECT, OBJECT_LOAD, (uintptr_t)&load, 0);
+  syscall_value(object_api::CREATE_OBJECT, OBJECT_LOAD, method_entry<ARCH, &load>(), 0);
 
   // ★測る前に一度叩いておく。無線チップ側の LED は最初の 1 回でチップの立ち上げ
   //   (ファーム転送) が走り、700ms 近くかかる。これを測定に混ぜると「揺らぎ」ではなく

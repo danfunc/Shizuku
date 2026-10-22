@@ -9,6 +9,7 @@
 //    RETURN count にし、kernel が ledger の floor と照合する。
 #include "shizuku/kernel.hpp"
 #include "shizuku/kernel_object.hpp"
+#include "shizuku/method_entry.hpp"
 #include "shizuku/svc_attributes.hpp"
 #include "shizuku/hot.hpp"
 #if defined(SHIZUKU_CRASH_RECORD)
@@ -139,7 +140,7 @@ uintptr_t handler_entry_point(uintptr_t a0, uintptr_t a1, uintptr_t a2,
 }
 
 template <> uintptr_t KERNEL_OBJECT::handler_entry() {
-  return (uintptr_t)&handler_entry_point;
+  return method_entry<KERNEL::ARCH, &handler_entry_point>();
 }
 
 // ★カーネルの簿記に貸す記憶。**静的領域に置く**のが要点で、ここは region の外

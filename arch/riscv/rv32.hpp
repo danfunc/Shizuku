@@ -6,6 +6,7 @@
 #include "arch/riscv/pmp.hpp"
 #include "arch/riscv/rv32_frame.h"
 #include "shizuku/concepts/arch.hpp"
+#include "shizuku/rv32_abi.hpp"
 
 // 共通の RV32 trap 経路 (arch/riscv/rv32_trap.S) の入口・戻り口。
 // dispatch と failure は chips 側の C++ が定義する (shizuku_rv32_trap_dispatch / shizuku_rv32_return_failed)。
@@ -176,6 +177,16 @@ public:
 
   static uintptr_t return_stub() {
     return reinterpret_cast<uintptr_t>(&shizuku_rv32_return_stub);
+  }
+
+  // ---- ABI converter, callee 側 (shizuku/method_entry.hpp, shizuku/rv32_abi.hpp) ----
+  // F の入口 stub (gp を自分の __global_pointer$ にしてから本体へ tail jump する)。
+  template <auto F> static void (*method_stub())() {
+#if defined(__riscv)
+    return &rv32_abi::method_stub_body<F>;
+#else
+    return reinterpret_cast<void (*)()>(F); // host 試験: stub を作れない
+#endif
   }
   // trap 深さの問い合わせは IntMode に委ねる。ECALL は割込みではない。
   static bool in_interrupt() { return IntMode::in_interrupt(); }

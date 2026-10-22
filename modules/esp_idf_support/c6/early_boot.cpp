@@ -1,6 +1,7 @@
 // Stage-2 / Stage-3 bootstrap for ESP32-C6. No IDF OS shim, heap or serial observer.
 #include "shizuku/kernel.hpp"
 #include "shizuku/kernel_object.hpp"
+#include "shizuku/method_entry.hpp"
 #include "chips/esp32_c6/chip.hpp"
 #include "chips/esp32_c6/trap_api.hpp"
 #include "chips/esp32_c6/selftest_record.h"
@@ -129,7 +130,7 @@ uintptr_t c6_combined_handler(uintptr_t a0, uintptr_t a1, uintptr_t a2,
   request.stack_bytes = sizeof(thread1_stack);
   request.object_id = 2;
   request.parent_handler_object = 0; // KERNEL_OBJECT_ID
-  request.parent_handler_entry = reinterpret_cast<uintptr_t>(&c6_combined_handler);
+  request.parent_handler_entry = shizuku::method_entry<shizuku::ARCH, &c6_combined_handler>();
   request.ledger = ledger1;
   request.ledger_capacity = 4;
   const auto spawned = shizuku::kernel_instance.spawn(request);
@@ -158,7 +159,7 @@ extern "C" [[noreturn]] void shizuku_c6_early_boot() {
   auto &kernel = shizuku::kernel_instance;
   kernel.init();
   shizuku::kernel_object_instance.init();
-  kernel.set_object_handler(reinterpret_cast<uintptr_t>(&c6_combined_handler), 0);
+  kernel.set_object_handler(shizuku::method_entry<shizuku::ARCH, &c6_combined_handler>(), 0);
   shizuku_c6_mark_boot_phase(0xC602u);
   const auto boot = shizuku::kernel_object_instance.lend_boot_stack();
   kernel.bootstrap(thread0, boot.base, boot.bytes, boot.ledger, boot.ledger_capacity);

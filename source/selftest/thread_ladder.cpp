@@ -9,6 +9,7 @@
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/object_api.hpp"
+#include "shizuku/method_entry.hpp"
 #include "shizuku/selftest.hpp"
 
 namespace shizuku {
@@ -103,7 +104,7 @@ uintptr_t nested_c_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 }
 
 uintptr_t nested_b_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
-  api(object_api::CREATE_OBJECT, OBJECT_WORKER, (uintptr_t)&nested_c_worker, OBJECT_REPLACE);
+  api(object_api::CREATE_OBJECT, OBJECT_WORKER, method_entry<ARCH, &nested_c_worker>(), OBJECT_REPLACE);
   const api_result spawned_c = api(object_api::SPAWN, OBJECT_WORKER, METHOD_MAIN, 0);
   if (spawned_c.error == (uintptr_t)object_error::OK) {
     const api_result granted_c = api(object_api::RUN_FOR, spawned_c.value, 2000u * BOARD::cycles_per_us());
@@ -182,7 +183,7 @@ uintptr_t multi_ancestor_c_worker(uintptr_t tid_a, uintptr_t, uintptr_t, uintptr
 }
 
 uintptr_t multi_ancestor_b_worker(uintptr_t tid_a, uintptr_t, uintptr_t, uintptr_t) {
-  api(object_api::CREATE_OBJECT, OBJECT_SLEEPER, (uintptr_t)&multi_ancestor_c_worker, OBJECT_REPLACE);
+  api(object_api::CREATE_OBJECT, OBJECT_SLEEPER, method_entry<ARCH, &multi_ancestor_c_worker>(), OBJECT_REPLACE);
   const api_result spawned_c = api(object_api::SPAWN, OBJECT_SLEEPER, METHOD_MAIN, tid_a);
   if (spawned_c.error == (uintptr_t)object_error::OK) {
     const uint32_t lend_cycles = 10000u * BOARD::cycles_per_us();
@@ -227,8 +228,8 @@ uintptr_t mutex_contender(uintptr_t tid_owner, uintptr_t, uintptr_t, uintptr_t) 
 void thread_ladder() {
   BOARD::diag_printf("[SELFTEST] thread ladder start\n");
 
-  api(object_api::CREATE_OBJECT, OBJECT_WORKER, (uintptr_t)&worker, 0);
-  api(object_api::CREATE_OBJECT, OBJECT_HOG, (uintptr_t)&hog, 0);
+  api(object_api::CREATE_OBJECT, OBJECT_WORKER, method_entry<ARCH, &worker>(), 0);
+  api(object_api::CREATE_OBJECT, OBJECT_HOG, method_entry<ARCH, &hog>(), 0);
 
   // 1 本起こして、譲り合いで進むこと。
   {
@@ -293,7 +294,7 @@ void thread_ladder() {
   //   (眠るのはカーネルオブジェクトへの要請で、要請した時点で実行権が返る)。
   //   **契約は、破れていないことを見て初めて契約になる**。
   {
-    api(object_api::CREATE_OBJECT, OBJECT_SLEEPER, (uintptr_t)&sleeper, 0);
+    api(object_api::CREATE_OBJECT, OBJECT_SLEEPER, method_entry<ARCH, &sleeper>(), 0);
     const api_result spawned =
         api(object_api::SPAWN, OBJECT_SLEEPER, METHOD_MAIN, 0);
     check("sleep: spawn sleeper", spawned.error == (uintptr_t)object_error::OK,
@@ -389,7 +390,7 @@ void thread_ladder() {
   {
     g_yield_borrower_ran = 0;
     api(object_api::CREATE_OBJECT, OBJECT_WORKER,
-        (uintptr_t)&yield_borrower, OBJECT_REPLACE);
+        method_entry<ARCH, &yield_borrower>(), OBJECT_REPLACE);
     const api_result spawned =
         api(object_api::SPAWN, OBJECT_WORKER, METHOD_MAIN, 0);
     check("yield borrower: spawn", spawned.error == (uintptr_t)object_error::OK,
@@ -423,7 +424,7 @@ void thread_ladder() {
     // Part 1: Nesting A -> B -> C and YIELD unwinds C -> B -> A
     g_nested_c_ran = 0;
     g_nested_b_saw_c_yield = 0;
-    api(object_api::CREATE_OBJECT, OBJECT_SLEEPER, (uintptr_t)&nested_b_worker, OBJECT_REPLACE);
+    api(object_api::CREATE_OBJECT, OBJECT_SLEEPER, method_entry<ARCH, &nested_b_worker>(), OBJECT_REPLACE);
     const api_result spawned_b =
         api(object_api::SPAWN, OBJECT_SLEEPER, METHOD_MAIN, 0);
     check("nested A->B->C: spawn B", spawned_b.error == (uintptr_t)object_error::OK,
@@ -447,7 +448,7 @@ void thread_ladder() {
     g_hog_stop = 0;
     g_nested_b_saw_c_expired = 0;
     g_nested_b_saw_c_elapsed_us = 0;
-    api(object_api::CREATE_OBJECT, OBJECT_SLEEPER, (uintptr_t)&nested_b_margin_worker, OBJECT_REPLACE);
+    api(object_api::CREATE_OBJECT, OBJECT_SLEEPER, method_entry<ARCH, &nested_b_margin_worker>(), OBJECT_REPLACE);
     const api_result spawned_b_margin =
         api(object_api::SPAWN, OBJECT_SLEEPER, METHOD_MAIN, 0);
     check("nested margin: spawn B", spawned_b_margin.error == (uintptr_t)object_error::OK,
@@ -478,7 +479,7 @@ void thread_ladder() {
     // without running post-grant user code, and A must observe grant_end::EXPIRED (0).
     g_hog_stop = 0;
     g_nested_b_clamp_exhaust_ran = 0;
-    api(object_api::CREATE_OBJECT, OBJECT_SLEEPER, (uintptr_t)&nested_b_clamp_exhaust_worker, OBJECT_REPLACE);
+    api(object_api::CREATE_OBJECT, OBJECT_SLEEPER, method_entry<ARCH, &nested_b_clamp_exhaust_worker>(), OBJECT_REPLACE);
     const api_result spawned_b_clamp =
         api(object_api::SPAWN, OBJECT_SLEEPER, METHOD_MAIN, 0);
     check("nested clamp: spawn B clamp", spawned_b_clamp.error == (uintptr_t)object_error::OK,
@@ -510,7 +511,7 @@ void thread_ladder() {
     g_ancestor_b_ran = 0;
     g_ancestor_b_resumed = 0;
     api(object_api::CREATE_OBJECT, OBJECT_WORKER,
-        (uintptr_t)&ancestor_worker, OBJECT_REPLACE);
+        method_entry<ARCH, &ancestor_worker>(), OBJECT_REPLACE);
     const uint32_t tid_a = kernel_instance.current_thread_id();
     const api_result spawned_b =
         api(object_api::SPAWN, OBJECT_WORKER, METHOD_MAIN, tid_a);
@@ -550,7 +551,7 @@ void thread_ladder() {
     g_multi_ancestor_b_completed = 0;
 
     api(object_api::CREATE_OBJECT, OBJECT_WORKER,
-        (uintptr_t)&multi_ancestor_b_worker, OBJECT_REPLACE);
+        method_entry<ARCH, &multi_ancestor_b_worker>(), OBJECT_REPLACE);
     const api_result spawned_multi_b =
         api(object_api::SPAWN, OBJECT_WORKER, METHOD_MAIN, tid_a);
     check("multi ancestor: spawn B", spawned_multi_b.error == (uintptr_t)object_error::OK,
@@ -606,7 +607,7 @@ void thread_ladder() {
           (unsigned long)g_mutex_word, (unsigned long)token_a);
 
     api(object_api::CREATE_OBJECT, OBJECT_WORKER,
-        (uintptr_t)&mutex_contender, OBJECT_REPLACE);
+        method_entry<ARCH, &mutex_contender>(), OBJECT_REPLACE);
     const api_result spawned_b =
         api(object_api::SPAWN, OBJECT_WORKER, METHOD_MAIN, tid_a);
     check("mutex: spawn contender B", spawned_b.error == (uintptr_t)object_error::OK,
@@ -650,8 +651,8 @@ void thread_ladder() {
           (unsigned long)g_mutex_word, 0);
 
     // Restore OBJECT_WORKER and OBJECT_SLEEPER to clean state
-    api(object_api::CREATE_OBJECT, OBJECT_WORKER, (uintptr_t)&worker, OBJECT_REPLACE);
-    api(object_api::CREATE_OBJECT, OBJECT_SLEEPER, (uintptr_t)&sleeper, OBJECT_REPLACE);
+    api(object_api::CREATE_OBJECT, OBJECT_WORKER, method_entry<ARCH, &worker>(), OBJECT_REPLACE);
+    api(object_api::CREATE_OBJECT, OBJECT_SLEEPER, method_entry<ARCH, &sleeper>(), OBJECT_REPLACE);
   }
 
   BOARD::diag_printf("[SELFTEST] thread ladder done: %lu passed, %lu failed\n",

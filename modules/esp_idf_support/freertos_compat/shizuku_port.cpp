@@ -1,4 +1,5 @@
 #include "shizuku_port.hpp"
+#include "shizuku/rv32_abi.hpp"
 #include <atomic>
 
 extern "C" void shizuku_esp_ble_note_task_started(uint32_t task_id) __attribute__((weak));
@@ -185,7 +186,7 @@ bool shizuku_port::spawn(void (*entry)(void *),void *arg,uint32_t stack,uint32_t
     for(;object_id<=last;++object_id) {
       uintptr_t created=0;
       error=call(shizuku::object_api::CREATE_OBJECT,object_id,
-                 reinterpret_cast<uintptr_t>(&plain_task_entry),0,&created);
+                 shizuku::rv32_abi::entry_address<&shizuku_port::plain_task_entry>(),0,&created);
       if(error==0&&created==object_id)break;
     }
     if(object_id>last){packet={};return false;}

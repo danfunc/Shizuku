@@ -8,6 +8,7 @@
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/object_api.hpp"
+#include "shizuku/method_entry.hpp"
 #include "shizuku/selftest.hpp"
 
 namespace shizuku {
@@ -68,7 +69,7 @@ void multicore_probe() {
   }
   BOARD::diag_printf("[SELFTEST] multicore probe start\n");
 
-  api(object_api::CREATE_OBJECT, OBJECT_COUNTER, (uintptr_t)&counter, 0);
+  api(object_api::CREATE_OBJECT, OBJECT_COUNTER, method_entry<ARCH, &counter>(), 0);
   uintptr_t spawned = 0;
   for (uintptr_t slot = 0; slot < WORKERS; ++slot) {
     g_cores_seen[slot] = 0;

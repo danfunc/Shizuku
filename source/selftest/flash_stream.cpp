@@ -18,6 +18,7 @@
 //    両方で確かめる。
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_api.hpp"
+#include "shizuku/method_entry.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/objects/flash_map.hpp"
 #include "shizuku/objects/flash_ops.hpp"
@@ -248,14 +249,14 @@ void flash_stream_ladder() {
 #endif
   FSTREAM_EVENT(1, 0);
 
-  api(object_api::CREATE_OBJECT, OBJECT_WRITER, (uintptr_t)&unprivileged_writer,
+  api(object_api::CREATE_OBJECT, OBJECT_WRITER, method_entry<ARCH, &unprivileged_writer>(),
       OBJECT_UNPRIVILEGED);
-  api(object_api::CREATE_OBJECT, OBJECT_READER, (uintptr_t)&unprivileged_reader,
+  api(object_api::CREATE_OBJECT, OBJECT_READER, method_entry<ARCH, &unprivileged_reader>(),
       OBJECT_UNPRIVILEGED);
-  api(object_api::CREATE_OBJECT, OBJECT_SINK, (uintptr_t)&unprivileged_sink,
+  api(object_api::CREATE_OBJECT, OBJECT_SINK, method_entry<ARCH, &unprivileged_sink>(),
       OBJECT_UNPRIVILEGED);
   api(object_api::CREATE_OBJECT, OBJECT_TRESPASSER,
-      (uintptr_t)&flash_trespasser, OBJECT_UNPRIVILEGED);
+      method_entry<ARCH, &flash_trespasser>(), OBJECT_UNPRIVILEGED);
   FSTREAM_EVENT(2, 0);
 
   // ---- 書き: 非特権がバイトを流し、特権側が焼く ----------------------------
