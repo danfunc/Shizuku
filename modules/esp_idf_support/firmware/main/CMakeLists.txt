@@ -52,6 +52,16 @@ if(SHIZUKU_ESP_BLE OR SHIZUKU_C5_BLE OR "$ENV{SHIZUKU_ESP_BLE}" STREQUAL "1" OR 
     target_compile_definitions(${COMPONENT_LIB} PRIVATE
         SHIZUKU_BLE_COMPAT_GRANT_CYCLES=${SHIZUKU_BLE_COMPAT_GRANT_CYCLES})
     target_compile_definitions(${COMPONENT_LIB} PRIVATE SHIZUKU_ESP32_C6=1)
+    # Bazel --copt applies to the archive, not these IDF-compiled radio sources.
+    # Pass the antenna choice explicitly with --action_env for the IDF action.
+    if(DEFINED ENV{SHIZUKU_C6_ANTENNA_EXTERNAL})
+      set(shizuku_c6_antenna_external "$ENV{SHIZUKU_C6_ANTENNA_EXTERNAL}")
+      if(NOT shizuku_c6_antenna_external MATCHES "^[01]$")
+        message(FATAL_ERROR "SHIZUKU_C6_ANTENNA_EXTERNAL must be 0 or 1")
+      endif()
+      target_compile_definitions(${COMPONENT_LIB} PRIVATE
+          SHIZUKU_C6_ANTENNA_EXTERNAL=${shizuku_c6_antenna_external})
+    endif()
   endif()
   if("$ENV{SHIZUKU_C5_MUTEX_SELF_RETAKE_FAILFAST}" STREQUAL "1")
     target_compile_definitions(${COMPONENT_LIB} PRIVATE SHIZUKU_C5_MUTEX_SELF_RETAKE_FAILFAST=1)
