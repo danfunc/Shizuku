@@ -220,8 +220,9 @@ chip_src = (root / 'chips/esp32_c6/chip.hpp').read_text()
 assert chip_src.index('#define SHIZUKU_HOT ') < chip_src.index('#include "arch/riscv/rv32.hpp"')
 assert 'section(".iram1." SHIZUKU_CHIP_STR(__COUNTER__))' in chip_src
 abi_src = (root / 'internal_headers/shizuku/rv32_abi.hpp').read_text()
-assert '#include "shizuku/hot.hpp"' in abi_src
-assert 'template <auto F> [[gnu::naked, gnu::used]] SHIZUKU_HOT void method_stub_body()' in abi_src
+# テンプレートの入口 stub には付けない (__COUNTER__ が 1 回しか評価されず section type conflict になる)。
+assert 'template <auto F> [[gnu::naked, gnu::used]] void method_stub_body()' in abi_src
+assert 'SHIZUKU_HOT' not in abi_src.split('method_stub_body()')[0].rsplit('template <auto F>', 1)[-1]
 trap_src = (root / 'chips/esp32_c6/trap.cpp').read_text()
 assert 'SHIZUKU_HOT uint32_t plic_vector_mode::cycle_counter_read()' in trap_src
 call_src = (root / 'source/selftest/call_cost.cpp').read_text()
