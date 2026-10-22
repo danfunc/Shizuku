@@ -123,3 +123,6 @@ build:esp32c6_ble --config=esp32c6
 build:esp32c6_ble --//configs:ble_profile=controller_init
 build:esp32c6_ble --copt=-DSHIZUKU_ESP_BLE=1
 test --platforms=@platforms//host
+
+# 試験的な遅延退避 (--config=abi_lazy_save、既定は無効)
+try-import %workspace%/tools/abi_lazy_save.bazelrc
