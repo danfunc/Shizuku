@@ -199,6 +199,40 @@ public:
   // ---- ISA 層 (例外入口) から呼ばれる ----
   CONTEXT *current_context();
   void svc_dispatch(CONTEXT *context);
+  // ---- ecall の直接入口 (arch の例外入口が、a0 の番号の表から呼ぶ) ------------------
+  //  svc_dispatch の枝を番号ごとに外へ出したもの。svc_dispatch 自身も同じ関数を呼ぶので、
+  //  どちらから入っても結果は同じ。巨大な svc_dispatch を通らずに、番号に対応する処理へ入る。
+  // 呼び出し元が root KernelObject 宛ての native API を撃てる立場か (kobj 本人でも、専用の親ハンドラ
+  // 配下でもなく、親ハンドラが登録済み)。false のときは svc_dispatch へ回す (primitive・objectland の
+  // raw 配送・未登録 panic はそこで従来どおり決まる)。
+  bool svc_native_route() const;
+  // trap 内で直接処理する native API (svc_attributes の mode == handler)。前提: svc_native_route()。
+  // true = 処理した (応答を書いた)。false = kobj へ回す (svc_forward を呼ぶこと)。
+  bool svc_exit_method(CONTEXT *context);
+  bool svc_exit(CONTEXT *context, bool forward); // EXIT_METHOD と FORWARD_CHILD_EXIT の共通部
+  bool svc_call_method(CONTEXT *context);
+  bool svc_get_current(CONTEXT *context);
+  bool svc_get_caller(CONTEXT *context);
+  bool svc_yield(CONTEXT *context);
+  bool svc_run_for(CONTEXT *context);
+  bool svc_set_budget(CONTEXT *context);
+  bool svc_forward_child_exit(CONTEXT *context);
+  bool svc_call_descriptor(CONTEXT *context);
+  // 呼び出し元が kobj 本人のときの primitive (CALL / RETURN / SWITCH / GRANT)。
+  void svc_primitive(CONTEXT *context);
+  // 親ハンドラ (root KernelObject か専用ハンドラ) へ dispatch 段を積んで配送する。
+  void svc_forward(CONTEXT *context, bool service_gate);
+  // 番号の表から呼ぶ入口: native の経路に立てていれば Body で処理し、処理しなかった (false) なら
+  // kobj へ配送。立てていなければ svc_dispatch。
+  template <bool (kernel::*Body)(CONTEXT *)>
+  void svc_entry(CONTEXT *context) {
+    if (!svc_native_route()) {
+      svc_dispatch(context);
+      return;
+    }
+    if (!(this->*Body)(context))
+      svc_forward(context, false);
+  }
   void pendsv_dispatch(CONTEXT *context);
   // 保護違反やスタック上限違反で落ちたときの受け口。
   // ★**系を止めない**。落ちたのは 1 つのスレッドなので、そのスレッドだけを止めて

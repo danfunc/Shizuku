@@ -428,331 +428,328 @@ static constexpr bool is_context_unprivileged(const C *ctx) {
   }
 }
 
-template <> SHIZUKU_HOT void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
-#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
-  shizuku_boot_trace_phase(410);
-#endif
+// ---------------------------------------------------------------------------
+//  svc の処理を呼び出し元の立場と番号ごとに分けたもの。svc_dispatch はこれらを順に
+//  判定して呼ぶ薄い振り分けで、arch の例外入口 (RV32) は番号の表から同じ関数へ直接入る
+//  (svc_native_route と svc_entry を使う)。どちらから入っても結果は同じ。
+// ---------------------------------------------------------------------------
+
+// 呼び出し元が root KernelObject 宛ての native API を撃てる立場か。svc_dispatch の
+//   「kobj 本人でない」「親ハンドラが登録済み」「宛先が root」の 3 つの判定をまとめたもの。
+template <> SHIZUKU_HOT bool KERNEL::svc_native_route() const {
+  const THREAD &thread = current_thread();
+  if (thread.current_kind() == (uint32_t)object_kind::KERNEL_OBJECT &&
+      thread.current_object() == m_object_svc_handler_object)
+    return false;
+  return thread.current_handler_entry() != 0 &&
+         thread.current_handler_object() == m_object_svc_handler_object;
+}
+
+// 呼び出し元が登録済み kernel object 本人のとき: 番号は primitive の番号空間 (CALL / RETURN /
+// SWITCH / GRANT)。
+template <> SHIZUKU_HOT void KERNEL::svc_primitive(KERNEL::CONTEXT *context) {
   THREAD &thread = current_thread();
   FRAME *frame = context->sp;
-  // Only this privileged internal gate bypasses parent routing. The public
-  // objectland raw-SVC path below, including colliding numbers, is unchanged.
-#if defined(__arm__) || defined(__thumb__)
-  const bool service_gate = ARCH::frame_pc(*frame) ==
-      reinterpret_cast<uintptr_t>(&shizuku_v2_service_resume);
-#else
-  constexpr bool service_gate = false;
-#endif
-  if (service_gate) {
-    if (is_context_unprivileged(context)) {
-      ARCH::set_result(*frame, (uintptr_t)object_error::NOT_PRIVILEGED, 0);
-      return;
-    }
-    const auto id = ARCH::arg(*frame, 0);
-    if (id != (uintptr_t)object_api::YIELD && id != (uintptr_t)object_api::RUN_FOR &&
-        id != (uintptr_t)object_api::SLEEP_US) {
-      ARCH::set_result(*frame, (uintptr_t)object_error::UNKNOWN_API, 0);
-      return;
-    }
-  }
-
-  // ★「kernel object 本人であるか」の厳格判定 (指摘3, 指摘4)。
-  //   単なる HANDLER ではなく、登録済み kernel object (種別 KERNEL_OBJECT かつ
-  //   ID が m_object_svc_handler_object) だけが kernel primitive を直接解釈できる。
-  if (!service_gate && thread.current_kind() == (uint32_t)object_kind::KERNEL_OBJECT &&
-      thread.current_object() == m_object_svc_handler_object) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
-    shizuku_boot_trace_phase(411);
+  shizuku_boot_trace_phase(411);
 #endif
-    const uintptr_t number = ARCH::arg(*frame, 0);
+  const uintptr_t number = ARCH::arg(*frame, 0);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
-    shizuku_boot_trace_primitive_number((uint32_t)number);
+  shizuku_boot_trace_primitive_number((uint32_t)number);
 #endif
-    switch ((primitive)number) {
-    case primitive::CALL: {
+  switch ((primitive)number) {
+  case primitive::CALL: {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
-      shizuku_boot_trace_call_enter((uint32_t)context->sp, (uint32_t)frame);
+    shizuku_boot_trace_call_enter((uint32_t)context->sp, (uint32_t)frame);
 #endif
-      const call_request *pointer = (const call_request *)ARCH::arg(*frame, 1);
-      if (pointer == nullptr) {
-        ARCH::set_result(*frame, (uintptr_t)kernel_error::BAD_REQUEST, 0);
-        break;
-      }
-      const call_request request = *pointer;
-      const kernel_error error = do_call(thread, context, &frame, request);
-#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
-      shizuku_boot_trace_call_leave((uint32_t)context->sp, (uint32_t)frame);
-#endif
-      if (error != kernel_error::OK)
-        ARCH::set_result(*frame, (uintptr_t)error, 0);
+    const call_request *pointer = (const call_request *)ARCH::arg(*frame, 1);
+    if (pointer == nullptr) {
+      ARCH::set_result(*frame, (uintptr_t)kernel_error::BAD_REQUEST, 0);
       break;
     }
-    case primitive::RETURN: {
+    const call_request request = *pointer;
+    const kernel_error error = do_call(thread, context, &frame, request);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
-      shizuku_boot_trace_return_enter((uint32_t)context->sp, (uint32_t)frame);
+    shizuku_boot_trace_call_leave((uint32_t)context->sp, (uint32_t)frame);
 #endif
-      uintptr_t count = ARCH::arg(*frame, 1);
-      const uintptr_t value = ARCH::arg(*frame, 2);
-      const uintptr_t error = ARCH::arg(*frame, 3);
-      const uint32_t depth = thread.call_stack.depth;
-      const uintptr_t target_arg = ARCH::arg(*frame, 4);
-      const uint32_t floor = current_unwind_floor();
-      uint32_t target_depth;
-      if (target_arg == RETURN_STUB_MARKER) {
-        const auto request = resolve_return_stub(depth);
-        target_depth = request.target_depth;
-        count = request.count;
-      } else if (target_arg > UINT32_MAX) {
-        ARCH::set_result(*frame, (uintptr_t)kernel_error::DEPTH_MISMATCH,
-                         depth);
-        break;
-      } else {
-        target_depth = (uint32_t)target_arg;
-      }
-      const kernel_error validation = validate_return_depth(
-          depth, floor, target_depth, count);
-      if (validation != kernel_error::OK) {
-        ARCH::set_result(*frame, (uintptr_t)validation, depth);
-        break;
-      }
-      call_unwind(thread, context, &frame, count);
-#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
-      shizuku_boot_trace_return_leave((uint32_t)context->sp, (uint32_t)frame);
-#endif
-      ARCH::set_result(*frame, error, value);
-      break;
-    }
-    case primitive::SWITCH: {
-#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
-      shizuku_boot_trace_primitive_stage(417);
-#endif
-      const kernel_error error = do_switch((uint32_t)ARCH::arg(*frame, 1));
+    if (error != kernel_error::OK)
       ARCH::set_result(*frame, (uintptr_t)error, 0);
-      break;
-    }
-    case primitive::GRANT: {
+    break;
+  }
+  case primitive::RETURN: {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
-      shizuku_boot_trace_primitive_stage(418);
+    shizuku_boot_trace_return_enter((uint32_t)context->sp, (uint32_t)frame);
 #endif
-      const uint32_t target = (uint32_t)ARCH::arg(*frame, 1);
-      const uint32_t cycles = (uint32_t)ARCH::arg(*frame, 2);
-      ARCH::set_result(*frame, (uintptr_t)kernel_error::OK,
-                       (uintptr_t)grant_end::YIELDED);
-      const kernel_error error = do_grant(target, cycles);
-      if (error != kernel_error::OK)
-        ARCH::set_result(*frame, (uintptr_t)error, 0);
+    uintptr_t count = ARCH::arg(*frame, 1);
+    const uintptr_t value = ARCH::arg(*frame, 2);
+    const uintptr_t error = ARCH::arg(*frame, 3);
+    const uint32_t depth = thread.call_stack.depth;
+    const uintptr_t target_arg = ARCH::arg(*frame, 4);
+    const uint32_t floor = current_unwind_floor();
+    uint32_t target_depth;
+    if (target_arg == RETURN_STUB_MARKER) {
+      const auto request = resolve_return_stub(depth);
+      target_depth = request.target_depth;
+      count = request.count;
+    } else if (target_arg > UINT32_MAX) {
+      ARCH::set_result(*frame, (uintptr_t)kernel_error::DEPTH_MISMATCH,
+                       depth);
+      break;
+    } else {
+      target_depth = (uint32_t)target_arg;
+    }
+    const kernel_error validation = validate_return_depth(
+        depth, floor, target_depth, count);
+    if (validation != kernel_error::OK) {
+      ARCH::set_result(*frame, (uintptr_t)validation, depth);
       break;
     }
-    default:
-      BOARD::panic("unknown kernel primitive");
-      break;
-    }
+    call_unwind(thread, context, &frame, count);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
-    shizuku_boot_trace_primitive_stage(425);
+    shizuku_boot_trace_return_leave((uint32_t)context->sp, (uint32_t)frame);
 #endif
-    return;
+    ARCH::set_result(*frame, error, value);
+    break;
+  }
+  case primitive::SWITCH: {
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+    shizuku_boot_trace_primitive_stage(417);
+#endif
+    const kernel_error error = do_switch((uint32_t)ARCH::arg(*frame, 1));
+    ARCH::set_result(*frame, (uintptr_t)error, 0);
+    break;
+  }
+  case primitive::GRANT: {
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+    shizuku_boot_trace_primitive_stage(418);
+#endif
+    const uint32_t target = (uint32_t)ARCH::arg(*frame, 1);
+    const uint32_t cycles = (uint32_t)ARCH::arg(*frame, 2);
+    ARCH::set_result(*frame, (uintptr_t)kernel_error::OK,
+                     (uintptr_t)grant_end::YIELDED);
+    const kernel_error error = do_grant(target, cycles);
+    if (error != kernel_error::OK)
+      ARCH::set_result(*frame, (uintptr_t)error, 0);
+    break;
+  }
+  default:
+    BOARD::panic("unknown kernel primitive");
+    break;
+  }
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_primitive_stage(425);
+#endif
+}
+
+// ---- trap 内で直接処理する native API (O(1)、待たない、ループしない) --------------------
+// 前提: svc_native_route() (root KernelObject 宛て、呼び出し元は kobj 本人でない)。
+// 戻り値 true = 処理した (応答を書いた)、false = kobj へ回す。
+
+template <> SHIZUKU_HOT bool KERNEL::svc_get_current(KERNEL::CONTEXT *context) {
+  ARCH::set_result(*context->sp, (uintptr_t)object_error::OK,
+                   current_object(current_thread_id()));
+  return true;
+}
+
+template <> SHIZUKU_HOT bool KERNEL::svc_get_caller(KERNEL::CONTEXT *context) {
+  ARCH::set_result(*context->sp, (uintptr_t)object_error::OK,
+                   caller_object(current_thread_id()));
+  return true;
+}
+
+// YIELD (8): CPU を渡してくれた相手 (grant 段の先頭の貸し手) へ返す。O(1)。
+//   grant_unwind(YIELDED) で貸し手の応答 (OK, YIELDED) が書かれ、自分の応答 (OK, 0) は
+//   次に実行権を貰って再開したときのために先に置いておく。
+//   grant 段が無い (貸し手が居ない = 起点のスレッド) ときは、起点のスレッドがスケジューラ役
+//   なので従来どおり kobj の schedule() へ転送する (false)。
+template <> SHIZUKU_HOT bool KERNEL::svc_yield(KERNEL::CONTEXT *context) {
+  if (!grant_active())
+    return false;
+  ARCH::set_result(*context->sp, (uintptr_t)object_error::OK, 0);
+  grant_unwind(grant_end::YIELDED);
+  return true;
+}
+
+// EXIT_METHOD (2) / FORWARD_CHILD_EXIT (27): 戻り先の絶対深さ d を検証して
+//   current_depth - d 段を落とす。27 は専用 HANDLER からだけ (parent_ledger 権限)。
+//   a1 = d, a2 = value, a3 = error。非 KOBJ の return stub (a4 = RETURN_STUB_MARKER、2 のみ) は
+//   d を持たないので、台帳の unwind floor (= 呼び先を積む前の深さ) を d とする。
+//   検査は primitive RETURN と同じ (validate_return_depth)。弾いたら 1 枚も落とさず
+//   UNWIND_REJECTED + kernel_error を呼び出し元へ返す (従来の exit_method の reply と同じ)。
+//   従来は dispatch 段が 1 枚積まれていたため d == current_depth も通ったが、今は段が
+//   無いので d >= current_depth は DEPTH_MISMATCH で弾く。
+template <> SHIZUKU_HOT bool KERNEL::svc_exit(KERNEL::CONTEXT *context, bool forward) {
+  THREAD &thread = current_thread();
+  FRAME *frame = context->sp;
+  if (forward) {
+    // 出どころ確認。発行元の段 (台帳の最上段、dispatch 段は積まれていない) が専用 HANDLER で、
+    // root kobj 本人ではないこと。従来の forward_child_exit は dispatch 段の 1 つ下
+    // (ledger_entry(thread, 1)) を見ていた。
+    const bool from_handler =
+        thread.call_stack.depth != 0 &&
+        thread.ledger_top().kind == (uint8_t)object_kind::HANDLER &&
+        thread.ledger_top().object != m_object_svc_handler_object;
+    if (!svc_permission_allows((uintptr_t)object_api::FORWARD_CHILD_EXIT,
+                               !is_context_unprivileged(context), false,
+                               from_handler)) {
+      ARCH::set_result(*frame, (uintptr_t)object_error::NOT_PRIVILEGED, 0);
+      return true;
+    }
+  }
+  const uint32_t depth = thread.call_stack.depth;
+  const uint32_t floor = current_unwind_floor();
+  const bool from_stub = !forward && ARCH::arg(*frame, 4) == RETURN_STUB_MARKER;
+  const uintptr_t d = from_stub ? (uintptr_t)floor : ARCH::arg(*frame, 1);
+  // スレッドの最外のメソッドが戻ったとき (d == 0 かつ呼出し段なし) は「スレッドの
+  // 終わり」で、次のスレッドの選び方に踏み込むので kobj の exit_thread に任せる
+  // (EXIT_THREAD が trap 内に入るまでは従来経路)。
+  if (d == 0 && thread.call_stack.call_count == 0)
+    return false;
+  const uint32_t target = (uint32_t)d;
+  const uintptr_t count = target < depth ? depth - target : 0;
+  const kernel_error validation =
+      validate_return_depth(depth, floor, target, count);
+  if (validation != kernel_error::OK) {
+    ARCH::set_result(*frame, (uintptr_t)object_error::UNWIND_REJECTED,
+                     (uintptr_t)validation);
+    return true;
+  }
+  const uintptr_t value = ARCH::arg(*frame, 2);
+  const uintptr_t error = ARCH::arg(*frame, 3);
+  call_unwind(thread, context, &frame, count);
+  ARCH::set_result(*frame, error, value);
+  return true;
+}
+
+template <> SHIZUKU_HOT bool KERNEL::svc_exit_method(KERNEL::CONTEXT *context) {
+  return svc_exit(context, false);
+}
+
+template <> SHIZUKU_HOT bool KERNEL::svc_forward_child_exit(KERNEL::CONTEXT *context) {
+  return svc_exit(context, true);
+}
+
+// CALL_METHOD (4): a1 = オブジェクト ID, a2 = メソッド番号, a3 = 引数。
+//   kobj の中継 (call_method → primitive CALL) をやめ、m_objects[id].methods[method] を
+//   O(1) で引いて呼び先へ直接入る。台帳段は本当の呼び出し元の上に積まれるので、
+//   呼び先から見た GET_CALLER_OBJECT は呼び出し元そのものになる。
+//   エラーの種類・順序は従来と同じ (BAD_OBJECT → BAD_METHOD → UNDECLARED_METHOD →
+//   NO_STACK)。応答は (error, 0)。
+template <> SHIZUKU_HOT bool KERNEL::svc_call_method(KERNEL::CONTEXT *context) {
+  THREAD &thread = current_thread();
+  FRAME *frame = context->sp;
+  call_request request{};
+  const object_error lookup = kernel_object_instance.method_call_request(
+      ARCH::arg(*frame, 1), ARCH::arg(*frame, 2), request);
+  if (lookup != object_error::OK) {
+    ARCH::set_result(*frame, (uintptr_t)lookup, 0);
+    return true;
+  }
+  if (thread.call_stack.call_count >= KERNEL_OBJECT::MAX_DEPTH) {
+    ARCH::set_result(*frame, (uintptr_t)object_error::NO_STACK, 0);
+    return true;
+  }
+  request.args[0] = ARCH::arg(*frame, 3);
+  const kernel_error entered = do_call(thread, context, &frame, request);
+  // 入れなかったときは台帳に段が残らない (frame もそのまま = 呼び出し元の svc フレーム)。
+  if (entered != kernel_error::OK)
+    ARCH::set_result(*frame, (uintptr_t)(entered == kernel_error::NO_STACK
+                                             ? object_error::NO_STACK
+                                             : object_error::BAD_OBJECT),
+                     0);
+  return true;
+}
+
+// RUN_FOR (9): a1 = スレッド ID, a2 = クロック数。GRANT をそのまま撃つ。
+//   応答は貸し手が戻ったときに grant_unwind が (OK, grant_end) で書く。先に既定値
+//   (OK, YIELDED) を置いておく点は primitive GRANT と同じ。貸せなかったときの
+//   変換は従来どおり: GRANT_TOO_SMALL → NO_TIME (こちらに配れる持ち分が無い。
+//   NOT_RUNNABLE と区別しないとスケジューラが空回りする)、それ以外 → NOT_RUNNABLE。
+template <> SHIZUKU_HOT bool KERNEL::svc_run_for(KERNEL::CONTEXT *context) {
+  FRAME *frame = context->sp;
+  // 引数は応答の既定値を置く前に読む (応答は同じ a0/a1 に載る)。
+  const uint32_t target = (uint32_t)ARCH::arg(*frame, 1);
+  const uint32_t cycles = (uint32_t)ARCH::arg(*frame, 2);
+  ARCH::set_result(*frame, (uintptr_t)object_error::OK, (uintptr_t)grant_end::YIELDED);
+  const kernel_error granted = do_grant(target, cycles);
+  if (granted != kernel_error::OK)
+    ARCH::set_result(*frame,
+                     (uintptr_t)(granted == kernel_error::GRANT_TOO_SMALL
+                                     ? object_error::NO_TIME
+                                     : object_error::NOT_RUNNABLE),
+                     0);
+  return true;
+}
+
+// SET_BUDGET (12): a1 = スレッド ID, a2 = クロック数。範囲外は黙って何もしない。
+template <> SHIZUKU_HOT bool KERNEL::svc_set_budget(KERNEL::CONTEXT *context) {
+  FRAME *frame = context->sp;
+  kernel_object_instance.set_budget(ARCH::arg(*frame, 1), ARCH::arg(*frame, 2));
+  ARCH::set_result(*frame, (uintptr_t)object_error::OK, 0);
+  return true;
+}
+
+template <> SHIZUKU_HOT bool KERNEL::svc_call_descriptor(KERNEL::CONTEXT *context) {
+  THREAD &thread = current_thread();
+  FRAME *frame = context->sp;
+#if !defined(__riscv)
+  ARCH::set_result(*frame, (uintptr_t)object_error::UNKNOWN_API, 0);
+  return true;
+#else
+  const uint32_t thread_id = current_thread_id();
+  const uint32_t caller_id = (uint32_t)current_object(thread_id);
+  const uint32_t index = (uint32_t)ARCH::arg(*frame, 1);
+  KERNEL_OBJECT::method_descriptor_entry desc{};
+  object_error error = object_error::OK;
+  kernel_object_instance.table_lock();
+  const bool descriptor_valid = kernel_object_instance.validate_method_descriptor(
+      caller_id, index, current_object_generation(), desc, error);
+  if (!descriptor_valid) {
+    kernel_object_instance.table_unlock();
+    ARCH::set_result(*frame, (uintptr_t)error, 0);
+    return true;
+  }
+  // 通常の CALL (do_call) と同じ形の台帳段を積む。戻りは既存の CALL の戻りに合流する。
+  const call_request request =
+      kernel_object_instance.callee_request(desc.target_object, desc.target_entry);
+  kernel_object_instance.table_unlock();
+#if defined(SHIZUKU_DEEP_DIAG)
+  shizuku_push_diag_kind = 3; // CALL_METHOD_DESCRIPTOR 経路 (riscv のみ)
+#endif
+  const kernel_error entered = enter_call(thread, context, &frame, request,
+                                          LEDGER_DESCRIPTOR_CALL);
+  if (entered != kernel_error::OK) {
+    ARCH::set_result(*frame, (uintptr_t)(entered == kernel_error::NO_STACK
+                                             ? object_error::NO_STACK
+                                             : object_error::BAD_DESCRIPTOR),
+                     0);
+    return true;
   }
 
-  // ここへ来るのは非 kernel object (一般 child や専用 handling object など)。
-  // 親ハンドラが未登録なら黙って root へ fallback せず、診断可能な panic とする (指摘2)。
-  if (!service_gate && thread.current_handler_entry() == 0) {
-    BOARD::panic("unregistered parent handler for object syscall");
+  uintptr_t args[6];
+  for (unsigned i = 0; i < 6; ++i) {
+    args[i] = ARCH::arg(*frame, 2 + i);
   }
+  ARCH::set_entry(*frame, desc.target_entry, ARCH::return_stub());
+  ARCH::set_args_6(*frame, args);
+  // 通常の CALL (do_call) と同じ規則: 呼び先オブジェクトの保護指定で決める。
+  ARCH::set_priv(*context, (request.protection & PROTECTION_UNPRIVILEGED) == 0);
+  // Region grants can change after descriptor creation. Use the live
+  // trusted window, while keeping authorization out of the O(1) call path.
+  ARCH::set_region_window(*context, request.region_base, request.region_limit);
+  return true;
+#endif
+}
 
-  // 親ハンドラへの直接ディスパッチ (O(1)、テーブル検索ゼロ、同期例外中の再帰なし)。
+// 親ハンドラ (root KernelObject か専用ハンドラ) への配送: dispatch 段を積み、親ハンドラの
+// 入口へ svc の引数を渡して入る。kobj へ回す thread mode の API と、専用の親ハンドラ宛ての
+// raw svc (全番号、無加工) がここを通る。
+template <> SHIZUKU_HOT void KERNEL::svc_forward(KERNEL::CONTEXT *context, bool service_gate) {
+  THREAD &thread = current_thread();
+  FRAME *frame = context->sp;
   const uintptr_t target_entry = service_gate ? m_object_svc_handler : thread.current_handler_entry();
   const uint32_t target_object = service_gate ? m_object_svc_handler_object : thread.current_handler_object();
   const bool to_root = (target_object == m_object_svc_handler_object);
-
-  // 段 V1: 宛先が信頼された root KernelObject かつ mode == svc_mode::handler の
-  // 同期・有界 native API (現 candidate は GET_CURRENT_OBJECT, GET_CALLER_OBJECT) に
-  // 限定して trap 内で直接処理し、dispatch frame を積まずに即時復帰する。
-  //
-  // 重要 (Luna レビュー指摘 1):
-  // 移行対象外の mode == svc_mode::thread (GRANT_REGION, YIELD, CALL_METHOD 等) や
-  // 未移行の mode::handler (MEMORY_OWNER 等) は、trap 内で先行して属性・権限検査を行わず、
-  // 既存の KOBJ actor dispatch 経路へそのまま通す (先行拒絶の禁止)。
-  // また、専用親ハンドラ宛て (to_root == false) の raw SVC は全 ID で親ハンドラへ無加工配送される。
-  if (to_root) {
-    const uintptr_t id = ARCH::arg(*frame, 0);
-    // 番号 → 密な種別の表引き (O(1))。その種別の switch は密な連番なのでジャンプ表になる。
-    // 旧: 9 個の ID との比較の連鎖で、33 (CALL_METHOD_DESCRIPTOR) が最後に比べられていた。
-    switch (trap_api_of(id)) {
-    case trap_api::NONE:
-      break;
-    case trap_api::GET_CURRENT:
-      ARCH::set_result(*frame, (uintptr_t)object_error::OK,
-                       current_object(current_thread_id()));
-      return;
-    case trap_api::GET_CALLER:
-      ARCH::set_result(*frame, (uintptr_t)object_error::OK,
-                       caller_object(current_thread_id()));
-      return;
-    case trap_api::YIELD:
-      // YIELD (8): CPU を渡してくれた相手 (grant 段の先頭の貸し手) へ返す。O(1)。
-      //   grant_unwind(YIELDED) で貸し手の応答 (OK, YIELDED) が書かれ、自分の応答 (OK, 0) は
-      //   次に実行権を貰って再開したときのために先に置いておく。
-      //   grant 段が無い (貸し手が居ない = 起点のスレッド) ときは、起点のスレッドがスケジューラ役
-      //   なので従来どおり kobj の schedule() へ転送する (下の dispatch に落ちる)。
-      if (grant_active()) {
-        ARCH::set_result(*frame, (uintptr_t)object_error::OK, 0);
-        grant_unwind(grant_end::YIELDED);
-        return;
-      }
-      break;
-    case trap_api::EXIT_METHOD:
-    case trap_api::FORWARD_CHILD_EXIT: {
-      // EXIT_METHOD (2) / FORWARD_CHILD_EXIT (27): 戻り先の絶対深さ d を検証して
-      //   current_depth - d 段を落とす。27 は専用 HANDLER からだけ (parent_ledger 権限)。
-      //   a1 = d, a2 = value, a3 = error。非 KOBJ の return stub (a4 = RETURN_STUB_MARKER、2 のみ) は
-      //   d を持たないので、台帳の unwind floor (= 呼び先を積む前の深さ) を d とする。
-      //   検査は primitive RETURN と同じ (validate_return_depth)。弾いたら 1 枚も落とさず
-      //   UNWIND_REJECTED + kernel_error を呼び出し元へ返す (従来の exit_method の reply と同じ)。
-      //   従来は dispatch 段が 1 枚積まれていたため d == current_depth も通ったが、今は段が
-      //   無いので d >= current_depth は DEPTH_MISMATCH で弾く。
-      const bool forward = id == (uintptr_t)object_api::FORWARD_CHILD_EXIT;
-      if (forward) {
-        // 出どころ確認。発行元の段 (台帳の最上段、dispatch 段は積まれていない) が専用 HANDLER で、
-        // root kobj 本人ではないこと。従来の forward_child_exit は dispatch 段の 1 つ下
-        // (ledger_entry(thread, 1)) を見ていた。
-        const bool from_handler =
-            thread.call_stack.depth != 0 &&
-            thread.ledger_top().kind == (uint8_t)object_kind::HANDLER &&
-            thread.ledger_top().object != m_object_svc_handler_object;
-        if (!svc_permission_allows(id, !is_context_unprivileged(context), false,
-                                   from_handler)) {
-          ARCH::set_result(*frame, (uintptr_t)object_error::NOT_PRIVILEGED, 0);
-          return;
-        }
-      }
-      const uint32_t depth = thread.call_stack.depth;
-      const uint32_t floor = current_unwind_floor();
-      const bool from_stub = !forward && ARCH::arg(*frame, 4) == RETURN_STUB_MARKER;
-      const uintptr_t d = from_stub ? (uintptr_t)floor : ARCH::arg(*frame, 1);
-      // スレッドの最外のメソッドが戻ったとき (d == 0 かつ呼出し段なし) は「スレッドの
-      // 終わり」で、次のスレッドの選び方に踏み込むので kobj の exit_thread に任せる
-      // (EXIT_THREAD が trap 内に入るまでは従来経路)。dispatch 段を積んで下へ落ちる。
-      if (!(d == 0 && thread.call_stack.call_count == 0)) {
-        const uint32_t target = (uint32_t)d;
-        const uintptr_t count = target < depth ? depth - target : 0;
-        const kernel_error validation =
-            validate_return_depth(depth, floor, target, count);
-        if (validation != kernel_error::OK) {
-          ARCH::set_result(*frame, (uintptr_t)object_error::UNWIND_REJECTED,
-                           (uintptr_t)validation);
-          return;
-        }
-        const uintptr_t value = ARCH::arg(*frame, 2);
-        const uintptr_t error = ARCH::arg(*frame, 3);
-        call_unwind(thread, context, &frame, count);
-        ARCH::set_result(*frame, error, value);
-        return;
-      }
-      break;
-    }
-    case trap_api::CALL_METHOD: {
-      // CALL_METHOD (4): a1 = オブジェクト ID, a2 = メソッド番号, a3 = 引数。
-      //   kobj の中継 (call_method → primitive CALL) をやめ、m_objects[id].methods[method] を
-      //   O(1) で引いて呼び先へ直接入る。台帳段は本当の呼び出し元の上に積まれるので、
-      //   呼び先から見た GET_CALLER_OBJECT は呼び出し元そのものになる。
-      //   エラーの種類・順序は従来と同じ (BAD_OBJECT → BAD_METHOD → UNDECLARED_METHOD →
-      //   NO_STACK)。応答は (error, 0)。
-      call_request request{};
-      const object_error lookup = kernel_object_instance.method_call_request(
-          ARCH::arg(*frame, 1), ARCH::arg(*frame, 2), request);
-      if (lookup != object_error::OK) {
-        ARCH::set_result(*frame, (uintptr_t)lookup, 0);
-        return;
-      }
-      if (thread.call_stack.call_count >= KERNEL_OBJECT::MAX_DEPTH) {
-        ARCH::set_result(*frame, (uintptr_t)object_error::NO_STACK, 0);
-        return;
-      }
-      request.args[0] = ARCH::arg(*frame, 3);
-      const kernel_error entered = do_call(thread, context, &frame, request);
-      // 入れなかったときは台帳に段が残らない (frame もそのまま = 呼び出し元の svc フレーム)。
-      if (entered != kernel_error::OK)
-        ARCH::set_result(*frame, (uintptr_t)(entered == kernel_error::NO_STACK
-                                                 ? object_error::NO_STACK
-                                                 : object_error::BAD_OBJECT),
-                         0);
-      return;
-    }
-    case trap_api::RUN_FOR: {
-      // RUN_FOR (9): a1 = スレッド ID, a2 = クロック数。GRANT をそのまま撃つ。
-      //   応答は貸し手が戻ったときに grant_unwind が (OK, grant_end) で書く。先に既定値
-      //   (OK, YIELDED) を置いておく点は primitive GRANT と同じ。貸せなかったときの
-      //   変換は従来どおり: GRANT_TOO_SMALL → NO_TIME (こちらに配れる持ち分が無い。
-      //   NOT_RUNNABLE と区別しないとスケジューラが空回りする)、それ以外 → NOT_RUNNABLE。
-      // 引数は応答の既定値を置く前に読む (応答は同じ a0/a1 に載る)。
-      const uint32_t target = (uint32_t)ARCH::arg(*frame, 1);
-      const uint32_t cycles = (uint32_t)ARCH::arg(*frame, 2);
-      ARCH::set_result(*frame, (uintptr_t)object_error::OK, (uintptr_t)grant_end::YIELDED);
-      const kernel_error granted = do_grant(target, cycles);
-      if (granted != kernel_error::OK)
-        ARCH::set_result(*frame,
-                         (uintptr_t)(granted == kernel_error::GRANT_TOO_SMALL
-                                         ? object_error::NO_TIME
-                                         : object_error::NOT_RUNNABLE),
-                         0);
-      return;
-    }
-    case trap_api::SET_BUDGET:
-      // SET_BUDGET (12): a1 = スレッド ID, a2 = クロック数。範囲外は黙って何もしない。
-      kernel_object_instance.set_budget(ARCH::arg(*frame, 1), ARCH::arg(*frame, 2));
-      ARCH::set_result(*frame, (uintptr_t)object_error::OK, 0);
-      return;
-    case trap_api::CALL_DESCRIPTOR: {
-#if !defined(__riscv)
-      ARCH::set_result(*frame, (uintptr_t)object_error::UNKNOWN_API, 0);
-      return;
-#else
-      const uint32_t thread_id = current_thread_id();
-      const uint32_t caller_id = (uint32_t)current_object(thread_id);
-      const uint32_t index = (uint32_t)ARCH::arg(*frame, 1);
-      KERNEL_OBJECT::method_descriptor_entry desc{};
-      object_error error = object_error::OK;
-      kernel_object_instance.table_lock();
-      const bool descriptor_valid = kernel_object_instance.validate_method_descriptor(
-          caller_id, index, current_object_generation(), desc, error);
-      if (!descriptor_valid) {
-        kernel_object_instance.table_unlock();
-        ARCH::set_result(*frame, (uintptr_t)error, 0);
-        return;
-      }
-      // 通常の CALL (do_call) と同じ形の台帳段を積む。戻りは既存の CALL の戻りに合流する。
-      const call_request request =
-          kernel_object_instance.callee_request(desc.target_object, desc.target_entry);
-      kernel_object_instance.table_unlock();
-#if defined(SHIZUKU_DEEP_DIAG)
-      shizuku_push_diag_kind = 3; // CALL_METHOD_DESCRIPTOR 経路 (riscv のみ)
-#endif
-      const kernel_error entered = enter_call(thread, context, &frame, request,
-                                              LEDGER_DESCRIPTOR_CALL);
-      if (entered != kernel_error::OK) {
-        ARCH::set_result(*frame, (uintptr_t)(entered == kernel_error::NO_STACK
-                                                 ? object_error::NO_STACK
-                                                 : object_error::BAD_DESCRIPTOR),
-                         0);
-        return;
-      }
-
-      uintptr_t args[6];
-      for (unsigned i = 0; i < 6; ++i) {
-        args[i] = ARCH::arg(*frame, 2 + i);
-      }
-      ARCH::set_entry(*frame, desc.target_entry, ARCH::return_stub());
-      ARCH::set_args_6(*frame, args);
-      // 通常の CALL (do_call) と同じ規則: 呼び先オブジェクトの保護指定で決める。
-      ARCH::set_priv(*context, (request.protection & PROTECTION_UNPRIVILEGED) == 0);
-      // Region grants can change after descriptor creation. Use the live
-      // trusted window, while keeping authorization out of the O(1) call path.
-      ARCH::set_region_window(*context, request.region_base, request.region_limit);
-      return;
-#endif
-    }
-    }
-  }
-
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(412);
 #endif
@@ -808,6 +805,98 @@ template <> SHIZUKU_HOT void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(414);
 #endif
+}
+
+template <> SHIZUKU_HOT void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
+#if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
+  shizuku_boot_trace_phase(410);
+#endif
+  THREAD &thread = current_thread();
+  FRAME *frame = context->sp;
+  // Only this privileged internal gate bypasses parent routing. The public
+  // objectland raw-SVC path below, including colliding numbers, is unchanged.
+#if defined(__arm__) || defined(__thumb__)
+  const bool service_gate = ARCH::frame_pc(*frame) ==
+      reinterpret_cast<uintptr_t>(&shizuku_v2_service_resume);
+#else
+  constexpr bool service_gate = false;
+#endif
+  if (service_gate) {
+    if (is_context_unprivileged(context)) {
+      ARCH::set_result(*frame, (uintptr_t)object_error::NOT_PRIVILEGED, 0);
+      return;
+    }
+    const auto id = ARCH::arg(*frame, 0);
+    if (id != (uintptr_t)object_api::YIELD && id != (uintptr_t)object_api::RUN_FOR &&
+        id != (uintptr_t)object_api::SLEEP_US) {
+      ARCH::set_result(*frame, (uintptr_t)object_error::UNKNOWN_API, 0);
+      return;
+    }
+  }
+
+  // ★「kernel object 本人であるか」の厳格判定 (指摘3, 指摘4)。
+  //   単なる HANDLER ではなく、登録済み kernel object (種別 KERNEL_OBJECT かつ
+  //   ID が m_object_svc_handler_object) だけが kernel primitive を直接解釈できる。
+  if (!service_gate && thread.current_kind() == (uint32_t)object_kind::KERNEL_OBJECT &&
+      thread.current_object() == m_object_svc_handler_object) {
+    svc_primitive(context);
+    return;
+  }
+
+  // ここへ来るのは非 kernel object (一般 child や専用 handling object など)。
+  // 親ハンドラが未登録なら黙って root へ fallback せず、診断可能な panic とする (指摘2)。
+  if (!service_gate && thread.current_handler_entry() == 0) {
+    BOARD::panic("unregistered parent handler for object syscall");
+  }
+
+  // 親ハンドラへの直接ディスパッチ (O(1)、テーブル検索ゼロ、同期例外中の再帰なし)。
+  const uint32_t target_object = service_gate ? m_object_svc_handler_object : thread.current_handler_object();
+  const bool to_root = (target_object == m_object_svc_handler_object);
+
+  // 宛先が信頼された root KernelObject かつ mode == svc_mode::handler の同期・有界 native API
+  // は trap 内で直接処理し、dispatch frame を積まずに即時復帰する。
+  //
+  // 重要 (Luna レビュー指摘 1):
+  // 移行対象外の mode == svc_mode::thread は、trap 内で先行して属性・権限検査を行わず、
+  // 既存の KOBJ actor dispatch 経路へそのまま通す (先行拒絶の禁止)。
+  // また、専用親ハンドラ宛て (to_root == false) の raw SVC は全 ID で親ハンドラへ無加工配送される。
+  if (to_root) {
+    // 番号 → 密な種別の表引き (O(1))。その種別の switch は密な連番なのでジャンプ表になる。
+    // RV32 の例外入口はこの振り分けを使わず、同じ番号の表から各 svc_* へ直接入る。
+    switch (trap_api_of(ARCH::arg(*frame, 0))) {
+    case trap_api::NONE:
+      break;
+    case trap_api::GET_CURRENT:
+      svc_get_current(context);
+      return;
+    case trap_api::GET_CALLER:
+      svc_get_caller(context);
+      return;
+    case trap_api::YIELD:
+      if (svc_yield(context)) return;
+      break;
+    case trap_api::EXIT_METHOD:
+      if (svc_exit_method(context)) return;
+      break;
+    case trap_api::FORWARD_CHILD_EXIT:
+      if (svc_forward_child_exit(context)) return;
+      break;
+    case trap_api::CALL_METHOD:
+      svc_call_method(context);
+      return;
+    case trap_api::RUN_FOR:
+      svc_run_for(context);
+      return;
+    case trap_api::SET_BUDGET:
+      svc_set_budget(context);
+      return;
+    case trap_api::CALL_DESCRIPTOR:
+      svc_call_descriptor(context);
+      return;
+    }
+  }
+
+  svc_forward(context, service_gate);
 }
 
 // 最低優先度の遅延例外 = 実行権の強制巻き取り。ここへ来た時点で全ての割り込みは
