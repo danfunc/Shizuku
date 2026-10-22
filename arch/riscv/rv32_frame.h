@@ -42,6 +42,11 @@
 // 呼出しの記録 (call_header_t) を置く枠。ecall の前に caller stub が sp をこれだけ余分に下げ、
 // カーネルが枠 [sp, sp + RV32_CALL_HEADER_BYTES) に書く (design notes §5b)。
 #define RV32_CALL_HEADER_BYTES 32
+// フレームの mcause に載せる出口の目印。ECALL のフレームはこの値になる (本物の例外コードは 11 =
+// M-mode ECALL と同じ値)。カーネルが呼び先の入口フレームを作ると RV32_TAG_ENTRY に書き換える。
+// それ以外の値 (割込み・例外・スレッドの初期フレーム = 0) は全レジスタを復元して戻る。
+#define RV32_TAG_ECALL 11
+#define RV32_TAG_ENTRY 0x100
 #define RV32_MSTATUS_MPP 0x1800
 #define RV32_MSTATUS_MPIE 0x80
 #endif

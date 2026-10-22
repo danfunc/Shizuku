@@ -139,20 +139,13 @@ void install_traps() {
   const auto mtvt = reinterpret_cast<uintptr_t>(&shizuku_c5_mtvt_table);
   asm volatile("csrw mscratch, %0\n csrw 0x307, %2\n csrw mtvec, %1" :: "r"(top), "r"(vector), "r"(mtvt) : "memory");
 }
+// frame が s0-s11 などの本物の保持者 (文脈の s* は使わない)。ECALL のフレームは s* を保存しない。
 void frame_to_context(arch::exception_frame_t &f, arch::context_t &c) {
   c.sp = &f;
-#define COPY(n) c.s##n = f.s##n;
-  COPY(0) COPY(1) COPY(2) COPY(3) COPY(4) COPY(5)
-  COPY(6) COPY(7) COPY(8) COPY(9) COPY(10) COPY(11)
-#undef COPY
   c.privileged = (f.mstatus & RV32_MSTATUS_MPP) == RV32_MSTATUS_MPP;
 }
 void context_to_frame(arch::context_t &c) {
   auto &f = *c.sp;
-#define COPY(n) f.s##n = c.s##n;
-  COPY(0) COPY(1) COPY(2) COPY(3) COPY(4) COPY(5)
-  COPY(6) COPY(7) COPY(8) COPY(9) COPY(10) COPY(11)
-#undef COPY
   // Threads always resume with interrupts enabled; only the kernel runs with MIE=0.
   f.mstatus = ((f.mstatus & ~RV32_MSTATUS_MPP) | (c.privileged ? RV32_MSTATUS_MPP : 0)) | RV32_MSTATUS_MPIE;
   // Actual U-mode is not safe before PMP and a trusted U-entry stack exist.
@@ -228,6 +221,9 @@ extern "C" arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_f
     kernel.svc_dispatch(context);
     run_pending_switch();
     context = kernel.current_context();
+    // 呼び先の入口フレームは s*/gp/tp を caller の値のまま通す出口を使うので、この trap の中で
+    // 別のスレッドへ切り替わってはならない。
+    if (frame->mcause == RV32_TAG_ENTRY && context->sp != frame) stop(0xE00B);
     context_to_frame(*context);
     result = context->sp;
   }, [&] {

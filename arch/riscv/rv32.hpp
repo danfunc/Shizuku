@@ -175,6 +175,8 @@ public:
   static void set_entry(exception_frame_t &frame, uintptr_t pc, uintptr_t lr) {
     frame.mepc = pc;
     frame.ra = lr;
+    // 呼び先の入口: 戻りの出口は引数 (a0-a5) と ra だけを入れ、s*/gp/tp は caller の値を通す。
+    frame.mcause = RV32_TAG_ENTRY;
   }
 
   static uintptr_t return_stub() {
@@ -242,6 +244,7 @@ public:
     const bool privileged = header->privileged != 0;
     *frame = {};
     frame->mepc = pc;
+    frame->mcause = RV32_TAG_ECALL; // 戻りの出口: a0/a1 以外を消す
     context.sp = frame;
     context.privileged = privileged;
     context.region_base = region_base;

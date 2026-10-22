@@ -322,12 +322,10 @@ void install_traps() {
   const auto vector = reinterpret_cast<uintptr_t>(&shizuku_c6_vectors) | 1u;
   asm volatile("csrw mscratch, %0\n csrw mtvec, %1" :: "r"(top), "r"(vector) : "memory");
 }
+// frame が s0-s11 などの本物の保持者 (文脈の s* は使わない)。ECALL のフレームは s* を保存しない
+// (caller が自分で退避する ABI) ので、フレームと文脈の間でコピーするものは無い。
 SHIZUKU_HOT void frame_to_context(arch::exception_frame_t &f, arch::context_t &c) {
   c.sp = &f;
-#define COPY(n) c.s##n = f.s##n;
-  COPY(0) COPY(1) COPY(2) COPY(3) COPY(4) COPY(5)
-  COPY(6) COPY(7) COPY(8) COPY(9) COPY(10) COPY(11)
-#undef COPY
   c.privileged = (f.mstatus & RV32_MSTATUS_MPP) == RV32_MSTATUS_MPP;
 }
 SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
@@ -339,10 +337,6 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
     stop(0xE004);
   }
   auto &f = *c.sp;
-#define COPY(n) f.s##n = c.s##n;
-  COPY(0) COPY(1) COPY(2) COPY(3) COPY(4) COPY(5)
-  COPY(6) COPY(7) COPY(8) COPY(9) COPY(10) COPY(11)
-#undef COPY
   // Threads always resume with interrupts enabled; only the kernel runs with MIE=0.
   f.mstatus = ((f.mstatus & ~RV32_MSTATUS_MPP) | (c.privileged ? RV32_MSTATUS_MPP : 0)) | RV32_MSTATUS_MPIE;
 }
@@ -440,6 +434,9 @@ extern "C" SHIZUKU_HOT arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch:
     context = kernel.current_context();
     active_context = context;
     active_frame = context->sp;
+    // 呼び先の入口フレーム (RV32_TAG_ENTRY) は s*/gp/tp を caller の値のまま通す出口を使うので、
+    // この trap の中で別のスレッドへ切り替わってはならない (切り替わるとそれらは別のスレッドの値)。
+    if (frame->mcause == RV32_TAG_ENTRY && context->sp != frame) stop(0xE00B);
     context_to_frame(*context);
     result = context->sp;
   }, [&] {
