@@ -180,47 +180,58 @@ public:
     uint32_t region_limit;
     volatile uint32_t valid;
   };
+  // 記述子の引きと検査 (index・作成者・所有者・世代・呼び先の生存と入口)。通れば表の行を返し、
+  // 通らなければ nullptr と error。コピーしないので trap 内の直接 call はこれを読む。
+  SHIZUKU_HOT const method_descriptor_entry *find_method_descriptor(
+      uint32_t caller_id, uint32_t index, uint32_t caller_generation,
+      object_error &error) const {
+    if (index >= METHOD_DESCRIPTOR_CAPACITY) {
+      error = object_error::BAD_DESCRIPTOR;
+      return nullptr;
+    }
+    if (caller_id >= OBJECT_COUNT_T || !m_objects[caller_id].created) {
+      error = object_error::BAD_DESCRIPTOR;
+      return nullptr;
+    }
+    const auto &desc = m_objects[caller_id].method_descriptors[index];
+    if (__atomic_load_n(&desc.valid, __ATOMIC_ACQUIRE) == 0) {
+      error = object_error::BAD_DESCRIPTOR;
+      return nullptr;
+    }
+    if (desc.owner_object != caller_id) {
+      error = object_error::BAD_DESCRIPTOR;
+      return nullptr;
+    }
+    if (desc.owner_generation != caller_generation) {
+      error = object_error::STALE_DESCRIPTOR;
+      return nullptr;
+    }
+    if (desc.target_object >= OBJECT_COUNT_T) {
+      error = object_error::BAD_DESCRIPTOR;
+      return nullptr;
+    }
+    if (desc.target_generation == 0 ||
+        desc.target_generation != object_version(desc.target_object)) {
+      error = object_error::STALE_DESCRIPTOR;
+      return nullptr;
+    }
+    if (!m_objects[desc.target_object].created || desc.target_entry == 0) {
+      error = object_error::BAD_DESCRIPTOR;
+      return nullptr;
+    }
+    error = object_error::OK;
+    return &desc;
+  }
   SHIZUKU_HOT bool validate_method_descriptor(uint32_t caller_id,
                                               uint32_t index,
                                               uint32_t caller_generation,
                                               method_descriptor_entry &out_desc,
                                               object_error &error) const {
-    if (index >= METHOD_DESCRIPTOR_CAPACITY) {
-      error = object_error::BAD_DESCRIPTOR;
+    const auto *desc =
+        find_method_descriptor(caller_id, index, caller_generation, error);
+    if (desc == nullptr)
       return false;
-    }
-    if (caller_id >= OBJECT_COUNT_T || !m_objects[caller_id].created) {
-      error = object_error::BAD_DESCRIPTOR;
-      return false;
-    }
-    const auto &desc = m_objects[caller_id].method_descriptors[index];
-    if (__atomic_load_n(&desc.valid, __ATOMIC_ACQUIRE) == 0) {
-      error = object_error::BAD_DESCRIPTOR;
-      return false;
-    }
-    if (desc.owner_object != caller_id) {
-      error = object_error::BAD_DESCRIPTOR;
-      return false;
-    }
-    if (desc.owner_generation != caller_generation) {
-      error = object_error::STALE_DESCRIPTOR;
-      return false;
-    }
-    if (desc.target_object >= OBJECT_COUNT_T) {
-      error = object_error::BAD_DESCRIPTOR;
-      return false;
-    }
-    if (desc.target_generation == 0 ||
-        desc.target_generation != object_version(desc.target_object)) {
-      error = object_error::STALE_DESCRIPTOR;
-      return false;
-    }
-    if (!m_objects[desc.target_object].created || desc.target_entry == 0) {
-      error = object_error::BAD_DESCRIPTOR;
-      return false;
-    }
-    out_desc = desc;
-    error = object_error::OK;
+    out_desc = *desc;
     return true;
   }
   // そのオブジェクトを走らせるときの保護指定 (PROTECTION_*)。直接 call (記述子経路) も
@@ -262,6 +273,36 @@ public:
     request = callee_request(id, (uintptr_t)entry);
     return object_error::OK;
   }
+  // 呼び先の表の 1 行 (読み取り専用)。trap 内の直接 call (CALL_METHOD / CALL_METHOD_DESCRIPTOR) が
+  // call_request を組まずに、台帳段と入口フレームへ行の値を直接書く (種別・世代・親ハンドラ・保護・窓は
+  // callee_request と同じ引き方)。行の型は非公開なので auto で受ける。前提: id < OBJECT_COUNT_T。
+  SHIZUKU_HOT const auto &callee_row(uintptr_t id) const { return m_objects[id]; }
+  // method 表の引き (method_call_request と同じ判定と順序: BAD_OBJECT → BAD_METHOD → UNDECLARED_METHOD)。
+  // OK のとき入口を返し、そうでなければ nullptr と error。
+  SHIZUKU_HOT method_t find_method(uintptr_t id, uintptr_t method, object_error &error) const {
+    if (id >= OBJECT_COUNT_T || !m_objects[id].created) {
+      error = object_error::BAD_OBJECT;
+      return nullptr;
+    }
+    if (method >= METHOD_COUNT_T) {
+      error = object_error::BAD_METHOD;
+      return nullptr;
+    }
+    const method_t entry = m_objects[id].methods[method];
+    if (entry == nullptr) {
+      error = object_error::UNDECLARED_METHOD; // 未 export は panic ではなくエラー
+      return nullptr;
+    }
+    error = object_error::OK;
+    return entry;
+  }
+  // 表の錠の inline 版 (table_lock / table_unlock と同じ CAS。区間は短く syscall を含まない)。
+  // trap 内の直接 call が関数呼出しなしで取る。診断用の breadcrumb は付けない。
+  SHIZUKU_HOT void table_lock_inline() {
+    while (!ARCH::cas32(&m_table_lock, 0u, 1u)) {
+    }
+  }
+  SHIZUKU_HOT void table_unlock_inline() { ARCH::store_release32(&m_table_lock, 0u); }
   // スケジューラが後でそのスレッドを選んだときに渡す量の既定値 [クロック]。範囲外は
   // 従来どおり黙って何もしない。★権限検査は無い (誰でも任意スレッドの量を書ける。従来のまま)。
   void set_budget(uintptr_t thread, uintptr_t cycles) {

@@ -232,18 +232,22 @@ public:
   }
 
   // 戻り: ヘッダの枠の直下に caller の再開フレームを作る。a0/a1 (戻り値) は呼び出し側が set_result で
-  // 書く。ほかのレジスタは 0 にする — 呼び先の値を caller に見せない。呼び先が返ってきたときの
-  // trap フレームと重なることがある (返りの SP が caller の SP のすぐ下のとき) ので、呼び出し側は
-  // 戻り値などを先に読んでおくこと。ヘッダ自身はフレームの上にあり、重ならない。
-  static exception_frame_t *call_resume(context_t &context, const call_header_t *header) {
+  // 書く。呼び先の値を caller に見せない (a0/a1 以外は 0) のは目印 RV32_TAG_ECALL の出口
+  // (rv32_trap.S の .Lrv32_exit_ecall) の仕事で、そこが ra・t*・a2–a7・s* をレジスタ上で 0 にする。
+  // 出口が読むのは mepc / mstatus / a0 / a1 だけなので、フレームの残り (144B) は書かない
+  // (旧: 全体を 0 で埋めていた)。呼び先が返ってきたときの trap フレームと重なることがある
+  // (返りの SP が caller の SP のすぐ下のとき) ので、呼び出し側は戻り値などを先に読んでおくこと。
+  // ヘッダ自身はフレームの上にあり、重ならない。
+  [[gnu::always_inline]] static exception_frame_t *call_resume(context_t &context,
+                                                                const call_header_t *header) {
     auto *frame = reinterpret_cast<exception_frame_t *>(
         reinterpret_cast<uintptr_t>(header) - sizeof(exception_frame_t));
     const uintptr_t pc = header->pc;
     const uintptr_t region_base = header->region_base;
     const uintptr_t region_limit = header->region_limit;
     const bool privileged = header->privileged != 0;
-    *frame = {};
     frame->mepc = pc;
+    frame->mstatus = 0; // 呼び出し側が特権・MPIE を足す
     frame->mcause = RV32_TAG_ECALL; // 戻りの出口: a0/a1 以外を消す
     context.sp = frame;
     context.privileged = privileged;

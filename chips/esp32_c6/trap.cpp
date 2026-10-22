@@ -1,4 +1,6 @@
 #include "shizuku/kernel.hpp"
+#include "shizuku/kernel_object.hpp"
+#include "shizuku/native_call.hpp"
 #include "arch/riscv/ecall_table.hpp"
 #include "arch/riscv/trap_route.hpp"
 #include "shizuku/svc_attributes.hpp"
@@ -465,20 +467,124 @@ SHIZUKU_HOT arch::exception_frame_t *ecall_native(arch::exception_frame_t *frame
 SHIZUKU_HOT arch::exception_frame_t *ecall_other(arch::exception_frame_t *frame) {
   return ecall_run(frame, [](auto &kernel, auto *context) { kernel.svc_dispatch(context); });
 }
+// ---- 切替えが起きない API の ECALL (ecall_direct) の、遅い経路。どれも ecall_direct の末尾から
+// tail call で入る (成功経路は関数呼出しを持たず、ra と枠を作らない)。戻り値の型が frame なのは
+// tail call にするためで、停止する関数は戻らない。noipa は「戻らない」ことをコンパイラに推論させない
+// ため (推論されると tail call にならず、呼び出し側が ra を退避する枠を作ってしまう)。
+__attribute__((noinline, noipa)) arch::exception_frame_t *ecall_fault_nested(arch::exception_frame_t *) {
+  stop(0xE003);  // ECALL from inside the kernel must never overwrite the current thread.
+}
+__attribute__((noinline, noipa)) arch::exception_frame_t *ecall_fault_corrupt(arch::exception_frame_t *) {
+  shizuku::KERNEL::BOARD::panic("call ledger count underflow");
+}
+// 呼び先の特権が落ちた (非特権の呼び先は M-only の C6 では復帰できない): context_to_frame と同じ停止。
+__attribute__((noinline, noipa)) arch::exception_frame_t *ecall_fault_unprivileged(arch::context_t *context) {
+  active_context = context;
+  active_frame = context->sp;
+  active_stop_phase = 0xE004u;
+  stop(0xE004);
+}
+// 戻る前の仕上げ。Threads always resume with interrupts enabled; only the kernel runs with MIE=0.
+// 非特権の呼び先は M-only の C6 では復帰できない (context_to_frame と同じ停止、0xE004)。
+[[gnu::always_inline]] inline arch::exception_frame_t *ecall_finish(arch::context_t *context) {
+  auto *result = context->sp;
+  if (__builtin_expect(!context->privileged, 0)) return ecall_fault_unprivileged(context);
+  result->mstatus |= RV32_MSTATUS_MPP | RV32_MSTATUS_MPIE;
+  return result;
+}
+// 本体が kobj へ回した (スレッドの最外のメソッドが戻る・起点スレッドの YIELD): dispatch 段を積んで
+// 親ハンドラ (kobj) の入口フレームを作る。
+__attribute__((noinline, noipa)) arch::exception_frame_t *ecall_to_kobj(arch::context_t *context) {
+  shizuku::kernel_instance.svc_forward(context, false);
+  return ecall_finish(context);
+}
+// 切替えが起きない API (CALL_METHOD / CALL_METHOD_DESCRIPTOR / EXIT_METHOD / FORWARD_CHILD_EXIT /
+// GET_CURRENT / GET_CALLER / SET_BUDGET) の ECALL。1 API = 1 関数: 本体 (native_call.hpp) をここへ
+// 展開し、context_t を組まず trap フレームを直接扱う。診断と入れ子の記帳 (shizuku_c6_trap_diag・
+// trap_depth・active_*・pend_flag) は割込み・例外 (shizuku_rv32_trap_dispatch) と、切替えが起きうる
+// ecall_run の側にだけ残す。これらの API の本体は pend_context_switch を呼ばず、trap の中で
+// 別のスレッドへ切り替わらない (pend_flag は常に 0)。
+//   - stack probe は従来どおり 1024 回の trap に 1 回: 1024 回目に当たる ECALL は記帳つきの
+//     ecall_other (ecall_run が数えて検査する) に回す。それ以外はカウンタを進めるだけ。
+//   - cause 11 (M-mode の ECALL) なので mstatus.MPP は必ず M: 特権の検査は呼び先が落ちたときだけ。
+//   - kernel の中からの ECALL (0xE003) は trap_depth の検査だけを残す (割込み・ecall_run が上げる)。
+//   - 呼び出し元が kobj 本人・専用の親ハンドラ配下 (svc_native_route が偽) のときは、primitive や
+//     raw 配送を決める従来の入口 (ecall_other = 記帳つき) に回す。
+//   - 本体の結果 FORWARD は kobj へ回す (ecall_to_kobj)、CORRUPT は台帳の破れで停止する。
+template <class Body>
+SHIZUKU_HOT [[gnu::always_inline]] inline arch::exception_frame_t *ecall_direct(
+    arch::exception_frame_t *frame, Body body) {
+  const uint32_t probe = trap_probe_interval_count;
+  if (__builtin_expect((probe & (kStackProbeInterval - 1u)) == kStackProbeInterval - 1u, 0))
+    return ecall_other(frame);
+  trap_probe_interval_count = probe + 1u;
+  if (__builtin_expect(shizuku_c6_trap_depth != 0, 0)) return ecall_fault_nested(frame);
+  auto &kernel = shizuku::kernel_instance;
+  auto &thread = kernel.current_thread();
+  if (__builtin_expect(!kernel.svc_native_route(), 0)) return ecall_other(frame);
+  arch::context_t *context = thread.context;
+  context->sp = frame;
+  context->privileged = true;
+  const shizuku::native::status result = body(kernel, thread, *context);
+  if (__builtin_expect(result != shizuku::native::status::DONE, 0)) {
+    if (result == shizuku::native::status::CORRUPT) return ecall_fault_corrupt(frame);
+    return ecall_to_kobj(context);
+  }
+  return ecall_finish(context);
+}
+using K = shizuku::KERNEL;
+using native_status = shizuku::native::status;
+SHIZUKU_HOT arch::exception_frame_t *ecall_exit_method(arch::exception_frame_t *frame) {
+  return ecall_direct(frame, [](K &k, auto &thread, auto &context) {
+    return shizuku::native::exit_in_place<K, false>(k, thread, context);
+  });
+}
+SHIZUKU_HOT arch::exception_frame_t *ecall_forward_child_exit(arch::exception_frame_t *frame) {
+  return ecall_direct(frame, [](K &k, auto &thread, auto &context) {
+    return shizuku::native::exit_in_place<K, true>(k, thread, context);
+  });
+}
+SHIZUKU_HOT arch::exception_frame_t *ecall_call_method(arch::exception_frame_t *frame) {
+  return ecall_direct(frame, [](K &k, auto &thread, auto &context) {
+    shizuku::native::call_method_in_place(k, thread, context, shizuku::kernel_object_instance);
+    return native_status::DONE;
+  });
+}
+SHIZUKU_HOT arch::exception_frame_t *ecall_call_descriptor(arch::exception_frame_t *frame) {
+  return ecall_direct(frame, [](K &k, auto &thread, auto &context) {
+    shizuku::native::call_descriptor_in_place(k, thread, context, shizuku::kernel_object_instance);
+    return native_status::DONE;
+  });
+}
+SHIZUKU_HOT arch::exception_frame_t *ecall_get_current(arch::exception_frame_t *frame) {
+  return ecall_direct(frame, [](K &k, auto &, auto &context) {
+    return k.svc_get_current(&context) ? native_status::DONE : native_status::FORWARD;
+  });
+}
+SHIZUKU_HOT arch::exception_frame_t *ecall_get_caller(arch::exception_frame_t *frame) {
+  return ecall_direct(frame, [](K &k, auto &, auto &context) {
+    return k.svc_get_caller(&context) ? native_status::DONE : native_status::FORWARD;
+  });
+}
+SHIZUKU_HOT arch::exception_frame_t *ecall_set_budget(arch::exception_frame_t *frame) {
+  return ecall_direct(frame, [](K &k, auto &, auto &context) {
+    return k.svc_set_budget(&context) ? native_status::DONE : native_status::FORWARD;
+  });
+}
 constexpr auto make_ecall_table() {
-  using K = shizuku::KERNEL;
   using shizuku::object_api;
   std::array<ecall_fn, RV32_ECALL_TABLE_ENTRIES> t{};
   t.fill(&ecall_other);
-  t[(unsigned)object_api::EXIT_METHOD] = &ecall_native<&K::svc_exit_method>;
-  t[(unsigned)object_api::CALL_METHOD] = &ecall_native<&K::svc_call_method>;
-  t[(unsigned)object_api::GET_CURRENT_OBJECT] = &ecall_native<&K::svc_get_current>;
-  t[(unsigned)object_api::GET_CALLER_OBJECT] = &ecall_native<&K::svc_get_caller>;
+  t[(unsigned)object_api::EXIT_METHOD] = &ecall_exit_method;
+  t[(unsigned)object_api::CALL_METHOD] = &ecall_call_method;
+  t[(unsigned)object_api::GET_CURRENT_OBJECT] = &ecall_get_current;
+  t[(unsigned)object_api::GET_CALLER_OBJECT] = &ecall_get_caller;
+  // 実行権を渡す API (切替えが起きる) は記帳つきの ecall_run を通る。
   t[(unsigned)object_api::YIELD] = &ecall_native<&K::svc_yield>;
   t[(unsigned)object_api::RUN_FOR] = &ecall_native<&K::svc_run_for>;
-  t[(unsigned)object_api::SET_BUDGET] = &ecall_native<&K::svc_set_budget>;
-  t[(unsigned)object_api::FORWARD_CHILD_EXIT] = &ecall_native<&K::svc_forward_child_exit>;
-  t[(unsigned)object_api::CALL_METHOD_DESCRIPTOR] = &ecall_native<&K::svc_call_descriptor>;
+  t[(unsigned)object_api::SET_BUDGET] = &ecall_set_budget;
+  t[(unsigned)object_api::FORWARD_CHILD_EXIT] = &ecall_forward_child_exit;
+  t[(unsigned)object_api::CALL_METHOD_DESCRIPTOR] = &ecall_call_descriptor;
   return t;
 }
 }

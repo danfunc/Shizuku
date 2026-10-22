@@ -205,7 +205,24 @@ public:
   // 呼び出し元が root KernelObject 宛ての native API を撃てる立場か (kobj 本人でも、専用の親ハンドラ
   // 配下でもなく、親ハンドラが登録済み)。false のときは svc_dispatch へ回す (primitive・objectland の
   // raw 配送・未登録 panic はそこで従来どおり決まる)。
-  bool svc_native_route() const;
+  // (定義はここ: RV32 の例外入口が 1 API = 1 関数の中へ展開する。)
+  bool svc_native_route() const {
+    const THREAD &thread = current_thread();
+    if (thread.call_stack.depth != 0) {
+      const auto &top = thread.ledger_top();
+      if (top.kind == (uint8_t)object_kind::KERNEL_OBJECT &&
+          top.object == m_object_svc_handler_object)
+        return false;
+      return top.handler_entry != 0 && top.handler_object == m_object_svc_handler_object;
+    }
+    if (thread.base_kind == (uint32_t)object_kind::KERNEL_OBJECT &&
+        thread.base_object == m_object_svc_handler_object)
+      return false;
+    return thread.base_handler_entry != 0 &&
+           thread.base_handler_object == m_object_svc_handler_object;
+  }
+  // オブジェクトランドの svc ハンドラ (root KernelObject) が名乗る ID。
+  uint32_t svc_handler_object() const { return m_object_svc_handler_object; }
   // trap 内で直接処理する native API (svc_attributes の mode == handler)。前提: svc_native_route()。
   // true = 処理した (応答を書いた)。false = kobj へ回す (svc_forward を呼ぶこと)。
   bool svc_exit_method(CONTEXT *context);

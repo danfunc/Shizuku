@@ -57,6 +57,33 @@ call_request KERNEL_OBJECT::callee_request(uintptr_t id, uintptr_t entry_pc) con
 namespace selftest {
 // kobj の表 (private) を試験が直接組み立てるための口。
 struct dispatcher_test_access {
+  // 表の錠の語 (0 = 放されている)。trap 内の直接 call は inline の錠 (CAS) を取り・放す。
+  static uint32_t lock_word() { return kernel_object_instance.m_table_lock; }
+  // 方法記述子 (owner が target を呼ぶ入口) を据える。generation は呼び先の version と突き合わせる値。
+  static void declare_descriptor(uint32_t owner, uint32_t index, uint32_t target,
+                                 uintptr_t target_entry, uint32_t owner_generation,
+                                 uint32_t target_generation) {
+    auto &desc = kernel_object_instance.m_objects[owner].method_descriptors[index];
+    desc.target_object = target;
+    desc.target_entry = target_entry;
+    desc.target_generation = target_generation;
+    desc.owner_object = owner;
+    desc.owner_generation = owner_generation;
+    desc.valid = 1;
+  }
+  static void invalidate_descriptor(uint32_t owner, uint32_t index) {
+    kernel_object_instance.m_objects[owner].method_descriptors[index].valid = 0;
+  }
+  static void set_version(uint32_t id, uint32_t generation) {
+    kernel_object_instance.m_objects[id].generation = generation;
+  }
+  static void set_instance_generation(uint32_t id, uint32_t generation) {
+    kernel_object_instance.m_objects[id].instance_generation = generation;
+  }
+  static void set_region(uint32_t id, uint32_t base, uint32_t limit) {
+    kernel_object_instance.m_objects[id].region_base = base;
+    kernel_object_instance.m_objects[id].region_limit = limit;
+  }
   static void declare(uint32_t id, uintptr_t method, KERNEL_OBJECT::method_t entry,
                       uint32_t flags, uint32_t parent_handler_object,
                       uintptr_t parent_handler_entry) {
@@ -559,14 +586,12 @@ static void run_dispatcher_tests() {
            f->s9 == (MARK | (seed + 22)) && f->s10 == (MARK | (seed + 23)) &&
            f->s11 == (MARK | (seed + 24));
   };
-  // 戻った caller から見て、a0/a1 以外が消えているか (ra・gp・tp・s*・t*・a2-a7)。
+  // 戻った caller から見て、a0/a1 以外が消えるか。消すのは目印 RV32_TAG_ECALL の出口
+  // (rv32_trap.S .Lrv32_exit_ecall) で、再開フレームはその出口が読む mepc / mstatus / a0 / a1 と
+  // 目印だけを書く (フレームの残りは書かない)。出口がレジスタを消すことは test_trap_static.py が
+  // asm で確かめる。ここでは再開フレームが必ずその出口に乗ること (目印) を見る。
   auto regs_cleared = [&](const KERNEL::FRAME *f) {
-    return f->ra == 0 && f->t0 == 0 && f->t1 == 0 && f->t2 == 0 && f->t3 == 0 &&
-           f->t4 == 0 && f->t5 == 0 && f->t6 == 0 && f->a2 == 0 && f->a3 == 0 &&
-           f->a4 == 0 && f->a5 == 0 && f->a6 == 0 && f->a7 == 0 && f->gp == 0 &&
-           f->tp == 0 && f->s0 == 0 && f->s1 == 0 && f->s2 == 0 && f->s3 == 0 &&
-           f->s4 == 0 && f->s5 == 0 && f->s6 == 0 && f->s7 == 0 && f->s8 == 0 &&
-           f->s9 == 0 && f->s10 == 0 && f->s11 == 0;
+    return f->mcause == RV32_TAG_ECALL;
   };
   constexpr uintptr_t A_PC = 0x42000100; // A が ecall した次の命令
 
@@ -770,6 +795,151 @@ static void run_dispatcher_tests() {
   assert(ctx->privileged == false);
   assert(frame->a1 == 0x12);
   printf("  8g. unprivileged A -> unprivileged C -> return: privilege stays false throughout: PASS\n");
+
+  // 8h. CALL_METHOD_DESCRIPTOR (33)。A (ROOT_APP_ID, 世代 0) が持つ記述子 3 = B、4 = C (非特権、窓あり)。
+  //     記述子の検査は表の錠の中 (取り・放しの対が 1 回)。台帳段は LEDGER_DESCRIPTOR_CALL で dispatch 段なし。
+  constexpr uintptr_t ENTRY_BD = 0x42040000, ENTRY_CD = 0x42041000;
+  access::declare(ROOT_APP_ID, 5, reinterpret_cast<KERNEL_OBJECT::method_t>(0x42001000), 0,
+                  ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY); // A を表に作る (記述子の持ち主は created であること)
+  access::set_version(B_ID, 7);
+  access::set_instance_generation(B_ID, 9);
+  access::set_version(C_ID, 4);
+  access::set_instance_generation(C_ID, 5);
+  access::set_region(C_ID, 0x1000, 0x2000);
+  access::declare_descriptor(ROOT_APP_ID, 3, B_ID, ENTRY_BD, 0, 7);
+  access::declare_descriptor(ROOT_APP_ID, 4, C_ID, ENTRY_CD, 0, 4);
+  {
+    fresh(ROOT_APP_ID, true);
+    mark_regs(frame, 0x700);
+    frame->mepc = A_PC;
+    frame->a0 = (uintptr_t)object_api::CALL_METHOD_DESCRIPTOR;
+    frame->a1 = 3;
+    frame->a2 = 0x11; frame->a3 = 0x12; frame->a4 = 0x13;
+    frame->a5 = 0x14; frame->a6 = 0x15; frame->a7 = 0x16;
+    kernel_instance.svc_dispatch(ctx);
+    assert(access::lock_word() == 0);
+    assert(kernel_instance.current_depth() == 1 && count_dispatch_frames() == 0);
+    assert(thread.ledger[0].via == KERNEL::LEDGER_DESCRIPTOR_CALL && thread.ledger[0].object == B_ID);
+    assert(thread.ledger[0].kind == (uint8_t)object_kind::PLAIN && thread.ledger[0].unwind_floor == 0);
+    assert(thread.ledger[0].handler_object == ROOT_KOBJ_ID && thread.ledger[0].handler_entry == ROOT_HANDLER_ENTRY);
+    assert(thread.call_stack.call_count == 1 && thread.call_stack.current_call_object == B_ID);
+    assert(thread.call_stack.current_call_generation == 9 && thread.call_stack.caller_object == ROOT_APP_ID);
+    assert(ctx->sp == frame && frame->mcause == RV32_TAG_ENTRY);
+    assert(ARCH::frame_pc(*ctx->sp) == ENTRY_BD);
+    // 引数: a2..a7 が呼び先の a0..a5 へ 1 つずつずれて渡る。
+    assert(frame->a0 == 0x11 && frame->a1 == 0x12 && frame->a2 == 0x13);
+    assert(frame->a3 == 0x14 && frame->a4 == 0x15 && frame->a5 == 0x16);
+    assert(frame->ra == (uint32_t)ARCH::return_stub());
+    assert(ctx->privileged == true);
+    {
+      const auto *h = (const ARCH::call_header_t *)thread.call_stack.top;
+      assert(h->via == KERNEL::LEDGER_DESCRIPTOR_CALL && h->pc == A_PC && h->privileged == 1 && h->prev == 0);
+    }
+    frame->a0 = (uintptr_t)object_api::GET_CALLER_OBJECT;
+    kernel_instance.svc_dispatch(ctx);
+    assert(frame->a1 == ROOT_APP_ID); // 本当の呼び出し元 (kobj ではない)
+    mark_regs(frame, 0x710);
+    frame->a0 = (uintptr_t)primitive::RETURN; // return stub
+    frame->a1 = 1;
+    frame->a2 = 0x46;
+    frame->a3 = 0;
+    frame->a4 = RETURN_STUB_MARKER;
+    kernel_instance.svc_dispatch(ctx);
+    assert(kernel_instance.current_depth() == 0 && thread.call_stack.call_count == 0);
+    assert(frame->a0 == (uintptr_t)object_error::OK && frame->a1 == 0x46);
+    assert(regs_cleared(frame) && frame->mepc == A_PC);
+    assert(thread.call_stack.current_call_object == ROOT_APP_ID);
+  }
+  printf("  8h. CALL_METHOD_DESCRIPTOR A->B: lock word back to 0, no dispatch frame, ledger via=LEDGER_DESCRIPTOR_CALL, args a2..a7 -> a0..a5, GET_CALLER == A, return stub back to A (value 0x46, regs cleared): PASS\n");
+
+  // 8i. 記述子のエラーは (error, 0)。段は積まれず、錠は必ず放される。
+  access::declare_descriptor(ROOT_APP_ID, 6, B_ID, ENTRY_BD, 1, 7);        // 持ち主の世代が合わない
+  access::declare_descriptor(ROOT_APP_ID, 7, B_ID, ENTRY_BD, 0, 8);        // 呼び先の version が合わない
+  access::declare_descriptor(ROOT_APP_ID, 8, B_ID, ENTRY_BD, 0, 0);        // 世代 0
+  access::declare_descriptor(ROOT_APP_ID, 9, KERNEL_OBJECT::OBJECT_COUNT, ENTRY_BD, 0, 1); // 範囲外の呼び先
+  access::set_version(8, 3);
+  access::declare_descriptor(ROOT_APP_ID, 10, 8, ENTRY_BD, 0, 3);          // 呼び先が未生成
+  access::declare_descriptor(ROOT_APP_ID, 11, B_ID, 0, 0, 7);              // 入口が 0
+  access::declare_descriptor(ROOT_APP_ID, 12, B_ID, ENTRY_BD, 0, 7);
+  access::invalidate_descriptor(ROOT_APP_ID, 12);                           // 無効化済み
+  struct descriptor_case {
+    uintptr_t index;
+    object_error expect;
+  };
+  const descriptor_case descriptor_cases[] = {
+      {0xFFFF, object_error::BAD_DESCRIPTOR}, {12, object_error::BAD_DESCRIPTOR},
+      {6, object_error::STALE_DESCRIPTOR},    {7, object_error::STALE_DESCRIPTOR},
+      {8, object_error::STALE_DESCRIPTOR},    {9, object_error::BAD_DESCRIPTOR},
+      {10, object_error::BAD_DESCRIPTOR},     {11, object_error::BAD_DESCRIPTOR},
+  };
+  for (const auto &c : descriptor_cases) {
+    fresh(ROOT_APP_ID, true);
+    frame->a0 = (uintptr_t)object_api::CALL_METHOD_DESCRIPTOR;
+    frame->a1 = c.index;
+    kernel_instance.svc_dispatch(ctx);
+    assert(access::lock_word() == 0);
+    assert(kernel_instance.current_depth() == 0 && ctx->sp == frame);
+    assert(frame->a0 == (uintptr_t)c.expect && frame->a1 == 0);
+    assert(ctx->privileged == true);
+  }
+  // 持ち主が表に居ない (A が created でない別オブジェクトの身) も BAD_DESCRIPTOR。
+  fresh(99 % KERNEL_OBJECT::OBJECT_COUNT, true);
+  frame->a0 = (uintptr_t)object_api::CALL_METHOD_DESCRIPTOR;
+  frame->a1 = 3;
+  kernel_instance.svc_dispatch(ctx);
+  assert(frame->a0 == (uintptr_t)object_error::BAD_DESCRIPTOR && frame->a1 == 0);
+  assert(kernel_instance.current_depth() == 0 && access::lock_word() == 0);
+  // NO_STACK: 呼出し段が MAX_DEPTH (呼び出し元の識別は call_count != 0 なので current_call_object から引く)。
+  fresh(ROOT_APP_ID, true);
+  thread.call_stack.call_count = KERNEL_OBJECT::MAX_DEPTH;
+  thread.call_stack.current_call_object = ROOT_APP_ID;
+  thread.call_stack.current_call_generation = 0;
+  frame->a0 = (uintptr_t)object_api::CALL_METHOD_DESCRIPTOR;
+  frame->a1 = 3;
+  kernel_instance.svc_dispatch(ctx);
+  assert(frame->a0 == (uintptr_t)object_error::NO_STACK && frame->a1 == 0);
+  assert(kernel_instance.current_depth() == 0 && ctx->privileged == true && access::lock_word() == 0);
+  printf("  8i. CALL_METHOD_DESCRIPTOR errors: index range / invalidated / owner gen / target version / gen 0 / target range / not created / entry 0 / owner not created (BAD_DESCRIPTOR or STALE_DESCRIPTOR), NO_STACK: reply (error,0), nothing pushed, lock released: PASS\n");
+
+  // 8j. 非特権の呼び先 (記述子 4 = C): 特権が落ち、呼び先の窓が開く。戻りで caller の特権・窓に戻る。
+  fresh(ROOT_APP_ID, true);
+  frame->a0 = (uintptr_t)object_api::CALL_METHOD_DESCRIPTOR;
+  frame->a1 = 4;
+  frame->a2 = 0x21;
+  kernel_instance.svc_dispatch(ctx);
+  assert(kernel_instance.current_depth() == 1 && ctx->privileged == false);
+  assert(ctx->region_base == 0x1000 && ctx->region_limit == 0x2000);
+  assert(frame->a0 == 0x21 && ARCH::frame_pc(*ctx->sp) == ENTRY_CD);
+  assert(thread.call_stack.current_call_generation == 5);
+  ctx->sp->a0 = (uintptr_t)primitive::RETURN;
+  ctx->sp->a1 = 1;
+  ctx->sp->a2 = 0x22;
+  ctx->sp->a3 = 0;
+  ctx->sp->a4 = RETURN_STUB_MARKER;
+  kernel_instance.svc_dispatch(ctx);
+  assert(kernel_instance.current_depth() == 0 && ctx->privileged == true);
+  assert(ctx->region_base == 0 && ctx->region_limit == 0 && frame->a1 == 0x22);
+  access::set_region(C_ID, 0, 0);
+  printf("  8j. CALL_METHOD_DESCRIPTOR to an unprivileged target: privilege drops and the target window opens (0x1000..0x2000), return restores the caller's privilege and window: PASS\n");
+
+  // 8k. 深さ上限と BAD_REQUEST が同時に成り立つ CALL_METHOD は、従来どおり NO_STACK を先に返す。
+  //     (呼び先が root ハンドラの ID を名乗る場合の BAD_REQUEST → BAD_OBJECT より、深さの検査が先)
+  access::declare(ROOT_KOBJ_ID, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(0x42070000), 0,
+                  ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+  fresh(ROOT_APP_ID, true);
+  frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+  frame->a1 = ROOT_KOBJ_ID;
+  frame->a2 = 0;
+  kernel_instance.svc_dispatch(ctx);
+  assert(kernel_instance.current_depth() == 0 && frame->a0 == (uintptr_t)object_error::BAD_OBJECT && frame->a1 == 0);
+  fresh(ROOT_APP_ID, true);
+  thread.call_stack.call_count = KERNEL_OBJECT::MAX_DEPTH;
+  frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+  frame->a1 = ROOT_KOBJ_ID;
+  frame->a2 = 0;
+  kernel_instance.svc_dispatch(ctx);
+  assert(kernel_instance.current_depth() == 0 && frame->a0 == (uintptr_t)object_error::NO_STACK && frame->a1 == 0);
+  printf("  8k. CALL_METHOD to the root handler's ID: BAD_OBJECT (impersonation refused, nothing pushed); with the depth limit also reached NO_STACK wins, as before: PASS\n");
 
   // -------------------------------------------------------------------------
   // 9. RUN_FOR (9): GRANT を trap 内で直接撃つ

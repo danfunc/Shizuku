@@ -37,6 +37,7 @@
 #include "shizuku/object_api.hpp"
 #include "shizuku/kernel_object.hpp"
 #include "shizuku/svc_attributes.hpp"
+#include "shizuku/native_call.hpp"
 #include "shizuku/hot.hpp"
 #include <array>
 #if defined(__arm__) || defined(__thumb__)
@@ -103,69 +104,6 @@ constexpr bool trap_api_table_consistent() {
 }
 static_assert(trap_api_table_consistent(),
               "trap_api_table must match svc_attributes (mode == handler)");
-
-// ARCH が in-place call (caller の frame をコピーせず、レジスタは全部 callee への入力、戻りで
-// 消える ABI) を持つか。持たない ARCH (ARM) は従来の call_frame_push だけを使う。
-template <class A> constexpr bool arch_call_in_place() {
-  if constexpr (requires { A::CALL_IN_PLACE; })
-    return A::CALL_IN_PLACE;
-  else
-    return false;
-}
-
-// 呼出しの記録 (ヘッダ枠方式、ARCH::CALL_IN_PLACE) の出し入れ。このファイルの関数は明示特殊化
-// (テンプレートではない) で、使わない側の枝も構文として通る必要があるため、ARCH 固有の呼び出しは
-// ここ (依存名のテンプレート) に包む。
-template <class A, class Context>
-bool header_has_room_of(const Context &context) {
-  if constexpr (arch_call_in_place<A>())
-    return A::call_header_has_room(context);
-  else
-    return false;
-}
-// caller の枠にヘッダを書いて top を進める。caller の状態は frame (trap フレーム) と context から取る。
-template <class A, class Thread, class Context, class Frame>
-bool header_push_of(Thread &thread, Context &context, Frame &frame, uint8_t via, uint32_t floor) {
-  if constexpr (arch_call_in_place<A>()) {
-    if (thread.ledger == nullptr || thread.call_stack.depth >= thread.ledger_capacity ||
-        !A::call_header_has_room(context))
-      return false;
-    auto *header = A::call_header_slot(context);
-    header->prev = thread.call_stack.top;
-    header->pc = frame.mepc;
-    header->caller_object = thread.call_stack.caller_object;
-    header->caller_generation = thread.call_stack.caller_generation;
-    header->region_base = context.region_base;
-    header->region_limit = context.region_limit;
-    header->unwind_floor = (uint16_t)floor;
-    header->via = via;
-    header->privileged = context.privileged ? 1 : 0;
-    header->reserved = 0;
-    thread.call_stack.top = reinterpret_cast<uintptr_t>(header);
-    thread.call_stack.depth++;
-    return true;
-  } else {
-    return false;
-  }
-}
-// 先頭ヘッダを 1 つ落とす。restore なら caller の再開フレームを作って frame を差し替える。
-// is_call なら call 段が積む前の caller の識別を戻す。
-template <class A, class Thread, class Context, class Frame>
-void header_pop_of(Thread &thread, Context &context, Frame *&frame, bool is_call, bool restore) {
-  if constexpr (arch_call_in_place<A>()) {
-    auto *header = reinterpret_cast<typename A::call_header_t *>(thread.call_stack.top);
-    if (is_call) {
-      thread.call_stack.call_count--;
-      thread.call_stack.current_call_object = thread.call_stack.caller_object;
-      thread.call_stack.current_call_generation = thread.call_stack.caller_generation;
-      thread.call_stack.caller_object = header->caller_object;
-      thread.call_stack.caller_generation = header->caller_generation;
-    }
-    thread.call_stack.top = header->prev;
-    if (restore)
-      frame = A::call_resume(context, header);
-  }
-}
 
 // ISA 層の例外入口が退避先・復帰先として使う文脈。dispatch が現在スレッドを
 // 差し替えれば、そのまま切替になる (退避後と復帰前の 2 回呼ばれる)。
@@ -297,6 +235,14 @@ SHIZUKU_HOT bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT 
                             KERNEL::FRAME **frame, bool restore) {
   if (thread.call_stack.top == 0)
     return false;
+  if (arch_call_in_place<ARCH>()) {
+    // ヘッダ枠方式: ヘッダから caller の識別・pc・特権・窓を読み、最後の 1 段だけ caller の
+    // 再開フレームを caller の SP の直下に作る (a0/a1 以外は 0)。frame のコピーも戻しも無い。
+    // (call の段の識別の戻しと underflow の検査は trap 内の EXIT_METHOD と共有: native_call.hpp)
+    if (!native::pop_in_place<KERNEL>(thread, *context, *frame, restore))
+      BOARD::panic("call ledger count underflow");
+    return true;
+  }
   // 落とす段が call の段 (LEDGER_CALL / LEDGER_DESCRIPTOR_CALL) か。identity の復元が要る。
   const bool is_call =
       thread.call_stack.depth > 0 &&
@@ -304,13 +250,6 @@ SHIZUKU_HOT bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT 
        thread.ledger[thread.call_stack.depth - 1].via == LEDGER_DESCRIPTOR_CALL);
   if (is_call && thread.call_stack.call_count == 0)
     BOARD::panic("call ledger count underflow");
-  if (arch_call_in_place<ARCH>()) {
-    // ヘッダ枠方式: ヘッダから caller の識別・pc・特権・窓を読み、最後の 1 段だけ caller の
-    // 再開フレームを caller の SP の直下に作る (a0/a1 以外は 0)。frame のコピーも戻しも無い。
-    header_pop_of<ARCH>(thread, *context, *frame, is_call, restore);
-    thread.call_stack.depth--;
-    return true;
-  }
   // ★幾何は push 時に記録した値を読み戻す。再計算しない (I-5)。
   // 元の例外フレームは退避域の中に元の位置のまま生きているので、文脈を丸ごと
   // 戻すだけで復帰先が正しく決まる (書き戻しも再配置も不要)。
@@ -417,33 +356,15 @@ kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   return kernel_error::OK;
 }
 
-template <typename C>
-static constexpr bool is_context_unprivileged(const C *ctx) {
-  if constexpr (requires { ctx->control; }) {
-    return (ctx->control & 1u) != 0;
-  } else if constexpr (requires { ctx->privileged; }) {
-    return !ctx->privileged;
-  } else {
-    return false;
-  }
-}
-
 // ---------------------------------------------------------------------------
 //  svc の処理を呼び出し元の立場と番号ごとに分けたもの。svc_dispatch はこれらを順に
 //  判定して呼ぶ薄い振り分けで、arch の例外入口 (RV32) は番号の表から同じ関数へ直接入る
 //  (svc_native_route と svc_entry を使う)。どちらから入っても結果は同じ。
 // ---------------------------------------------------------------------------
 
-// 呼び出し元が root KernelObject 宛ての native API を撃てる立場か。svc_dispatch の
-//   「kobj 本人でない」「親ハンドラが登録済み」「宛先が root」の 3 つの判定をまとめたもの。
-template <> SHIZUKU_HOT bool KERNEL::svc_native_route() const {
-  const THREAD &thread = current_thread();
-  if (thread.current_kind() == (uint32_t)object_kind::KERNEL_OBJECT &&
-      thread.current_object() == m_object_svc_handler_object)
-    return false;
-  return thread.current_handler_entry() != 0 &&
-         thread.current_handler_object() == m_object_svc_handler_object;
-}
+// 呼び出し元が root KernelObject 宛ての native API を撃てる立場か (svc_native_route) は
+//   kernel.hpp に inline で置く: svc_dispatch の「kobj 本人でない」「親ハンドラが登録済み」
+//   「宛先が root」の 3 つの判定をまとめたもの。
 
 // 呼び出し元が登録済み kernel object 本人のとき: 番号は primitive の番号空間 (CALL / RETURN /
 // SWITCH / GRANT)。
@@ -580,6 +501,15 @@ template <> SHIZUKU_HOT bool KERNEL::svc_yield(KERNEL::CONTEXT *context) {
 //   無いので d >= current_depth は DEPTH_MISMATCH で弾く。
 template <> SHIZUKU_HOT bool KERNEL::svc_exit(KERNEL::CONTEXT *context, bool forward) {
   THREAD &thread = current_thread();
+  // ヘッダ枠方式 (RV32) の本体は native_call.hpp (例外入口が 1 関数に展開するものと同じ)。
+  if (arch_call_in_place<ARCH>()) {
+    const native::status result =
+        forward ? native::exit_in_place<KERNEL, true>(*this, thread, *context)
+                : native::exit_in_place<KERNEL, false>(*this, thread, *context);
+    if (result == native::status::CORRUPT)
+      BOARD::panic("call ledger count underflow");
+    return result == native::status::DONE;
+  }
   FRAME *frame = context->sp;
   if (forward) {
     // 出どころ確認。発行元の段 (台帳の最上段、dispatch 段は積まれていない) が専用 HANDLER で、
@@ -637,6 +567,11 @@ template <> SHIZUKU_HOT bool KERNEL::svc_forward_child_exit(KERNEL::CONTEXT *con
 //   NO_STACK)。応答は (error, 0)。
 template <> SHIZUKU_HOT bool KERNEL::svc_call_method(KERNEL::CONTEXT *context) {
   THREAD &thread = current_thread();
+  // ヘッダ枠方式 (RV32) の本体は native_call.hpp (例外入口が 1 関数に展開するものと同じ)。
+  if (arch_call_in_place<ARCH>()) {
+    native::call_method_in_place(*this, thread, *context, kernel_object_instance);
+    return true;
+  }
   FRAME *frame = context->sp;
   call_request request{};
   const object_error lookup = kernel_object_instance.method_call_request(
@@ -689,56 +624,21 @@ template <> SHIZUKU_HOT bool KERNEL::svc_set_budget(KERNEL::CONTEXT *context) {
   return true;
 }
 
+// CALL_METHOD_DESCRIPTOR (33): 記述子の引き・世代・権限の検査は表の錠の中、台帳段は通常の CALL と
+//   同じ形 (via = LEDGER_DESCRIPTOR_CALL)。本体は native_call.hpp (例外入口が 1 関数に展開する
+//   ものと同じ)。ヘッダ枠方式でない ARCH (ARM) は未対応 (UNKNOWN_API)。
+//   Region grants can change after descriptor creation. The live trusted window is used,
+//   while keeping authorization out of the O(1) call path.
 template <> SHIZUKU_HOT bool KERNEL::svc_call_descriptor(KERNEL::CONTEXT *context) {
-  FRAME *frame = context->sp;
-#if !defined(__riscv)
-  ARCH::set_result(*frame, (uintptr_t)object_error::UNKNOWN_API, 0);
-  return true;
-#else
-  THREAD &thread = current_thread();
-  const uint32_t thread_id = current_thread_id();
-  const uint32_t caller_id = (uint32_t)current_object(thread_id);
-  const uint32_t index = (uint32_t)ARCH::arg(*frame, 1);
-  KERNEL_OBJECT::method_descriptor_entry desc{};
-  object_error error = object_error::OK;
-  kernel_object_instance.table_lock();
-  const bool descriptor_valid = kernel_object_instance.validate_method_descriptor(
-      caller_id, index, current_object_generation(), desc, error);
-  if (!descriptor_valid) {
-    kernel_object_instance.table_unlock();
-    ARCH::set_result(*frame, (uintptr_t)error, 0);
+  if (!arch_call_in_place<ARCH>()) {
+    ARCH::set_result(*context->sp, (uintptr_t)object_error::UNKNOWN_API, 0);
     return true;
   }
-  // 通常の CALL (do_call) と同じ形の台帳段を積む。戻りは既存の CALL の戻りに合流する。
-  const call_request request =
-      kernel_object_instance.callee_request(desc.target_object, desc.target_entry);
-  kernel_object_instance.table_unlock();
 #if defined(SHIZUKU_DEEP_DIAG)
   shizuku_push_diag_kind = 3; // CALL_METHOD_DESCRIPTOR 経路 (riscv のみ)
 #endif
-  const kernel_error entered = enter_call(thread, context, &frame, request,
-                                          LEDGER_DESCRIPTOR_CALL);
-  if (entered != kernel_error::OK) {
-    ARCH::set_result(*frame, (uintptr_t)(entered == kernel_error::NO_STACK
-                                             ? object_error::NO_STACK
-                                             : object_error::BAD_DESCRIPTOR),
-                     0);
-    return true;
-  }
-
-  uintptr_t args[6];
-  for (unsigned i = 0; i < 6; ++i) {
-    args[i] = ARCH::arg(*frame, 2 + i);
-  }
-  ARCH::set_entry(*frame, desc.target_entry, ARCH::return_stub());
-  ARCH::set_args_6(*frame, args);
-  // 通常の CALL (do_call) と同じ規則: 呼び先オブジェクトの保護指定で決める。
-  ARCH::set_priv(*context, (request.protection & PROTECTION_UNPRIVILEGED) == 0);
-  // Region grants can change after descriptor creation. Use the live
-  // trusted window, while keeping authorization out of the O(1) call path.
-  ARCH::set_region_window(*context, request.region_base, request.region_limit);
+  native::call_descriptor_in_place(*this, current_thread(), *context, kernel_object_instance);
   return true;
-#endif
 }
 
 // 親ハンドラ (root KernelObject か専用ハンドラ) への配送: dispatch 段を積み、親ハンドラの

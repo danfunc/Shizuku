@@ -38,6 +38,20 @@ assert 'addi t0, t0, 4\n  sw t0, RV32_F_MEPC(sp)' in ecall
 assert 'li t0, RV32_ECALL_TABLE_ENTRIES\n  bltu a0, t0, .Lrv32_ecall_in_range\n  li a0, 0\n' in ecall
 assert 'slli a0, a0, 2\n  la t1, shizuku_rv32_ecall_table\n  add t1, t1, a0\n  lw t1, 0(t1)\n  j .Lrv32_save_done' in ecall
 assert '#define RV32_ECALL_TABLE_ENTRIES 34' in layout
+# ECALL の戻りの出口: 読むのは mepc / mstatus / a0 / a1 だけ。ra・t*・a2-a7・s* は全部 0 に消す
+# (gp / tp は caller stub が戻った直後に自分の値を入れ直すので触らない)。再開フレーム
+# (call_resume) はこの 4 つと目印だけを書くので、消去はこの出口の仕事。
+exit_ecall = asm.split('.Lrv32_exit_ecall:')[1].split('// ---- 呼び先の入口')[0]
+assert sorted(re.findall(r'lw (\w+), RV32_F_(\w+)\(sp\)', exit_ecall)) == sorted(
+    [('t0', 'MEPC'), ('t0', 'MSTATUS'), ('a0', 'A0'), ('a1', 'A1')])
+cleared = set(re.findall(r'mv (\w+), zero', exit_ecall))
+expected_cleared = {'ra', *(f't{i}' for i in range(7)), *(f'a{i}' for i in range(2, 8)),
+                    *(f's{i}' for i in range(12))}
+assert cleared == expected_cleared, sorted(cleared ^ expected_cleared)
+assert exit_ecall.rstrip().endswith('mret')
+call_resume = header.split('static exception_frame_t *call_resume(')[1].split('\n  }\n')[0]
+assert 'frame->mcause = RV32_TAG_ECALL' in call_resume and 'frame->mepc = pc' in call_resume
+assert '*frame = {}' not in call_resume
 assert 'mv sp, a0\n  j shizuku_rv32_restore' in asm
 assert 'shizuku_rv32_restore:' in asm and 'call shizuku_rv32_return_failed' in asm
 assert 'shizuku_rv32_return_stub:' in asm and 'shizuku_rv32_first_return:' in asm
@@ -68,9 +82,31 @@ assert 'shizuku_c6_timer_diag' in trap_src
 # ECALL の経路でも stack probe (1024 回に 1 回) を保つ。
 assert 'shizuku_rv32_ecall_table = make_ecall_table()' in trap_src
 assert 'ecall_table_consistent(' in trap_src
-assert trap_src.count('ecall_native<&K::svc_') == 9
 ecall_run = trap_src.split('inline arch::exception_frame_t *ecall_run(')[1].split('template <bool (shizuku::KERNEL::*Body)')[0]
 assert 'check_stack_canary(0u)' in ecall_run and 'kStackProbeInterval' in ecall_run
+# 実行権を渡す API (切替えが起きる) だけが記帳つきの ecall_run を通る (ecall_native)。
+assert trap_src.count('ecall_native<&K::svc_') == 2
+assert '&ecall_native<&K::svc_yield>' in trap_src and '&ecall_native<&K::svc_run_for>' in trap_src
+# 切替えが起きない API は ecall_direct (1 API = 1 関数)。診断・入れ子の記帳・pend_flag を持たず、
+# stack probe (1024 回に 1 回) と kernel 内からの ECALL (0xE003) の検査は残す。
+ecall_direct = trap_src.split('inline arch::exception_frame_t *ecall_direct(')[1].split('using K = shizuku::KERNEL;')[0]
+for forbidden in ('shizuku_c6_trap_diag', 'trap_depth =', 'active_frame', 'active_mstatus', 'pend_flag',
+                  'current_context()', 'frame_to_context', 'context_to_frame'):
+    assert forbidden not in ecall_direct, forbidden
+assert 'kStackProbeInterval' in ecall_direct and 'trap_probe_interval_count' in ecall_direct
+assert 'return ecall_other(frame);' in ecall_direct  # 1024 回目は記帳つきの経路で probe する
+assert 'ecall_fault_nested(frame)' in ecall_direct and 'svc_native_route()' in ecall_direct
+assert 'stop(0xE003)' in trap_src.split('ecall_fault_nested(')[1].split('}')[0]
+# 遅い経路はどれも tail call (成功経路に関数呼出しを持たない): 本体の中で呼ぶのは return 付きだけ。
+import re as _re
+assert not _re.search(r'(?<!return )\b(ecall_other|ecall_fault_\w+|ecall_to_kobj|stop)\(', ecall_direct)
+for name, call in (('exit_method', 'exit_in_place<K, false>'), ('forward_child_exit', 'exit_in_place<K, true>'),
+                   ('call_method', 'call_method_in_place'), ('call_descriptor', 'call_descriptor_in_place')):
+    body = trap_src.split(f'ecall_{name}(arch::exception_frame_t *frame) {{')[1].split('\n}\n')[0]
+    assert 'ecall_direct(frame' in body and call in body, name
+for name in ('exit_method', 'call_method', 'get_current', 'get_caller', 'set_budget',
+             'forward_child_exit', 'call_descriptor'):
+    assert f'= &ecall_{name};' in trap_src, name
 
 boot_src = (root / 'modules/esp_idf_support/c6/early_boot.cpp').read_text()
 assert 'shizuku_c6_thread1_diag' in boot_src
