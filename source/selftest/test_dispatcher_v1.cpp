@@ -829,6 +829,14 @@ static void run_dispatcher_tests() {
     // 引数: a2..a7 が呼び先の a0..a5 へ 1 つずつずれて渡る。
     assert(frame->a0 == 0x11 && frame->a1 == 0x12 && frame->a2 == 0x13);
     assert(frame->a3 == 0x14 && frame->a4 == 0x15 && frame->a5 == 0x16);
+    // 引数を入口検査のあとでずらしても、caller の s*/gp/tp は入力のまま。
+    assert(frame->s0 == (MARK | 0x70D) && frame->s1 == (MARK | 0x70E));
+    assert(frame->s2 == (MARK | 0x70F) && frame->s3 == (MARK | 0x710));
+    assert(frame->s4 == (MARK | 0x711) && frame->s5 == (MARK | 0x712));
+    assert(frame->s6 == (MARK | 0x713) && frame->s7 == (MARK | 0x714));
+    assert(frame->s8 == (MARK | 0x715) && frame->s9 == (MARK | 0x716));
+    assert(frame->s10 == (MARK | 0x717) && frame->s11 == (MARK | 0x718));
+    assert(frame->gp == (MARK | 0x70B) && frame->tp == (MARK | 0x70C));
     assert(frame->ra == (uint32_t)ARCH::return_stub());
     assert(ctx->privileged == true);
     {
@@ -874,12 +882,17 @@ static void run_dispatcher_tests() {
   };
   for (const auto &c : descriptor_cases) {
     fresh(ROOT_APP_ID, true);
+    mark_regs(frame, 0x800);
+    frame->a2 = 0x81; frame->a3 = 0x82; frame->a4 = 0x83;
+    frame->a5 = 0x84;
     frame->a0 = (uintptr_t)object_api::CALL_METHOD_DESCRIPTOR;
     frame->a1 = c.index;
     kernel_instance.svc_dispatch(ctx);
     assert(access::lock_word() == 0);
     assert(kernel_instance.current_depth() == 0 && ctx->sp == frame);
     assert(frame->a0 == (uintptr_t)c.expect && frame->a1 == 0);
+    assert(frame->a2 == 0x81 && frame->a3 == 0x82 && frame->a4 == 0x83 && frame->a5 == 0x84);
+    assert(regs_pass_through(frame, 0x800)); // 拒否時は入力をずらさない
     assert(ctx->privileged == true);
   }
   // 持ち主が表に居ない (A が created でない別オブジェクトの身) も BAD_DESCRIPTOR。

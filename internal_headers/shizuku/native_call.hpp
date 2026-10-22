@@ -247,8 +247,6 @@ template <class K, class KObj>
       A::set_result(frame, (uintptr_t)error, 0);
       return;
     }
-    const uintptr_t a2 = frame.a2, a3 = frame.a3, a4 = frame.a4, a5 = frame.a5,
-                    a6 = frame.a6, a7 = frame.a7;
     const kernel_error entered =
         enter_in_place(kernel, thread, context, kobj, desc->target_object, desc->target_entry,
                        K::LEDGER_DESCRIPTOR_CALL);
@@ -260,12 +258,15 @@ template <class K, class KObj>
                     0);
       return;
     }
-    frame.a0 = a2;
-    frame.a1 = a3;
-    frame.a2 = a4;
-    frame.a3 = a5;
-    frame.a4 = a6;
-    frame.a5 = a7;
+    // enter_in_place は pc/ra/tag と context/台帳だけを書き、引数欄を触らない。
+    // 検査がすべて通ったあとで前からずらす。6 引数を入口処理をまたいでレジスタに
+    // 保持する必要がなく、失敗時にも caller の入力はそのまま残る (応答 a0/a1 以外)。
+    frame.a0 = frame.a2;
+    frame.a1 = frame.a3;
+    frame.a2 = frame.a4;
+    frame.a3 = frame.a5;
+    frame.a4 = frame.a6;
+    frame.a5 = frame.a7;
   }
 }
 
