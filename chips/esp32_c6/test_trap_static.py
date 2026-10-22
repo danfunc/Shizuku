@@ -140,6 +140,24 @@ for name in ('exit_method', 'call_method', 'get_current', 'get_caller', 'set_bud
              'forward_child_exit', 'call_descriptor'):
     assert f'= &ecall_{name};' in trap_src, name
 
+# ecall の caller 側 (rv32_abi.hpp): 既定は s1–s11 を全部 clobber (callee を信用しない)、gp/tp/s0 は asm で
+# 退避・復元。試験的な遅延退避 (SHIZUKU_ABI_LAZY_SAVE、-fcall-used-s2..s11 と対で call_cost.cpp にだけ付く) は
+# 別の inline 名前空間で、s1 を asm で退避して clobber から外し、s2–s11 は clobber に残す。
+abi = (root / 'internal_headers/shizuku/rv32_abi.hpp').read_text()
+assert abi.count(r'"sw gp, 32(sp)\n"') == 2 and abi.count(r'"sw tp, 36(sp)\n"') == 2
+assert abi.count(r'"sw s0, 40(sp)\n" SHIZUKU_RV32_ABI_EXTRA_SAVE') == 2
+lazy_block = abi.split('#if defined(SHIZUKU_ABI_LAZY_SAVE)\n#define SHIZUKU_RV32_ABI_EXTRA_SAVE')[1].split('#else')[0]
+assert r'"sw s1, 44(sp)\n"' in lazy_block and r'"lw s1, 44(sp)\n"' in lazy_block
+lazy_clobbers = lazy_block.split('SHIZUKU_RV32_ABI_SAVE_RESTORE_CLOBBERS')[1]
+assert '"s1"' not in lazy_clobbers and all(f'"s{i}"' in lazy_clobbers for i in range(2, 12))
+default_block = abi.split('#else\n#define SHIZUKU_RV32_ABI_EXTRA_SAVE ""')[1].split('#endif')[0]
+assert all(f'"s{i}"' in default_block for i in range(1, 12))  # 既定: s1–s11 全部 clobber
+assert 'inline namespace lazy_save {' in abi and '} // inline namespace lazy_save' in abi
+# callee 側: 使ったレジスタだけ消す属性は機能検出つきで、使えなければ空 (ビルドを壊さない)。
+entry = (root / 'internal_headers/shizuku/method_entry.hpp').read_text()
+assert '__has_attribute(zero_call_used_regs)' in entry and 'zero_call_used_regs("used-gpr")' in entry
+assert 'defined(__riscv)' in entry and '#  define SHIZUKU_ZERO_USED_REGS\n' in entry
+
 boot_src = (root / 'modules/esp_idf_support/c6/early_boot.cpp').read_text()
 assert 'shizuku_c6_thread1_diag' in boot_src
 assert 'records[2]' in boot_src

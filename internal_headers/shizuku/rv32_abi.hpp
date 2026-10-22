@@ -70,9 +70,40 @@ struct call_result {
 };
 
 #if defined(__riscv)
+// ---- 試験的な遅延退避 (既定は無効): SHIZUKU_ABI_LAZY_SAVE ---------------------------------------------
+//  この翻訳単位を `-fcall-used-s2 … -fcall-used-s11` つきでコンパイルしたときだけ、.bazelrc の
+//  `--config=abi_lazy_save` が -DSHIZUKU_ABI_LAZY_SAVE=1 を**同じ翻訳単位に**付ける (対象は
+//  source/selftest/call_cost.cpp だけ)。そのとき:
+//   - コンパイラはこの TU の関数の s2–s11 を「呼出しで壊れてよい (caller-saved)」として扱う。
+//     関数の入口で s2–s11 を退避しない (旧: clobber 宣言のたびに入口で 10 本ぶん退避)。生きている
+//     値だけが、呼出しをまたぐところで退避される。
+//   - s2–s11 は asm の clobber に残す (callee を信用しない: callee が壊した値をコンパイラが
+//     「保たれている」と思って使わないように)。-fcall-used は asm には効かないので宣言は必要。
+//   - s1 は asm の中で gp/tp/s0 と一緒に自分のスタックへ退避・復元する (clobber から外す): s1 を
+//     ecall をまたいで保持できる 1 本にする。枠の 44(sp) を使う (48 バイトの中に空きがある)。
+//  ★危険: この TU の関数は s2–s11 を保たない。通常の ABI の TU から**直接呼ばれる**関数があると、
+//    呼んだ側の s2–s11 が壊れる。call_cost.cpp の外から呼ばれる唯一の入口 call_cost() は境界で
+//    s2–s11 を退避・復元する (call_cost.cpp)。ecall で入る callee (cost_leaf など) は、呼んだ側が
+//    ecall で s を信用しないので安全。別の TU に広げるときは同じ境界が要る。
+#if defined(SHIZUKU_ABI_LAZY_SAVE)
+#define SHIZUKU_RV32_ABI_EXTRA_SAVE "sw s1, 44(sp)\n"
+#define SHIZUKU_RV32_ABI_EXTRA_RESTORE "lw s1, 44(sp)\n"
+#define SHIZUKU_RV32_ABI_SAVE_RESTORE_CLOBBERS                                   \
+  "ra", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "s2", "s3", "s4", "s5", "s6", \
+      "s7", "s8", "s9", "s10", "s11", "memory"
+#else
+#define SHIZUKU_RV32_ABI_EXTRA_SAVE ""
+#define SHIZUKU_RV32_ABI_EXTRA_RESTORE ""
 #define SHIZUKU_RV32_ABI_SAVE_RESTORE_CLOBBERS                                   \
   "ra", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "s1", "s2", "s3", "s4", "s5", \
       "s6", "s7", "s8", "s9", "s10", "s11", "memory"
+#endif
+
+// ★遅延退避の版は別名前空間 (inline) に置く: 同じ名前・別定義の関数が翻訳単位ごとに違う形で
+//   存在すると ODR 違反になるため。通常の翻訳単位には現れない。
+#if defined(SHIZUKU_ABI_LAZY_SAVE)
+inline namespace lazy_save {
+#endif
 
 // a0 = 番号, a1..a4 = 引数。a5..a7 はカーネルに渡さず、返ったあと値が不定になるだけ。
 [[gnu::always_inline]] inline call_result ecall(uintptr_t number, uintptr_t a1,
@@ -90,11 +121,11 @@ struct call_result {
       "addi sp, sp, -48\n"
       "sw gp, 32(sp)\n"
       "sw tp, 36(sp)\n"
-      "sw s0, 40(sp)\n"
+      "sw s0, 40(sp)\n" SHIZUKU_RV32_ABI_EXTRA_SAVE
       "ecall\n"
       "lw gp, 32(sp)\n"
       "lw tp, 36(sp)\n"
-      "lw s0, 40(sp)\n"
+      "lw s0, 40(sp)\n" SHIZUKU_RV32_ABI_EXTRA_RESTORE
       "addi sp, sp, 48\n"
       : "+r"(r_a0), "+r"(r_a1), "+r"(r_a2), "+r"(r_a3), "+r"(r_a4),
         "=r"(r_a5), "=r"(r_a6), "=r"(r_a7)
@@ -120,11 +151,11 @@ struct call_result {
       "addi sp, sp, -48\n"
       "sw gp, 32(sp)\n"
       "sw tp, 36(sp)\n"
-      "sw s0, 40(sp)\n"
+      "sw s0, 40(sp)\n" SHIZUKU_RV32_ABI_EXTRA_SAVE
       "ecall\n"
       "lw gp, 32(sp)\n"
       "lw tp, 36(sp)\n"
-      "lw s0, 40(sp)\n"
+      "lw s0, 40(sp)\n" SHIZUKU_RV32_ABI_EXTRA_RESTORE
       "addi sp, sp, 48\n"
       : "+r"(r_a0), "+r"(r_a1), "+r"(r_a2), "+r"(r_a3), "+r"(r_a4),
         "+r"(r_a5), "+r"(r_a6), "+r"(r_a7)
@@ -132,7 +163,12 @@ struct call_result {
       : SHIZUKU_RV32_ABI_SAVE_RESTORE_CLOBBERS);
   return {r_a0, r_a1};
 }
+#if defined(SHIZUKU_ABI_LAZY_SAVE)
+} // inline namespace lazy_save
+#endif
 #undef SHIZUKU_RV32_ABI_SAVE_RESTORE_CLOBBERS
+#undef SHIZUKU_RV32_ABI_EXTRA_SAVE
+#undef SHIZUKU_RV32_ABI_EXTRA_RESTORE
 #endif
 
 } // namespace shizuku::rv32_abi

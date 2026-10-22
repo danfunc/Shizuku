@@ -601,7 +601,36 @@ template <typename A> void bench() {
 
 } // namespace
 
-void call_cost() {
+// ---- 試験的な遅延退避 (--config=abi_lazy_save, 既定は無効) の境界 ----------------------------------
+//   この翻訳単位は -fcall-used-s2 … -fcall-used-s11 つきでコンパイルされる (internal_headers/shizuku/
+//   rv32_abi.hpp の SHIZUKU_ABI_LAZY_SAVE)。つまり下の call_cost_body とその先の関数は s2–s11 を保たない。
+//   外 (selftest_runner.cpp / firmware/main.cpp) から呼ばれるのは call_cost() だけで、呼ぶ側は通常の ABI で
+//   s2–s11 が保たれると信じる。なので入口をこの 1 関数に絞り、ここで s2–s11 を退避・復元する。
+//   (ecall で入る callee は、呼んだ側が ecall の戻りで s を信用しないので境界は要らない。)
+#if defined(SHIZUKU_ABI_LAZY_SAVE)
+namespace {
+[[gnu::noinline, gnu::used]] void call_cost_body();
+}
+[[gnu::noinline]] void call_cost() {
+  asm volatile(
+      "addi sp, sp, -48\n"
+      "sw s2, 0(sp)\n sw s3, 4(sp)\n sw s4, 8(sp)\n sw s5, 12(sp)\n sw s6, 16(sp)\n"
+      "sw s7, 20(sp)\n sw s8, 24(sp)\n sw s9, 28(sp)\n sw s10, 32(sp)\n sw s11, 36(sp)\n"
+      "call %0\n"
+      "lw s2, 0(sp)\n lw s3, 4(sp)\n lw s4, 8(sp)\n lw s5, 12(sp)\n lw s6, 16(sp)\n"
+      "lw s7, 20(sp)\n lw s8, 24(sp)\n lw s9, 28(sp)\n lw s10, 32(sp)\n lw s11, 36(sp)\n"
+      "addi sp, sp, 48\n"
+      :
+      : "i"(&call_cost_body)
+      : "ra", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "a0", "a1", "a2", "a3", "a4", "a5", "a6",
+        "a7", "memory");
+}
+namespace {
+void call_cost_body()
+#else
+void call_cost()
+#endif
+{
 #if !defined(__riscv)
   service_profile::reset();
 #if SHIZUKU_KERNEL_SERVICE_PROFILE
@@ -629,6 +658,9 @@ void call_cost() {
       service_profile::cycles()?"cyc":"us");
 #endif
 }
+#if defined(SHIZUKU_ABI_LAZY_SAVE)
+} // namespace
+#endif
 
 } // namespace selftest
 } // namespace shizuku
