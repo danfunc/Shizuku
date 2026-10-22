@@ -148,6 +148,69 @@ bool plic_vector_mode::faulted_in_thread_mode<shizuku::archs::rv32_c6::context_t
 
 using namespace shizuku;
 
+// ---- 呼出しの記録 (戻りの権威) を試験が直接据える・読む口 ---------------------------------------
+//   既定の版は user stack 上のヘッダ (call_header_t) とスレッドの call_stack の識別欄、
+//   SHIZUKU_LEAN_LEDGER の版は台帳の項目 (ret_* / generation / prev_call) と call_top。同じ試験が
+//   どちらの版でも通ることを確かめるため、版の違いはここに閉じ込める。
+//   台帳の index 段を call 段として据える (同定 + 識別の記帳。戻りの記録は fake_return_record)。
+static void fake_call_entry(KERNEL::THREAD &t, uint32_t index, uint32_t object, uint32_t handler_object,
+                            uintptr_t handler_entry, uint8_t via, uint16_t floor) {
+#if defined(SHIZUKU_LEAN_LEDGER)
+  KERNEL::call_ledger_entry entry = {object, handler_object, handler_entry,
+                                     (uint8_t)object_kind::PLAIN, via, floor};
+  entry.prev_call = (uint16_t)t.call_stack.call_top;
+  t.ledger[index] = entry;
+  t.call_stack.depth = index + 1;
+  t.call_stack.call_count++;
+  t.call_stack.call_top = index + 1;
+#else
+  t.ledger[index] = {object, handler_object, handler_entry, (uint8_t)object_kind::PLAIN, via, floor};
+  t.call_stack.depth = index + 1;
+  t.call_stack.caller_object =
+      t.call_stack.call_count == 0 ? t.base_object : t.call_stack.current_call_object;
+  t.call_stack.caller_generation =
+      t.call_stack.call_count == 0 ? t.call_stack.base_object_generation : t.call_stack.current_call_generation;
+  t.call_stack.current_call_object = object;
+  t.call_stack.current_call_generation = 0;
+  t.call_stack.call_count++;
+#endif
+}
+//   index 段から戻るときの caller の再開点を据える (ctx->sp は caller の ecall 時点の trap フレーム)。
+static void fake_return_record(KERNEL::CONTEXT &c, KERNEL::THREAD &t, uint32_t index, uintptr_t pc,
+                               bool privileged) {
+#if defined(SHIZUKU_LEAN_LEDGER)
+  auto &e = t.ledger[index];
+  e.ret_pc = pc;
+  e.ret_sp = ARCH::call_return_sp(c);
+  e.ret_region_base = 0;
+  e.ret_region_limit = 0;
+  e.ret_privileged = privileged ? 1 : 0;
+#else
+  auto *header = ARCH::call_header_slot(c);
+  *header = {};
+  header->pc = pc;
+  header->caller_object = (uint32_t)KERNEL_OBJECT::NO_OBJECT; // 呼び先を積む前の caller_object
+  header->privileged = privileged ? 1 : 0;
+  t.call_stack.top = (uintptr_t)header;
+  (void)index;
+#endif
+}
+//   最内の段の戻りの記録 (pc と caller の特権) を読む。
+static uintptr_t top_return_pc(const KERNEL::THREAD &t) {
+#if defined(SHIZUKU_LEAN_LEDGER)
+  return t.ledger_top().ret_pc;
+#else
+  return ((const ARCH::call_header_t *)t.call_stack.top)->pc;
+#endif
+}
+static bool top_return_privileged(const KERNEL::THREAD &t) {
+#if defined(SHIZUKU_LEAN_LEDGER)
+  return t.ledger_top().ret_privileged != 0;
+#else
+  return ((const ARCH::call_header_t *)t.call_stack.top)->privileged != 0;
+#endif
+}
+
 static void run_dispatcher_tests() {
   printf("[TEST] Running V1 kernel dispatcher host tests...\n");
 
@@ -209,12 +272,7 @@ static void run_dispatcher_tests() {
 
   // Simulate 1-hop call: caller ROOT_APP (1) -> callee LEAF (10)
   auto &thread = kernel_instance.current_thread();
-  thread.ledger[0] = {LEAF_ID, ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY,
-                      (uint8_t)object_kind::PLAIN, KERNEL::LEDGER_CALL, 0};
-  thread.call_stack.depth = 1;
-  thread.call_stack.call_count = 1;
-  thread.call_stack.current_call_object = LEAF_ID;
-  thread.call_stack.caller_object = ROOT_APP_ID;
+  fake_call_entry(thread, 0, LEAF_ID, ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY, KERNEL::LEDGER_CALL, 0);
 
   frame->a0 = (uintptr_t)object_api::GET_CURRENT_OBJECT;
   kernel_instance.svc_dispatch(ctx);
@@ -230,12 +288,7 @@ static void run_dispatcher_tests() {
   printf("  2a. 1-hop call caller identity (current=LEAF, caller=ROOT_APP, depth=1): PASS\n");
 
   // Simulate 2-hop nested call: ROOT_APP (1) -> LEAF (10) -> NEST (20)
-  thread.ledger[1] = {NEST_ID, ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY,
-                      (uint8_t)object_kind::PLAIN, KERNEL::LEDGER_CALL, 1};
-  thread.call_stack.depth = 2;
-  thread.call_stack.call_count = 2;
-  thread.call_stack.current_call_object = NEST_ID;
-  thread.call_stack.caller_object = LEAF_ID;
+  fake_call_entry(thread, 1, NEST_ID, ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY, KERNEL::LEDGER_CALL, 1);
 
   frame->a0 = (uintptr_t)object_api::GET_CURRENT_OBJECT;
   kernel_instance.svc_dispatch(ctx);
@@ -253,6 +306,7 @@ static void run_dispatcher_tests() {
   // Reset depth
   thread.call_stack.depth = 0;
   thread.call_stack.call_count = 0;
+  thread.call_stack.call_top = 0;
   thread.call_stack.current_call_object = 0;
   thread.call_stack.caller_object = 0;
 
@@ -283,6 +337,7 @@ static void run_dispatcher_tests() {
   // Pop the dispatch frame
   thread.call_stack.depth = 0;
   thread.call_stack.top = 0;
+  thread.call_stack.call_top = 0;
   ctx->sp = frame;
 
   // 3b. Child issues raw SVC 6 (same numeric ID as GET_CALLER_OBJECT)
@@ -295,6 +350,7 @@ static void run_dispatcher_tests() {
 
   thread.call_stack.depth = 0;
   thread.call_stack.top = 0;
+  thread.call_stack.call_top = 0;
   ctx->sp = frame;
 
   // 3c. Child issues raw SVC 16 (CMD_COMPUTE / MEMORY_OWNER number)
@@ -307,6 +363,7 @@ static void run_dispatcher_tests() {
 
   thread.call_stack.depth = 0;
   thread.call_stack.top = 0;
+  thread.call_stack.call_top = 0;
   ctx->sp = frame;
 
   // 3d/e. The V2 descriptor API numbers remain objectland numbers for a custom
@@ -328,6 +385,7 @@ static void run_dispatcher_tests() {
            (unsigned long)raw_id);
     thread.call_stack.depth = 0;
     thread.call_stack.top = 0;
+    thread.call_stack.call_top = 0;
     ctx->sp = frame;
   }
 
@@ -350,6 +408,7 @@ static void run_dispatcher_tests() {
 
   thread.call_stack.depth = 0;
   thread.call_stack.top = 0;
+  thread.call_stack.call_top = 0;
   ctx->sp = frame;
 
   // 4b. MEMORY_OWNER (16): mode == svc_mode::thread (O(1) でない / 錠を取るので trap には入れない)
@@ -362,6 +421,7 @@ static void run_dispatcher_tests() {
 
   thread.call_stack.depth = 0;
   thread.call_stack.top = 0;
+  thread.call_stack.call_top = 0;
   ctx->sp = frame;
 
   // -------------------------------------------------------------------------
@@ -394,8 +454,7 @@ static void run_dispatcher_tests() {
   assert(ARCH::arg(*ctx->sp, 1) == 0x1234);
   assert(ARCH::arg(*ctx->sp, 2) == 0x1000);
   assert(ARCH::arg(*ctx->sp, 3) == 0x2000);
-  const auto *header = (const ARCH::call_header_t *)thread.call_stack.top;
-  assert(header->privileged == 0); // Caller privilege preserved as unprivileged!
+  assert(!top_return_privileged(thread)); // Caller privilege preserved as unprivileged!
 
   // Return from actor handler via primitive::RETURN (with RETURN_STUB_MARKER),
   // verifying caller's unprivileged context is restored upon frame pop.
@@ -416,21 +475,13 @@ static void run_dispatcher_tests() {
   auto arm_frame = [&](uint8_t via, uint16_t unwind_floor, ARCH::exception_frame_t *callee) {
     ctx->sp = frame;
     ctx->privileged = true;
-    // 呼出しの記録: caller (sp = frame + trap フレーム) の枠にヘッダを置く (caller stub が空けた枠)。
-    auto *header = ARCH::call_header_slot(*ctx);
-    *header = {};
-    header->pc = A_PC_6;
-    header->caller_object = (uint32_t)KERNEL_OBJECT::NO_OBJECT; // 呼び先を積む前の caller_object
-    header->privileged = 1;
-    thread.call_stack.top = (uintptr_t)header;
-    thread.call_stack.depth = 1;
-    thread.call_stack.call_count = 1;
-    thread.call_stack.caller_object = ROOT_APP_ID;
-    thread.call_stack.current_call_object = LEAF_ID;
-    thread.call_stack.caller_generation = 0;
-    thread.call_stack.current_call_generation = 0;
-    thread.ledger[0] = {LEAF_ID, ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY,
-                        (uint8_t)object_kind::PLAIN, via, unwind_floor};
+    // 呼出しの記録: caller (sp = frame + trap フレーム) の再開点を据える (既定の版は caller stub が
+    // 空けた枠のヘッダ、SHIZUKU_LEAN_LEDGER の版は台帳の項目)。
+    thread.call_stack.depth = 0;
+    thread.call_stack.call_count = 0;
+    thread.call_stack.call_top = 0;
+    fake_call_entry(thread, 0, LEAF_ID, ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY, via, unwind_floor);
+    fake_return_record(*ctx, thread, 0, A_PC_6, true);
     callee->a0 = (uintptr_t)primitive::RETURN;
     callee->a1 = 1;
     callee->a2 = 0x77;
@@ -446,8 +497,9 @@ static void run_dispatcher_tests() {
   kernel_instance.svc_dispatch(ctx);
   assert(kernel_instance.current_depth() == 0);
   assert(thread.call_stack.call_count == 0);
-  assert(thread.call_stack.current_call_object == ROOT_APP_ID); // identity を push 時の値へ戻す
-  assert(thread.call_stack.caller_object == (uint32_t)KERNEL_OBJECT::NO_OBJECT);
+  assert(thread.identity_object() == ROOT_APP_ID); // identity を push 時の値へ戻す
+  assert(kernel_instance.caller_object(kernel_instance.current_thread_id()) ==
+         (uintptr_t)KERNEL_OBJECT::NO_OBJECT);
   assert(ctx->sp == frame);
   assert(frame->a0 == (uintptr_t)kernel_error::OK);
   assert(frame->a1 == 0x77);
@@ -458,11 +510,12 @@ static void run_dispatcher_tests() {
   thread.call_stack.depth = 0;
   thread.call_stack.call_count = 0;
   thread.call_stack.top = 0;
+  thread.call_stack.call_top = 0;
   arm_frame(KERNEL::LEDGER_CALL, 0, callee);
   kernel_instance.svc_dispatch(ctx);
   assert(kernel_instance.current_depth() == 0); // dispatch 段は積まれない
   assert(thread.call_stack.call_count == 0);
-  assert(thread.call_stack.current_call_object == ROOT_APP_ID);
+  assert(thread.identity_object() == ROOT_APP_ID);
   assert(ctx->sp == frame);
   assert(frame->a0 == (uintptr_t)object_error::OK);
   assert(frame->a1 == 0x77);
@@ -473,6 +526,7 @@ static void run_dispatcher_tests() {
   thread.call_stack.depth = 0;
   thread.call_stack.call_count = 0;
   thread.call_stack.top = 0;
+  thread.call_stack.call_top = 0;
   arm_frame(KERNEL::LEDGER_DESCRIPTOR_CALL, 1, callee);
   kernel_instance.svc_dispatch(ctx);
   assert(kernel_instance.current_depth() == 1); // 落としていない・dispatch 段も積まない
@@ -486,6 +540,7 @@ static void run_dispatcher_tests() {
   thread.call_stack.depth = 0;
   thread.call_stack.call_count = 0;
   thread.call_stack.top = 0;
+  thread.call_stack.call_top = 0;
   arm_frame(KERNEL::LEDGER_DESCRIPTOR_CALL, 0, callee);
   thread.ledger[0].handler_object = CUSTOM_HANDLER_ID;
   thread.ledger[0].handler_entry = CUSTOM_HANDLER_ENTRY;
@@ -633,12 +688,22 @@ static void run_dispatcher_tests() {
   {
     // 呼出しの記録は caller の枠 (trap フレームの直上 = caller の ecall 時点の SP) にある。
     // カーネルが持つのはその先頭へのポインタと深さだけ。callee の窓の上端は枠の下端 (= 枠のアドレス)。
+#if defined(SHIZUKU_LEAN_LEDGER)
+    // SHIZUKU_LEAN_LEDGER の版: user stack にヘッダは無い。戻りの権威は台帳の項目 (特権メモリ) に 1 つ。
+    const auto &rec = thread.ledger[0];
+    assert(rec.ret_sp == reinterpret_cast<uintptr_t>(frame) + sizeof(KERNEL::FRAME));
+    assert(rec.prev_call == 0 && rec.ret_pc == A_PC && rec.ret_privileged == 1);
+    assert(rec.ret_region_base == 0 && rec.ret_region_limit == 0 && rec.generation == 0);
+    assert(thread.call_stack.call_top == 1 && thread.call_stack.call_count == 1);
+    assert(thread.identity_object() == B_ID && thread.call_caller_object() == 0 /* fresh() の base */);
+#else
     const auto *h = (const ARCH::call_header_t *)thread.call_stack.top;
     assert((uintptr_t)h == reinterpret_cast<uintptr_t>(frame) + sizeof(KERNEL::FRAME));
     assert(ARCH::call_window_top(h) == (uintptr_t)h);
     assert(h->prev == 0 && h->pc == A_PC && h->privileged == 1);
     // via / unwind_floor はヘッダに書かない (台帳が持つ。上で thread.ledger[0] を検査済み)。
     assert(h->caller_object == 0 /* fresh() の caller_object */);
+#endif
   }
   // ra は 32bit レジスタ。host (64bit) では関数ポインタが切り詰められるので下位 32bit で比べる。
   assert(frame->ra == (uint32_t)ARCH::return_stub()); // 戻り口はカーネルが決める
@@ -748,7 +813,7 @@ static void run_dispatcher_tests() {
   assert(frame->a1 == 0x44);
   assert(resumes_passthrough(frame)); // B の値は A に見えない。A の値も戻らない (A が自分で復元する)
   assert(frame->mepc == A_PC); // A の ecall の次の命令から再開
-  assert(thread.call_stack.current_call_object == ROOT_APP_ID);
+  assert(thread.identity_object() == ROOT_APP_ID);
   printf("  8e. B return stub -> A directly (depth 0, value 0x44, no dispatch frame), plain 1-level return resumes on the pass-through exit (RV32_TAG_ECALL), resume pc = A_PC: PASS\n");
 
   // 8f. エラー応答: (error, 0) を呼び出し元へ。段は積まれず、特権も変わらない。
@@ -799,8 +864,7 @@ static void run_dispatcher_tests() {
   kernel_instance.svc_dispatch(ctx);
   assert(kernel_instance.current_depth() == 1);
   assert(ctx->privileged == false);
-  assert(thread.call_stack.top != 0);
-  assert(((const ARCH::call_header_t *)thread.call_stack.top)->privileged == 0); // caller の特権はヘッダに残る
+  assert(!top_return_privileged(thread)); // caller の特権は戻りの記録 (ヘッダ / 台帳の項目) に残る
   ctx->sp->a0 = (uintptr_t)primitive::RETURN;
   ctx->sp->a1 = 1;
   ctx->sp->a2 = 0x12;
@@ -838,8 +902,8 @@ static void run_dispatcher_tests() {
     assert(thread.ledger[0].via == KERNEL::LEDGER_DESCRIPTOR_CALL && thread.ledger[0].object == B_ID);
     assert(thread.ledger[0].kind == (uint8_t)object_kind::PLAIN && thread.ledger[0].unwind_floor == 0);
     assert(thread.ledger[0].handler_object == ROOT_KOBJ_ID && thread.ledger[0].handler_entry == ROOT_HANDLER_ENTRY);
-    assert(thread.call_stack.call_count == 1 && thread.call_stack.current_call_object == B_ID);
-    assert(thread.call_stack.current_call_generation == 9 && thread.call_stack.caller_object == ROOT_APP_ID);
+    assert(thread.call_stack.call_count == 1 && thread.identity_object() == B_ID);
+    assert(thread.identity_generation() == 9 && thread.call_caller_object() == ROOT_APP_ID);
     assert(ctx->sp == frame && frame->mcause == RV32_TAG_ENTRY);
     assert(ARCH::frame_pc(*ctx->sp) == ENTRY_BD);
     // 引数: a2..a7 が呼び先の a0..a5 へ 1 つずつずれて渡る。
@@ -856,8 +920,7 @@ static void run_dispatcher_tests() {
     assert(frame->ra == (uint32_t)ARCH::return_stub());
     assert(ctx->privileged == true);
     {
-      const auto *h = (const ARCH::call_header_t *)thread.call_stack.top;
-      assert(h->pc == A_PC && h->privileged == 1 && h->prev == 0); // via は台帳 (上で検査済み) が持つ
+      assert(top_return_pc(thread) == A_PC && top_return_privileged(thread)); // via は台帳 (上で検査済み) が持つ
     }
     frame->a0 = (uintptr_t)object_api::GET_CALLER_OBJECT;
     kernel_instance.svc_dispatch(ctx);
@@ -872,7 +935,7 @@ static void run_dispatcher_tests() {
     assert(kernel_instance.current_depth() == 0 && thread.call_stack.call_count == 0);
     assert(frame->a0 == (uintptr_t)object_error::OK && frame->a1 == 0x46);
     assert(resumes_passthrough(frame) && frame->mepc == A_PC);
-    assert(thread.call_stack.current_call_object == ROOT_APP_ID);
+    assert(thread.identity_object() == ROOT_APP_ID);
   }
   printf("  8h. CALL_METHOD_DESCRIPTOR A->B: lock word back to 0, no dispatch frame, ledger via=LEDGER_DESCRIPTOR_CALL, args a2..a7 -> a0..a5, GET_CALLER == A, return stub back to A (value 0x46, pass-through exit): PASS\n");
 
@@ -920,9 +983,18 @@ static void run_dispatcher_tests() {
   assert(kernel_instance.current_depth() == 0 && access::lock_word() == 0);
   // NO_STACK: 呼出し段が MAX_DEPTH (呼び出し元の識別は call_count != 0 なので current_call_object から引く)。
   fresh(ROOT_APP_ID, true);
-  thread.call_stack.call_count = KERNEL_OBJECT::MAX_DEPTH;
+#if defined(SHIZUKU_LEAN_LEDGER)
+  // 識別は最内の call 段 (call_top) から引くので、深さ 0 のまま call 段が MAX_DEPTH 個あることにして
+  // 先頭の項目を ROOT_APP_ID の段として据える。
+  thread.ledger[0].object = ROOT_APP_ID;
+  thread.ledger[0].generation = 0;
+  thread.ledger[0].prev_call = 0;
+  thread.call_stack.call_top = 1;
+#else
   thread.call_stack.current_call_object = ROOT_APP_ID;
   thread.call_stack.current_call_generation = 0;
+#endif
+  thread.call_stack.call_count = KERNEL_OBJECT::MAX_DEPTH;
   frame->a0 = (uintptr_t)object_api::CALL_METHOD_DESCRIPTOR;
   frame->a1 = 3;
   kernel_instance.svc_dispatch(ctx);
@@ -939,7 +1011,7 @@ static void run_dispatcher_tests() {
   assert(kernel_instance.current_depth() == 1 && ctx->privileged == false);
   assert(ctx->region_base == 0x1000 && ctx->region_limit == 0x2000);
   assert(frame->a0 == 0x21 && ARCH::frame_pc(*ctx->sp) == ENTRY_CD);
-  assert(thread.call_stack.current_call_generation == 5);
+  assert(thread.identity_generation() == 5);
   ctx->sp->a0 = (uintptr_t)primitive::RETURN;
   ctx->sp->a1 = 1;
   ctx->sp->a2 = 0x22;
@@ -997,7 +1069,7 @@ static void run_dispatcher_tests() {
     desc_call(7, 13, 0x37);
     assert(kernel_instance.current_depth() == 1 && thread.ledger[0].object == C_ID);
     assert(ARCH::frame_pc(*ctx->sp) == ENTRY_CD && ctx->privileged == false);
-    assert(thread.call_stack.caller_object == 7); // 呼び出し元は持ち主 7
+    assert(thread.call_caller_object() == 7); // 呼び出し元は持ち主 7
     access::invalidate_descriptor(ROOT_APP_ID, 13);
     access::invalidate_descriptor(7, 13);
     desc_call(ROOT_APP_ID, 13, 0);
@@ -1456,6 +1528,16 @@ static void run_dispatcher_tests() {
       assert(ARCH::arg(*ctx->sp, 0) == i);
       assert(ctx->sp == cur); // どの段も frame をコピーしない
       assert(regs_pass_through(cur, 0x500 + 0x40 * i));
+#if defined(SHIZUKU_LEAN_LEDGER)
+      // 戻りの権威は台帳の項目: 段 i の caller の再開点 (pc・sp) と、ひとつ外側の call 段への鎖 (prev_call)。
+      const auto &rec = thread.ledger[i];
+      headers[i] = rec.ret_sp;
+      assert(rec.ret_sp == reinterpret_cast<uintptr_t>(cur) + sizeof(KERNEL::FRAME));
+      assert(rec.prev_call == i && rec.ret_pc == A_PC + 0x10 * i);
+      assert(thread.call_stack.call_top == i + 1);
+      // 各段の caller の再開点は前の段の再開点より下 (スタックは下へ伸びる)。
+      assert(i == 0 || rec.ret_sp < thread.ledger[i - 1].ret_sp);
+#else
       headers[i] = thread.call_stack.top;
       assert(headers[i] == reinterpret_cast<uintptr_t>(cur) + sizeof(KERNEL::FRAME));
       const auto *h = (const ARCH::call_header_t *)headers[i];
@@ -1464,6 +1546,7 @@ static void run_dispatcher_tests() {
       // ヘッダ (戻り pc・caller の識別) の領域へは届かない。
       assert(i == 0 || (headers[i] + sizeof(ARCH::call_header_t) <=
                         ARCH::call_window_top((const ARCH::call_header_t *)headers[i - 1])));
+#endif
       // 呼び先は自分のスタックを 400 バイト使ってから次の ecall をする (窓は枠の下端まで)。
       cur = reinterpret_cast<KERNEL::FRAME *>(reinterpret_cast<uint8_t *>(cur) - 400);
       ctx->sp = cur;
@@ -1477,7 +1560,11 @@ static void run_dispatcher_tests() {
       cur->a4 = RETURN_STUB_MARKER;
       kernel_instance.svc_dispatch(ctx);
       assert(kernel_instance.current_depth() == i);
+#if defined(SHIZUKU_LEAN_LEDGER)
+      assert(thread.call_stack.call_top == i); // 鎖が一つ外側の call 段へ戻る
+#else
       assert(thread.call_stack.top == (i == 0 ? 0 : headers[i - 1]));
+#endif
       cur = ctx->sp;
       assert(cur == frames[i]); // 段 i を呼んだ caller の枠の直下で再開する
       assert(cur->a0 == (uintptr_t)object_error::OK && cur->a1 == 0x70 + i);
@@ -1841,6 +1928,7 @@ static void run_dispatcher_tests() {
   thread.call_stack.depth = 0;
   thread.call_stack.call_count = 0;
   thread.call_stack.top = 0;
+  thread.call_stack.call_top = 0;
   ctx->sp = frame;
 
   printf("[TEST] All V1 kernel dispatcher host tests PASSED successfully!\n");
