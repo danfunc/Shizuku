@@ -182,7 +182,7 @@ template <> void KERNEL_OBJECT::init() {
     for (uintptr_t method = 0; method < METHOD_COUNT; ++method)
       m_objects[id].methods[method] = nullptr;
     for (auto &d : m_descriptors[id])
-      d.target = nullptr;
+      invalidate_descriptor(d);
   }
   for (uintptr_t thread = 0; thread < THREAD_COUNT; ++thread) {
     m_kill_pending[thread] = 0;
@@ -467,9 +467,8 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
       if (replace) {
         // 差し替えた持ち主の記述子は全部無効 (target = nullptr)。呼び先を差し替えた場合は
         // 呼び先の version (generation) が上がるので、世代照合で STALE になる。
-        for (auto &d : m_descriptors[id]) {
-          __atomic_store_n(&d.target, decltype(d.target)(nullptr), __ATOMIC_RELEASE);
-        }
+        for (auto &d : m_descriptors[id])
+          invalidate_descriptor(d);
       }
       for (uintptr_t method = 1; method < METHOD_COUNT; ++method)
         m_objects[id].methods[method] = nullptr;
@@ -683,10 +682,10 @@ uintptr_t KERNEL_OBJECT::create_method_descriptor(uintptr_t target_id,
   int free_slot = -1;
   for (int i = 0; i < (int)METHOD_DESCRIPTOR_CAPACITY; ++i) {
     auto &candidate = m_descriptors[caller_id][i];
-    const object_t *candidate_target = __atomic_load_n(&candidate.target, __ATOMIC_ACQUIRE);
-    bool valid = candidate_target != nullptr;
+    const uint8_t candidate_callee = __atomic_load_n(&candidate.callee, __ATOMIC_ACQUIRE);
+    bool valid = candidate_callee != DESCRIPTOR_NONE;
     if (valid && (candidate.target_generation == 0 ||
-                  candidate.target_generation != row_version(*candidate_target))) {
+                  candidate.target_generation != row_version(m_objects[candidate_callee]))) {
       // Stale indices are never recycled within this owner generation: API 33
       // carries only the index, so reuse would turn an old handle into a new call.
       continue;
@@ -700,13 +699,10 @@ uintptr_t KERNEL_OBJECT::create_method_descriptor(uintptr_t target_id,
     error = object_error::NO_DESCRIPTOR; // 21
     return 0;
   }
-  auto &desc = m_descriptors[caller_id][free_slot];
-  desc.target_entry = (uintptr_t)m_objects[target_id].methods[method_index];
-  desc.target_generation = target_generation;
-  desc.owner_generation = caller_generation;
-  // 公開は target を最後に release で書く (呼び側は target を acquire で読んでから他の欄を読む)。
-  // ここまでに target_id が created で methods[method_index] が非 null と確かめてある。
-  __atomic_store_n(&desc.target, (const object_t *)&m_objects[target_id], __ATOMIC_RELEASE);
+  // 呼び先の前計算を写して公開する (callee は最後に release で書く)。ここまでに target_id が created で
+  // methods[method_index] が非 null と確かめてある。
+  publish_descriptor(m_descriptors[caller_id][free_slot], target_id,
+                     (uintptr_t)m_objects[target_id].methods[method_index], caller_generation);
   return (uintptr_t)free_slot;
 }
 

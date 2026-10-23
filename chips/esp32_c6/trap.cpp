@@ -833,7 +833,7 @@ bool plic_vector_mode::cycle_counter_enable() {
 #endif
 }
 
-uint32_t plic_vector_mode::cycle_counter_read() {
+SHIZUKU_HOT uint32_t plic_vector_mode::cycle_counter_read() {
 #if defined(__riscv)
   uint32_t cycles = 0;
   asm volatile("csrr %0, 0x7e2" : "=r"(cycles));

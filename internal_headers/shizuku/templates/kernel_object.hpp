@@ -212,28 +212,55 @@ private:
   static_assert(sizeof(uintptr_t) != 4 || sizeof(object_t) == OBJECT_ROW_ALIGN,
                 "an object row must be exactly OBJECT_ROW_ALIGN bytes on 32-bit targets");
 public:
-  // 方法記述子 (caller が callee を呼ぶ入口)。caller の表の 1 項目で、呼出しに要るものは
-  //   「呼び先の行へのポインタ」「入口 pc」「持ち主の世代」「呼び先の世代 (version)」だけ。
-  //   種別・親ハンドラ・特権・窓・instance 世代は**呼び先の行から呼出し時に読む** (旧と同じ生きた値)。
-  //   行の位置はポインタが持つので、id × 行の大きさの乗算は要らない。
-  //   ★失効: 呼び先の version (generation) が変わると世代照合で STALE になる。version を上げるのは
-  //     CREATE_OBJECT の差し替え (handler.cpp の replace)、EXPORT_METHOD、GRANT_REGION の 3 つで、
-  //     種別・親ハンドラ・特権・窓・入口を書き換える所は全部この 3 つのどれかの中にある
-  //     (特権の旗 flags を書くのは生成 / 差し替えと SET_OBJECT_AFFINITY のみで、後者は特権の旗に触れない)。
-  //     持ち主の差し替えは持ち主の項目を全部 target = nullptr にする。
-  //   target == nullptr が「無効」(旧 valid == 0)。公開は target を最後に release で書く。
-  //   ★持ち主 (owner_object) は持たない: 表が持ち主の行ごとなので、項目の位置が持ち主を決める。
+  // 呼び先 1 件ぶんの入場に要る値 (台帳段と入口フレームへの書き出しが読む)。CALL_METHOD は行から
+  //   (view_of_row)、方法記述子の直接 call は項目の前計算から (view_of_descriptor) 作る。形が同じなので
+  //   入場の処理は 1 本で済む。
+  struct callee_view {
+    uint32_t id;
+    object_kind kind;
+    uint32_t parent_handler_object;
+    uintptr_t parent_handler_entry;
+    uint32_t instance_generation;
+    bool privileged;
+    uint32_t region_base;
+    uint32_t region_limit;
+  };
+  // 方法記述子 (caller が callee を呼ぶ入口)。caller の表の 1 項目で、32 バイト (2 の冪なので index は
+  //   シフトで引く)。呼出しに要る値は作成 (publish_descriptor) が呼び先の行から前計算して写す:
+  //   入口 pc・親ハンドラの入口・種別・親ハンドラ・特権・窓・instance 世代、そして照合用の持ち主と
+  //   呼び先の世代 (version)。trap 内の直接 call は「index → 世代照合 → 写しで入る」だけで、行を引かない
+  //   (照合の version の 1 語だけ呼び先の行を読む)。
+  //   ★写しで入る経路を作らないため、写しの元になる値が変わる操作は必ず呼び先の version (generation) を
+  //     上げる。上げるのは 4 か所だけで、どれも項目を STALE にする:
+  //     (1) CREATE_OBJECT の生成と差し替え (種別・親ハンドラ・特権の旗・instance 世代を書く)、
+  //     (2) EXPORT_METHOD (入口を書く。項目の入口は作成時の写し)、
+  //     (3) GRANT_REGION (窓を書く)、
+  //     (4) init (表ごと無効にする)。
+  //     SET_OBJECT_AFFINITY は flags のアフィニティ欄だけを書き、写す値 (特権の旗を含む) に触れないので
+  //     version を上げない (test_dispatcher_v1.cpp の試験で縛る)。
+  //     持ち主の差し替えは持ち主の項目を全部無効にする。
+  //   ★callee == DESCRIPTOR_NONE が「無効」(旧 target == nullptr)。公開は callee を最後に release で書く。
+  //   ★持ち主 (owner_object) は持たない: 表が持ち主ごとなので、項目の位置が持ち主を決める。
   //   ★created / 入口 0 の検査は呼出し側に残さない: 作成 (create_method_descriptor) が
-  //     「呼び先が created、かつ methods[index] != nullptr」を確かめてから項目を公開し、
-  //     created は init 以外で false に戻らず、入口は項目に固定される。
+  //     「呼び先が created、かつ methods[index] != nullptr」を確かめてから項目を公開する。
   struct method_descriptor_entry {
-    const object_t *target;
+    uintptr_t target_entry;
+    uintptr_t parent_handler_entry;
     uint32_t owner_generation;
     uint32_t target_generation;
-    uintptr_t target_entry;
+    uint32_t instance_generation;
+    uint32_t region_base;
+    uint32_t region_limit;
+    uint8_t callee;
+    uint8_t kind;
+    uint8_t parent_handler_object;
+    uint8_t privileged;
   };
-  static_assert(sizeof(uintptr_t) != 4 || sizeof(method_descriptor_entry) == 16,
-                "a descriptor entry must be 16 bytes on 32-bit targets");
+  static constexpr uint8_t DESCRIPTOR_NONE = 0xFF;
+  static_assert(OBJECT_COUNT_T < DESCRIPTOR_NONE,
+                "a descriptor's callee id must fit in a byte below the NONE marker");
+  static_assert(sizeof(uintptr_t) != 4 || sizeof(method_descriptor_entry) == 32,
+                "a descriptor entry must be 32 bytes on 32-bit targets (index by shift)");
   // 行から id を求める (行は m_objects の要素。2 の冪の大きさなのでシフトで済む)。
   template <class Row> uint32_t row_id(const Row &row) const {
     return (uint32_t)(&row - m_objects);
@@ -245,6 +272,7 @@ public:
   // 記述子の引きと検査 (index・持ち主の世代・呼び先の version)。通れば項目を返し、通らなければ
   // nullptr と error。コピーしないので trap 内の直接 call はこれを読む。
   // 順序: index / 持ち主の範囲 (BAD) → 無効 (BAD) → 持ち主の世代 (STALE) → 呼び先の version (STALE)。
+  // 呼び先の行を読むのは version の 1 語だけ (種別・窓などは項目の写しを使う)。
   SHIZUKU_HOT const method_descriptor_entry *find_method_descriptor(
       uint32_t caller_id, uint32_t index, uint32_t caller_generation,
       object_error &error) const {
@@ -253,8 +281,8 @@ public:
       return nullptr;
     }
     const auto &desc = m_descriptors[caller_id][index];
-    const object_t *target = __atomic_load_n(&desc.target, __ATOMIC_ACQUIRE);
-    if (target == nullptr) {
+    const uint8_t callee = __atomic_load_n(&desc.callee, __ATOMIC_ACQUIRE);
+    if (callee == DESCRIPTOR_NONE) {
       error = object_error::BAD_DESCRIPTOR;
       return nullptr;
     }
@@ -262,13 +290,52 @@ public:
       error = object_error::STALE_DESCRIPTOR;
       return nullptr;
     }
-    const uint32_t version = row_version(*target);
+    const uint32_t version = row_version(m_objects[callee]);
     if (version == 0 || desc.target_generation != version) {
       error = object_error::STALE_DESCRIPTOR;
       return nullptr;
     }
     error = object_error::OK;
     return &desc;
+  }
+  // 項目から入場の形を作る (前計算の写し。引きの検査は find_method_descriptor が済ませている)。
+  SHIZUKU_HOT callee_view view_of_descriptor(const method_descriptor_entry &desc) const {
+    return callee_view{(uint32_t)desc.callee,       (object_kind)desc.kind,
+                       desc.parent_handler_object,  desc.parent_handler_entry,
+                       desc.instance_generation,    desc.privileged != 0,
+                       desc.region_base,            desc.region_limit};
+  }
+  // 呼び先の行から入場の形を作る (CALL_METHOD と、作成時の写しの元)。
+  template <class Row> callee_view view_of_row(uint32_t id, const Row &row) const {
+    return callee_view{id,
+                       row.kind,
+                       row.parent_handler_object,
+                       row.parent_handler_entry,
+                       instance_generation_of(row),
+                       (row.flags & OBJECT_UNPRIVILEGED) == 0,
+                       row.region_base,
+                       row.region_limit};
+  }
+  // 項目に呼び先の前計算を書き、最後に callee を release で公開する (作成と試験の据付けが共有する)。
+  // 呼び先は created・入口 0 でないことを呼出し側が確かめてあること。
+  void publish_descriptor(method_descriptor_entry &desc, uintptr_t callee_id,
+                          uintptr_t target_entry, uint32_t owner_generation) {
+    const object_t &row = m_objects[callee_id];
+    desc.target_entry = target_entry;
+    desc.parent_handler_entry = row.parent_handler_entry;
+    desc.owner_generation = owner_generation;
+    desc.target_generation = row_version(row);
+    desc.instance_generation = instance_generation_of(row);
+    desc.region_base = row.region_base;
+    desc.region_limit = row.region_limit;
+    desc.kind = (uint8_t)row.kind;
+    desc.parent_handler_object = (uint8_t)row.parent_handler_object;
+    desc.privileged = (row.flags & OBJECT_UNPRIVILEGED) == 0 ? 1 : 0;
+    __atomic_store_n(&desc.callee, (uint8_t)callee_id, __ATOMIC_RELEASE);
+  }
+  // 項目を無効にする (持ち主の差し替え・初期化)。
+  static void invalidate_descriptor(method_descriptor_entry &desc) {
+    __atomic_store_n(&desc.callee, DESCRIPTOR_NONE, __ATOMIC_RELEASE);
   }
   SHIZUKU_HOT bool validate_method_descriptor(uint32_t caller_id,
                                               uint32_t index,
@@ -321,10 +388,6 @@ public:
     request = callee_request(id, (uintptr_t)entry);
     return object_error::OK;
   }
-  // 呼び先の表の 1 行 (読み取り専用)。trap 内の直接 call (CALL_METHOD / CALL_METHOD_DESCRIPTOR) が
-  // call_request を組まずに、台帳段と入口フレームへ行の値を直接書く (種別・世代・親ハンドラ・保護・窓は
-  // callee_request と同じ引き方)。行の型は非公開なので auto で受ける。前提: id < OBJECT_COUNT_T。
-  SHIZUKU_HOT const auto &callee_row(uintptr_t id) const { return m_objects[id]; }
   // method 表の引き (method_call_request と同じ判定と順序: BAD_OBJECT → BAD_METHOD → UNDECLARED_METHOD)。
   // OK のとき入口を返し、そうでなければ nullptr と error。
   SHIZUKU_HOT method_t find_method(uintptr_t id, uintptr_t method, object_error &error) const {

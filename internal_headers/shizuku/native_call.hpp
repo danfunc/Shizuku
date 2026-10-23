@@ -170,18 +170,20 @@ template <class K>
 // 呼び先 id (入口 entry_pc) へ入る (enter_call + do_call の後半)。ヘッダ枠方式 ARCH 専用。
 //   台帳段を via で積み、戻りの床 (unwind floor) を積む前の深さに置く。呼び先の入口フレームは
 //   caller の trap フレームそのもので、入口・戻り口・特権・窓を書き換える (引数は呼び出し側)。
-//   値は call_request に組まず、呼び先の表の行 row から書く場所で直接読む。行は呼び出し側が引いたもの
-//   (id から行のアドレスを作り直さない)。前提: row は m_objects[id] で、id は範囲内・作成済み。
+//   値は call_request に組まず、呼び出し側が作った view (行の値か項目の前計算) から書く場所で直接読む。
+//   この関数は行を引かない。前提: view.id は範囲内・作成済み。
 //   入れなかったとき (BAD_REQUEST / NO_STACK) は何も書かない。
-template <class K, class KObj, class Row>
+// 入場の本体。呼び先の形 (view: 種別・親ハンドラ・窓・特権・instance 世代) は CALL_METHOD が行から、
+// 方法記述子の直接 call が項目の前計算から渡す。どちらも同じ書き出し (台帳段・入口フレーム) になる。
+template <class K, class KObj>
 [[gnu::always_inline]] inline kernel_error enter_in_place(
-    K &kernel, typename K::THREAD &thread, typename K::CONTEXT &context, KObj &kobj,
-    uint32_t id, const Row &row, uintptr_t entry_pc, uint8_t via) {
+    K &kernel, typename K::THREAD &thread, typename K::CONTEXT &context,
+    const typename KObj::callee_view &view, uintptr_t entry_pc, uint8_t via) {
   using A = typename K::ARCH;
   if constexpr (arch_call_in_place<A>()) {
     auto &stack = thread.call_stack;
     // ★偽装防止: 一般の呼び先が KERNEL_OBJECT 種別や root ハンドラの ID を名乗ることは拒否する。
-    if (row.kind == object_kind::KERNEL_OBJECT || id == kernel.svc_handler_object())
+    if (view.kind == object_kind::KERNEL_OBJECT || view.id == kernel.svc_handler_object())
       return kernel_error::BAD_REQUEST;
     if (stack.call_count >= KObj::MAX_DEPTH)
       return kernel_error::NO_STACK;
@@ -195,13 +197,13 @@ template <class K, class KObj, class Row>
     // 戻るときの caller の再開点 (pc・sp・特権・窓) と、ひとつ外側の call 段への鎖 (prev_call)。
     // user stack のヘッダは書かない。current / caller の識別は call 段の列から導く (call_top だけ更新)。
     auto &entry = thread.ledger[depth];
-    entry.object = id;
-    entry.handler_object = row.parent_handler_object;
-    entry.handler_entry = row.parent_handler_entry;
-    entry.kind = (uint8_t)row.kind;
+    entry.object = view.id;
+    entry.handler_object = view.parent_handler_object;
+    entry.handler_entry = view.parent_handler_entry;
+    entry.kind = (uint8_t)view.kind;
     entry.via = via;
     entry.unwind_floor = (uint16_t)depth;
-    entry.generation = kobj.instance_generation_of(row);
+    entry.generation = view.instance_generation;
     entry.ret_pc = frame.mepc;
     entry.ret_sp = A::call_return_sp(context);
     entry.ret_region_base = context.region_base;
@@ -224,19 +226,19 @@ template <class K, class KObj, class Row>
     header->privileged = context.privileged ? 1 : 0;
     stack.top = reinterpret_cast<uintptr_t>(header);
     stack.depth = depth + 1;
-    thread.ledger[depth] = {id, row.parent_handler_object, row.parent_handler_entry,
-                            (uint8_t)row.kind, via, (uint16_t)depth};
+    thread.ledger[depth] = {view.id, view.parent_handler_object, view.parent_handler_entry,
+                            (uint8_t)view.kind, via, (uint16_t)depth};
     const uint32_t count = stack.call_count;
     stack.caller_object = count == 0 ? thread.base_object : stack.current_call_object;
     stack.caller_generation =
         count == 0 ? stack.base_object_generation : stack.current_call_generation;
-    stack.current_call_object = id;
-    stack.current_call_generation = kobj.instance_generation_of(row);
+    stack.current_call_object = view.id;
+    stack.current_call_generation = view.instance_generation;
     stack.call_count = count + 1;
     A::set_entry(frame, entry_pc, A::return_stub());
 #endif
-    A::set_priv(context, (row.flags & OBJECT_UNPRIVILEGED) == 0);
-    A::set_region_window(context, row.region_base, row.region_limit);
+    A::set_priv(context, view.privileged);
+    A::set_region_window(context, view.region_base, view.region_limit);
     return kernel_error::OK;
   } else {
     return kernel_error::BAD_REQUEST;
@@ -267,8 +269,9 @@ template <class K, class KObj>
       return;
     }
     const uintptr_t argument = A::arg(frame, 3);
-    const kernel_error entered = enter_in_place(kernel, thread, context, kobj, (uint32_t)id, *row,
-                                                (uintptr_t)entry, K::LEDGER_CALL);
+    const kernel_error entered = enter_in_place<K, KObj>(
+        kernel, thread, context, kobj.view_of_row((uint32_t)id, *row), (uintptr_t)entry,
+        K::LEDGER_CALL);
     if (entered != kernel_error::OK) {
       A::set_result(frame, (uintptr_t)(entered == kernel_error::NO_STACK
                                            ? object_error::NO_STACK
@@ -284,7 +287,8 @@ template <class K, class KObj>
 
 // CALL_METHOD_DESCRIPTOR (33): a1 = 記述子の index, a2..a7 = 呼び先の引数 6 個 (a0..a5 へ渡る)。
 //   記述子の引きと呼び先の読み出し・台帳段の積みは表の錠の中 (区間は短く、syscall を含まない)。
-//   項目は呼び先の行へのポインタを持つので、object 表の行を id から引く乗算は無い。
+//   項目は呼び先の前計算 (入口・種別・親・窓・特権・instance 世代) を持つので、行を引かず、表は [持ち主][index]
+//   の 32 バイト項目をシフトで引く。
 template <class K, class KObj>
 [[gnu::always_inline]] inline void call_descriptor_in_place(K &kernel,
                                                             typename K::THREAD &thread,
@@ -304,12 +308,10 @@ template <class K, class KObj>
       A::set_result(frame, (uintptr_t)error, 0);
       return;
     }
-    // 呼び先の行は項目が持つポインタ (行を id から引き直さない)。id は行の位置から求める (シフト)。
-    // 錠の中で読む。種別・親ハンドラ・特権・窓・instance 世代は行から呼出し時に読む (enter_in_place)。
-    const auto &row = *desc->target;
-    const kernel_error entered =
-        enter_in_place(kernel, thread, context, kobj, kobj.row_id(row), row, desc->target_entry,
-                       K::LEDGER_DESCRIPTOR_CALL);
+    // 入場の形は項目の前計算から作る (呼び先の行を引かない)。錠の中で読む (照合と写しを同じ区間で読む)。
+    const kernel_error entered = enter_in_place<K, KObj>(
+        kernel, thread, context, kobj.view_of_descriptor(*desc), desc->target_entry,
+        K::LEDGER_DESCRIPTOR_CALL);
     kobj.table_unlock_inline();
     if (entered != kernel_error::OK) {
       A::set_result(frame, (uintptr_t)(entered == kernel_error::NO_STACK

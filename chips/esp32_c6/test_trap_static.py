@@ -159,19 +159,51 @@ entry = (root / 'internal_headers/shizuku/method_entry.hpp').read_text()
 assert '__has_attribute(zero_call_used_regs)' in entry and 'zero_call_used_regs("used-gpr")' in entry
 assert 'defined(__riscv)' in entry and '#  define SHIZUKU_ZERO_USED_REGS\n' in entry
 
-# 記述子の呼出し経路には object 表の行を id で引く式 (id × 行の大きさの乗算) が無い: 項目 (16 バイト) は
-# 呼び先の行へのポインタを持ち、表は [持ち主][index] の平坦配列、行は 128 バイトに揃えて id からシフトで引く。
+# 記述子の呼出し経路は「index → 世代照合 → 前計算の写しで入る」だけ。項目 (32 バイト) は呼び先の入口・親の入口・
+# 種別・親・特権・窓・instance 世代と、照合用の持ち主と呼び先の世代を写しで持つ。表は [持ち主][index] の平坦配列で、
+# 行は 128 バイトに揃えて id からシフトで引く。呼出しが行を引くのは世代照合の version の 1 語だけ。
 ko = (root / 'internal_headers/shizuku/templates/kernel_object.hpp').read_text()
 assert 'static constexpr uintptr_t OBJECT_ROW_ALIGN = 128;' in ko
 assert 'struct alignas(OBJECT_ROW_ALIGN) object_t' in ko
-assert 'sizeof(object_t) == OBJECT_ROW_ALIGN' in ko and 'sizeof(method_descriptor_entry) == 16' in ko
+assert 'sizeof(object_t) == OBJECT_ROW_ALIGN' in ko and 'sizeof(method_descriptor_entry) == 32' in ko
 assert 'method_descriptor_entry m_descriptors[OBJECT_COUNT][METHOD_DESCRIPTOR_CAPACITY];' in ko
+# 項目は前計算の写しを持つ (行への生ポインタは持たない)。
+entry_struct = ko.split('struct method_descriptor_entry {')[1].split('};')[0]
+for field in ('target_entry', 'parent_handler_entry', 'owner_generation', 'target_generation',
+              'instance_generation', 'region_base', 'region_limit', 'callee', 'kind',
+              'parent_handler_object', 'privileged'):
+    assert f' {field};' in entry_struct, field
+assert 'const object_t *target' not in entry_struct
+assert 'static constexpr uint8_t DESCRIPTOR_NONE = 0xFF;' in ko
 find_desc = ko.split('SHIZUKU_HOT const method_descriptor_entry *find_method_descriptor(')[1].split(
-    'SHIZUKU_HOT bool validate_method_descriptor')[0]
-assert 'm_objects[' not in find_desc and 'm_descriptors[caller_id][index]' in find_desc
+    'SHIZUKU_HOT callee_view view_of_descriptor')[0]
+assert 'm_descriptors[caller_id][index]' in find_desc
+assert find_desc.count('m_objects[') == 1 and 'm_objects[callee]' in find_desc  # 照合の version の 1 語だけ
+assert 'desc.callee, __ATOMIC_ACQUIRE' in find_desc or '&desc.callee, __ATOMIC_ACQUIRE' in find_desc
+view_desc = ko.split('SHIZUKU_HOT callee_view view_of_descriptor(')[1].split('// 呼び先の行から入場の形')[0]
+assert 'm_objects[' not in view_desc and 'row' not in view_desc
+pub = ko.split('void publish_descriptor(')[1].split('// 項目を無効にする')[0]
+assert '__atomic_store_n(&desc.callee, (uint8_t)callee_id, __ATOMIC_RELEASE)' in pub  # 最後に公開する
+assert pub.index('__atomic_store_n') > pub.index('desc.privileged')
 nc = (root / 'internal_headers/shizuku/native_call.hpp').read_text()
 call_desc = nc.split('inline void call_descriptor_in_place(')[1].split('// EXIT_METHOD (2, Forward')[0]
-assert 'callee_row' not in call_desc and 'kobj.row_id(row)' in call_desc
+assert 'row' not in call_desc and 'kobj.row_id' not in call_desc and 'callee_row' not in call_desc
+assert 'enter_in_place<K, KObj>(' in call_desc and 'kobj.view_of_descriptor(*desc)' in call_desc
+enter_body = nc.split('inline kernel_error enter_in_place(')[1].split('// CALL_METHOD (4)')[0]
+assert 'row.' not in enter_body and 'kobj.' not in enter_body  # 入場は形 (view) だけを読む
+
+# 行を書き換える操作のうち、写しの元になる値を変えるものは必ず呼び先の version を上げる (項目を STALE にする)。
+# 上げるのは生成・差し替え・EXPORT_METHOD・GRANT_REGION の 4 つと init。SET_OBJECT_AFFINITY は版を上げない。
+hd = (root / 'source/kernel_object/handler.cpp').read_text()
+assert 'publish_descriptor(m_descriptors[caller_id][free_slot], target_id,' in hd
+assert hd.count('invalidate_descriptor(d);') == 2  # init と差し替え
+assert 'm_objects[target].generation, generation + 1u' in hd  # GRANT_REGION
+assert 'm_objects[self].generation, generation + 1u' in hd  # EXPORT_METHOD
+assert 'm_objects[id].generation,\n                             current_generation + 1u' in hd or \
+       'current_generation + 1u' in hd  # 生成・差し替え
+aff = hd.split('uintptr_t KERNEL_OBJECT::set_object_affinity(uintptr_t id, uintptr_t cores,')[1].split(
+    'template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::object_region_base')[0]
+assert 'generation' not in aff  # アフィニティの書き換えは版を上げない
 
 boot_src = (root / 'modules/esp_idf_support/c6/early_boot.cpp').read_text()
 assert 'shizuku_c6_thread1_diag' in boot_src
@@ -181,5 +213,24 @@ assert 'c6_idf_ble_freertos_policy' in boot_src
 assert 'set_irq_dispatch_hooks' in boot_src
 assert 'set_irq_dispatch_hooks' in api_src
 assert 'make_irq_dispatch_hooks' in api_src
+
+# 計測の区間に入る caller/callee を C6 だけ .iram1 へ置く (SHIZUKU_HOT)。
+# chip.hpp は rv32.hpp (経由で rv32_abi.hpp) より前に SHIZUKU_HOT を定義しないと stub が空に展開される。
+chip_src = (root / 'chips/esp32_c6/chip.hpp').read_text()
+assert chip_src.index('#define SHIZUKU_HOT ') < chip_src.index('#include "arch/riscv/rv32.hpp"')
+assert 'section(".iram1." SHIZUKU_CHIP_STR(__COUNTER__))' in chip_src
+abi_src = (root / 'internal_headers/shizuku/rv32_abi.hpp').read_text()
+# テンプレートの入口 stub には付けない (__COUNTER__ が 1 回しか評価されず section type conflict になる)。
+assert 'template <auto F> [[gnu::naked, gnu::used]] void method_stub_body()' in abi_src
+assert 'SHIZUKU_HOT' not in abi_src.split('method_stub_body()')[0].rsplit('template <auto F>', 1)[-1]
+trap_src = (root / 'chips/esp32_c6/trap.cpp').read_text()
+assert 'SHIZUKU_HOT uint32_t plic_vector_mode::cycle_counter_read()' in trap_src
+call_src = (root / 'source/selftest/call_cost.cpp').read_text()
+for fn in ['cost_leaf', 'cost_nest', 'cost_dnest', 'cost_owner']:
+    assert re.search(r'SHIZUKU_HOT SHIZUKU_ZERO_USED_REGS uintptr_t ' + fn + r'\(', call_src), fn
+for fn in ['plain_callee', 'op_nothing', 'op_direct', 'op_svc', 'op_call', 'op_call2', 'op_desc1', 'op_desc2']:
+    assert re.search(r'SHIZUKU_HOT __attribute__\(\(noinline\)\) uintptr_t ' + fn + r'\(', call_src), fn
+assert 'SHIZUKU_HOT __attribute__((noinline)) stat_t measure(' in call_src
+assert '#include "shizuku/hot.hpp"' in call_src
 
 print('PASS: frame offsets, full saves/restores, CSR capture, vector slots, mscratch nesting, ring retention, timer/thread1 invariants')

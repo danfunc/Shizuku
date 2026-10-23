@@ -30,6 +30,8 @@ inline constexpr unsigned CALL_HEADER_BYTES = 32;
 //    - tp は触らない: メソッドは caller と同じスレッドで走るので、スレッドの TLS を指す
 //      caller の tp がそのまま正しい (オブジェクト単位の TLS は無い)。
 #if defined(__riscv)
+// ★SHIZUKU_HOT は付けない: __COUNTER__ がテンプレート定義時に 1 回しか評価されず、全実体化が同じ
+//   .iram1.N に入って COMDAT と内部リンケージの実体化が section type conflict になる。stub は数命令で flash のまま。
 template <auto F> [[gnu::naked, gnu::used]] void method_stub_body() {
   asm volatile(
       ".option push\n"
