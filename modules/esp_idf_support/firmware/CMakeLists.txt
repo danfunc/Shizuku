@@ -41,7 +41,21 @@ foreach(lang C CXX)
   set(CMAKE_${lang}_LINK_LIBRARY_USING_WHOLE_ARCHIVE_SUPPORTED TRUE)
 endforeach()
 
+if(NOT DEFINED SHIZUKU_C6_UMODE)
+  set(SHIZUKU_C6_UMODE on)
+endif()
+if(SHIZUKU_C6_UMODE STREQUAL "on")
+  if(NOT IDF_TARGET STREQUAL "esp32c6")
+    message(FATAL_ERROR "SHIZUKU_C6_UMODE=on は esp32c6 のみ (IDF_TARGET=${IDF_TARGET})")
+  endif()
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+
+if(SHIZUKU_C6_UMODE STREQUAL "on")
+  idf_build_set_property(BOOTLOADER_EXTRA_COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/components" APPEND)
+  message(STATUS "Shizuku C6 U-mode: ON (shizuku_c6_region を bootloader へ登録。app 側は project components/ で発見)")
+endif()
 project(shizuku_${IDF_TARGET})
 
 if(NOT "${IDF_VER}" MATCHES "^v6\\.1")

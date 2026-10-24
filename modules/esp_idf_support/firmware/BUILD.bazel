@@ -20,6 +20,8 @@ exports_files([
     "kernel_lto.sh",
     "build_ota_profile.sh",
     "collect_ota_artifacts.py",
+    "components/shizuku_c6_region/CMakeLists.txt",
+    "components/shizuku_c6_region/shizuku_c6_region.c",
 ])
 
 sh_test(
@@ -50,6 +52,15 @@ genrule(
     target_compatible_with = ["@platforms//cpu:riscv32"],
 )
 
+genrule(
+    name = "c6_umode_flag",
+    outs = ["c6_umode.txt"],
+    cmd = select({
+        "//configs:c6_umode_enabled": "echo on > $@",
+        "//conditions:default": "echo off > $@",
+    }),
+)
+
 # ESP32-C6: Bazel が作る libshizuku_kernel.a を ESP-IDF v6.1 の最終リンクへ渡し、
 # .bin を出すターゲット (idf.py build の薄いラッパ)。
 #   bazelisk build --config=esp32c6 //modules/esp_idf_support/firmware:esp32c6
@@ -58,10 +69,17 @@ genrule(
     srcs = select({
         ":kernel_lto": [":shizuku_kernel_lto"],
         "//conditions:default": ["//:shizuku_kernel"],
-    }) + [":esp32c6_project"],
-    outs = ["shizuku_esp32c6.bin"],
+    }) + [
+        ":esp32c6_project",
+        ":c6_umode_flag",
+    ],
+    outs = [
+        "shizuku_esp32c6.bin",
+        "shizuku_esp32c6.elf",
+        "shizuku_esp32c6.map",
+    ],
     cmd = "ARCHIVE=; for f in $(SRCS); do case $$f in *libshizuku_kernel.a|*libshizuku_kernel_lto.a) ARCHIVE=$$f;; esac; done;" +
-          " $(location build.sh) $$ARCHIVE $@ esp-15.2.0_20251204",
+          " SHIZUKU_C6_UMODE=$$(cat $(location :c6_umode_flag)) $(location build.sh) $$ARCHIVE $(location shizuku_esp32c6.bin) esp-15.2.0_20251204 esp32c6 \"\" $(location shizuku_esp32c6.elf) $(location shizuku_esp32c6.map)",
     tools = ["build.sh"],
     tags = [
         "local",
@@ -114,9 +132,13 @@ genrule(
     srcs = select({
         ":kernel_lto": [":shizuku_kernel_lto"],
         "//conditions:default": ["//:shizuku_kernel"],
-    }) + [":esp32c6_project"],
+    }) + [
+        ":esp32c6_project",
+        ":c6_umode_flag",
+    ],
     outs = ["shizuku_esp32c6_ble.bin", "shizuku_esp32c6_ble.elf", "shizuku_esp32c6_ble.map"],
     cmd = "ARCHIVE=; for f in $(SRCS); do case $$f in *libshizuku_kernel.a|*libshizuku_kernel_lto.a) ARCHIVE=$$f;; esac; done;" +
+          " SHIZUKU_C6_UMODE=$$(cat $(location :c6_umode_flag)) " +
           select({
               ":esp_ble_prefer_1m_phy": "SHIZUKU_ESP_BLE_PREFER_1M_PHY=1 ",
               "//conditions:default": "SHIZUKU_ESP_BLE_PREFER_1M_PHY=0 ",
@@ -129,7 +151,7 @@ genrule(
 
 filegroup(
     name = "esp32c6_project",
-    srcs = glob(["CMakeLists.txt", "sdkconfig.defaults", "sdkconfig.defaults.esp32c5", "sdkconfig.defaults.esp32c5.ble", "sdkconfig.defaults.esp32c6.ble", "esp32c6_ota_defaults.conf", "partitions_esp32c6_ota.csv", "main/*"]) + [
+    srcs = glob(["CMakeLists.txt", "sdkconfig.defaults", "sdkconfig.defaults.esp32c5", "sdkconfig.defaults.esp32c5.ble", "sdkconfig.defaults.esp32c6.ble", "esp32c6_ota_defaults.conf", "partitions_esp32c6_ota.csv", "main/*", "components/**"]) + [
         "//modules/esp_idf_support/radio:c5_intr_alloc.cpp",
         "//modules/esp_idf_support/radio:c6_intr_alloc.cpp",
         "//modules/esp_idf_support/radio:intr_alloc_impl.inc",

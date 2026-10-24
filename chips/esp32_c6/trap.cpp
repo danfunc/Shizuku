@@ -7,6 +7,7 @@
 #include "chips/esp32_c6/systimer.hpp"
 #include "chips/esp32_c6/trap_api.hpp"
 #include "chips/esp32_c6/stop_capture.hpp"
+#include "chips/esp32_c6/pmp_c6.hpp"
 
 #include <array>
 #include <cstddef>
@@ -38,6 +39,63 @@ volatile uint32_t shizuku_c6_boot_marker_magic;
 // SYSTIMER IRQ count, max IRQ depth, pend/switch count, last oneshot ticks,
 // last IRQ mcause, last mie readback during init/IRQ setup, pend_context_switch calls.
 volatile uint32_t shizuku_c6_timer_diag[7];
+// 段1 U-mode / PMP 診断レコード:
+// [0]=0x802 状態 (0:未実行, 1:成功, 2:Illegal Instruction trap),
+// [1]=0x802 読取サイクル値 (成功時),
+// [2]=U-mode ecall 通過数,
+// [3]=PMP 違反検出数 (kernel stack 読取試行時の fault 捕捉),
+// [4]=最後の fault mcause, [5]=最後の fault mepc, [6]=最後の fault mtval,
+// [7]=Caller stack PMP 違反検出数 (caller stack 読取試行時の fault 捕捉),
+// [8]=kernel stack store 違反数, [9]=caller stack store 違反数, [10]=U code store 違反数,
+// [11]=U stack instruction fetch 違反数, [12]=pmpcfg0 (0x3A0) illegal instruction 捕捉数
+volatile uint32_t shizuku_c6_u_mode_diag[13];
+// 段1 U-mode ecall 記録: 最初の U-mode ecall (mcause 8) の [0]=mcause, [1]=mepc, [2]=mtval。
+volatile uint32_t shizuku_c6_u_ecall_diag[3];
+#if defined(SHIZUKU_C6_UMODE)
+// app の C wrapper (components/shizuku_c6_region) が PMA 0-15 を読み直した後に書く準備完了マーカー (0 = 未設定)。
+extern volatile uint32_t shizuku_c6_stage1_pma_ready;
+#endif
+volatile uintptr_t g_c6_probe_0x802_pc;
+volatile uintptr_t g_c6_probe_pmp_fault_pc;
+volatile uintptr_t g_c6_probe_caller_stack_fault_pc;
+volatile uintptr_t g_c6_probe_combo_0x802_pc;
+volatile uintptr_t g_c6_probe_combo_pmp_pc;
+#if defined(SHIZUKU_C6_UMODE)
+volatile uintptr_t g_c6_probe_ustore_kstack_pc;
+volatile uintptr_t g_c6_probe_ustore_caller_pc;
+volatile uintptr_t g_c6_probe_ustore_code_pc;
+volatile uintptr_t g_c6_probe_ufetch_target;
+volatile uintptr_t g_c6_probe_upmpcfg_pc;
+volatile uintptr_t g_c6_probe_mstore_iram_pc;
+volatile uintptr_t g_c6_probe_mfetch_target;
+volatile uint32_t shizuku_c6_m_pma_diag[2];
+#endif
+using c6_stage1_object_bounds = shizuku::chips::esp32_c6::c6_stage1_object_bounds;
+c6_stage1_object_bounds g_c6_stage1_u_bounds;
+
+bool shizuku_c6_is_authorized_u_object(uint32_t owner_id, uint32_t current_obj) {
+  return shizuku::chips::esp32_c6::is_authorized_u_object(
+      g_c6_stage1_u_bounds.owner_id, owner_id, current_obj);
+}
+bool shizuku_c6_is_kstack_address(uintptr_t addr) {
+  return shizuku::chips::esp32_c6::is_kstack_range(
+      addr, reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack), sizeof(shizuku_c6_kernel_stack));
+}
+uintptr_t shizuku_c6_kstack_limit(void) {
+  return shizuku::chips::esp32_c6::compute_kstack_limit(
+      reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack), shizuku::chips::esp32_c6::KSTACK_GUARD_BYTES);
+}
+uintptr_t shizuku_c6_get_m_handler_stack(uintptr_t current_sp, uintptr_t frame_sp) {
+  return shizuku::chips::esp32_c6::get_m_handler_stack(
+      current_sp,
+      g_c6_stage1_u_bounds.stack_base,
+      g_c6_stage1_u_bounds.stack_limit,
+      frame_sp,
+      reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack),
+      sizeof(shizuku_c6_kernel_stack),
+      shizuku::chips::esp32_c6::KSTACK_GUARD_BYTES);
+}
+bool shizuku_c6_handle_fault(arch::exception_frame_t *frame);
 // OpenOCD rows: source, cpu_irq, handler, arg, enabled, dispatch_count, flags,
 // INTMTX readback, PLIC enable/type bits, priority, threshold, mie bit, pending,
 // last mstatus.MPIE observed in this ISR (UINT32_MAX means never dispatched).
@@ -334,16 +392,133 @@ SHIZUKU_HOT void frame_to_context(arch::exception_frame_t &f, arch::context_t &c
   c.privileged = (f.mstatus & RV32_MSTATUS_MPP) == RV32_MSTATUS_MPP;
 }
 SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
-  // Capture the untrusted context before dereferencing its saved SP.
+  auto &f = *c.sp;
+  // Threads always resume with interrupts enabled; only the kernel runs with MIE=0.
+  f.mstatus = ((f.mstatus & ~RV32_MSTATUS_MPP) | (c.privileged ? RV32_MSTATUS_MPP : 0)) | RV32_MSTATUS_MPIE;
+  // 段1: U-mode 復帰時は PMP allow-list を適用し、カーネルスタック/復帰情報を隔離。
   if (!c.privileged) {
+#if !defined(SHIZUKU_C6_UMODE)
     active_context = &c;
     active_frame = c.sp;
     active_stop_phase = 0xE004u;
     stop(0xE004);
+#else
+    auto &kernel = shizuku::kernel_instance;
+    // PMA 規則 (app の wrapper が設定) が有効であることを要求する。
+    if (!shizuku::chips::esp32_c6::pma_c6::ready_marker_ok(shizuku_c6_stage1_pma_ready)) {
+      active_context = &c;
+      active_frame = c.sp;
+      active_stop_phase = 0xE004u;
+      stop(0xE004); // PMA ready marker 欠落 → fail-closed
+    }
+    const uint32_t cur_obj = kernel.current_thread().current_object();
+    if (!shizuku_c6_is_authorized_u_object(g_c6_stage1_u_bounds.owner_id, cur_obj)) {
+      active_context = &c;
+      active_frame = c.sp;
+      active_stop_phase = 0xE004u;
+      stop(0xE004); // 未認可または未知の U object
+    }
+
+    const uintptr_t code_base = g_c6_stage1_u_bounds.code_base;
+    const uintptr_t code_limit = g_c6_stage1_u_bounds.code_limit;
+    const uintptr_t data_base = g_c6_stage1_u_bounds.data_base;
+    const uintptr_t data_limit = g_c6_stage1_u_bounds.data_limit;
+    const uintptr_t stack_base = g_c6_stage1_u_bounds.stack_base;
+    const uintptr_t stack_limit = g_c6_stage1_u_bounds.stack_limit;
+    const uintptr_t trampoline = g_c6_stage1_u_bounds.u_return_trampoline;
+
+    // mepc がオブジェクト所有 code 範囲内にあることを厳格検査
+    if (code_base == 0 || code_limit <= code_base || f.mepc < code_base || f.mepc >= code_limit) {
+      active_context = &c;
+      active_frame = c.sp;
+      active_stop_phase = 0xE004u;
+      stop(0xE004);
+    }
+
+    // U return trampoline がオブジェクト所有 code 範囲内にあることを厳格検査
+    if (trampoline < code_base || trampoline >= code_limit) {
+      active_context = &c;
+      active_frame = c.sp;
+      active_stop_phase = 0xE004u;
+      stop(0xE004);
+    }
+
+    // 戻り先 ra が kernel IRAM の return_stub の場合、U 所有の return trampoline に切替
+    if (f.ra == arch::return_stub()) {
+      f.ra = trampoline;
+    }
+
+    // スタック境界の厳格検査
+    if (stack_base == 0 || stack_limit <= stack_base) {
+      active_context = &c;
+      active_frame = c.sp;
+      active_stop_phase = 0xE004u;
+      stop(0xE004);
+    }
+
+    // active SP (f.reserved0) の設定および検証:
+    if (f.reserved0 < stack_base || f.reserved0 > stack_limit) {
+      f.reserved0 = stack_limit;
+    }
+
+    // U-mode 走行中の mscratch に設定する trusted kernel stack cursor:
+    const uintptr_t kstack_top = reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack + sizeof(shizuku_c6_kernel_stack));
+    f.reserved1 = kstack_top;
+
+    // PMA ready marker は U が読書きできない範囲になければならない
+    {
+      const uintptr_t mk_lo = reinterpret_cast<uintptr_t>(&shizuku_c6_stage1_pma_ready);
+      const uintptr_t mk_hi = mk_lo + sizeof(shizuku_c6_stage1_pma_ready);
+      if (shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(code_base, code_limit, mk_lo, mk_hi) ||
+          shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(stack_base, stack_limit, mk_lo, mk_hi) ||
+          (data_limit != 0 && shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(data_base, data_limit, mk_lo, mk_hi)) ||
+          (c.region_limit != 0 && shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(c.region_base, c.region_limit, mk_lo, mk_hi))) {
+        active_context = &c;
+        active_frame = c.sp;
+        active_stop_phase = 0xE004u;
+        stop(0xE004);
+      }
+    }
+
+    shizuku::chips::esp32_c6::pmp_c6_config cfg{
+      .code_base = code_base,
+      .code_limit = code_limit,
+      .data_base = data_base,
+      .data_limit = data_limit,
+      .stack_base = stack_base,
+      .stack_limit = stack_limit,
+      .region_base = c.region_base,
+      .region_limit = c.region_limit
+    };
+
+    const uintptr_t kstack_start = reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack);
+    if (!shizuku::chips::esp32_c6::pmp_controller::apply(cfg, kstack_start, sizeof(shizuku_c6_kernel_stack))) {
+      active_context = &c;
+      active_frame = c.sp;
+      active_stop_phase = 0xE004u;
+      stop(0xE004);
+    }
+#endif
+  } else {
+    // M-mode への復帰:
+    f.reserved1 = 0;
+#if defined(SHIZUKU_C6_UMODE)
+    if (!shizuku::chips::esp32_c6::pmp_controller::disable()) {
+      active_context = &c;
+      active_frame = c.sp;
+      active_stop_phase = 0xE004u;
+      stop(0xE004);
+    }
+    const uintptr_t new_sp = shizuku_c6_get_m_handler_stack(f.reserved0, reinterpret_cast<uintptr_t>(c.sp));
+    if (new_sp == 0) {
+      active_context = &c;
+      active_frame = c.sp;
+      active_stop_phase = 0xE004u;
+      stop(0xE004);
+    }
+    f.reserved0 = new_sp;
+#endif
   }
-  auto &f = *c.sp;
-  // Threads always resume with interrupts enabled; only the kernel runs with MIE=0.
-  f.mstatus = ((f.mstatus & ~RV32_MSTATUS_MPP) | (c.privileged ? RV32_MSTATUS_MPP : 0)) | RV32_MSTATUS_MPIE;
 }
 }
 extern "C" void shizuku_c6_mark_boot_phase(uint32_t phase) {
@@ -431,7 +606,18 @@ SHIZUKU_HOT inline arch::exception_frame_t *ecall_run(arch::exception_frame_t *f
   shizuku_c6_trap_diag[3] = frame->mtval;
   // ECALL from inside the kernel must never overwrite the current thread.
   if (shizuku_c6_trap_depth != 1) stop(0xE003);
+#if !defined(SHIZUKU_C6_UMODE)
   if ((frame->mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) stop(0xE004);
+#else
+  if ((frame->mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) {
+    if (shizuku_c6_u_mode_diag[2] == 0) {
+      shizuku_c6_u_ecall_diag[0] = frame->mcause;
+      shizuku_c6_u_ecall_diag[1] = frame->mepc;
+      shizuku_c6_u_ecall_diag[2] = frame->mtval;
+    }
+    shizuku_c6_u_mode_diag[2] = shizuku_c6_u_mode_diag[2] + 1;
+  }
+#endif
   auto &kernel = shizuku::kernel_instance;
   auto *context = kernel.current_context();
   const auto *const entered = context;
@@ -488,11 +674,17 @@ __attribute__((noinline, noipa)) arch::exception_frame_t *ecall_fault_unprivileg
   stop(0xE004);
 }
 // 戻る前の仕上げ。Threads always resume with interrupts enabled; only the kernel runs with MIE=0.
-// 非特権の呼び先は M-only の C6 では復帰できない (context_to_frame と同じ停止、0xE004)。
 [[gnu::always_inline]] inline arch::exception_frame_t *ecall_finish(arch::context_t *context) {
   auto *result = context->sp;
+#if !defined(SHIZUKU_C6_UMODE)
   if (__builtin_expect(!context->privileged, 0)) return ecall_fault_unprivileged(context);
-  result->mstatus |= RV32_MSTATUS_MPP | RV32_MSTATUS_MPIE;
+#endif
+  if (__builtin_expect(context->privileged, 1)) {
+    result->mstatus |= RV32_MSTATUS_MPP | RV32_MSTATUS_MPIE;
+  } else {
+    result->mstatus = (result->mstatus & ~RV32_MSTATUS_MPP) | RV32_MSTATUS_MPIE;
+    context_to_frame(*context);
+  }
   return result;
 }
 // 本体が kobj へ回した (スレッドの最外のメソッドが戻る・起点スレッドの YIELD): dispatch 段を積んで
@@ -600,6 +792,100 @@ static_assert(shizuku::ports::riscv::ecall_table_consistent(
                     return a != nullptr && a->mode == shizuku::svc_mode::handler;
                   }),
               "shizuku_rv32_ecall_table must match svc_attributes (mode == handler)");
+bool shizuku_c6_handle_fault(arch::exception_frame_t *frame) {
+#if !defined(SHIZUKU_C6_UMODE)
+  (void)frame;
+  return false;
+#else
+  shizuku_c6_u_mode_diag[4] = frame->mcause;
+  shizuku_c6_u_mode_diag[5] = frame->mepc;
+  shizuku_c6_u_mode_diag[6] = frame->mtval;
+
+  // 1. 0x802 読み取りプローブ時の Illegal Instruction (mcause == 2) 捕捉
+  if (frame->mcause == 2) {
+    if (g_c6_probe_0x802_pc != 0 && frame->mepc == g_c6_probe_0x802_pc) {
+      shizuku_c6_u_mode_diag[0] = 2; // Illegal instruction
+      frame->a0 = 0xFFFFFFFFu;      // エラーマーカー返却
+      frame->mepc += 4;             // 次命令へスキップ
+      return true;
+    }
+    if (g_c6_probe_combo_0x802_pc != 0 && frame->mepc == g_c6_probe_combo_0x802_pc) {
+      shizuku_c6_u_mode_diag[0] = 2; // Combo 内の Illegal instruction
+      frame->mepc += 4;             // 次命令へスキップ
+      return true;
+    }
+    if (g_c6_probe_upmpcfg_pc != 0 && frame->mepc == g_c6_probe_upmpcfg_pc) {
+      shizuku_c6_u_mode_diag[12] = shizuku_c6_u_mode_diag[12] + 1;
+      frame->a0 = 0xE00Eu;
+      frame->mepc += 4;
+      return true;
+    }
+  }
+
+  // 2. Load access fault (mcause == 5)
+  if (frame->mcause == 5) {
+    if (g_c6_probe_pmp_fault_pc != 0 && frame->mepc == g_c6_probe_pmp_fault_pc) {
+      shizuku_c6_u_mode_diag[3] = shizuku_c6_u_mode_diag[3] + 1;
+      frame->a0 = 0xDEADBEEFu;
+      frame->mepc += 4;
+      return true;
+    }
+    if (g_c6_probe_caller_stack_fault_pc != 0 && frame->mepc == g_c6_probe_caller_stack_fault_pc) {
+      shizuku_c6_u_mode_diag[7] = shizuku_c6_u_mode_diag[7] + 1;
+      frame->a0 = 0xCAFEBABEu;
+      frame->mepc += 4;
+      return true;
+    }
+  }
+
+  // 3. Store/AMO access fault (mcause == 7)
+  if (frame->mcause == 7) {
+    if (g_c6_probe_mstore_iram_pc != 0 && frame->mepc == g_c6_probe_mstore_iram_pc) {
+      shizuku_c6_m_pma_diag[0] = shizuku_c6_m_pma_diag[0] + 1;
+      frame->a0 = 0xE00Cu;
+      frame->mepc += 4;
+      return true;
+    }
+    if (g_c6_probe_ustore_kstack_pc != 0 && frame->mepc == g_c6_probe_ustore_kstack_pc) {
+      shizuku_c6_u_mode_diag[8] = shizuku_c6_u_mode_diag[8] + 1;
+      frame->a0 = 0xE008u;
+      frame->mepc += 4;
+      return true;
+    }
+    if (g_c6_probe_ustore_caller_pc != 0 && frame->mepc == g_c6_probe_ustore_caller_pc) {
+      shizuku_c6_u_mode_diag[9] = shizuku_c6_u_mode_diag[9] + 1;
+      frame->a0 = 0xE009u;
+      frame->mepc += 4;
+      return true;
+    }
+    if (g_c6_probe_ustore_code_pc != 0 && frame->mepc == g_c6_probe_ustore_code_pc) {
+      shizuku_c6_u_mode_diag[10] = shizuku_c6_u_mode_diag[10] + 1;
+      frame->a0 = 0xE00Au;
+      frame->mepc += 4;
+      return true;
+    }
+  }
+
+  // 4. Instruction access fault (mcause == 1)
+  if (frame->mcause == 1) {
+    if (g_c6_probe_mfetch_target != 0 && frame->mepc == g_c6_probe_mfetch_target) {
+      shizuku_c6_m_pma_diag[1] = shizuku_c6_m_pma_diag[1] + 1;
+      frame->a0 = 0xE00Du;
+      frame->mepc = frame->ra; // probe 呼出し元へ復帰
+      return true;
+    }
+    if (g_c6_probe_ufetch_target != 0 && frame->mepc == g_c6_probe_ufetch_target) {
+      shizuku_c6_u_mode_diag[11] = shizuku_c6_u_mode_diag[11] + 1;
+      frame->a0 = 0xE00Bu;
+      frame->mepc = frame->ra; // probe 呼出し元へ復帰
+      return true;
+    }
+  }
+
+  return false;
+#endif
+}
+
 extern "C" SHIZUKU_HOT arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch::exception_frame_t *frame) {
   if (shizuku_c6_stack_diag[0] == kStackDiagMagic &&
       shizuku_c6_stack_diag[1] == kStackDiagVersion &&
@@ -618,7 +904,18 @@ extern "C" SHIZUKU_HOT arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch:
   shizuku::ports::riscv::route_trap(*frame, shizuku_c6_irq_depth, [&] {
     // ECALL from inside the kernel must never overwrite the current thread.
     if (shizuku_c6_trap_depth != 1) stop(0xE003);
+#if !defined(SHIZUKU_C6_UMODE)
     if ((frame->mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) stop(0xE004);
+#else
+    if ((frame->mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) {
+      if (shizuku_c6_u_mode_diag[2] == 0) {
+        shizuku_c6_u_ecall_diag[0] = frame->mcause;
+        shizuku_c6_u_ecall_diag[1] = frame->mepc;
+        shizuku_c6_u_ecall_diag[2] = frame->mtval;
+      }
+      shizuku_c6_u_mode_diag[2] = shizuku_c6_u_mode_diag[2] + 1;
+    }
+#endif
     auto &kernel = shizuku::kernel_instance;
     auto *context = kernel.current_context();
     const auto *const entered = context;
@@ -639,7 +936,9 @@ extern "C" SHIZUKU_HOT arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch:
   }, [&] {
     // MIE is clear inside traps, so IRQs cannot nest: depth is exactly 1.
     if (shizuku_c6_trap_depth != 1 || shizuku_c6_irq_depth != 1) stop(0xE009);
+#if !defined(SHIZUKU_C6_UMODE)
     if ((frame->mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) stop(0xE004);
+#endif
     const uint32_t cpu_irq = frame->mcause & 0x7fffffffu;
     if (cpu_irq != c6::TIMER_CPU_INT) {
       const int slot = irq_find_cpu(cpu_irq);
@@ -690,7 +989,11 @@ extern "C" SHIZUKU_HOT arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch:
     context_to_frame(*context);
     result = context->sp;
   }, [&] {
-    // V2 fault recovery requires timer/switch support. Preserve cause and stop.
+    // フォールト処理: 0x802 診断プローブおよび PMP fault 捕捉の処理
+    if (shizuku_c6_handle_fault(frame)) {
+      result = frame;
+      return;
+    }
     active_stop_phase = 0xE002u;
     stop(0xE002);
   });
@@ -809,6 +1112,12 @@ bool plic_vector_mode::current_priv() {
   // The stage-2 runnable domain is M-only; inside a trap report the saved MPP.
   return shizuku_c6_trap_depth == 0 ||
     (active_mstatus & RV32_MSTATUS_MPP) == RV32_MSTATUS_MPP;
+}
+bool plic_vector_mode::is_kstack_address(uintptr_t addr) {
+  return shizuku_c6_is_kstack_address(addr);
+}
+uintptr_t plic_vector_mode::kstack_limit() {
+  return shizuku_c6_kstack_limit();
 }
 
 bool plic_vector_mode::cycle_counter_enable() {

@@ -309,6 +309,11 @@ public:
   }
 
   static uintptr_t stack_limit(const context_t &context) {
+#if defined(SHIZUKU_C6_UMODE)
+    if (IntMode::is_kstack_address(reinterpret_cast<uintptr_t>(context.sp))) {
+      return IntMode::kstack_limit();
+    }
+#endif
     return context.stack_limit;
   }
   // CALL 時に、戻りの dispatch が積む 1 枚ぶんの余白が残るか (dispatch.cpp の
@@ -396,7 +401,12 @@ public:
     frame->a1 = frame->a2 = frame->a3 = frame->a4 = 0;
     frame->mstatus = context.privileged ? RV32_MSTATUS_MPP : 0;
     // MPIE stays clear until the interrupt matrix and timer are owned.
+#if defined(SHIZUKU_C6_UMODE)
+    frame->reserved0 = (stack_top & ~static_cast<uintptr_t>(15));
     context.sp = frame;
+#else
+    context.sp = frame;
+#endif
   }
 
   // タイマ・割込み方式の処理は IntMode (チップ側) に委ねる。

@@ -87,6 +87,8 @@ build:esp32c6 --action_env=PATH
 build:esp32c6 --per_file_copt=^source/(kernel|kernel_object|cpu_manager)/,^chips/esp32_c6/trap\.cpp$@-O2
 # C6 のカーネルは既定で部分リンク LTO。比較時は esp32c6 の後に kernel_no_lto を指定する。
 build:esp32c6 --config=kernel_lto
+# ESP32-C6 U-mode + PMP 無効化オプション (既定は enabled)
+build:c6_umode_off --//configs:c6_umode=disabled
 
 # ---------------------------------------------------------------------------
 # ESP32-C5 (RV32, CLIC) — C6 と同じ rv32_esp ツールチェーン / platform。board だけが違う。

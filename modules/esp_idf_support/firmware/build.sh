@@ -79,7 +79,13 @@ for include_dir in "${OTA_INCLUDE_DIRS[@]}"; do
   test -d "$include_dir" || fail "外部 OTA include dir が無い: $include_dir"
 done
 case "$TARGET" in esp32c6|esp32c5) ;; *) fail "未対応の IDF target: $TARGET" ;; esac
-IDF_PROFILE_ARGS=()
+# C6 U-mode + PMP (既定 on)。C6 以外 (C5) では off に倒す。
+C6_UMODE=${SHIZUKU_C6_UMODE:-on}
+case "$C6_UMODE" in off|on) ;; *) fail "SHIZUKU_C6_UMODE は off|on のどちらか: $C6_UMODE" ;; esac
+if [ "$C6_UMODE" = on ] && [ "$TARGET" != esp32c6 ]; then
+  C6_UMODE=off
+fi
+IDF_PROFILE_ARGS=("-DSHIZUKU_C6_UMODE=$C6_UMODE")
 case "$PROFILE" in
   "") ;;
   ble)
@@ -162,4 +168,22 @@ fi
 cp "$BUILD_DIR/shizuku_$TARGET.bin" "$OUT"
 if test -n "$ELF_OUT"; then cp "$BUILD_DIR/shizuku_$TARGET.elf" "$ELF_OUT"; fi
 if test -n "$MAP_OUT"; then cp "$BUILD_DIR/shizuku_$TARGET.map" "$MAP_OUT"; fi
+
+if [ "$TARGET" = esp32c6 ] && [ "$C6_UMODE" = on ]; then
+  echo "--- [CHECK] Verifying C6 Stage1 PMA Wrap & U-mode symbols ---"
+  echo "1. Bootloader ELF wrap check:"
+  BOOTLOADER_ELF="$BUILD_DIR/bootloader/bootloader.elf"
+  test -f "$BOOTLOADER_ELF" || fail "bootloader.elf が無い: $BOOTLOADER_ELF"
+  riscv32-esp-elf-nm "$BOOTLOADER_ELF" | grep -E "wrap_esp_cpu_configure_region_protection|shizuku_c6_bootloader_branch" || fail "bootloader.elf に wrap シンボルが無い"
+
+  echo "2. App ELF wrap check:"
+  APP_ELF="$BUILD_DIR/shizuku_$TARGET.elf"
+  test -f "$APP_ELF" || fail "app ELF が無い: $APP_ELF"
+  riscv32-esp-elf-nm "$APP_ELF" | grep -E "wrap_esp_cpu_configure_region_protection|shizuku_c6_app_branch|shizuku_c6_stage1_pma_ready" || fail "app ELF に wrap シンボルが無い"
+
+  echo "3. U-mode entry IRAM check:"
+  riscv32-esp-elf-nm "$APP_ELF" | grep -E "shizuku_rv32_trap_entry|shizuku_c6_vectors" || fail "IRAM entry シンボルが無い"
+  echo "--- [CHECK] Verification PASSED ---"
+fi
+
 echo "OK($TARGET): $IDF_VER / $GCC_BANNER -> $OUT"

@@ -18,10 +18,35 @@
 .global shizuku_rv32_trap_entry
 .type shizuku_rv32_trap_entry,@function
 shizuku_rv32_trap_entry:
-  // The interrupted stack is trusted and writable (no U-mode stack switch here).
-  // Saving before the kernel-stack swap preserves V2's thread-frame geometry.
+  // 段1安全不変条件:
+  // U-mode 走行時は mscratch に trusted stack cursor (非0) が格納されている。
+  // M-mode 走行時は mscratch に 0 が格納されている。
+  // mscratch と sp をアトミックに交換
+  csrrw sp, mscratch, sp
+  bnez sp, .Lrv32_from_umode
+
+  // mscratch == 0: M-mode (特権スレッドまたはネストしたカーネル) からのトラップ。
+  // sp を元の M-mode スレッドスタックに戻し、スレッドスタック上にフレームを確保 (V2 既定幾何維持)。
+  csrrw sp, mscratch, sp
   addi sp, sp, -RV32_FRAME_BYTES
   sw t0, RV32_F_T0(sp)
+  addi t0, sp, RV32_FRAME_BYTES
+  sw t0, RV32_F_RESERVED0(sp)
+  sw zero, RV32_F_RESERVED1(sp)
+  j .Lrv32_check_cause
+
+.Lrv32_from_umode:
+  // mscratch != 0: U-mode (非特権 worker) からのトラップ。
+  // sp は trusted kernel stack cursor、mscratch は元の untrusted U-mode sp。
+  // U thread のスタックには一切触れず、trusted stack 上にフレーム領域を確保。
+  addi sp, sp, -RV32_FRAME_BYTES
+  sw t0, RV32_F_T0(sp)
+  csrrw t0, mscratch, zero
+  sw t0, RV32_F_RESERVED0(sp)
+  addi t0, sp, RV32_FRAME_BYTES
+  sw t0, RV32_F_RESERVED1(sp)
+
+.Lrv32_check_cause:
   // M-mode ECALL (exception code 11, interrupt bit clear)? 例外コード以外のビット (C5 の CLIC が載せる
   // mpp / mpie / mpil など) は無視して比べる。
   // (t0 だけを使う: 全保存側へ分岐したとき t1 以降は割込まれたスレッドの値のまま。)
@@ -30,7 +55,15 @@ shizuku_rv32_trap_entry:
   slli t0, t0, 20
   srli t0, t0, 20
   addi t0, t0, -11
+  bnez t0, .Lrv32_check_umode_ecall
+  j .Lrv32_is_ecall
+
+.Lrv32_check_umode_ecall:
+  // U-mode ECALL (exception code 8)?
+  addi t0, t0, 3
   bnez t0, .Lrv32_full_save
+
+.Lrv32_is_ecall:
   // ---- ECALL: caller-saved ABI。入力と戻りに要るものだけ保存する。
   sw a0, RV32_F_A0(sp)
   sw a1, RV32_F_A1(sp)
@@ -160,7 +193,13 @@ shizuku_rv32_restore:
   lw s11, RV32_F_S11(sp)
   lw gp, RV32_F_GP(sp)
   lw tp, RV32_F_TP(sp)
-  addi sp, sp, RV32_FRAME_BYTES
+  // 復帰先特権モードに応じた mscratch 設定:
+  // RESERVED1 には復帰先が U-mode のときは trusted_stack_cursor、
+  // M-mode のときは 0 が格納されている。
+  lw t0, RV32_F_RESERVED1(sp)
+  csrw mscratch, t0
+  lw t0, RV32_F_T0(sp)
+  lw sp, RV32_F_RESERVED0(sp)
   mret
 // ---- ECALL からの戻り (RV32_TAG_ECALL、素通し)。
 //   a0/a1 (戻り値) と mepc/mstatus/sp だけを戻す。ほかのレジスタには触らない (カーネルを抜けた時点の

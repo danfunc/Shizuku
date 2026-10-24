@@ -18,6 +18,11 @@ RV_KERNEL_COPTS = select({
     "//conditions:default": [],
 })
 
+exports_files([
+    "source/kernel_object/handler.cpp",
+    "source/selftest/call_cost.cpp",
+])
+
 # オブジェクト番号の生成。★**CMake とまったく同じスクリプトを呼ぶ** —
 # 番号を振る規則を 2 つ持つと、片方だけ直して番号がずれる。名前の一覧も
 # objects.list を共有するので、二重に書く場所がどこにも無い (D28)。

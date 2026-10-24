@@ -38,6 +38,9 @@ struct plic_vector_mode {
   static bool cycle_counter_enable();
   static uint32_t cycle_counter_read();
 
+  static bool is_kstack_address(uintptr_t addr);
+  static uintptr_t kstack_limit();
+
   static bool in_interrupt();
   static bool current_priv();
   static void timer_oneshot(uint32_t cycles);

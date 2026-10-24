@@ -7,6 +7,7 @@ package(default_visibility = ["//visibility:public"])
 #   (runfiles の repo 相対パス chips/esp32_c6/... は変わらない)。
 exports_files([
     "chip.hpp",
+    "pmp_c6.hpp",
     "rv32_c6.hpp",
     "trap.cpp",
     "c6_vectors.S",
@@ -17,6 +18,7 @@ exports_files([
     "systimer.hpp",
     "trap_api.hpp",
     "test_c6_concepts.cpp",
+    "test_pma_c6.cpp",
     "test_fail_closed.cpp",
     "test_fail_closed.sh",
     "test_fail_closed_board.cpp",
@@ -32,12 +34,17 @@ cc_library(
     name = "headers",
     hdrs = [
         "chip.hpp",
+        "pmp_c6.hpp",
         "rv32_c6.hpp",
         "selftest_record.h",
         "stop_capture.hpp",
         "systimer.hpp",
         "trap_api.hpp",
     ],
+    defines = select({
+        "//configs:c6_umode_enabled": ["SHIZUKU_C6_UMODE=1"],
+        "//conditions:default": [],
+    }),
     includes = ["."],
     deps = [
         "//arch/riscv:pmp",
@@ -46,6 +53,15 @@ cc_library(
         # 公開ヘッダが使うのは arch の concept と kernel ABI だけ。objects.list に届く
         # //:internal_headers は使わない。
         "//:arch_headers",
+    ],
+)
+
+cc_library(
+    name = "pmp_c6",
+    hdrs = ["pmp_c6.hpp"],
+    includes = ["."],
+    deps = [
+        "//arch/riscv:pmp",
     ],
 )
 
