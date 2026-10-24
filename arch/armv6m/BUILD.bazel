@@ -9,6 +9,13 @@ cc_test(
     deps = [":headers"],
 )
 
+# 非特権オブジェクトの窓 (2 の冪 + SRD の RBAR/RASR) の前計算値と、表現できない窓の拒否。
+cc_test(
+    name = "object_window_test",
+    srcs = ["object_window_test.cpp"],
+    deps = [":headers"],
+)
+
 cc_library(
     name = "headers",
     hdrs = ["armv6m.hpp"],

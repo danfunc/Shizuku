@@ -777,8 +777,11 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
   //   カーネルが決めることではない。非特権スレッドも自分のスタックには触れないと
   //   困るので、オブジェクト用 arena (非特権から届く側) から取る。
   table_lock();
+  // stack 窓は arch の揃え (STACK_WINDOW_ALIGN) に置く。余分に確保して揃え、解放は元の取っ手で行う。
+  constexpr uintptr_t kStackAlign = ARCH::STACK_WINDOW_ALIGN;
+  constexpr uintptr_t kStackSlack = kStackAlign > BLOCK_ALIGN ? kStackAlign : 0;
   const uintptr_t stack =
-      arena_allocate(m_objects_arena, THREAD_STACK_BYTES, id);
+      arena_allocate(m_objects_arena, THREAD_STACK_BYTES + kStackSlack, id);
   const uintptr_t ledger = arena_allocate(
       m_bookkeeping, LEDGER_CAPACITY * sizeof(KERNEL::call_ledger_entry), id);
   table_unlock();
@@ -797,7 +800,7 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
   request.affinity = object_affinity(id);
   request.region_base = object_region_base(id);
   request.region_limit = object_region_limit(id);
-  request.stack_base = stack;
+  request.stack_base = (stack + kStackAlign - 1) & ~(kStackAlign - 1);
   request.stack_bytes = THREAD_STACK_BYTES;
   request.object_id = (uint32_t)id; // ★所属オブジェクトIDをカーネルに渡す
   request.object_generation = object_generation(id);
@@ -1197,7 +1200,10 @@ template <> bool KERNEL_OBJECT::stream_stack_range(uint32_t thread,
       address > UINTPTR_MAX - bytes)
     return false;
   const uintptr_t base = m_thread_stack[thread];
-  const uintptr_t size = thread == 0 ? 8192u : THREAD_STACK_BYTES;
+  // spawn は stack 窓の揃えのぶん余分に取って揃える (確保した範囲の内側に収まる)。
+  constexpr uintptr_t kStackSlack =
+      ARCH::STACK_WINDOW_ALIGN > BLOCK_ALIGN ? ARCH::STACK_WINDOW_ALIGN : 0;
+  const uintptr_t size = thread == 0 ? 8192u : THREAD_STACK_BYTES + kStackSlack;
   return base <= UINTPTR_MAX - size && address >= base &&
          address + bytes <= base + size;
 }

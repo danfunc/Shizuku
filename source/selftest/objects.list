@@ -9,6 +9,8 @@ sleeper
 unpriv_probe
 priv_probe
 trespasser
+win_a
+win_b
 blink
 load
 counter

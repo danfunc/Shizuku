@@ -174,41 +174,16 @@ void rp2040_pico_w::init(uint32_t core){
 }
 void rp2040_pico_w::protection_init(){
   using A=shizuku::archs::armv6m<SOC::kMpuRegionCount,SOC::kNvicPriorityBits>;
-  constexpr uint32_t RAM_EXEC_REGION=3;
-  static_assert(RAM_EXEC_REGION>1 && RAM_EXEC_REGION!=A::GRANT_REGION_INDEX && RAM_EXEC_REGION<SOC::kMpuRegionCount);
+  static_assert(A::GRANT_REGION_INDEX<SOC::kMpuRegionCount);
   const uintptr_t end=((uintptr_t)&__flash_binary_end+31u)&~(uintptr_t)31u;
   // PMSAv6 rounds out to a power-of-two region. Any surrounding flash can
   // become readable/executable; the exact excess depends on linked image size.
   if(!A::region_try_set(0,SOC::kXipBase,end,A::ACCESS_RO_ALL,false))
     panic("RP2040 code range cannot be represented by PMSAv6 MPU");
-  const uintptr_t heap=((uintptr_t)__end__+31u)&~(uintptr_t)31u;
-  // Likewise SRAM padding around the region is included; stack guard work is Phase 2.
-  if(!A::region_try_set(1,heap,SOC::kSramRegionEnd,A::ACCESS_RW_ALL,true))
-    panic("RP2040 heap range cannot be represented by PMSAv6 MPU");
-  for(uint32_t i=2;i<SOC::kMpuRegionCount;i++)A::region_disable(i);
-  const uintptr_t data_start=(uintptr_t)__data_start__;
-  const uintptr_t data_end=(uintptr_t)__data_end__;
-  if(data_start<SOC::kSramBase || data_end<=data_start || data_end>SOC::kSramStripedEnd)
-    panic("RP2040 RAM code bounds are invalid");
-  uint32_t ram_rbar,ram_rasr;
-  if(!A::region_encode(data_start,data_end,ram_rbar,ram_rasr,A::ACCESS_RW_ALL,false))
-    panic("RP2040 RAM code range cannot be represented by PMSAv6 MPU");
-  const uintptr_t ram_region_base=ram_rbar;
-  const uint32_t ram_region_log=((ram_rasr>>1)&0x1fu)+1u;
-  const uintptr_t ram_region_size=(uintptr_t)1u<<ram_region_log;
-  const uintptr_t ram_subregion_size=ram_region_size/8u;
-  const uint32_t ram_subregion_disable=(ram_rasr>>8)&0xffu;
-  auto region_covers=[&](uintptr_t address){
-    if(address<ram_region_base || address>=ram_region_base+ram_region_size)return false;
-    if(ram_region_size>=2048u){
-      const uint32_t subregion=(uint32_t)((address-ram_region_base)/ram_subregion_size);
-      if(ram_subregion_disable&(1u<<subregion))return false;
-    }
-    return true;
-  };
-  if(!region_covers(data_start) || !region_covers(data_end-1u) ||
-     !A::region_try_set(RAM_EXEC_REGION,data_start,data_end,A::ACCESS_RW_ALL,false))
-    panic("RP2040 RAM code overlay does not cover linker data");
+  // SRAM 全域の RW 窓は持たない。特権は PRIVDEFENA の背景領域で RAM (.data/.bss/RAM 実行コード
+  // を含む) に触れ、非特権は stack(2)・data(3)・MMIO(4)・貸与(5) の窓の中だけに触れる。
+  // 窓はスレッド作成/オブジェクト登録で前計算し、復帰時に書く (arch_glue_v6m.cpp)。
+  for(uint32_t i=1;i<SOC::kMpuRegionCount;i++)A::region_disable(i);
   A::protection_enable();
 }
 #if defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0

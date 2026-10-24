@@ -32,9 +32,47 @@ constexpr uintptr_t OBJECT_UNPRIV_PROBE = object_id::unpriv_probe;
 constexpr uintptr_t OBJECT_PRIV_PROBE = object_id::priv_probe;
 constexpr uintptr_t OBJECT_TRESPASSER = object_id::trespasser;
 constexpr uintptr_t OBJECT_KERNEL_CALLER = object_id::kernel_caller;
+constexpr uintptr_t OBJECT_WIN_A = object_id::win_a;
+constexpr uintptr_t OBJECT_WIN_B = object_id::win_b;
 constexpr uintptr_t METHOD_MAIN = 0;
 
-alignas(32) uint8_t s_unpriv_probe_data[64] = {};
+// 非特権 probe に貸す data 窓。RP2040 (PMSAv6) は 2 の冪の大きさ・揃えでしか窓にできないので、
+// 256B ちょうど・256B 境界に置く (RP2350 も同じ置き方で通る)。
+alignas(256) uint8_t s_unpriv_probe_data[256] = {};
+
+// 保護窓を持つ arch だけ、オブジェクトの data 窓を登録する。窓を持たない arch (RISC-V は chip 側)
+// では何もしない。表現できない窓は登録されず false (= 非特権オブジェクトは data に触れない)。
+// アプリ⇄ドライバの窓分離の試験用: 2 つの非特権オブジェクトが、それぞれ自分だけの data 窓を持つ。
+alignas(256) uint8_t s_win_a_data[256] = {};
+alignas(256) uint8_t s_win_b_data[256] = {};
+
+// 自分の窓に書いて読み戻す。selector==1 は**相手の窓**を読む (窓の外なので落ちるのが正しい)。
+uintptr_t win_a(uintptr_t selector, uintptr_t, uintptr_t, uintptr_t) {
+  volatile uint8_t *own = s_win_a_data;
+  own[0] = 0xA5;
+  if (selector == 1) return *(volatile uint8_t *)s_win_b_data;
+  return own[0];
+}
+uintptr_t win_b(uintptr_t selector, uintptr_t, uintptr_t, uintptr_t) {
+  volatile uint8_t *own = s_win_b_data;
+  own[0] = 0x5A;
+  if (selector == 1) return *(volatile uint8_t *)s_win_a_data;
+  return own[0];
+}
+
+// 窓の表を arch が持つか (ARM)。持たない arch (C6) は項目を足さず、既存の件数を変えない。
+template <class A>
+constexpr bool has_window_table = requires { A::set_object_bounds(0u, 0, 0, 0, 0); };
+
+template <class A>
+bool provision_data_window(uint32_t id, const void *base, uintptr_t bytes) {
+  if constexpr (requires { A::set_object_bounds(id, 0, 0, 0, 0); }) {
+    return A::set_object_bounds(id, (uintptr_t)base, (uintptr_t)base + bytes, 0, 0);
+  } else {
+    (void)id; (void)base; (void)bytes;
+    return true;
+  }
+}
 
 // 自分の CONTROL を読んで返すだけ。触るのはレジスタと自分のスタックのみ。
 uintptr_t probe(uintptr_t selector, uintptr_t, uintptr_t, uintptr_t) {
@@ -95,13 +133,11 @@ void unprivileged_probe() {
 
   // 同じコードを 2 つのオブジェクトとして登録する。**片方だけ非特権を宣言**する
   // ので、差が出れば「宣言が効いた」ことの証拠になる (対照実験)。
-  if constexpr (requires { ARCH::set_object_bounds(OBJECT_UNPRIV_PROBE, 0, 0, 0, 0); }) {
-    ARCH::set_object_bounds(
-        OBJECT_UNPRIV_PROBE,
-        (uintptr_t)s_unpriv_probe_data,
-        (uintptr_t)s_unpriv_probe_data + sizeof(s_unpriv_probe_data),
-        0, 0);
-  }
+  if constexpr (has_window_table<ARCH>)
+    check("window: probe data window registered",
+          provision_data_window<ARCH>(OBJECT_UNPRIV_PROBE, s_unpriv_probe_data,
+                                      sizeof(s_unpriv_probe_data)),
+          1, 1);
   ARCH::syscall((uintptr_t)object_api::CREATE_OBJECT, OBJECT_UNPRIV_PROBE,
                 method_entry<ARCH, &probe>(), OBJECT_UNPRIVILEGED);
   ARCH::syscall((uintptr_t)object_api::CREATE_OBJECT, OBJECT_PRIV_PROBE,
@@ -231,13 +267,11 @@ void unprivileged_probe() {
   // ---- 拒否のテスト: 触れないはずの場所を触ったら、そのスレッドだけが止まる ----
   {
     const auto faults_before = kernel_instance.faults().count;
-    if constexpr (requires { ARCH::set_object_bounds(OBJECT_TRESPASSER, 0, 0, 0, 0); }) {
-      ARCH::set_object_bounds(
-          OBJECT_TRESPASSER,
-          (uintptr_t)s_unpriv_probe_data,
-          (uintptr_t)s_unpriv_probe_data + sizeof(s_unpriv_probe_data),
-          0, 0);
-    }
+    if constexpr (has_window_table<ARCH>)
+      check("window: trespasser data window registered",
+            provision_data_window<ARCH>(OBJECT_TRESPASSER, s_unpriv_probe_data,
+                                        sizeof(s_unpriv_probe_data)),
+            1, 1);
     ARCH::syscall((uintptr_t)object_api::CREATE_OBJECT, OBJECT_TRESPASSER,
                   method_entry<ARCH, &trespass>(), OBJECT_UNPRIVILEGED);
     // ★**別スレッドで**走らせる。落ちるのはスレッド単位なので、呼び出しで試すと
@@ -261,6 +295,39 @@ void unprivileged_probe() {
                        "cfsr=%08lx\n",
                        (unsigned long)record.thread, (unsigned long)record.pc,
                        (unsigned long)record.status);
+  }
+
+  // ---- 窓の分離 (窓の表を持つ arch だけ。C6 は chip 側の窓なので件数を変えない) ----
+  if constexpr (has_window_table<ARCH>) {
+    const bool provisioned =
+        provision_data_window<ARCH>(OBJECT_WIN_A, s_win_a_data, sizeof(s_win_a_data)) &&
+        provision_data_window<ARCH>(OBJECT_WIN_B, s_win_b_data, sizeof(s_win_b_data));
+    check("window: two data windows registered", provisioned, 1, 1);
+    ARCH::syscall((uintptr_t)object_api::CREATE_OBJECT, OBJECT_WIN_A,
+                  method_entry<ARCH, &win_a>(), OBJECT_UNPRIVILEGED);
+    ARCH::syscall((uintptr_t)object_api::CREATE_OBJECT, OBJECT_WIN_B,
+                  method_entry<ARCH, &win_b>(), OBJECT_UNPRIVILEGED);
+    // 呼ぶたびに窓が切り替わる: 自分の窓を触れて (切替え済み)、前に呼んだ側の窓が残っていれば落ちる。
+    const auto a1 = ARCH::syscall((uintptr_t)object_api::CALL_METHOD, OBJECT_WIN_A, METHOD_MAIN, 0);
+    const auto b1 = ARCH::syscall((uintptr_t)object_api::CALL_METHOD, OBJECT_WIN_B, METHOD_MAIN, 0);
+    const auto a2 = ARCH::syscall((uintptr_t)object_api::CALL_METHOD, OBJECT_WIN_A, METHOD_MAIN, 0);
+    check("window: A reaches its own window", a1.error == 0 && a1.value == 0xA5,
+          (unsigned long)a1.value, 0xA5);
+    check("window: B reaches its own window after A", b1.error == 0 && b1.value == 0x5A,
+          (unsigned long)b1.value, 0x5A);
+    check("window: A reaches its own window again", a2.error == 0 && a2.value == 0xA5,
+          (unsigned long)a2.value, 0xA5);
+    // 相手の窓を触ると、そのスレッドだけが止まる。
+    const auto faults_before = kernel_instance.faults().count;
+    const auto spawned = ARCH::syscall((uintptr_t)object_api::SPAWN, OBJECT_WIN_A, METHOD_MAIN, 1);
+    for (uint32_t guard = 0;
+         guard < 200 && kernel_instance.faults().count == faults_before; ++guard)
+      ARCH::syscall((uintptr_t)object_api::YIELD);
+    const auto &record = kernel_instance.faults();
+    check("window: touching the other window faults", record.count == faults_before + 1,
+          (unsigned long)record.count, (unsigned long)(faults_before + 1));
+    check("window: only the offending thread stopped", record.thread == spawned.value,
+          (unsigned long)record.thread, (unsigned long)spawned.value);
   }
 
   BOARD::diag_printf("[SELFTEST] unprivileged probe done (unpriv control=%lu "

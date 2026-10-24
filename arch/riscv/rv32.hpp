@@ -333,6 +333,7 @@ public:
   };
   static constexpr stack_window encode_stack_window(uintptr_t, uintptr_t) { return {}; }
   static constexpr uintptr_t kMaxObjectWindows = UINTPTR_MAX;
+  static constexpr uintptr_t STACK_WINDOW_ALIGN = 8;  // 追加の揃えは要らない
 
   static void switch_caller_protection(uint32_t caller_object) {
 #if defined(SHIZUKU_C6_UMODE)

@@ -16,7 +16,10 @@ cc_library(
 cc_test(
     name = "object_window_test",
     srcs = ["object_window_test.cpp"],
-    deps = [":headers"],
+    deps = [
+        ":headers",
+        "//:internal_headers",
+    ],
 )
 
 # 文脈退避・復帰・戻り口の asm のみ。C++ のフック (systick / svc / fault など) の実体は

@@ -382,6 +382,8 @@ public:
     context.region_limit = (uint32_t)limit;
   }
   static constexpr bool HAS_OBJECT_PROTECTION = true;
+  // stack 窓は 32B 境界。arena の stack はこの境界に置いて、窓が隣のブロックの header にかからないようにする。
+  static constexpr uintptr_t STACK_WINDOW_ALIGN = 32;
   static bool context_unprivileged(const context_t &c) { return (c.control & 1u) != 0; }
 
   // Region 配置 (Plan §4.1)

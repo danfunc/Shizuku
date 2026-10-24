@@ -154,18 +154,94 @@ public:
   static bool current_priv(){return (control_register()&1u)==0;}
   static void set_priv(context_t &c,bool p){c.control=p?CONTROL_PRIV_PSP:CONTROL_UNPRIV_PSP;}
   static bool set_region_window(context_t &c,uintptr_t b,uintptr_t e){return e==0?(c.region_base=c.region_limit=0,true):grant_set(c,b,e);}
-  static constexpr bool HAS_OBJECT_PROTECTION = false;
-  // 共通コードが呼ぶ窓の口。段 B で RP2040 の窓 (2 の冪 + SRD) を実装するまでは空。
+  static constexpr bool HAS_OBJECT_PROTECTION = true;
+  static bool context_unprivileged(const context_t &c){return (c.control&1u)!=0;}
+
+  // Region 配置 (PMSAv6, 8 本): 0 Flash コード (固定) / 1 空き / 2 スレッド stack 窓 /
+  // 3 オブジェクト data 窓 / 4 オブジェクト MMIO 窓 / 5 貸与窓 / 6,7 空き。
+  // SRAM 全域の窓は持たない。特権は PRIVDEFENA の背景領域で RAM に触れ、非特権は
+  // 2・3・4・5 の窓の中だけに触れる。
+  static constexpr uint32_t REGION_STACK=2, REGION_DATA=3, REGION_MMIO=4;
+  // 窓は 2 の冪の大きさ・揃え、2048B 以上なら 1/8 (subregion) 単位で削れる。値は RASR。
+  // thread の stack (THREAD_STACK_BYTES=4096) は 4096B 境界に置いて 4KB 領域でちょうど覆う。
+  // 1KB や 2KB 境界では 8KB 領域をまたぐ置き方が生じ、より大きい領域に化けて隣を巻き込むので
+  // この揃えが要る (代償: spawn 1 本につき最大 4KB の余白)。
+  static constexpr uintptr_t STACK_WINDOW_ALIGN=4096;
   struct stack_window {
     uint32_t rbar = 0;
-    uint32_t rlar = 0;
+    uint32_t rlar = 0;  // v6-M では RASR (名前は thread の共通欄に合わせた)
   };
-  static constexpr stack_window encode_stack_window(uintptr_t, uintptr_t) { return {}; }
-  static constexpr uintptr_t kMaxObjectWindows = UINTPTR_MAX;
+  using mpu_window_entry = stack_window;
+  struct object_protection_window {
+    uint32_t owner_id = 0;
+    mpu_window_entry data{};
+    mpu_window_entry mmio{};
+  };
+  static constexpr uint32_t kRasrAttrMask=(7u<<19)|(1u<<18)|(1u<<17)|(1u<<16);
+  // 要求範囲が 2 の冪 + subregion で**ちょうど**表せるときだけ窓にする (外へはみ出す窓は作らない)。
+  static mpu_window_entry encode_exact_window(uintptr_t base,uintptr_t limit,bool device){
+    if(limit<=base||base==0||!region_range_representable(base,limit))return {};
+    uint32_t rb,ra;if(!region_encode(base,limit,rb,ra,ACCESS_RW_ALL,true))return {};
+    if(device)ra=(ra&~kRasrAttrMask)|(1u<<18)|(1u<<16); // Device, shareable
+    return {rb,ra};
+  }
+  static mpu_window_entry encode_data_window(uintptr_t base,uintptr_t limit){return encode_exact_window(base,limit,false);}
+  static mpu_window_entry encode_stack_window(uintptr_t base,uintptr_t limit){return encode_exact_window(base,limit,false);}
+  // DMA / PIO / PPB (割込み・MPU 自身) は非特権に窓を出さない。MMIO は周辺 (0x40000000〜0x5FFFFFFF) の内側だけ。
+  static constexpr bool is_dma_or_system_peripheral(uintptr_t base,uintptr_t limit){
+    if(base<0x40000000u||limit>0x60000000u)return true;
+    if(base<0x50010000u&&limit>0x50000000u)return true; // DMA
+    if(base<0x50400000u&&limit>0x50200000u)return true; // PIO0/1
+    return false;
+  }
+  static mpu_window_entry encode_mmio_window(uintptr_t base,uintptr_t limit){
+    if(limit<=base||is_dma_or_system_peripheral(base,limit))return {};
+    return encode_exact_window(base,limit,true);
+  }
 
+  static constexpr uint32_t kMaxObjectWindows=64;  // OBJECT_COUNT の既定 (configs/kit.bzl) に合わせる
+  static inline object_protection_window s_object_windows[kMaxObjectWindows]={};
+  static inline uint32_t s_active_object_id=0xFFFFFFFFu;
+  static void invalidate_active_object(){s_active_object_id=0xFFFFFFFFu;}
+  static bool has_object_bounds(uint32_t id){return id<kMaxObjectWindows&&s_object_windows[id].owner_id!=0;}
+  // 表現できない窓 (揃え・大きさ) は false で拒否し、登録しない。data/mmio のどちらかが 0 なら窓なし。
+  static bool set_object_bounds(uint32_t id,uintptr_t db,uintptr_t dl,uintptr_t mb,uintptr_t ml){
+    if(id>=kMaxObjectWindows)return false;
+    const bool has_data=dl!=0,has_mmio=ml!=0;
+    mpu_window_entry d{},m{};
+    if(has_data){d=encode_data_window(db,dl);if(d.rlar==0)return false;}
+    if(has_mmio){m=encode_mmio_window(mb,ml);if(m.rlar==0)return false;}
+    s_object_windows[id].owner_id=id;s_object_windows[id].data=d;s_object_windows[id].mmio=m;
+    return true;
+  }
+  static void region_write(uint32_t index,uint32_t rbar,uint32_t rasr){
+    volatile uint32_t *m=(volatile uint32_t *)0xE000ED90u;m[2]=index;m[3]=rbar;m[4]=rasr;
+  }
+  static void apply_window_region(uint32_t index,const mpu_window_entry &w){
+    if(w.rlar!=0)region_write(index,w.rbar,w.rlar);else region_disable(index);
+  }
+  static void apply_object_window(const object_protection_window &w){
+    apply_window_region(REGION_DATA,w.data);apply_window_region(REGION_MMIO,w.mmio);
+    __asm volatile("dsb\n\tisb":::"memory");
+  }
+  static void apply_stack_window(uint32_t rbar,uint32_t rasr){
+    apply_window_region(REGION_STACK,mpu_window_entry{rbar,rasr});__asm volatile("dsb\n\tisb":::"memory");
+  }
   template <class Frame>
-  static void switch_callee_protection(context_t &, Frame &, uint32_t, bool) {}
-  static void switch_caller_protection(uint32_t) {}
+  static void switch_callee_protection(context_t &,Frame &,uint32_t callee_id,bool privileged){
+    if(privileged){
+      if(s_active_object_id!=callee_id){region_disable(REGION_DATA);region_disable(REGION_MMIO);s_active_object_id=callee_id;}
+      return;
+    }
+    if(callee_id>=kMaxObjectWindows){region_disable(REGION_DATA);region_disable(REGION_MMIO);s_active_object_id=0xFFFFFFFFu;return;}
+    if(s_active_object_id==callee_id)return; // 同じ窓の組は書換えを省く
+    apply_object_window(s_object_windows[callee_id]);s_active_object_id=callee_id;
+  }
+  static void switch_caller_protection(uint32_t caller_object){
+    if(caller_object>=kMaxObjectWindows){region_disable(REGION_DATA);region_disable(REGION_MMIO);s_active_object_id=0xFFFFFFFFu;return;}
+    if(s_active_object_id==caller_object)return;
+    apply_object_window(s_object_windows[caller_object]);s_active_object_id=caller_object;
+  }
   // ソフトウェア下限のみ。MPU ガード領域は未実装
   static void stack_limit_set(context_t &c, uintptr_t v){c.stack_limit_addr=(uint32_t)v;}
   static uintptr_t stack_limit(const context_t &c){return (uintptr_t)c.stack_limit_addr;}

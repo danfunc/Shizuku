@@ -160,8 +160,17 @@ extern "C" void shizuku_fault_dispatch(shizuku_armv6m_context *c){shizuku::kerne
 extern "C" void shizuku_arm_pending_step(){}
 extern "C" void shizuku_restore_region_window(){
   using A=shizuku::archs::armv6m<shizuku::chips::rp2040::chip::kMpuRegionCount,shizuku::chips::rp2040::chip::kNvicPriorityBits>;const auto*c=shizuku::kernel_instance.current_context();
-  if(c->region_limit && A::region_try_set(A::GRANT_REGION_INDEX,c->region_base,c->region_limit,A::ACCESS_RO_ALL,true))return;
-  A::region_disable(A::GRANT_REGION_INDEX);
+  if(!(c->region_limit && A::region_try_set(A::GRANT_REGION_INDEX,c->region_base,c->region_limit,A::ACCESS_RO_ALL,true)))
+    A::region_disable(A::GRANT_REGION_INDEX);
+  // スレッド切替えで別スレッドの窓が残らないよう、stack 窓と(非特権なら)オブジェクト窓を張り直す。
+  const auto &thread=shizuku::kernel_instance.current_thread();
+  A::apply_stack_window(thread.stack_rbar,thread.stack_rlar);
+  A::invalidate_active_object();
+  if(A::context_unprivileged(*c)){
+    A::switch_caller_protection(thread.identity_object());
+  }else{
+    A::region_disable(A::REGION_DATA);A::region_disable(A::REGION_MMIO);
+  }
 }
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
 // frame は armv6m_ctx.S の systick_entry が渡す、割り込まれた側の例外フレーム。

@@ -107,6 +107,12 @@ template <>
 KERNEL::spawn_result KERNEL::spawn(const KERNEL::spawn_request &request) {
   if (request.stack_base == 0 || request.stack_bytes < 256)
     return {kernel_error::NO_MEMORY, 0};
+  // 窓で表せない stack の非特権スレッドは作らない (黙って窓なし = stack に触れない状態にしない)。
+  if constexpr (ARCH::HAS_OBJECT_PROTECTION) {
+    if ((request.protection & PROTECTION_UNPRIVILEGED) != 0 &&
+        ARCH::encode_stack_window(request.stack_base, request.stack_base + request.stack_bytes).rlar == 0)
+      return {kernel_error::BAD_REQUEST, 0};
+  }
 #if defined(SHIZUKU_RP2040)
   if (!ARCH::region_range_representable(request.region_base, request.region_limit))
     return {kernel_error::BAD_REQUEST, 0};
