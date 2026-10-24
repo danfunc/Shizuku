@@ -63,11 +63,16 @@ expected_cleared = {'ra', *(f't{i}' for i in range(7)), *(f'a{i}' for i in range
                     *(f's{i}' for i in range(12))}
 assert cleared == expected_cleared, sorted(cleared ^ expected_cleared)
 assert exit_scrub.rstrip().endswith('mret')
-exit_entry = asm.split('.Lrv32_exit_entry:')[1].split('.size shizuku_rv32_trap_entry')[0]
+exit_entry = asm.split('.Lrv32_exit_entry:')[1].split('// ---- U-mode 高速出口')[0]
 assert sorted(re.findall(r'lw (\w+), RV32_F_(\w+)\(sp\)', exit_entry)) == sorted(
     [('t0', 'MEPC'), ('t0', 'MSTATUS'), ('ra', 'RA')] + [(f'a{i}', f'A{i}') for i in range(8)])
 assert not re.findall(r'mv (\w+), zero', exit_entry)  # 入口も何も消さない
 assert exit_entry.rstrip().endswith('mret')
+# U-mode 高速出口: 復帰先特権 U-mode 時に mscratch に trusted stack cursor、sp に U-mode sp を復帰
+u_exit = asm.split('// ---- U-mode 高速出口')[1].split('.size shizuku_rv32_trap_entry')[0]
+assert 'bnez t0, .Lrv32_exit_umode' in asm
+assert 'csrw mscratch, t0' in u_exit
+assert 'lw sp, RV32_F_RESERVED0(sp)' in u_exit
 # 再開フレームを作るのは call_resume_at (ヘッダ版の call_resume も、SHIZUKU_LEAN_LEDGER の台帳版もここへ来る)。
 call_resume = header.split('static exception_frame_t *call_resume_at(')[1].split('\n  }\n')[0]
 assert 'frame->mcause = scrub ? RV32_TAG_ECALL_SCRUB : RV32_TAG_ECALL' in call_resume

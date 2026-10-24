@@ -245,5 +245,27 @@ int main() {
   drv_bounds.role = c6_stage1_role::Driver;
   assert(role_allows_kind(static_cast<ObjectRole>(drv_bounds.role), RegionKind::DriverMmio));
 
+  // §1b: PMP 配置と切替え CSR 本数の厳格検証 (固定エントリを切替えで書かない)
+  static_assert(pmp_controller::SWITCH_CSR_COUNT == 8u,
+                "PMP switch must touch exactly 8 CSRs");
+  static_assert(pmp_controller::FIXED_ENTRIES_TOUCHED_ON_SWITCH == 0u,
+                "PMP switch must not touch fixed entries");
+
+  app_bounds.update_precomputed();
+  drv_bounds.update_precomputed();
+
+  // App は MMIO を持たないため pmpcfg2 (entry 8-11) は 0
+  assert(app_bounds.precomputed.pmpcfg2 == 0);
+  assert(app_bounds.precomputed.pmpaddr4 == (app_bounds.stack_base >> 2));
+  assert(app_bounds.precomputed.pmpaddr5 == (app_bounds.stack_limit >> 2));
+  assert(app_bounds.precomputed.pmpaddr6 == (app_bounds.data_base >> 2));
+  assert(app_bounds.precomputed.pmpaddr7 == (app_bounds.data_limit >> 2));
+  assert(app_bounds.precomputed.pmpcfg1 != 0);
+
+  // Driver は MMIO 窓を持つため pmpcfg2 != 0
+  assert(drv_bounds.precomputed.pmpcfg2 != 0);
+  assert(drv_bounds.precomputed.pmpaddr8 == (drv_bounds.mmio_base >> 2));
+  assert(drv_bounds.precomputed.pmpaddr9 == (drv_bounds.mmio_limit >> 2));
+
   return 0;
 }

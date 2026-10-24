@@ -134,6 +134,9 @@ int main() {
     assert(shizuku_c6_selftest_name_to_id("grant: spawn hog") == 0x3005);
     assert(shizuku_c6_selftest_name_to_id("memory: allocate") == 0x4001);
     assert(shizuku_c6_selftest_name_to_id("stream: nothing was lost") == 0x5005);
+    assert(shizuku_c6_selftest_name_to_id("stage1: U-to-U call executed twice consecutively without fault") == 0x604F);
+    assert(shizuku_c6_selftest_name_to_id("stage1: U callee access to caller window caused fault trapped") == 0x6050);
+    assert(shizuku_c6_selftest_name_to_id("stage1: caller restored its own data window successfully") == 0x6051);
     assert(shizuku_c6_selftest_name_to_id("unregistered test") == 0xFFFF);
     std::printf("[TEST]   9. Name-to-ID mapping assertions passed.\n");
 

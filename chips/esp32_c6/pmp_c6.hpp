@@ -19,6 +19,55 @@ enum class c6_stage1_role : uint8_t {
   Driver = 2,
 };
 
+struct alignas(8) pmp_precomputed_csr {
+  uint32_t pmpaddr4 = 0; // stack base >> 2
+  uint32_t pmpaddr5 = 0; // stack limit >> 2
+  uint32_t pmpaddr6 = 0; // data base >> 2
+  uint32_t pmpaddr7 = 0; // data limit >> 2
+  uint32_t pmpaddr8 = 0; // mmio base >> 2
+  uint32_t pmpaddr9 = 0; // mmio limit >> 2
+  uint32_t pmpcfg1 = 0;  // entries 4..7 cfg
+  uint32_t pmpcfg2 = 0;  // entries 8..11 cfg
+};
+
+inline constexpr pmp_precomputed_csr precompute_object_pmp(
+    uintptr_t stack_base, uintptr_t stack_limit,
+    uintptr_t data_base, uintptr_t data_limit,
+    c6_stage1_role role, uintptr_t mmio_base, uintptr_t mmio_limit) noexcept {
+  pmp_precomputed_csr csr{};
+  namespace perm = shizuku::ports::riscv::pmp_perm;
+  constexpr uint8_t PMP_MODE_TOR = static_cast<uint8_t>(shizuku::ports::riscv::pmp_mode::TOR) << 3;
+
+  // Entry 4, 5: Stack (TOR, R|W, NX)
+  csr.pmpaddr4 = static_cast<uint32_t>(stack_base >> 2);
+  csr.pmpaddr5 = static_cast<uint32_t>(stack_limit >> 2);
+  const uint8_t cfg_stack = PMP_MODE_TOR | perm::R | perm::W;
+
+  // Entry 6, 7: Data (TOR, R|W, NX) (optional)
+  uint8_t cfg_data = 0;
+  if (data_limit != 0 && data_base < data_limit) {
+    csr.pmpaddr6 = static_cast<uint32_t>(data_base >> 2);
+    csr.pmpaddr7 = static_cast<uint32_t>(data_limit >> 2);
+    cfg_data = PMP_MODE_TOR | perm::R | perm::W;
+  }
+
+  // pmpcfg1: entry 4 (0), entry 5 (cfg_stack), entry 6 (0), entry 7 (cfg_data)
+  csr.pmpcfg1 = shizuku::ports::riscv::pmp_codec<4>::pack_pmpcfg(0, cfg_stack, 0, cfg_data);
+
+  // Entry 8, 9: MMIO (TOR, R|W, NX) (Driver のみ)
+  uint8_t cfg_mmio = 0;
+  if (role == c6_stage1_role::Driver && mmio_limit != 0 && mmio_base < mmio_limit) {
+    csr.pmpaddr8 = static_cast<uint32_t>(mmio_base >> 2);
+    csr.pmpaddr9 = static_cast<uint32_t>(mmio_limit >> 2);
+    cfg_mmio = PMP_MODE_TOR | perm::R | perm::W;
+  }
+
+  // pmpcfg2: entry 8 (0), entry 9 (cfg_mmio), entry 10 (0), entry 11 (0)
+  csr.pmpcfg2 = shizuku::ports::riscv::pmp_codec<4>::pack_pmpcfg(0, cfg_mmio, 0, 0);
+
+  return csr;
+}
+
 struct c6_stage1_object_bounds {
   uint32_t owner_id = 0;
   uintptr_t code_base = 0;
@@ -31,6 +80,12 @@ struct c6_stage1_object_bounds {
   c6_stage1_role role = c6_stage1_role::App;
   uintptr_t mmio_base = 0;
   uintptr_t mmio_limit = 0;
+  pmp_precomputed_csr precomputed{};
+
+  constexpr void update_precomputed() noexcept {
+    precomputed = precompute_object_pmp(
+        stack_base, stack_limit, data_base, data_limit, role, mmio_base, mmio_limit);
+  }
 };
 
 // オブジェクト所有者の検証述語:
@@ -377,6 +432,74 @@ public:
     }
 
     return true;
+  }
+
+  // 切替え時の定数縛り (試験で検証)
+  static constexpr uint32_t SWITCH_CSR_COUNT = 8u;
+  static constexpr uint32_t FIXED_ENTRIES_TOUCHED_ON_SWITCH = 0u;
+
+  // 起動時の固定エントリ設定 (Entry 0-3: 共有コード・Trampoline, 共有アドレス窓)
+  static void init_fixed_entries(uintptr_t code_base, uintptr_t code_limit,
+                                 uintptr_t shared_region_base = 0,
+                                 uintptr_t shared_region_limit = 0) noexcept {
+    namespace perm = shizuku::ports::riscv::pmp_perm;
+    constexpr uint8_t PMP_MODE_TOR = static_cast<uint8_t>(shizuku::ports::riscv::pmp_mode::TOR) << 3;
+    const uint32_t addr0 = static_cast<uint32_t>(code_base >> 2);
+    const uint32_t addr1 = static_cast<uint32_t>(code_limit >> 2);
+    const uint8_t cfg_code = PMP_MODE_TOR | perm::R | perm::X;
+
+    uint32_t addr2 = 0;
+    uint32_t addr3 = 0;
+    uint8_t cfg_shared = 0;
+    if (shared_region_limit != 0 && shared_region_base < shared_region_limit) {
+      addr2 = static_cast<uint32_t>(shared_region_base >> 2);
+      addr3 = static_cast<uint32_t>(shared_region_limit >> 2);
+      cfg_shared = PMP_MODE_TOR | perm::R | perm::W;
+    }
+
+    const uint32_t pmpcfg0_val = codec::pack_pmpcfg(0, cfg_code, 0, cfg_shared);
+
+#if defined(__riscv)
+    asm volatile(
+        "csrw 0x3B0, %0\n" // pmpaddr0
+        "csrw 0x3B1, %1\n" // pmpaddr1
+        "csrw 0x3B2, %2\n" // pmpaddr2
+        "csrw 0x3B3, %3\n" // pmpaddr3
+        "csrw 0x3A0, %4\n" // pmpcfg0
+        "csrw 0x3A3, zero\n" // pmpcfg3 (entries 12-15 = OFF)
+        "fence.i\n"
+        "fence rw,rw\n"
+        :
+        : "r"(addr0), "r"(addr1), "r"(addr2), "r"(addr3), "r"(pmpcfg0_val)
+        : "memory");
+#else
+    (void)addr0; (void)addr1; (void)addr2; (void)addr3; (void)pmpcfg0_val;
+#endif
+  }
+
+  // オブジェクト切替え (固定エントリに触れず、前計算された固有 8 本の CSR のみ書き込み)
+  [[gnu::always_inline]] static void switch_to_precomputed(const pmp_precomputed_csr &csr) noexcept {
+#if defined(__riscv)
+    asm volatile(
+        "csrw 0x3B4, %0\n" // pmpaddr4
+        "csrw 0x3B5, %1\n" // pmpaddr5
+        "csrw 0x3B6, %2\n" // pmpaddr6
+        "csrw 0x3B7, %3\n" // pmpaddr7
+        "csrw 0x3B8, %4\n" // pmpaddr8
+        "csrw 0x3B9, %5\n" // pmpaddr9
+        "csrw 0x3A1, %6\n" // pmpcfg1
+        "csrw 0x3A2, %7\n" // pmpcfg2
+        "fence.i\n"
+        "fence rw,rw\n"
+        :
+        : "r"(csr.pmpaddr4), "r"(csr.pmpaddr5),
+          "r"(csr.pmpaddr6), "r"(csr.pmpaddr7),
+          "r"(csr.pmpaddr8), "r"(csr.pmpaddr9),
+          "r"(csr.pmpcfg1), "r"(csr.pmpcfg2)
+        : "memory");
+#else
+    (void)csr;
+#endif
   }
 
   // PMP CSR の読み戻し (pmpcfg0-3, pmpaddr0-15)。host では 0 を返す。

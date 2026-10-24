@@ -145,6 +145,8 @@ asm(
     "  beq a0, t0, .Lprobe_app_mmio\n"
     "  li t0, 13\n"
     "  beq a0, t0, .Lprobe_app_driver_data\n"
+    "  li t0, 14\n"
+    "  beq a0, t0, .Lprobe_u_to_u_call\n"
     "  li a0, 0\n"
     "  ret\n"
     "\n"
@@ -278,6 +280,108 @@ asm(
     "  or a0, a0, t0\n"
     "  ret\n"
     "\n"
+    ".Lprobe_u_to_u_call:\n"
+    "  addi sp, sp, -32\n"
+    "  sw ra, 28(sp)\n"
+    "  sw s0, 24(sp)\n"
+    "  sw s1, 20(sp)\n"
+    "  sw s2, 16(sp)\n"
+    "  la s0, u_mode_stage1_data_pool\n"
+    "  li t0, 0xA110CAFE\n"
+    "  sw t0, 16(s0)\n"
+    "  lw s1, 20(s0)\n"
+    "  lw s2, 24(s0)\n"
+    "\n"
+    "  li a0, 4\n"
+    "  mv a1, s1\n"
+    "  mv a2, s2\n"
+    "  li a3, 3\n"
+    "  li a4, 0\n"
+    "  ecall\n"
+    "  bnez a0, .Lu2u_fail_1\n"
+    "  li t0, 0x42\n"
+    "  bne a1, t0, .Lu2u_fail_1\n"
+    "\n"
+    "  li a0, 4\n"
+    "  mv a1, s1\n"
+    "  mv a2, s2\n"
+    "  li a3, 3\n"
+    "  li a4, 0\n"
+    "  ecall\n"
+    "  bnez a0, .Lu2u_fail_2\n"
+    "  li t0, 0x42\n"
+    "  bne a1, t0, .Lu2u_fail_2\n"
+    "\n"
+    "  li a0, 4\n"
+    "  mv a1, s1\n"
+    "  mv a2, s2\n"
+    "  li a3, 2\n"
+    "  li a4, 0\n"
+    "  ecall\n"
+    "  li t0, 0xE012\n"
+    "  bne a1, t0, .Lu2u_fail_3\n"
+    "\n"
+    "  lw t0, 16(s0)\n"
+    "  li t1, 0xA110CAFE\n"
+    "  bne t0, t1, .Lu2u_fail_4\n"
+    "  li t2, 0xBEEFCAFE\n"
+    "  sw t2, 16(s0)\n"
+    "  lw t3, 16(s0)\n"
+    "  bne t3, t2, .Lu2u_fail_5\n"
+    "\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  lw s2, 16(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  li a0, 0x5AFE0000\n"
+    "  ret\n"
+    "\n"
+    ".Lu2u_fail_1:\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  lw s2, 16(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  li a0, 0xDEAD0001\n"
+    "  ret\n"
+    "\n"
+    ".Lu2u_fail_2:\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  lw s2, 16(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  li a0, 0xDEAD0002\n"
+    "  ret\n"
+    "\n"
+    ".Lu2u_fail_3:\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  lw s2, 16(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  li a0, 0xDEAD0003\n"
+    "  ret\n"
+    "\n"
+    ".Lu2u_fail_4:\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  lw s2, 16(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  li a0, 0xDEAD0004\n"
+    "  ret\n"
+    "\n"
+    ".Lu2u_fail_5:\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  lw s2, 16(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  li a0, 0xDEAD0005\n"
+    "  ret\n"
+    "\n"
     ".size u_mode_probe_worker, .-u_mode_probe_worker\n"
     "\n"
     ".balign 4\n"
@@ -288,7 +392,13 @@ asm(
     "  beq a0, t0, .Ldriver_probe_mmio\n"
     "  li t0, 2\n"
     "  beq a0, t0, .Ldriver_probe_app_data\n"
+    "  li t0, 3\n"
+    "  beq a0, t0, .Ldriver_probe_echo\n"
     "  li a0, 0\n"
+    "  ret\n"
+    "\n"
+    ".Ldriver_probe_echo:\n"
+    "  li a0, 0x42\n"
     "  ret\n"
     "\n"
     ".Ldriver_probe_mmio:\n"
@@ -418,6 +528,7 @@ void c6_stage1_safety() {
   g_c6_stage1_u_bounds.role = c6_stage1_role::App;
   g_c6_stage1_u_bounds.mmio_base = 0;
   g_c6_stage1_u_bounds.mmio_limit = 0;
+  g_c6_stage1_u_bounds.update_precomputed();
 
   // ドライバオブジェクトの登録 (role=Driver, MMIO 窓: 0x60000000..0x60001000)
   g_c6_stage1_driver_bounds.owner_id = OBJECT_STAGE1_DRIVER;
@@ -431,6 +542,7 @@ void c6_stage1_safety() {
   g_c6_stage1_driver_bounds.role = c6_stage1_role::Driver;
   g_c6_stage1_driver_bounds.mmio_base = 0x60000000u;
   g_c6_stage1_driver_bounds.mmio_limit = 0x60001000u;
+  g_c6_stage1_driver_bounds.update_precomputed();
 
   // U worker スタックのカナリア初期化
   constexpr uint32_t U_STACK_CANARY = 0x5A5A5A5Au;
@@ -454,6 +566,8 @@ void c6_stage1_safety() {
   data_pool_words[1] = caller_sentinel_addr;
   data_pool_words[2] = target_mmio_addr;
   data_pool_words[3] = reinterpret_cast<uintptr_t>(u_mode_driver_data_pool);
+  data_pool_words[5] = OBJECT_STAGE1_DRIVER;
+  data_pool_words[6] = METHOD_STAGE1_PROBE;
 
   auto *drv_pool_words = reinterpret_cast<volatile uintptr_t *>(u_mode_driver_data_pool);
   drv_pool_words[0] = target_mmio_addr;
@@ -876,6 +990,24 @@ void c6_stage1_safety() {
                shizuku_c6_u_mode_diag[5] == mfetch_target, shizuku_c6_u_mode_diag[5], mfetch_target);
   record_check("stage1: M-mode DRAM fetch exact mtval is DRAM fetch target",
                shizuku_c6_u_mode_diag[6] == mfetch_target, shizuku_c6_u_mode_diag[6], mfetch_target);
+
+  // 14. U→U method call 連続 2 回、U callee 窓アクセス fault、caller 自窓復帰の検証
+  g_c6_probe_driver_app_data_fault_pc = reinterpret_cast<uintptr_t>(&c6_stage1_probe_driver_app_data_fault_insn_addr);
+  const auto u2u_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      14 /* cmd=14: U->U call test */);
+  g_c6_probe_driver_app_data_fault_pc = 0;
+  record_check("stage1: U-to-U call executed twice consecutively without fault",
+               u2u_res.error == 0 && u2u_res.value == 0x5AFE0000u,
+               u2u_res.value, 0x5AFE0000u);
+  record_check("stage1: U callee access to caller window caused fault trapped",
+               shizuku_c6_u_mode_diag[15] >= 1u,
+               shizuku_c6_u_mode_diag[15], 1);
+  record_check("stage1: caller restored its own data window successfully",
+               data_pool_words[4] == 0xBEEFCAFEu,
+               data_pool_words[4], 0xBEEFCAFEu);
 #endif
 
   BOARD::diag_printf("[C6_STAGE1] stage 1 verification complete: passed=%lu failed=%lu\n",

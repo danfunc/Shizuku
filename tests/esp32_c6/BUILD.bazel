@@ -6,13 +6,15 @@ load("@rules_cc//cc:defs.bzl", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
-sh_test(
+cc_test(
     name = "selftest_record_test",
-    srcs = ["//chips/esp32_c6:test_selftest_record.sh"],
-    data = [
+    srcs = [
         "//chips/esp32_c6:selftest_adapter.cpp",
-        "//chips/esp32_c6:selftest_record.h",
         "//chips/esp32_c6:test_selftest_record.cpp",
+    ],
+    copts = ["-std=c++20"],
+    deps = [
+        "//chips/esp32_c6:headers",
     ],
 )
 

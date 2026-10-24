@@ -152,6 +152,8 @@ shizuku_rv32_trap_entry:
   mv sp, a0
 .global shizuku_rv32_restore
 shizuku_rv32_restore:
+  lw t0, RV32_F_RESERVED1(sp)
+  bnez t0, .Lrv32_exit_umode
   lw t0, RV32_F_MCAUSE(sp)
   li t1, RV32_TAG_ECALL
   beq t0, t1, .Lrv32_exit_ecall
@@ -159,6 +161,7 @@ shizuku_rv32_restore:
   beq t0, t1, .Lrv32_exit_entry
   li t1, RV32_TAG_ECALL_SCRUB
   beq t0, t1, .Lrv32_exit_scrub
+1:
   lw t0, RV32_F_MEPC(sp)
   csrw mepc, t0
   lw t0, RV32_F_MSTATUS(sp)
@@ -274,6 +277,88 @@ shizuku_rv32_restore:
   lw a6, RV32_F_A6(sp)
   lw a7, RV32_F_A7(sp)
   addi sp, sp, RV32_FRAME_BYTES
+  mret
+
+// ---- U-mode 高速出口 (.Lrv32_exit_umode)
+//   復帰先が U-mode (RESERVED1 != 0) の場合、mscratch に trusted stack cursor を戻し、
+//   sp に U-mode の元のスタックポインタ (RESERVED0) を戻して mret する。
+.Lrv32_exit_umode:
+  lw t0, RV32_F_MCAUSE(sp)
+  li t1, RV32_TAG_ENTRY
+  beq t0, t1, .Lrv32_umode_exit_entry
+  li t1, RV32_TAG_ECALL_SCRUB
+  beq t0, t1, .Lrv32_umode_exit_scrub
+  li t1, RV32_TAG_ECALL
+  beq t0, t1, .Lrv32_umode_exit_ecall
+  j 1b
+
+.Lrv32_umode_exit_entry:
+  lw t0, RV32_F_MEPC(sp)
+  csrw mepc, t0
+  lw t0, RV32_F_MSTATUS(sp)
+  csrw mstatus, t0
+  lw ra, RV32_F_RA(sp)
+  lw a0, RV32_F_A0(sp)
+  lw a1, RV32_F_A1(sp)
+  lw a2, RV32_F_A2(sp)
+  lw a3, RV32_F_A3(sp)
+  lw a4, RV32_F_A4(sp)
+  lw a5, RV32_F_A5(sp)
+  lw a6, RV32_F_A6(sp)
+  lw a7, RV32_F_A7(sp)
+  lw t0, RV32_F_RESERVED1(sp)
+  csrw mscratch, t0
+  lw sp, RV32_F_RESERVED0(sp)
+  mret
+
+.Lrv32_umode_exit_ecall:
+  lw t0, RV32_F_MEPC(sp)
+  csrw mepc, t0
+  lw t0, RV32_F_MSTATUS(sp)
+  csrw mstatus, t0
+  lw a0, RV32_F_A0(sp)
+  lw a1, RV32_F_A1(sp)
+  lw t0, RV32_F_RESERVED1(sp)
+  csrw mscratch, t0
+  lw sp, RV32_F_RESERVED0(sp)
+  mret
+
+.Lrv32_umode_exit_scrub:
+  lw t0, RV32_F_MEPC(sp)
+  csrw mepc, t0
+  lw t0, RV32_F_MSTATUS(sp)
+  csrw mstatus, t0
+  lw a0, RV32_F_A0(sp)
+  lw a1, RV32_F_A1(sp)
+  mv ra, zero
+  mv t0, zero
+  mv t1, zero
+  mv t2, zero
+  mv t3, zero
+  mv t4, zero
+  mv t5, zero
+  mv t6, zero
+  mv a2, zero
+  mv a3, zero
+  mv a4, zero
+  mv a5, zero
+  mv a6, zero
+  mv a7, zero
+  mv s0, zero
+  mv s1, zero
+  mv s2, zero
+  mv s3, zero
+  mv s4, zero
+  mv s5, zero
+  mv s6, zero
+  mv s7, zero
+  mv s8, zero
+  mv s9, zero
+  mv s10, zero
+  mv s11, zero
+  lw t0, RV32_F_RESERVED1(sp)
+  csrw mscratch, t0
+  lw sp, RV32_F_RESERVED0(sp)
   mret
 .size shizuku_rv32_trap_entry, .-shizuku_rv32_trap_entry
 .global shizuku_rv32_first_return

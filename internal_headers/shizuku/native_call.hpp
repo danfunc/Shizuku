@@ -78,6 +78,9 @@ template <class A, class Thread, class Context, class Frame>
     header->region_base = context.region_base;
     header->region_limit = context.region_limit;
     header->privileged = context.privileged ? 1 : 0;
+#if defined(SHIZUKU_C6_UMODE)
+    header->reserved = frame.reserved0;
+#endif
     thread.call_stack.top = reinterpret_cast<uintptr_t>(header);
     thread.call_stack.depth++;
     return true;
@@ -224,6 +227,9 @@ template <class K, class KObj>
     header->region_limit = context.region_limit;
     // unwind_floor / via はヘッダに書かない: 同じ値を台帳 (下の thread.ledger[depth]) が持つ。
     header->privileged = context.privileged ? 1 : 0;
+#if defined(SHIZUKU_C6_UMODE)
+    header->reserved = frame.reserved0;
+#endif
     stack.top = reinterpret_cast<uintptr_t>(header);
     stack.depth = depth + 1;
     thread.ledger[depth] = {view.id, view.parent_handler_object, view.parent_handler_entry,

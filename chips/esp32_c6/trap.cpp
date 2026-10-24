@@ -522,26 +522,16 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
       }
     }
 
-    shizuku::chips::esp32_c6::pmp_c6_config cfg{
-      .code_base = code_base,
-      .code_limit = code_limit,
-      .data_base = data_base,
-      .data_limit = data_limit,
-      .stack_base = stack_base,
-      .stack_limit = stack_limit,
-      .region_base = c.region_base,
-      .region_limit = c.region_limit,
-      .mmio_base = mmio_base,
-      .mmio_limit = mmio_limit
-    };
-
-    const uintptr_t kstack_start = reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack);
-    if (!shizuku::chips::esp32_c6::pmp_controller::apply(cfg, kstack_start, sizeof(shizuku_c6_kernel_stack))) {
-      active_context = &c;
-      active_frame = c.sp;
-      active_stop_phase = 0xE004u;
-      stop(0xE004);
+    // 固定エントリの初期化 (起動時に1回)
+    static bool fixed_pmp_initialized = false;
+    if (__builtin_expect(!fixed_pmp_initialized, 0)) {
+      shizuku::chips::esp32_c6::pmp_controller::init_fixed_entries(
+          code_base, code_limit, c.region_base, c.region_limit);
+      fixed_pmp_initialized = true;
     }
+
+    // オブジェクト固有エントリへの切替え (前計算済み 8 本の CSR のみ書込み、固定エントリは触らない)
+    shizuku::chips::esp32_c6::pmp_controller::switch_to_precomputed(bounds->precomputed);
 #endif
   } else {
     // M-mode への復帰:

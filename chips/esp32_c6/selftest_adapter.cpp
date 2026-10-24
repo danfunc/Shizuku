@@ -225,6 +225,9 @@ static const name_id_entry kMapping[] = {
     {"stage1: M-mode DRAM fetch exact mcause is 1 (Instruction Access Fault)", 0x604C},
     {"stage1: M-mode DRAM fetch exact mepc is DRAM fetch target", 0x604D},
     {"stage1: M-mode DRAM fetch exact mtval is DRAM fetch target", 0x604E},
+    {"stage1: U-to-U call executed twice consecutively without fault", 0x604F},
+    {"stage1: U callee access to caller window caused fault trapped", 0x6050},
+    {"stage1: caller restored its own data window successfully", 0x6051},
 };
 
 static const size_t kMappingCount = sizeof(kMapping) / sizeof(kMapping[0]);

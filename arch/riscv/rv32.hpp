@@ -243,9 +243,13 @@ public:
   [[gnu::always_inline]] static exception_frame_t *call_resume(context_t &context,
                                                                 const call_header_t *header,
                                                                 bool scrub) {
-    return call_resume_at(context, header->pc, reinterpret_cast<uintptr_t>(header),
+    auto *frame = call_resume_at(context, header->pc, reinterpret_cast<uintptr_t>(header),
                           header->privileged != 0, header->region_base, header->region_limit,
                           scrub);
+#if defined(SHIZUKU_C6_UMODE)
+    frame->reserved0 = header->reserved;
+#endif
+    return frame;
   }
 
   // caller の ecall 時点の SP (= 再開フレームの上端。ヘッダ枠方式ではヘッダ枠のアドレスと同じ)。
