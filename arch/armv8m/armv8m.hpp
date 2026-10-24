@@ -326,9 +326,9 @@ public:
     ppb::mpu->rnr = index;
     ppb::mpu->rlar = 0;
   }
-  // attr0 = 通常メモリ (書き戻し), attr1 = 通常メモリ (キャッシュしない)。
+  // attr0 = 通常メモリ (書き戻し), attr1 = 通常メモリ (キャッシュしない), attr2 = Device-nGnRE
   static void protection_enable() {
-    *ppb::mpu_mair0 = 0xFFu | (0x44u << 8);
+    *ppb::mpu_mair0 = 0xFFu | (0x44u << 8) | (0x04u << 16);
     // ★PRIVDEFENA: region で明示していない場所は「特権だけが触れる」。これが
     //   単一アドレス空間における「カーネル空間」の実体で、MMU が無くても
     //   非特権から見えない領域を作れる (DESIGN §11.1)。
@@ -381,11 +381,157 @@ public:
     context.region_base = (uint32_t)base;
     context.region_limit = (uint32_t)limit;
   }
+  static constexpr bool HAS_OBJECT_PROTECTION = true;
+  static bool context_unprivileged(const context_t &c) { return (c.control & 1u) != 0; }
+
+  // Region 配置 (Plan §4.1)
+  // Region 0: Flash コード固定
+  // Region 1: 無効 (PRIVDEFENA でカーネルのみアクセス可)
+  // Region 2: スレッドスタック窓
+  // Region 3: オブジェクトデータ窓
+  // Region 4: オブジェクト MMIO 窓
+  // Region 5: 動的貸与窓 (GRANT_REGION_INDEX)
+  static constexpr uint32_t REGION_FLASH = 0;
+  static constexpr uint32_t REGION_UNUSED = 1;
+  static constexpr uint32_t REGION_STACK = 2;
+  static constexpr uint32_t REGION_DATA = 3;
+  static constexpr uint32_t REGION_MMIO = 4;
+  static constexpr uint32_t GRANT_REGION_INDEX = 5;
+
+  struct mpu_window_entry {
+    uint32_t rbar = 0;
+    uint32_t rlar = 0;
+  };
+
+  struct object_protection_window {
+    uint32_t owner_id = 0;
+    mpu_window_entry data{};
+    mpu_window_entry mmio{};
+  };
+
+  static inline constexpr bool is_dma_or_system_peripheral(uintptr_t base, uintptr_t limit) {
+    if (base < 0xE0100000u && limit > 0xE0000000u) return true; // PPB / NVIC / SCB
+    if (base < 0x50010000u && limit > 0x50000000u) return true; // RP2350 DMA コントローラ
+    if (base < 0x50500000u && limit > 0x50200000u) return true; // RP2350 PIO0..2
+    return false;
+  }
+
+  static inline constexpr mpu_window_entry encode_data_window(uintptr_t base, uintptr_t limit) {
+    if (limit <= base || base == 0) return {0, 0};
+    uint32_t rbar = ((uint32_t)base & ~0x1Fu) | (ACCESS_RW_ALL << 1) | 1u; // XN=1
+    uint32_t lim32 = (uint32_t)((limit + 31u) & ~31u);
+    uint32_t rlar = (lim32 & ~0x1Fu) | (1u << 1) | 1u; // Attr 1 (Normal Non-cacheable), Enable=1
+    return {rbar, rlar};
+  }
+
+  static inline constexpr mpu_window_entry encode_mmio_window(uintptr_t base, uintptr_t limit) {
+    if (limit <= base || base == 0) return {0, 0};
+    if (is_dma_or_system_peripheral(base, limit)) return {0, 0};
+    uint32_t rbar = ((uint32_t)base & ~0x1Fu) | (ACCESS_RW_ALL << 1) | 1u; // XN=1
+    uint32_t lim32 = (uint32_t)((limit + 31u) & ~31u);
+    uint32_t rlar = (lim32 & ~0x1Fu) | (2u << 1) | 1u; // Attr 2 (Device-nGnRE), Enable=1
+    return {rbar, rlar};
+  }
+
+  static inline constexpr mpu_window_entry encode_stack_window(uintptr_t base, uintptr_t limit) {
+    if (limit <= base || base == 0) return {0, 0};
+    uint32_t rbar = ((uint32_t)base & ~0x1Fu) | (ACCESS_RW_ALL << 1) | 1u; // XN=1
+    uint32_t lim32 = (uint32_t)((limit + 31u) & ~31u);
+    uint32_t rlar = (lim32 & ~0x1Fu) | (1u << 1) | 1u; // Attr 1 (Normal Non-cacheable), Enable=1
+    return {rbar, rlar};
+  }
+
+  static constexpr size_t kMaxObjectWindows = 64;
+  static inline object_protection_window s_object_windows[kMaxObjectWindows] = {};
+  static inline uint32_t s_active_object_id = 0xFFFFFFFFu;
+
+  static void invalidate_active_object() {
+    s_active_object_id = 0xFFFFFFFFu;
+  }
+
+  static bool has_object_bounds(uint32_t object_id) {
+    if (object_id >= kMaxObjectWindows) return false;
+    return s_object_windows[object_id].owner_id != 0;
+  }
+
+  static bool set_object_bounds(uint32_t object_id, uintptr_t data_base, uintptr_t data_limit,
+                                uintptr_t mmio_base, uintptr_t mmio_limit) {
+    if (object_id >= kMaxObjectWindows) return false;
+    s_object_windows[object_id].owner_id = object_id;
+    s_object_windows[object_id].data = encode_data_window(data_base, data_limit);
+    s_object_windows[object_id].mmio = encode_mmio_window(mmio_base, mmio_limit);
+    return true;
+  }
+
+  static void apply_object_window(const object_protection_window &win) {
+    if (win.data.rlar != 0) {
+      ppb::mpu->rnr = REGION_DATA;
+      ppb::mpu->rbar = win.data.rbar;
+      ppb::mpu->rlar = win.data.rlar;
+    } else {
+      region_disable(REGION_DATA);
+    }
+    if (win.mmio.rlar != 0) {
+      ppb::mpu->rnr = REGION_MMIO;
+      ppb::mpu->rbar = win.mmio.rbar;
+      ppb::mpu->rlar = win.mmio.rlar;
+    } else {
+      region_disable(REGION_MMIO);
+    }
+    asm volatile("dsb\nisb" ::: "memory");
+  }
+
+  static void apply_stack_window(uint32_t rbar, uint32_t rlar) {
+    if (rlar != 0) {
+      ppb::mpu->rnr = REGION_STACK;
+      ppb::mpu->rbar = rbar;
+      ppb::mpu->rlar = rlar;
+      asm volatile("dsb\nisb" ::: "memory");
+    } else {
+      region_disable(REGION_STACK);
+    }
+  }
+
   template <class Frame>
-  static void switch_callee_pmp(context_t &, Frame &, uint32_t, bool) {}
-  // GRANT_REGION が使う MPU region。0/1 は固定 (board.cpp)、2
-  // 以降は空いている。
-  static constexpr uint32_t GRANT_REGION_INDEX = 2;
+  static void switch_callee_protection(context_t &context, Frame &frame, uint32_t callee_id, bool privileged) {
+    (void)context;
+    (void)frame;
+    if (privileged) {
+      if (s_active_object_id != callee_id) {
+        region_disable(REGION_DATA);
+        region_disable(REGION_MMIO);
+        s_active_object_id = callee_id;
+      }
+      return;
+    }
+    if (callee_id >= kMaxObjectWindows) {
+      region_disable(REGION_DATA);
+      region_disable(REGION_MMIO);
+      s_active_object_id = 0xFFFFFFFFu;
+      return;
+    }
+    if (s_active_object_id == callee_id) {
+      return; // 同一窓の呼出しは書換えを省く
+    }
+    const auto &win = s_object_windows[callee_id];
+    apply_object_window(win);
+    s_active_object_id = callee_id;
+  }
+
+  static void switch_caller_protection(uint32_t caller_object) {
+    if (caller_object >= kMaxObjectWindows) {
+      region_disable(REGION_DATA);
+      region_disable(REGION_MMIO);
+      s_active_object_id = 0xFFFFFFFFu;
+      return;
+    }
+    if (s_active_object_id == caller_object) {
+      return; // 同一窓の呼出しは書換えを省く
+    }
+    const auto &win = s_object_windows[caller_object];
+    apply_object_window(win);
+    s_active_object_id = caller_object;
+  }
   static void stack_limit_set(context_t &context, uintptr_t limit) {
     context.psplim = (uint32_t)limit;
   }

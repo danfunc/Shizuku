@@ -17,6 +17,17 @@ extern "C" void shizuku_selftest_fault_phase(uint32_t, uint32_t);
 #endif
 namespace shizuku {
 
+namespace {
+#if !defined(SHIZUKU_LEAN_LEDGER) && !defined(__riscv)
+// ARM (RP2350 等) で HAS_OBJECT_PROTECTION かつ LEAN_LEDGER 未定義時のフォールバック用レコード。
+// C6 (非 U-mode / HAS_OBJECT_PROTECTION == false) では .bss を一切消費しないよう除外する。
+// スレッド数は configs/kit.bzl の SHIZUKU_THREAD_COUNT (32) に整合させる。
+static constexpr size_t kMaxReturnThreads = 32;
+static constexpr size_t kMaxReturnDepth = 34;
+alignas(8) caller_return_record s_thread_returns[kMaxReturnThreads][kMaxReturnDepth] = {};
+#endif
+}
+
 // 実装より前に使う (do_switch が grant_unwind を、grant_unwind が arm_timer を呼ぶ)
 // ので、特殊化の宣言を先に置く。無いと暗黙の実体化が先に起きる。
 template <> void KERNEL::grant_unwind(grant_end);
@@ -52,6 +63,13 @@ template <> void KERNEL::set_thread_storage(void *memory, uintptr_t bytes) {
     m_threads[index].thread = THREAD{};
     m_threads[index].context = CONTEXT{};
     m_threads[index].thread.context = &m_threads[index].context;
+#if !defined(SHIZUKU_LEAN_LEDGER) && !defined(__riscv)
+    if constexpr (requires { ARCH::HAS_OBJECT_PROTECTION; } && ARCH::HAS_OBJECT_PROTECTION) {
+      if (index < kMaxReturnThreads) {
+        m_threads[index].thread.return_records = s_thread_returns[index];
+      }
+    }
+#endif
   }
   // 現在のスレッドのキャッシュを新しい表に張り直す (m_current は init で 0)。
   for (uint32_t core = 0; core < CORE_COUNT; ++core)
@@ -67,6 +85,13 @@ template <> void KERNEL::set_thread_ledger(
       (uintptr_t)memory >= BOARD::unprivileged_floor())
     BOARD::panic("call ledger must be privileged memory");
   THREAD &thread = m_threads[id].thread;
+#if !defined(SHIZUKU_LEAN_LEDGER) && !defined(__riscv)
+  if constexpr (requires { ARCH::HAS_OBJECT_PROTECTION; } && ARCH::HAS_OBJECT_PROTECTION) {
+    if (id < kMaxReturnThreads) {
+      thread.return_records = s_thread_returns[id];
+    }
+  }
+#endif
   thread.ledger = memory;
   thread.ledger_capacity = capacity;
   thread.call_stack = {};
@@ -117,6 +142,11 @@ KERNEL::spawn_result KERNEL::spawn(const KERNEL::spawn_request &request) {
                         : request.affinity;
   ARCH::stack_limit_set(*thread.context,
                         (request.stack_base + 7) & ~(uintptr_t)7);
+  if constexpr (ARCH::HAS_OBJECT_PROTECTION) {
+    const auto stack_win = ARCH::encode_stack_window(request.stack_base, request.stack_base + request.stack_bytes);
+    thread.stack_rbar = stack_win.rbar;
+    thread.stack_rlar = stack_win.rlar;
+  }
   ARCH::set_priv(*thread.context,
                  (request.protection & PROTECTION_UNPRIVILEGED) == 0);
   ARCH::set_region_window(*thread.context, request.region_base,

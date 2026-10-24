@@ -34,6 +34,8 @@ constexpr uintptr_t OBJECT_TRESPASSER = object_id::trespasser;
 constexpr uintptr_t OBJECT_KERNEL_CALLER = object_id::kernel_caller;
 constexpr uintptr_t METHOD_MAIN = 0;
 
+alignas(32) uint8_t s_unpriv_probe_data[64] = {};
+
 // 自分の CONTROL を読んで返すだけ。触るのはレジスタと自分のスタックのみ。
 uintptr_t probe(uintptr_t selector, uintptr_t, uintptr_t, uintptr_t) {
   if (selector == 1)
@@ -93,6 +95,13 @@ void unprivileged_probe() {
 
   // 同じコードを 2 つのオブジェクトとして登録する。**片方だけ非特権を宣言**する
   // ので、差が出れば「宣言が効いた」ことの証拠になる (対照実験)。
+  if constexpr (requires { ARCH::set_object_bounds(OBJECT_UNPRIV_PROBE, 0, 0, 0, 0); }) {
+    ARCH::set_object_bounds(
+        OBJECT_UNPRIV_PROBE,
+        (uintptr_t)s_unpriv_probe_data,
+        (uintptr_t)s_unpriv_probe_data + sizeof(s_unpriv_probe_data),
+        0, 0);
+  }
   ARCH::syscall((uintptr_t)object_api::CREATE_OBJECT, OBJECT_UNPRIV_PROBE,
                 method_entry<ARCH, &probe>(), OBJECT_UNPRIVILEGED);
   ARCH::syscall((uintptr_t)object_api::CREATE_OBJECT, OBJECT_PRIV_PROBE,
@@ -222,6 +231,13 @@ void unprivileged_probe() {
   // ---- 拒否のテスト: 触れないはずの場所を触ったら、そのスレッドだけが止まる ----
   {
     const auto faults_before = kernel_instance.faults().count;
+    if constexpr (requires { ARCH::set_object_bounds(OBJECT_TRESPASSER, 0, 0, 0, 0); }) {
+      ARCH::set_object_bounds(
+          OBJECT_TRESPASSER,
+          (uintptr_t)s_unpriv_probe_data,
+          (uintptr_t)s_unpriv_probe_data + sizeof(s_unpriv_probe_data),
+          0, 0);
+    }
     ARCH::syscall((uintptr_t)object_api::CREATE_OBJECT, OBJECT_TRESPASSER,
                   method_entry<ARCH, &trespass>(), OBJECT_UNPRIVILEGED);
     // ★**別スレッドで**走らせる。落ちるのはスレッド単位なので、呼び出しで試すと

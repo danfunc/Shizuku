@@ -134,7 +134,7 @@ public:
   static void region_disable(uint32_t i){volatile uint32_t *m=(volatile uint32_t *)0xE000ED90u;m[2]=i;m[4]=0;}
   static void protection_enable(){volatile uint32_t *m=(volatile uint32_t *)0xE000ED90u;m[1]=5;__asm volatile("dsb\n\tisb":::"memory");}
   static void protection_disable(){((volatile uint32_t *)0xE000ED90u)[1]=0;}
-  static constexpr uint32_t GRANT_REGION_INDEX=2;
+  static constexpr uint32_t GRANT_REGION_INDEX=5;
   static bool grant_set(context_t &c,uintptr_t b,uintptr_t e){
     uint32_t rb,ra;if(!region_encode(b,e,rb,ra,ACCESS_RO_ALL,true))return false;
     const unsigned log=((ra>>1)&0x1Fu)+1u;const uintptr_t size=(uintptr_t)1<<log;
@@ -154,8 +154,18 @@ public:
   static bool current_priv(){return (control_register()&1u)==0;}
   static void set_priv(context_t &c,bool p){c.control=p?CONTROL_PRIV_PSP:CONTROL_UNPRIV_PSP;}
   static bool set_region_window(context_t &c,uintptr_t b,uintptr_t e){return e==0?(c.region_base=c.region_limit=0,true):grant_set(c,b,e);}
+  static constexpr bool HAS_OBJECT_PROTECTION = false;
+  // 共通コードが呼ぶ窓の口。段 B で RP2040 の窓 (2 の冪 + SRD) を実装するまでは空。
+  struct stack_window {
+    uint32_t rbar = 0;
+    uint32_t rlar = 0;
+  };
+  static constexpr stack_window encode_stack_window(uintptr_t, uintptr_t) { return {}; }
+  static constexpr uintptr_t kMaxObjectWindows = UINTPTR_MAX;
+
   template <class Frame>
-  static void switch_callee_pmp(context_t &, Frame &, uint32_t, bool) {}
+  static void switch_callee_protection(context_t &, Frame &, uint32_t, bool) {}
+  static void switch_caller_protection(uint32_t) {}
   // ソフトウェア下限のみ。MPU ガード領域は未実装
   static void stack_limit_set(context_t &c, uintptr_t v){c.stack_limit_addr=(uint32_t)v;}
   static uintptr_t stack_limit(const context_t &c){return (uintptr_t)c.stack_limit_addr;}

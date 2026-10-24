@@ -313,14 +313,34 @@ public:
   }
 
   static uintptr_t trusted_stack_top() {
+#if defined(SHIZUKU_C6_UMODE)
     if constexpr (requires { IntMode::kstack_top(); })
       return IntMode::kstack_top();
+#endif
     return 0;
   }
 
-  static void switch_caller_pmp(uint32_t caller_object) {
+#if defined(SHIZUKU_C6_UMODE)
+  static constexpr bool HAS_OBJECT_PROTECTION = true;
+#else
+  static constexpr bool HAS_OBJECT_PROTECTION = false;
+#endif
+  // 共通コードが arch を問わず呼べる窓の口。RISC-V の窓は chip 側 (PMP) が持つので、
+  // thread に前計算する stack 窓は無く、非特権オブジェクトの数にも上限を課さない。
+  struct stack_window {
+    uint32_t rbar = 0;
+    uint32_t rlar = 0;
+  };
+  static constexpr stack_window encode_stack_window(uintptr_t, uintptr_t) { return {}; }
+  static constexpr uintptr_t kMaxObjectWindows = UINTPTR_MAX;
+
+  static void switch_caller_protection(uint32_t caller_object) {
+#if defined(SHIZUKU_C6_UMODE)
     if constexpr (requires { IntMode::switch_object_pmp(caller_object); })
       IntMode::switch_object_pmp(caller_object);
+#else
+    (void)caller_object;
+#endif
   }
 
   // caller の ecall 時点の SP (= 再開フレームの上端。ヘッダ枠方式ではヘッダ枠のアドレスと同じ)。
@@ -382,6 +402,9 @@ public:
   static uintptr_t frame_pc(const exception_frame_t &frame) {
     return frame.mepc;
   }
+  static uintptr_t frame_lr(const exception_frame_t &frame) {
+    return frame.ra;
+  }
 
   // 特権の判定は IntMode に委ねる (trap 内の保存 MPP など)。
   static bool current_priv() { return IntMode::current_priv(); }
@@ -434,7 +457,7 @@ public:
   }
 
   template <class Frame>
-  static void switch_callee_pmp(context_t &context, Frame &frame, uint32_t callee_id, bool privileged) {
+  static void switch_callee_protection(context_t &context, Frame &frame, uint32_t callee_id, bool privileged) {
 #if defined(SHIZUKU_C6_UMODE)
     if (!privileged) {
       IntMode::enter_u_object(context, frame, callee_id);

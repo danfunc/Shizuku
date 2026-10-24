@@ -136,12 +136,9 @@ void rp2350_pico2::protection_init() {
       ((uintptr_t)&__flash_binary_end + 31u) & ~(uintptr_t)31;
   ARCH_TYPE::region_set(0, SOC_TYPE::kXipBase, code_end, ARCH_TYPE::ACCESS_RO_ALL,
                         false, 0);
-  // region1: ヒープ先頭〜SRAM 終端 = 読み書き可・実行不可。スレッドスタックは
-  // ここに住むので、スタック上のデータを実行する事故が止まる。
-  const uintptr_t heap = ((uintptr_t)__end__ + 31u) & ~(uintptr_t)31;
-  ARCH_TYPE::region_set(1, heap, SOC_TYPE::kSramRegionEnd, ARCH_TYPE::ACCESS_RW_ALL, true,
-                        1);
-  for (uint32_t index = 2; index < SOC_TYPE::kMpuRegionCount; ++index)
+  // Region 1: SRAM 全域 RW は撤廃。SRAM は PRIVDEFENA (特権 RWX, 非特権 None) に委ね、
+  // 非特権オブジェクトには Region 2(Stack), Region 3(Data), Region 4(MMIO) を動的に張る。
+  for (uint32_t index = 1; index < SOC_TYPE::kMpuRegionCount; ++index)
     ARCH_TYPE::region_disable(index);
   ARCH_TYPE::protection_enable();
 }

@@ -202,6 +202,22 @@ SHIZUKU_HOT bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT
   // ★識別情報は非特権から届かない特権 ledger に置く。ここには復帰用文脈だけを残す。
   header->saved = *context; // sp を含めて丸ごと (= 元フレームの位置も記録される)
 
+  // ★戻りの権威を特権台帳に記録 (Plan §5)
+  // in-place 経路を持つ arch (RISC-V) は native_call.hpp 側の台帳が権威なので触らない。
+  if constexpr (ARCH::HAS_OBJECT_PROTECTION && !arch_call_in_place<ARCH>()) {
+    const uintptr_t caller_pc = (context->sp != nullptr) ? ARCH::frame_pc(*context->sp) : 0;
+    if (!THREAD::ledger_accessor::record_caller_return_authority(
+            thread, thread.call_stack.depth,
+            caller_pc,
+            (uintptr_t)context->sp,
+            !is_context_unprivileged(context) ? 1 : 0,
+            context->region_base,
+            context->region_limit,
+            (uint16_t)thread.call_stack.call_count,
+            0))
+      return false;
+  }
+
   // ★元の例外フレームは動かさない (I-3)。下へ複製するのは書き換え用の作業コピー。
   __builtin_memcpy((void *)callee_frame, (const void *)context->sp, frame_bytes);
   context->sp = (FRAME *)callee_frame;
@@ -236,7 +252,7 @@ SHIZUKU_HOT bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT 
   if (thread.call_stack.depth == 0)
     return false;
 #else
-  if (thread.call_stack.top == 0)
+  if (thread.call_stack.top == 0 || thread.call_stack.depth == 0)
     return false;
 #endif
   if (arch_call_in_place<ARCH>()) {
@@ -261,6 +277,28 @@ SHIZUKU_HOT bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT 
   const call_frame_header *header = (const call_frame_header *)thread.call_stack.top;
   const uintptr_t previous = header->prev;
   *context = header->saved;
+
+  // ★戻りの権威は user stack 上の header ではなく特権台帳 (Plan §5)
+  if constexpr (ARCH::HAS_OBJECT_PROTECTION && !arch_call_in_place<ARCH>()) {
+    uintptr_t ret_pc = 0;
+    uintptr_t ret_sp = 0;
+    bool ret_privileged = false;
+    uintptr_t ret_region_base = 0;
+    uintptr_t ret_region_limit = 0;
+    // 記録が読めないときは panic。header の値で黙って続けると権威が user stack に戻る。
+    if (!THREAD::ledger_accessor::restore_caller_return_authority(
+            thread, thread.call_stack.depth - 1,
+            ret_pc, ret_sp, ret_privileged,
+            ret_region_base, ret_region_limit))
+      BOARD::panic("call return authority missing");
+
+    // 台帳の値を権威として強制反映 (user stack の header からの読み戻し値は上書き)
+    context->sp = (FRAME *)ret_sp;
+    ARCH::set_priv(*context, ret_privileged);
+    ARCH::set_region_window(*context, ret_region_base, ret_region_limit);
+    ARCH::set_entry(*context->sp, ret_pc, ARCH::frame_lr(*context->sp));
+  }
+
   *frame = context->sp;
   if (is_call) {
     thread.call_stack.call_count--;
@@ -274,6 +312,14 @@ SHIZUKU_HOT bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT 
   }
   thread.call_stack.top = previous;
   thread.call_stack.depth--;
+
+  // 復帰先 caller の保護窓を復元
+  const uint32_t caller_obj = thread.call_stack.call_count == 0
+      ? thread.base_object
+      : thread.call_stack.current_call_object;
+  if constexpr (requires { ARCH::switch_caller_protection(caller_obj); }) {
+    ARCH::switch_caller_protection(caller_obj);
+  }
   return true;
 }
 
@@ -338,9 +384,12 @@ SHIZUKU_HOT kernel_error KERNEL::enter_call(KERNEL::THREAD &thread, KERNEL::CONT
     return kernel_error::OK;
   }
 #endif
-  entry = {request.callee_object, request.parent_handler_object,
-           request.parent_handler_entry, (uint8_t)request.callee_kind,
-           via, (uint16_t)unwind_floor};
+  entry.object = request.callee_object;
+  entry.handler_object = request.parent_handler_object;
+  entry.handler_entry = request.parent_handler_entry;
+  entry.kind = (uint8_t)request.callee_kind;
+  entry.via = via;
+  entry.unwind_floor = (uint16_t)unwind_floor;
   thread.call_stack.caller_object = thread.call_stack.call_count == 0
                                         ? thread.base_object
                                         : thread.call_stack.current_call_object;
@@ -376,6 +425,9 @@ kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   ARCH::set_args(**frame, request.args);
   ARCH::set_priv(*context, (request.protection & PROTECTION_UNPRIVILEGED) == 0);
   ARCH::set_region_window(*context, request.region_base, request.region_limit);
+  if constexpr (requires { ARCH::switch_callee_protection(*context, **frame, request.callee_object, (request.protection & PROTECTION_UNPRIVILEGED) == 0); }) {
+    ARCH::switch_callee_protection(*context, **frame, request.callee_object, (request.protection & PROTECTION_UNPRIVILEGED) == 0);
+  }
   return kernel_error::OK;
 }
 

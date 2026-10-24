@@ -82,9 +82,9 @@ template <class A, class Thread, class Context, class Frame>
     header->region_base = context.region_base;
     header->region_limit = context.region_limit;
     header->privileged = context.privileged ? 1 : 0;
-#if defined(SHIZUKU_C6_UMODE)
-    header->reserved = frame.reserved0;
-#endif
+    if constexpr (requires { header->reserved; frame.reserved0; }) {
+      header->reserved = frame.reserved0;
+    }
     thread.call_stack.top = reinterpret_cast<uintptr_t>(header);
     thread.call_stack.depth++;
     return true;
@@ -152,12 +152,14 @@ template <class K>
     if (restore) {
       frame = A::call_resume_at(context, entry.ret_pc, entry.ret_sp, entry.ret_privileged != 0,
                                 entry.ret_region_base, entry.ret_region_limit, scrub);
-#if defined(SHIZUKU_C6_UMODE)
       if (!context.privileged) {
-        A::set_unprivileged_resume_metadata(*frame, entry.ret_sp, A::trusted_stack_top(), scrub);
-        A::switch_caller_pmp(caller_object);
+        if constexpr (requires { A::set_unprivileged_resume_metadata(*frame, entry.ret_sp, A::trusted_stack_top(), scrub); }) {
+          A::set_unprivileged_resume_metadata(*frame, entry.ret_sp, A::trusted_stack_top(), scrub);
+        }
+        if constexpr (requires { A::switch_caller_protection(caller_object); }) {
+          A::switch_caller_protection(caller_object);
+        }
       }
-#endif
     }
     thread.call_stack.depth = depth - 1;
 #else
@@ -244,9 +246,9 @@ template <class K, class KObj>
     header->region_limit = context.region_limit;
     // unwind_floor / via はヘッダに書かない: 同じ値を台帳 (下の thread.ledger[depth]) が持つ。
     header->privileged = context.privileged ? 1 : 0;
-#if defined(SHIZUKU_C6_UMODE)
-    header->reserved = frame.reserved0;
-#endif
+    if constexpr (requires { header->reserved; frame.reserved0; }) {
+      header->reserved = frame.reserved0;
+    }
     stack.top = reinterpret_cast<uintptr_t>(header);
     stack.depth = depth + 1;
     thread.ledger[depth] = {view.id, view.parent_handler_object, view.parent_handler_entry,
@@ -262,7 +264,7 @@ template <class K, class KObj>
 #endif
     A::set_priv(context, view.privileged);
     A::set_region_window(context, view.region_base, view.region_limit);
-    A::switch_callee_pmp(context, frame, view.id, view.privileged);
+    A::switch_callee_protection(context, frame, view.id, view.privileged);
     return kernel_error::OK;
   } else {
     return kernel_error::BAD_REQUEST;

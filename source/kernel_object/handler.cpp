@@ -396,6 +396,13 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
     note_create_failure(id, creator, error);
     return 0;
   }
+  // 窓の表に載らない非特権オブジェクトは作らせない (黙って空窓にしない = fail closed)。
+  // 特権オブジェクトは窓を使わないので上限の対象外。保護窓を持たない arch は上限なし。
+  if ((flags & OBJECT_UNPRIVILEGED) != 0 && id >= ARCH::kMaxObjectWindows) {
+    error = object_error::BAD_OBJECT;
+    note_create_failure(id, creator, error);
+    return 0;
+  }
   const bool is_privileged =
       (object_protection(creator) == PROTECTION_PRIVILEGED);
 
