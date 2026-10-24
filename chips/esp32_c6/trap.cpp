@@ -1171,6 +1171,51 @@ bool plic_vector_mode::is_kstack_address(uintptr_t addr) {
 uintptr_t plic_vector_mode::kstack_limit() {
   return shizuku_c6_kstack_limit();
 }
+uintptr_t plic_vector_mode::kstack_top() {
+  return reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack + sizeof(shizuku_c6_kernel_stack));
+}
+
+void plic_vector_mode::switch_object_pmp(uint32_t object_id) {
+#if defined(SHIZUKU_C6_UMODE)
+  const c6_stage1_object_bounds *bounds = nullptr;
+  if (g_c6_stage1_u_bounds.owner_id != 0 && object_id == g_c6_stage1_u_bounds.owner_id) {
+    bounds = &g_c6_stage1_u_bounds;
+  } else if (g_c6_stage1_driver_bounds.owner_id != 0 && object_id == g_c6_stage1_driver_bounds.owner_id) {
+    bounds = &g_c6_stage1_driver_bounds;
+  }
+  if (bounds != nullptr) {
+    shizuku::chips::esp32_c6::pmp_controller::switch_to_precomputed(bounds->precomputed);
+  }
+#else
+  (void)object_id;
+#endif
+}
+
+template <class Context, class Frame>
+void plic_vector_mode::enter_u_object(Context &context, Frame &frame, uint32_t callee_id) {
+#if defined(SHIZUKU_C6_UMODE)
+  (void)context;
+  const c6_stage1_object_bounds *bounds = nullptr;
+  if (g_c6_stage1_u_bounds.owner_id != 0 && callee_id == g_c6_stage1_u_bounds.owner_id) {
+    bounds = &g_c6_stage1_u_bounds;
+  } else if (g_c6_stage1_driver_bounds.owner_id != 0 && callee_id == g_c6_stage1_driver_bounds.owner_id) {
+    bounds = &g_c6_stage1_driver_bounds;
+  }
+  if (bounds != nullptr) {
+    shizuku::chips::esp32_c6::pmp_controller::switch_to_precomputed(bounds->precomputed);
+    frame.ra = bounds->u_return_trampoline;
+    frame.reserved0 = bounds->stack_limit;
+    frame.reserved1 = reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack + sizeof(shizuku_c6_kernel_stack));
+    frame.mcause = RV32_TAG_U_ENTRY;
+    frame.mstatus = (frame.mstatus & ~0x1800u); // MPP = 0 (U-mode)
+  }
+#else
+  (void)context; (void)frame; (void)callee_id;
+#endif
+}
+
+template void plic_vector_mode::enter_u_object<chip::arch_type::context_t, chip::arch_type::exception_frame_t>(
+    chip::arch_type::context_t &, chip::arch_type::exception_frame_t &, uint32_t);
 
 bool plic_vector_mode::cycle_counter_enable() {
 #if defined(__riscv)

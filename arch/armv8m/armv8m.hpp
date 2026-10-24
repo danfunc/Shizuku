@@ -381,6 +381,8 @@ public:
     context.region_base = (uint32_t)base;
     context.region_limit = (uint32_t)limit;
   }
+  template <class Frame>
+  static void switch_callee_pmp(context_t &, Frame &, uint32_t, bool) {}
   // GRANT_REGION が使う MPU region。0/1 は固定 (board.cpp)、2
   // 以降は空いている。
   static constexpr uint32_t GRANT_REGION_INDEX = 2;

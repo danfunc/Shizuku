@@ -245,6 +245,7 @@ template <class K, class KObj>
 #endif
     A::set_priv(context, view.privileged);
     A::set_region_window(context, view.region_base, view.region_limit);
+    A::switch_callee_pmp(context, frame, view.id, view.privileged);
     return kernel_error::OK;
   } else {
     return kernel_error::BAD_REQUEST;

@@ -56,12 +56,14 @@ shizuku_rv32_trap_entry:
   srli t0, t0, 20
   addi t0, t0, -11
   bnez t0, .Lrv32_check_umode_ecall
+  li t1, RV32_TAG_ECALL
   j .Lrv32_is_ecall
 
 .Lrv32_check_umode_ecall:
   // U-mode ECALL (exception code 8)?
   addi t0, t0, 3
   bnez t0, .Lrv32_full_save
+  li t1, RV32_TAG_U_ECALL
 
 .Lrv32_is_ecall:
   // ---- ECALL: caller-saved ABI。入力と戻りに要るものだけ保存する。
@@ -79,8 +81,7 @@ shizuku_rv32_trap_entry:
   sw t0, RV32_F_MEPC(sp)
   csrr t0, mstatus
   sw t0, RV32_F_MSTATUS(sp)
-  li t0, RV32_TAG_ECALL
-  sw t0, RV32_F_MCAUSE(sp)
+  sw t1, RV32_F_MCAUSE(sp)
   // 番号 (a0、frame に保存済みなので壊してよい) で表を引き、各 API の処理へ直接入る。
   // 範囲外は 0 番 (thread mode の API・primitive・raw 配送を決める共通の入口)。
   li t0, RV32_ECALL_TABLE_ENTRIES
@@ -152,8 +153,6 @@ shizuku_rv32_trap_entry:
   mv sp, a0
 .global shizuku_rv32_restore
 shizuku_rv32_restore:
-  lw t0, RV32_F_RESERVED1(sp)
-  bnez t0, .Lrv32_exit_umode
   lw t0, RV32_F_MCAUSE(sp)
   li t1, RV32_TAG_ECALL
   beq t0, t1, .Lrv32_exit_ecall
@@ -161,6 +160,12 @@ shizuku_rv32_restore:
   beq t0, t1, .Lrv32_exit_entry
   li t1, RV32_TAG_ECALL_SCRUB
   beq t0, t1, .Lrv32_exit_scrub
+  li t1, RV32_TAG_U_ENTRY
+  beq t0, t1, .Lrv32_umode_exit_entry
+  li t1, RV32_TAG_U_SCRUB
+  beq t0, t1, .Lrv32_umode_exit_scrub
+  li t1, RV32_TAG_U_ECALL
+  beq t0, t1, .Lrv32_umode_exit_ecall
 1:
   lw t0, RV32_F_MEPC(sp)
   csrw mepc, t0
@@ -279,19 +284,9 @@ shizuku_rv32_restore:
   addi sp, sp, RV32_FRAME_BYTES
   mret
 
-// ---- U-mode 高速出口 (.Lrv32_exit_umode)
-//   復帰先が U-mode (RESERVED1 != 0) の場合、mscratch に trusted stack cursor を戻し、
+// ---- U-mode 高速出口 (RV32_TAG_U_*)
+//   復帰先が U-mode の場合、mscratch に trusted stack cursor を戻し、
 //   sp に U-mode の元のスタックポインタ (RESERVED0) を戻して mret する。
-.Lrv32_exit_umode:
-  lw t0, RV32_F_MCAUSE(sp)
-  li t1, RV32_TAG_ENTRY
-  beq t0, t1, .Lrv32_umode_exit_entry
-  li t1, RV32_TAG_ECALL_SCRUB
-  beq t0, t1, .Lrv32_umode_exit_scrub
-  li t1, RV32_TAG_ECALL
-  beq t0, t1, .Lrv32_umode_exit_ecall
-  j 1b
-
 .Lrv32_umode_exit_entry:
   lw t0, RV32_F_MEPC(sp)
   csrw mepc, t0

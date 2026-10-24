@@ -248,6 +248,12 @@ public:
                           scrub);
 #if defined(SHIZUKU_C6_UMODE)
     frame->reserved0 = header->reserved;
+    if (!context.privileged) {
+      frame->reserved1 = IntMode::kstack_top();
+      frame->mcause = scrub ? RV32_TAG_U_SCRUB : RV32_TAG_U_ECALL;
+      frame->mstatus = (frame->mstatus & ~0x1800u); // U-mode MPP = 0
+      IntMode::switch_object_pmp(header->caller_object);
+    }
 #endif
     return frame;
   }
@@ -343,6 +349,20 @@ public:
                                 uintptr_t limit) {
     context.region_base = base;
     context.region_limit = limit;
+  }
+
+  template <class Frame>
+  static void switch_callee_pmp(context_t &context, Frame &frame, uint32_t callee_id, bool privileged) {
+#if defined(SHIZUKU_C6_UMODE)
+    if (!privileged) {
+      IntMode::enter_u_object(context, frame, callee_id);
+    }
+#else
+    (void)context;
+    (void)frame;
+    (void)callee_id;
+    (void)privileged;
+#endif
   }
 
   // RV32 A 拡張 (LR.W / SC.W) によるアトミック操作

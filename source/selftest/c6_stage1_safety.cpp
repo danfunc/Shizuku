@@ -146,7 +146,11 @@ asm(
     "  li t0, 13\n"
     "  beq a0, t0, .Lprobe_app_driver_data\n"
     "  li t0, 14\n"
-    "  beq a0, t0, .Lprobe_u_to_u_call\n"
+    "  beq a0, t0, .Lprobe_u_to_u_call_1\n"
+    "  li t0, 15\n"
+    "  beq a0, t0, .Lprobe_u_to_u_call_2\n"
+    "  li t0, 16\n"
+    "  beq a0, t0, .Lprobe_u_to_u_call_fault\n"
     "  li a0, 0\n"
     "  ret\n"
     "\n"
@@ -280,15 +284,13 @@ asm(
     "  or a0, a0, t0\n"
     "  ret\n"
     "\n"
-    ".Lprobe_u_to_u_call:\n"
+    ".Lprobe_u_to_u_call_1:\n"
     "  addi sp, sp, -32\n"
     "  sw ra, 28(sp)\n"
     "  sw s0, 24(sp)\n"
     "  sw s1, 20(sp)\n"
     "  sw s2, 16(sp)\n"
     "  la s0, u_mode_stage1_data_pool\n"
-    "  li t0, 0xA110CAFE\n"
-    "  sw t0, 16(s0)\n"
     "  lw s1, 20(s0)\n"
     "  lw s2, 24(s0)\n"
     "\n"
@@ -299,8 +301,24 @@ asm(
     "  li a4, 0\n"
     "  ecall\n"
     "  bnez a0, .Lu2u_fail_1\n"
-    "  li t0, 0x42\n"
-    "  bne a1, t0, .Lu2u_fail_1\n"
+    "  mv a0, a1\n"
+    "\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  lw s2, 16(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    "\n"
+    ".Lprobe_u_to_u_call_2:\n"
+    "  addi sp, sp, -32\n"
+    "  sw ra, 28(sp)\n"
+    "  sw s0, 24(sp)\n"
+    "  sw s1, 20(sp)\n"
+    "  sw s2, 16(sp)\n"
+    "  la s0, u_mode_stage1_data_pool\n"
+    "  lw s1, 20(s0)\n"
+    "  lw s2, 24(s0)\n"
     "\n"
     "  li a0, 4\n"
     "  mv a1, s1\n"
@@ -309,8 +327,26 @@ asm(
     "  li a4, 0\n"
     "  ecall\n"
     "  bnez a0, .Lu2u_fail_2\n"
-    "  li t0, 0x42\n"
-    "  bne a1, t0, .Lu2u_fail_2\n"
+    "  mv a0, a1\n"
+    "\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  lw s2, 16(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    "\n"
+    ".Lprobe_u_to_u_call_fault:\n"
+    "  addi sp, sp, -32\n"
+    "  sw ra, 28(sp)\n"
+    "  sw s0, 24(sp)\n"
+    "  sw s1, 20(sp)\n"
+    "  sw s2, 16(sp)\n"
+    "  la s0, u_mode_stage1_data_pool\n"
+    "  li t0, 0xA110CAFE\n"
+    "  sw t0, 16(s0)\n"
+    "  lw s1, 20(s0)\n"
+    "  lw s2, 24(s0)\n"
     "\n"
     "  li a0, 4\n"
     "  mv a1, s1\n"
@@ -334,7 +370,7 @@ asm(
     "  lw s1, 20(sp)\n"
     "  lw s2, 16(sp)\n"
     "  addi sp, sp, 32\n"
-    "  li a0, 0x5AFE0000\n"
+    "  li a0, 0xE012\n"
     "  ret\n"
     "\n"
     ".Lu2u_fail_1:\n"
@@ -991,20 +1027,57 @@ void c6_stage1_safety() {
   record_check("stage1: M-mode DRAM fetch exact mtval is DRAM fetch target",
                shizuku_c6_u_mode_diag[6] == mfetch_target, shizuku_c6_u_mode_diag[6], mfetch_target);
 
-  // 14. U→U method call 連続 2 回、U callee 窓アクセス fault、caller 自窓復帰の検証
-  g_c6_probe_driver_app_data_fault_pc = reinterpret_cast<uintptr_t>(&c6_stage1_probe_driver_app_data_fault_insn_addr);
-  const auto u2u_res = ARCH::syscall(
+  // 14. U→U method call 連続 2 回の検証 (1回目と2回目を別々に assert)
+  const auto u2u_res1 = ARCH::syscall(
       static_cast<uintptr_t>(object_api::CALL_METHOD),
       OBJECT_STAGE1_PROBE,
       METHOD_STAGE1_PROBE,
-      14 /* cmd=14: U->U call test */);
+      14 /* cmd=14: U->U call test 1st */);
+  record_check("stage1: U-to-U call 1st iteration returned 0x42",
+               u2u_res1.error == 0 && u2u_res1.value == 0x42u,
+               u2u_res1.value, 0x42u);
+
+  const auto u2u_res2 = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      15 /* cmd=15: U->U call test 2nd */);
+  record_check("stage1: U-to-U call 2nd iteration returned 0x42",
+               u2u_res2.error == 0 && u2u_res2.value == 0x42u,
+               u2u_res2.value, 0x42u);
+
+  // 15. 2回目の後の mscratch 健全性確認、および U callee 窓アクセス fault、caller 自窓復帰の検証
+  // 実行前に diag[15] (および fault diag 4, 6) を 0 に初期化
+  shizuku_c6_u_mode_diag[15] = 0;
+  shizuku_c6_u_mode_diag[4] = 0;
+  shizuku_c6_u_mode_diag[6] = 0;
+
+  g_c6_probe_driver_app_data_fault_pc = reinterpret_cast<uintptr_t>(&c6_stage1_probe_driver_app_data_fault_insn_addr);
+  const auto u2u_res3 = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      16 /* cmd=16: U->U fault test */);
   g_c6_probe_driver_app_data_fault_pc = 0;
-  record_check("stage1: U-to-U call executed twice consecutively without fault",
-               u2u_res.error == 0 && u2u_res.value == 0x5AFE0000u,
-               u2u_res.value, 0x5AFE0000u);
-  record_check("stage1: U callee access to caller window caused fault trapped",
-               shizuku_c6_u_mode_diag[15] >= 1u,
-               shizuku_c6_u_mode_diag[15], 1);
+
+  // 2回目の後に 3回目の trap が成功したこと (mscratch の健全性)
+  record_check("stage1: 3rd trap after 2 consecutive U-to-U calls succeeded (mscratch sound)",
+               u2u_res3.error == 0 && u2u_res3.value == 0xE012u,
+               u2u_res3.value, 0xE012u);
+
+  // callee がアクセスした直後に fault した (mcause=5, mtval が caller 窓アドレス) ことを assert
+  const uintptr_t caller_window_addr = reinterpret_cast<uintptr_t>(u_mode_stage1_data_pool);
+  record_check("stage1: U callee access to caller window caused fault trapped (diag[15] == 1)",
+               shizuku_c6_u_mode_diag[15] == 1u,
+               shizuku_c6_u_mode_diag[15], 1u);
+  record_check("stage1: U callee fault exact mcause is 5 (Load Access Fault)",
+               shizuku_c6_u_mode_diag[4] == 5u,
+               shizuku_c6_u_mode_diag[4], 5u);
+  record_check("stage1: U callee fault exact mtval matches caller data pool address",
+               shizuku_c6_u_mode_diag[6] == caller_window_addr,
+               shizuku_c6_u_mode_diag[6], caller_window_addr);
+
+  // caller 復帰後の自窓アクセス健全性
   record_check("stage1: caller restored its own data window successfully",
                data_pool_words[4] == 0xBEEFCAFEu,
                data_pool_words[4], 0xBEEFCAFEu);

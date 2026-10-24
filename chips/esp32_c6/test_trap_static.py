@@ -47,9 +47,15 @@ assert '#define RV32_ECALL_TABLE_ENTRIES 34' in layout
 # 再開フレーム (call_resume) は mepc / mstatus / 目印だけを書くので、消去はこの出口の仕事。
 assert '#define RV32_TAG_ECALL 11' in layout and '#define RV32_TAG_ENTRY 0x100' in layout
 assert '#define RV32_TAG_ECALL_SCRUB 0x101' in layout
+assert '#define RV32_TAG_U_ENTRY 0x110' in layout
+assert '#define RV32_TAG_U_ECALL 0x111' in layout
+assert '#define RV32_TAG_U_SCRUB 0x112' in layout
 restore = asm.split('shizuku_rv32_restore:')[1].split('.Lrv32_exit_ecall:')[0]
 assert 'beq t0, t1, .Lrv32_exit_ecall' in restore and 'beq t0, t1, .Lrv32_exit_entry' in restore
 assert 'li t1, RV32_TAG_ECALL_SCRUB\n  beq t0, t1, .Lrv32_exit_scrub' in restore
+assert 'li t1, RV32_TAG_U_ENTRY\n  beq t0, t1, .Lrv32_umode_exit_entry' in restore
+assert 'li t1, RV32_TAG_U_SCRUB\n  beq t0, t1, .Lrv32_umode_exit_scrub' in restore
+assert 'li t1, RV32_TAG_U_ECALL\n  beq t0, t1, .Lrv32_umode_exit_ecall' in restore
 exit_ecall = asm.split('.Lrv32_exit_ecall:')[1].split('// ---- ECALL からの戻り (RV32_TAG_ECALL_SCRUB')[0]
 assert sorted(re.findall(r'lw (\w+), RV32_F_(\w+)\(sp\)', exit_ecall)) == sorted(
     [('t0', 'MEPC'), ('t0', 'MSTATUS'), ('a0', 'A0'), ('a1', 'A1')])
@@ -69,8 +75,7 @@ assert sorted(re.findall(r'lw (\w+), RV32_F_(\w+)\(sp\)', exit_entry)) == sorted
 assert not re.findall(r'mv (\w+), zero', exit_entry)  # 入口も何も消さない
 assert exit_entry.rstrip().endswith('mret')
 # U-mode 高速出口: 復帰先特権 U-mode 時に mscratch に trusted stack cursor、sp に U-mode sp を復帰
-u_exit = asm.split('// ---- U-mode 高速出口')[1].split('.size shizuku_rv32_trap_entry')[0]
-assert 'bnez t0, .Lrv32_exit_umode' in asm
+u_exit = asm.split('// ---- U-mode 高速出口 (RV32_TAG_U_*)')[1].split('.size shizuku_rv32_trap_entry')[0]
 assert 'csrw mscratch, t0' in u_exit
 assert 'lw sp, RV32_F_RESERVED0(sp)' in u_exit
 # 再開フレームを作るのは call_resume_at (ヘッダ版の call_resume も、SHIZUKU_LEAN_LEDGER の台帳版もここへ来る)。
