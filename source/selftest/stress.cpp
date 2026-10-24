@@ -124,6 +124,16 @@ uintptr_t load(uintptr_t kind, uintptr_t, uintptr_t, uintptr_t) {
 }
 
 // 周期スレッド。締切のズレを測り、LED をオブジェクト経由で叩く。
+// ROOT_OBJECT の中継メソッド:
+// OBJECT_BLINK は ROOT_OBJECT の子であり、LED_OBJECT も ROOT_OBJECT の子である。
+// 兄弟関係にある BLINK と LED_OBJECT の直接呼出しを避け、親である ROOT_OBJECT の
+// メソッドを経由して LED_OBJECT を叩く (親子呼出しに正規化し、kernel_role を撤去)。
+constexpr uintptr_t ROOT_METHOD_LED_RELAY = 1;
+uintptr_t root_led_relay(uintptr_t request_ptr, uintptr_t, uintptr_t, uintptr_t) {
+  return ARCH::syscall((uintptr_t)object_api::CALL_METHOD, objects::LED_OBJECT,
+                       (uintptr_t)objects::led_method::WRITE, request_ptr).error;
+}
+
 uintptr_t blink(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   syscall_value(object_api::DECLARE_NAME, (uintptr_t) "blink");
   objects::led_request request{0};
@@ -158,8 +168,8 @@ uintptr_t blink(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
     //   スケジューリングの費用ではない — 混ぜると原因を取り違える。
     const uint64_t led_started = BOARD::time_us();
     const auto written = ARCH::syscall((uintptr_t)object_api::CALL_METHOD,
-                                       objects::LED_OBJECT,
-                                       (uintptr_t)objects::led_method::WRITE,
+                                       KERNEL_OBJECT::ROOT_OBJECT,
+                                       ROOT_METHOD_LED_RELAY,
                                        (uintptr_t)&request);
     const uint64_t led_took = BOARD::time_us() - led_started;
     if (led_took > led_window)
@@ -246,15 +256,17 @@ uintptr_t blink(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 } // namespace
 
 uint32_t stress_launch() {
+  // 親 (ROOT_OBJECT) の中継メソッドを export する (BLINK から LED への親子経由中継)。
+  syscall_value(object_api::EXPORT_METHOD, ROOT_METHOD_LED_RELAY,
+                method_entry<ARCH, &root_led_relay>());
+
   // ★blink は LED = CYW43 を叩く。CYW43 は**初期化したコアからしか触れない**ので
   //   core0 に固定する。実測でここを外すと、blink が core1 へ移った瞬間に
   //   pico-sdk の assert が発火してそのスレッドが止まった (系は継続した)。
-  // ★kernel_role 付与の正当性:
-  //   OBJECT_BLINK は独立スレッドとして走り、システム初期化時に ROOT_OBJECT が生成した
-  //   周辺ドライバ objects::LED_OBJECT を直接 CALL_METHOD する特権サービススレッドである。
-  //   LED_OBJECT と BLINK は親子関係を結べないため、kernel_role による直接呼出し権限を保持する。
+  // 親子関係: ROOT_OBJECT が親、BLINK は子。BLINK は親の中継メソッド経由で LED を呼ぶため
+  // kernel_role は不要。
   syscall_value(object_api::CREATE_OBJECT, OBJECT_BLINK, method_entry<ARCH, &blink>(),
-                OBJECT_ON_CORE(0) | KERNEL_OBJECT::INTERNAL_FLAG_KERNEL_ROLE);
+                OBJECT_ON_CORE(0));
   syscall_value(object_api::CREATE_OBJECT, OBJECT_LOAD, method_entry<ARCH, &load>(), 0);
 
   // ★測る前に一度叩いておく。無線チップ側の LED は最初の 1 回でチップの立ち上げ

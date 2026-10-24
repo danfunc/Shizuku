@@ -40,6 +40,7 @@ using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
 
 constexpr uintptr_t OBJECT_COST_LEAF = object_id::cost_leaf;
+constexpr uintptr_t OBJECT_COST_LEAF2 = object_id::cost_leaf2;
 constexpr uintptr_t OBJECT_COST_NEST = object_id::cost_nest;
 constexpr uintptr_t OBJECT_COST_PARENT = object_id::cost_parent;
 constexpr uintptr_t OBJECT_COST_CHILD = object_id::cost_child;
@@ -98,8 +99,14 @@ SHIZUKU_HOT SHIZUKU_ZERO_USED_REGS uintptr_t cost_leaf(uintptr_t argument, uintp
 }
 
 // 1 段深いだけの相手。(4) との差が「1 段あたりの限界費用」になる。
+// cost_nest は SETUP 時に自身の子として OBJECT_COST_LEAF2 を作成し、呼ぶ (親子呼出しに正規化)。
 SHIZUKU_HOT SHIZUKU_ZERO_USED_REGS uintptr_t cost_nest(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
-  return call_method(OBJECT_COST_LEAF, argument).value;
+  if (argument == MODE_SETUP) {
+    api(object_api::CREATE_OBJECT, OBJECT_COST_LEAF2,
+        method_entry<ARCH, &cost_leaf>(), 0);
+    return 0;
+  }
+  return call_method(OBJECT_COST_LEAF2, argument).value;
 }
 
 // 素の関数呼び出しの比較用。★noinline を付けないと消える (消えたことに気づかず
@@ -310,7 +317,9 @@ SHIZUKU_HOT SHIZUKU_ZERO_USED_REGS uintptr_t cost_parent(uintptr_t argument, uin
     return 0;
   }
   if (argument == MODE_MEASURE) {
-    g_parent_child_stat = measure<ARCH>(op_call_child, ROUNDS);
+    if constexpr (ARCH::HAS_CYCLE_COUNTER) {
+      g_parent_child_stat = measure<ARCH>(op_call_child, ROUNDS);
+    }
     return 0;
   }
   return call_method(OBJECT_COST_CHILD, argument).value;
@@ -480,14 +489,9 @@ template <typename A> void bench() {
     uintptr_t flags;
   } const entries[] = {
       {OBJECT_COST_LEAF, method_entry<ARCH, &cost_leaf>(), 0},
-      // ★cost_nest の kernel_role について:
-      //   cost_nest と cost_leaf はともに ROOT_OBJECT が生成した兄弟オブジェクトである。
-      //   cost_nest の本体 (計測区間) を変更せずに leaf の親にするには、cost_nest 内部で
-      //   CREATE_OBJECT を呼ぶなどの改造が必要になり「既存の計測区間を変えない」制約に反する。
-      //   そのため cost_nest には特権役 INTERNAL_FLAG_KERNEL_ROLE を残して 2-hop 呼出しを成立させ、
-      //   親子比較を通る費用は独立に追加した「method call (parent->child)」で精密に測定する。
-      {OBJECT_COST_NEST, method_entry<ARCH, &cost_nest>(),
-       KERNEL_OBJECT::INTERNAL_FLAG_KERNEL_ROLE},
+      // cost_nest は SETUP 時に自身の子として OBJECT_COST_LEAF2 を作成し、呼ぶ。
+      // 親子呼出しに正規化されるため、kernel_role は不要 (flags = 0)。
+      {OBJECT_COST_NEST, method_entry<ARCH, &cost_nest>(), 0},
       {OBJECT_COST_PARENT, method_entry<ARCH, &cost_parent>(), 0}};
   for (const entry_t &entry : entries) {
     const api_result created =
@@ -500,6 +504,9 @@ template <typename A> void bench() {
       return;
     }
   }
+
+  // cost_nest の子 (cost_leaf2) の生成
+  call_method(OBJECT_COST_NEST, MODE_SETUP);
 
   // 親子比較の呼出し計測 (cost_parent が子 cost_child を生成し、その中で計測)
   call_method(OBJECT_COST_PARENT, MODE_SETUP);

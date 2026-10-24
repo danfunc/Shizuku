@@ -181,8 +181,10 @@ template <> void KERNEL_OBJECT::init() {
     m_object_name[id] = nullptr;
     for (uintptr_t method = 0; method < METHOD_COUNT; ++method)
       m_objects[id].methods[method] = nullptr;
-    for (auto &d : m_descriptors[id])
+    for (auto &d : m_descriptors[id]) {
+      d.seq = 0;
       invalidate_descriptor(d);
+    }
   }
   for (uintptr_t thread = 0; thread < THREAD_COUNT; ++thread) {
     m_kill_pending[thread] = 0;

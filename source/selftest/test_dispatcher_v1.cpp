@@ -82,6 +82,12 @@ struct dispatcher_test_access {
   static void invalidate_descriptor(uint32_t owner, uint32_t index) {
     KERNEL_OBJECT::invalidate_descriptor(kernel_object_instance.m_descriptors[owner][index]);
   }
+  static void set_seq(uint32_t owner, uint32_t index, uint8_t seq) {
+    kernel_object_instance.m_descriptors[owner][index].seq = seq;
+  }
+  static uint8_t get_seq(uint32_t owner, uint32_t index) {
+    return kernel_object_instance.m_descriptors[owner][index].seq;
+  }
   static void init_descriptors() {
     for (uint32_t o = 0; o < KERNEL_OBJECT::OBJECT_COUNT; ++o) {
       for (uint32_t i = 0; i < KERNEL_OBJECT::METHOD_DESCRIPTOR_CAPACITY; ++i) {
@@ -1136,8 +1142,40 @@ static void run_dispatcher_tests() {
     }
     access::invalidate_descriptor(ROOT_APP_ID, 14);
     access::invalidate_descriptor(ROOT_APP_ID, 15);
+
+    // (5) seq が奇数の項目を読むと STALE (書込み中の検出)。偶数に戻すと正常に通る。
+    access::declare_descriptor(ROOT_APP_ID, 5, B_ID, ENTRY_BD, 0, 7);
+    desc_call(ROOT_APP_ID, 5, 0x41);
+    assert(kernel_instance.current_depth() == 1 && thread.ledger[0].object == B_ID);
+    desc_return(0x42);
+    assert(kernel_instance.current_depth() == 0 && frame->a1 == 0x42);
+    // seq を奇数に据える -> STALE_DESCRIPTOR (項目は有効な呼び先を持つが、書き込み中と判定)
+    access::set_seq(ROOT_APP_ID, 5, 1);
+    desc_call(ROOT_APP_ID, 5, 0x43);
+    assert(frame->a0 == (uintptr_t)object_error::STALE_DESCRIPTOR && kernel_instance.current_depth() == 0);
+    // seq を偶数に戻す -> 通る
+    access::set_seq(ROOT_APP_ID, 5, 2);
+    desc_call(ROOT_APP_ID, 5, 0x44);
+    assert(kernel_instance.current_depth() == 1 && thread.ledger[0].object == B_ID);
+    desc_return(0x45);
+    assert(kernel_instance.current_depth() == 0 && frame->a1 == 0x45);
+
+    // (6) 削除直後・差し替え直後の desc call
+    // 呼び先の差し替え直後: 呼び先オブジェクトが再生成 (REPLACE) されると version が上がり STALE
+    access::set_version(B_ID, 9);
+    desc_call(ROOT_APP_ID, 5, 0x46);
+    assert(frame->a0 == (uintptr_t)object_error::STALE_DESCRIPTOR && kernel_instance.current_depth() == 0);
+    access::set_version(B_ID, 7); // 戻す
+    // 持ち主の差し替え直後: 持ち主の世代不一致は STALE
+    access::declare_descriptor(ROOT_APP_ID, 5, B_ID, ENTRY_BD, 3, 7); // owner_gen = 3 (caller は 0)
+    desc_call(ROOT_APP_ID, 5, 0x47);
+    assert(frame->a0 == (uintptr_t)object_error::STALE_DESCRIPTOR && kernel_instance.current_depth() == 0);
+    // 記述子の無効化 (invalidate_descriptor) 直後: callee=NONE で BAD_DESCRIPTOR
+    access::invalidate_descriptor(ROOT_APP_ID, 5);
+    desc_call(ROOT_APP_ID, 5, 0x48);
+    assert(frame->a0 == (uintptr_t)object_error::BAD_DESCRIPTOR && kernel_instance.current_depth() == 0);
   }
-  printf("  8l. descriptor entry = precomputed window (a row window change without a version bump is not seen), version bump -> STALE and nothing pushed, re-declare picks up the new window, restored version passes again, per-owner tables (owner 7 index 13 != root index 13), uncreatable entries stay invalid: PASS\n");
+  printf("  8l. descriptor entry = precomputed window (a row window change without a version bump is not seen), version bump -> STALE and nothing pushed, re-declare picks up the new window, restored version passes again, per-owner tables (owner 7 index 13 != root index 13), uncreatable entries stay invalid, seq odd -> STALE, replace/invalidate -> STALE/BAD: PASS\n");
 
   // 8k. 深さ上限と BAD_REQUEST が同時に成り立つ CALL_METHOD は、従来どおり NO_STACK を先に返す。
   //     (呼び先が root ハンドラの ID を名乗る場合の BAD_REQUEST → BAD_OBJECT より、深さの検査が先)
