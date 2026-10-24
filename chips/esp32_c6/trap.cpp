@@ -47,8 +47,9 @@ volatile uint32_t shizuku_c6_timer_diag[7];
 // [4]=最後の fault mcause, [5]=最後の fault mepc, [6]=最後の fault mtval,
 // [7]=Caller stack PMP 違反検出数 (caller stack 読取試行時の fault 捕捉),
 // [8]=kernel stack store 違反数, [9]=caller stack store 違反数, [10]=U code store 違反数,
-// [11]=U stack instruction fetch 違反数, [12]=pmpcfg0 (0x3A0) illegal instruction 捕捉数
-volatile uint32_t shizuku_c6_u_mode_diag[13];
+// [11]=U stack instruction fetch 違反数, [12]=pmpcfg0 (0x3A0) illegal instruction 捕捉数,
+// [13]=App MMIO load 違反数, [14]=App -> Driver data load 違反数, [15]=Driver -> App data load 違反数
+volatile uint32_t shizuku_c6_u_mode_diag[16];
 // 段1 U-mode ecall 記録: 最初の U-mode ecall (mcause 8) の [0]=mcause, [1]=mepc, [2]=mtval。
 volatile uint32_t shizuku_c6_u_ecall_diag[3];
 #if defined(SHIZUKU_C6_UMODE)
@@ -68,14 +69,27 @@ volatile uintptr_t g_c6_probe_ufetch_target;
 volatile uintptr_t g_c6_probe_upmpcfg_pc;
 volatile uintptr_t g_c6_probe_mstore_iram_pc;
 volatile uintptr_t g_c6_probe_mfetch_target;
+volatile uintptr_t g_c6_probe_app_mmio_fault_pc;
+volatile uintptr_t g_c6_probe_app_driver_data_fault_pc;
+volatile uintptr_t g_c6_probe_driver_app_data_fault_pc;
 volatile uint32_t shizuku_c6_m_pma_diag[2];
 #endif
 using c6_stage1_object_bounds = shizuku::chips::esp32_c6::c6_stage1_object_bounds;
 c6_stage1_object_bounds g_c6_stage1_u_bounds;
+c6_stage1_object_bounds g_c6_stage1_driver_bounds;
 
 bool shizuku_c6_is_authorized_u_object(uint32_t owner_id, uint32_t current_obj) {
-  return shizuku::chips::esp32_c6::is_authorized_u_object(
-      g_c6_stage1_u_bounds.owner_id, owner_id, current_obj);
+  if (g_c6_stage1_u_bounds.owner_id != 0 &&
+      shizuku::chips::esp32_c6::is_authorized_u_object(
+          g_c6_stage1_u_bounds.owner_id, owner_id, current_obj)) {
+    return true;
+  }
+  if (g_c6_stage1_driver_bounds.owner_id != 0 &&
+      shizuku::chips::esp32_c6::is_authorized_u_object(
+          g_c6_stage1_driver_bounds.owner_id, owner_id, current_obj)) {
+    return true;
+  }
+  return false;
 }
 bool shizuku_c6_is_kstack_address(uintptr_t addr) {
   return shizuku::chips::esp32_c6::is_kstack_range(
@@ -86,10 +100,18 @@ uintptr_t shizuku_c6_kstack_limit(void) {
       reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack), shizuku::chips::esp32_c6::KSTACK_GUARD_BYTES);
 }
 uintptr_t shizuku_c6_get_m_handler_stack(uintptr_t current_sp, uintptr_t frame_sp) {
+  uintptr_t s_base = g_c6_stage1_u_bounds.stack_base;
+  uintptr_t s_limit = g_c6_stage1_u_bounds.stack_limit;
+  if (g_c6_stage1_driver_bounds.owner_id != 0 &&
+      current_sp >= g_c6_stage1_driver_bounds.stack_base &&
+      current_sp <= g_c6_stage1_driver_bounds.stack_limit) {
+    s_base = g_c6_stage1_driver_bounds.stack_base;
+    s_limit = g_c6_stage1_driver_bounds.stack_limit;
+  }
   return shizuku::chips::esp32_c6::get_m_handler_stack(
       current_sp,
-      g_c6_stage1_u_bounds.stack_base,
-      g_c6_stage1_u_bounds.stack_limit,
+      s_base,
+      s_limit,
       frame_sp,
       reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack),
       sizeof(shizuku_c6_kernel_stack),
@@ -412,20 +434,39 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
       stop(0xE004); // PMA ready marker 欠落 → fail-closed
     }
     const uint32_t cur_obj = kernel.current_thread().current_object();
-    if (!shizuku_c6_is_authorized_u_object(g_c6_stage1_u_bounds.owner_id, cur_obj)) {
+    const c6_stage1_object_bounds *bounds = nullptr;
+    if (g_c6_stage1_u_bounds.owner_id != 0 && cur_obj == g_c6_stage1_u_bounds.owner_id) {
+      bounds = &g_c6_stage1_u_bounds;
+    } else if (g_c6_stage1_driver_bounds.owner_id != 0 && cur_obj == g_c6_stage1_driver_bounds.owner_id) {
+      bounds = &g_c6_stage1_driver_bounds;
+    }
+
+    if (bounds == nullptr || !shizuku_c6_is_authorized_u_object(bounds->owner_id, cur_obj)) {
       active_context = &c;
       active_frame = c.sp;
       active_stop_phase = 0xE004u;
       stop(0xE004); // 未認可または未知の U object
     }
 
-    const uintptr_t code_base = g_c6_stage1_u_bounds.code_base;
-    const uintptr_t code_limit = g_c6_stage1_u_bounds.code_limit;
-    const uintptr_t data_base = g_c6_stage1_u_bounds.data_base;
-    const uintptr_t data_limit = g_c6_stage1_u_bounds.data_limit;
-    const uintptr_t stack_base = g_c6_stage1_u_bounds.stack_base;
-    const uintptr_t stack_limit = g_c6_stage1_u_bounds.stack_limit;
-    const uintptr_t trampoline = g_c6_stage1_u_bounds.u_return_trampoline;
+    // Role 検査: App オブジェクトは MMIO 窓を持つことができない (fail-closed)
+    if (bounds->role == shizuku::chips::esp32_c6::c6_stage1_role::App) {
+      if (bounds->mmio_limit != 0) {
+        active_context = &c;
+        active_frame = c.sp;
+        active_stop_phase = 0xE004u;
+        stop(0xE004);
+      }
+    }
+
+    const uintptr_t code_base = bounds->code_base;
+    const uintptr_t code_limit = bounds->code_limit;
+    const uintptr_t data_base = bounds->data_base;
+    const uintptr_t data_limit = bounds->data_limit;
+    const uintptr_t stack_base = bounds->stack_base;
+    const uintptr_t stack_limit = bounds->stack_limit;
+    const uintptr_t trampoline = bounds->u_return_trampoline;
+    const uintptr_t mmio_base = bounds->mmio_base;
+    const uintptr_t mmio_limit = bounds->mmio_limit;
 
     // mepc がオブジェクト所有 code 範囲内にあることを厳格検査
     if (code_base == 0 || code_limit <= code_base || f.mepc < code_base || f.mepc >= code_limit) {
@@ -472,7 +513,8 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
       if (shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(code_base, code_limit, mk_lo, mk_hi) ||
           shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(stack_base, stack_limit, mk_lo, mk_hi) ||
           (data_limit != 0 && shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(data_base, data_limit, mk_lo, mk_hi)) ||
-          (c.region_limit != 0 && shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(c.region_base, c.region_limit, mk_lo, mk_hi))) {
+          (c.region_limit != 0 && shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(c.region_base, c.region_limit, mk_lo, mk_hi)) ||
+          (mmio_limit != 0 && shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(mmio_base, mmio_limit, mk_lo, mk_hi))) {
         active_context = &c;
         active_frame = c.sp;
         active_stop_phase = 0xE004u;
@@ -488,7 +530,9 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
       .stack_base = stack_base,
       .stack_limit = stack_limit,
       .region_base = c.region_base,
-      .region_limit = c.region_limit
+      .region_limit = c.region_limit,
+      .mmio_base = mmio_base,
+      .mmio_limit = mmio_limit
     };
 
     const uintptr_t kstack_start = reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack);
@@ -833,6 +877,24 @@ bool shizuku_c6_handle_fault(arch::exception_frame_t *frame) {
     if (g_c6_probe_caller_stack_fault_pc != 0 && frame->mepc == g_c6_probe_caller_stack_fault_pc) {
       shizuku_c6_u_mode_diag[7] = shizuku_c6_u_mode_diag[7] + 1;
       frame->a0 = 0xCAFEBABEu;
+      frame->mepc += 4;
+      return true;
+    }
+    if (g_c6_probe_app_mmio_fault_pc != 0 && frame->mepc == g_c6_probe_app_mmio_fault_pc) {
+      shizuku_c6_u_mode_diag[13] = shizuku_c6_u_mode_diag[13] + 1;
+      frame->a0 = 0xE010u;
+      frame->mepc += 4;
+      return true;
+    }
+    if (g_c6_probe_app_driver_data_fault_pc != 0 && frame->mepc == g_c6_probe_app_driver_data_fault_pc) {
+      shizuku_c6_u_mode_diag[14] = shizuku_c6_u_mode_diag[14] + 1;
+      frame->a0 = 0xE011u;
+      frame->mepc += 4;
+      return true;
+    }
+    if (g_c6_probe_driver_app_data_fault_pc != 0 && frame->mepc == g_c6_probe_driver_app_data_fault_pc) {
+      shizuku_c6_u_mode_diag[15] = shizuku_c6_u_mode_diag[15] + 1;
+      frame->a0 = 0xE012u;
       frame->mepc += 4;
       return true;
     }

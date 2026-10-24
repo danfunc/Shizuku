@@ -170,8 +170,8 @@ cc_library(
     }),
 )
 
-# C6 M-only で成立可能な selftest の 5 つのサブセット
-C6_SELFTEST_SRCS = [
+# C5 / C6 で成立可能な selftest の 5 つのサブセット
+C5_SELFTEST_SRCS = [
     "source/selftest/call_ladder.cpp",
     "source/selftest/compat_premise_probe.cpp",
     "source/selftest/handler_binding.cpp",
@@ -180,13 +180,28 @@ C6_SELFTEST_SRCS = [
     "source/selftest/thread_ladder.cpp",
 ]
 
+C6_SELFTEST_SRCS = C5_SELFTEST_SRCS + select({
+    "//configs:c6_umode_enabled": ["source/selftest/c6_stage1_safety.cpp"],
+    "//conditions:default": [],
+})
+
+exports_files(
+    ["source/selftest/c6_stage1_safety.cpp"],
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "c6_selftest",
     srcs = C6_SELFTEST_SRCS,
+    defines = select({
+        "//configs:c6_umode_enabled": ["SHIZUKU_C6_UMODE=1"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
     deps = [
         ":internal_headers",
         ":kernel_object",
+        "//chips/esp32_c6:headers",
     ],
 )
 
@@ -223,7 +238,7 @@ cc_library(
 cc_library(
     name = "shizuku_kernel_c5",
     copts = RV_KERNEL_COPTS,
-    srcs = KERNEL_SRCS + KERNEL_OBJECT_SRCS + C6_SELFTEST_SRCS + [
+    srcs = KERNEL_SRCS + KERNEL_OBJECT_SRCS + C5_SELFTEST_SRCS + [
         "source/memory_manager/freestanding.cpp",
         "//modules/esp_idf_support/c5:early_boot.cpp",
         "//modules/esp_idf_support/c5:link_stubs.cpp",

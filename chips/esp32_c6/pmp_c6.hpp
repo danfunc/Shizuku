@@ -13,6 +13,12 @@ namespace shizuku::chips::esp32_c6 {
 // 全メモリ許可は禁止。未マッチ領域は RISC-V PMP 仕様により U-mode からアクセス禁止 (Fault)。
 // カーネルスタック / trusted stack / 復帰情報は U-mode から完全に隔離される。
 
+enum class c6_stage1_role : uint8_t {
+  Root = 0,
+  App = 1,
+  Driver = 2,
+};
+
 struct c6_stage1_object_bounds {
   uint32_t owner_id = 0;
   uintptr_t code_base = 0;
@@ -22,6 +28,9 @@ struct c6_stage1_object_bounds {
   uintptr_t stack_base = 0;
   uintptr_t stack_limit = 0;
   uintptr_t u_return_trampoline = 0;
+  c6_stage1_role role = c6_stage1_role::App;
+  uintptr_t mmio_base = 0;
+  uintptr_t mmio_limit = 0;
 };
 
 // オブジェクト所有者の検証述語:
@@ -110,6 +119,8 @@ struct pmp_c6_config {
   uintptr_t stack_limit = 0;
   uintptr_t region_base = 0;
   uintptr_t region_limit = 0;
+  uintptr_t mmio_base = 0;
+  uintptr_t mmio_limit = 0;
 };
 
 // ---- 段1 PMA/PMP 所有権の検証 (fail-closed、experiment 専用) ----
@@ -276,7 +287,18 @@ public:
       }
     }
 
-    // 5. 4許可領域相互の全組み合わせの重複検査 (全6ペア)
+    // 4b. MMIO window の検証 (optional: limit == 0 なら空)
+    if (cfg.mmio_limit != 0) {
+      if (cfg.mmio_base >= cfg.mmio_limit || (cfg.mmio_base & 3u) != 0 || (cfg.mmio_limit & 3u) != 0) {
+        return false;
+      }
+    } else {
+      if (cfg.mmio_base != 0) {
+        return false;
+      }
+    }
+
+    // 5. 5許可領域相互の重複検査
     // 1) Code vs Stack
     if (ranges_overlap(cfg.code_base, cfg.code_limit, cfg.stack_base, cfg.stack_limit)) {
       return false;
@@ -302,6 +324,15 @@ public:
         ranges_overlap(cfg.data_base, cfg.data_limit, cfg.region_base, cfg.region_limit)) {
       return false;
     }
+    // 7) MMIO vs 他領域 (Code, Stack, Data, Region)
+    if (cfg.mmio_limit != 0) {
+      if (ranges_overlap(cfg.code_base, cfg.code_limit, cfg.mmio_base, cfg.mmio_limit) ||
+          ranges_overlap(cfg.stack_base, cfg.stack_limit, cfg.mmio_base, cfg.mmio_limit) ||
+          (cfg.data_limit != 0 && ranges_overlap(cfg.data_base, cfg.data_limit, cfg.mmio_base, cfg.mmio_limit)) ||
+          (cfg.region_limit != 0 && ranges_overlap(cfg.region_base, cfg.region_limit, cfg.mmio_base, cfg.mmio_limit))) {
+        return false;
+      }
+    }
 
     // 6. カーネル/信頼スタック範囲との全重複検査
     if (kernel_stack_bytes > 0) {
@@ -315,6 +346,9 @@ public:
         return false;
       }
       if (cfg.region_limit != 0 && ranges_overlap(cfg.region_base, cfg.region_limit, kernel_stack_start, kstack_end)) {
+        return false;
+      }
+      if (cfg.mmio_limit != 0 && ranges_overlap(cfg.mmio_base, cfg.mmio_limit, kernel_stack_start, kstack_end)) {
         return false;
       }
     }
@@ -331,6 +365,9 @@ public:
         return false;
       }
       if (cfg.region_limit != 0 && ranges_overlap(cfg.region_base, cfg.region_limit, dispatch_stack_start, dstack_end)) {
+        return false;
+      }
+      if (cfg.mmio_limit != 0 && ranges_overlap(cfg.mmio_base, cfg.mmio_limit, dispatch_stack_start, dstack_end)) {
         return false;
       }
       // カーネルスタックとディスパッチスタック自体の完全非重複性
@@ -422,8 +459,23 @@ public:
       cfg7 = e7.cfg;
     }
 
+    // Entry 8, 9: MMIO window (optional, for Driver)
+    uint8_t cfg8 = 0, cfg9 = 0;
+    uint32_t addr8 = 0, addr9 = 0;
+    if (cfg.mmio_limit != 0 && cfg.mmio_base < cfg.mmio_limit) {
+      shizuku::ports::riscv::pmp_entry e9{};
+      if (!codec::encode_tor(cfg.mmio_limit, perm::R | perm::W, e9)) {
+        return false;
+      }
+      addr8 = cfg.mmio_base >> 2;
+      addr9 = e9.addr;
+      cfg8 = 0;
+      cfg9 = e9.cfg;
+    }
+
     const uint32_t pmpcfg0_val = codec::pack_pmpcfg(0, e1.cfg, cfg2, cfg3);
     const uint32_t pmpcfg1_val = codec::pack_pmpcfg(0, e5.cfg, cfg6, cfg7);
+    const uint32_t pmpcfg2_val = codec::pack_pmpcfg(cfg8, cfg9, 0, 0);
 
 #if defined(__riscv)
     // 事前: 全 entry が unlock (L=0) でなければ書込みは無視されうるため拒否 (fail-closed)
@@ -438,9 +490,11 @@ public:
         "csrw 0x3B5, %5\n" // pmpaddr5 (stack limit)
         "csrw 0x3B6, %6\n" // pmpaddr6 (region base)
         "csrw 0x3B7, %7\n" // pmpaddr7 (region limit)
-        "csrw 0x3A0, %8\n" // pmpcfg0 (code & data)
-        "csrw 0x3A1, %9\n" // pmpcfg1 (stack & region)
-        "csrw 0x3A2, zero\n" // pmpcfg2 = OFF
+        "csrw 0x3B8, %8\n" // pmpaddr8 (mmio base)
+        "csrw 0x3B9, %9\n" // pmpaddr9 (mmio limit)
+        "csrw 0x3A0, %10\n" // pmpcfg0 (code & data)
+        "csrw 0x3A1, %11\n" // pmpcfg1 (stack & region)
+        "csrw 0x3A2, %12\n" // pmpcfg2 (mmio)
         "csrw 0x3A3, zero\n" // pmpcfg3 = OFF
         "fence.i\n"
         "fence rw,rw\n"
@@ -449,28 +503,33 @@ public:
           "r"(addr2), "r"(addr3),
           "r"(cfg.stack_base >> 2), "r"(e5.addr),
           "r"(addr6), "r"(addr7),
-          "r"(pmpcfg0_val), "r"(pmpcfg1_val)
+          "r"(addr8), "r"(addr9),
+          "r"(pmpcfg0_val), "r"(pmpcfg1_val), "r"(pmpcfg2_val)
         : "memory");
     // 事後読み戻し: 無視された書込みや想定外の値は成功扱いにしない
     const pmp_snapshot post = read_pmp();
-    if (post.cfg[0] != pmpcfg0_val || post.cfg[1] != pmpcfg1_val || post.cfg[2] != 0 || post.cfg[3] != 0) {
+    if (post.cfg[0] != pmpcfg0_val || post.cfg[1] != pmpcfg1_val || post.cfg[2] != pmpcfg2_val || post.cfg[3] != 0) {
       return false;
     }
-    const uint32_t exp_addr[8] = {static_cast<uint32_t>(cfg.code_base >> 2), e1.addr, addr2, addr3,
-                                  static_cast<uint32_t>(cfg.stack_base >> 2), e5.addr, addr6, addr7};
-    for (uint32_t i = 0; i < 8; ++i) {
+    const uint32_t exp_addr[10] = {static_cast<uint32_t>(cfg.code_base >> 2), e1.addr, addr2, addr3,
+                                   static_cast<uint32_t>(cfg.stack_base >> 2), e5.addr, addr6, addr7,
+                                   addr8, addr9};
+    for (uint32_t i = 0; i < 10; ++i) {
       if (post.addr[i] != exp_addr[i]) return false;
     }
-    for (uint32_t i = 8; i < 16; ++i) {  // entry 8-15 は書かないので事前値のまま
+    for (uint32_t i = 10; i < 16; ++i) {  // entry 10-15 は書かないので事前値のまま
       if (post.addr[i] != pre.addr[i]) return false;
     }
 #else
     (void)pmpcfg0_val;
     (void)pmpcfg1_val;
+    (void)pmpcfg2_val;
     (void)addr2;
     (void)addr3;
     (void)addr6;
     (void)addr7;
+    (void)addr8;
+    (void)addr9;
     return false; // host: 実機の CSR を設定していない。成功扱いにしない (unsupported)
 #endif
 

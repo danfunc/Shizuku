@@ -44,3 +44,5 @@ cost_dleaf
 cost_dnest
 cost_dinner
 cost_owner
+c6_stage1_probe
+c6_stage1_driver

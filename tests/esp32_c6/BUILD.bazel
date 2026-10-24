@@ -116,5 +116,8 @@ cc_test(
     name = "region_capability_test",
     srcs = ["test_region_capability.cpp"],
     copts = ["-std=c++20"],
-    deps = ["//:internal_headers"],
+    deps = [
+        "//:internal_headers",
+        "//chips/esp32_c6:headers",
+    ],
 )

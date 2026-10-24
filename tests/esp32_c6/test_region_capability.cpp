@@ -1,10 +1,19 @@
 #include "shizuku/region_capability.hpp"
+#include "chips/esp32_c6/pmp_c6.hpp"
 
 #include <array>
 #include <cassert>
 #include <cstdint>
 
 using namespace shizuku::region_capability;
+using namespace shizuku::chips::esp32_c6;
+
+static_assert(static_cast<uint8_t>(ObjectRole::Root) == static_cast<uint8_t>(c6_stage1_role::Root),
+              "ObjectRole::Root must match c6_stage1_role::Root");
+static_assert(static_cast<uint8_t>(ObjectRole::App) == static_cast<uint8_t>(c6_stage1_role::App),
+              "ObjectRole::App must match c6_stage1_role::App");
+static_assert(static_cast<uint8_t>(ObjectRole::Driver) == static_cast<uint8_t>(c6_stage1_role::Driver),
+              "ObjectRole::Driver must match c6_stage1_role::Driver");
 
 constexpr uint32_t ROOT = 1;
 constexpr uint32_t APP = 2;
@@ -183,5 +192,58 @@ int main() {
   assert(revoke(ROOT, ROOT, 41, &next) == Error::Ok && next == 42);
   assert(revoke(DRIVER, ROOT, 41, &next) == Error::Authority);
   assert(revoke(ROOT, ROOT, UINT32_MAX, &next) == Error::GenerationExhausted);
+
+  // PMP window validation: Driver MMIO vs App separation
+  pmp_c6_config driver_cfg{
+    .code_base = 0x40800000u,
+    .code_limit = 0x40801000u,
+    .data_base = 0x40810000u,
+    .data_limit = 0x40811000u,
+    .stack_base = 0x40820000u,
+    .stack_limit = 0x40821000u,
+    .region_base = 0,
+    .region_limit = 0,
+    .mmio_base = 0x60000000u,
+    .mmio_limit = 0x60001000u,
+  };
+  assert(pmp_controller::validate(driver_cfg, 0x40830000u, 4096u));
+
+  pmp_c6_config bad_mmio = driver_cfg;
+  bad_mmio.mmio_base = 0x40800000u; // overlap with code
+  bad_mmio.mmio_limit = 0x40801000u;
+  assert(!pmp_controller::validate(bad_mmio, 0x40830000u, 4096u));
+
+  bad_mmio = driver_cfg;
+  bad_mmio.mmio_base = 0x40830000u; // overlap with kstack
+  bad_mmio.mmio_limit = 0x40831000u;
+  assert(!pmp_controller::validate(bad_mmio, 0x40830000u, 4096u));
+
+  bad_mmio = driver_cfg;
+  bad_mmio.mmio_base = 0x60000001u; // misaligned
+  assert(!pmp_controller::validate(bad_mmio, 0x40830000u, 4096u));
+
+  bad_mmio = driver_cfg;
+  bad_mmio.mmio_base = 0x60001000u; // base >= limit
+  bad_mmio.mmio_limit = 0x60000000u;
+  assert(!pmp_controller::validate(bad_mmio, 0x40830000u, 4096u));
+
+  c6_stage1_object_bounds app_bounds{
+    .owner_id = 10,
+    .code_base = 0x40800000u,
+    .code_limit = 0x40801000u,
+    .data_base = 0x40810000u,
+    .data_limit = 0x40811000u,
+    .stack_base = 0x40820000u,
+    .stack_limit = 0x40821000u,
+    .u_return_trampoline = 0x40800010u,
+    .role = c6_stage1_role::App,
+    .mmio_base = 0x60000000u,
+    .mmio_limit = 0x60001000u,
+  };
+  assert(!role_allows_kind(static_cast<ObjectRole>(app_bounds.role), RegionKind::DriverMmio));
+  c6_stage1_object_bounds drv_bounds = app_bounds;
+  drv_bounds.role = c6_stage1_role::Driver;
+  assert(role_allows_kind(static_cast<ObjectRole>(drv_bounds.role), RegionKind::DriverMmio));
+
   return 0;
 }
