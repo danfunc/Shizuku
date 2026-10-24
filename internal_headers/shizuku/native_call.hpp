@@ -15,6 +15,10 @@
 #include "shizuku/object_api.hpp"
 #include "shizuku/svc_attributes.hpp"
 
+#if defined(SHIZUKU_C6_UMODE) && !defined(SHIZUKU_LEAN_LEDGER)
+#error "C6 U-mode requires kernel-resident call return authority (SHIZUKU_LEAN_LEDGER)"
+#endif
+
 namespace shizuku {
 
 // ARCH が in-place call (caller の frame をコピーせず、レジスタは全部 callee への入力、戻りで
@@ -41,9 +45,9 @@ static constexpr bool is_context_unprivileged(const C *ctx) {
 // (テンプレートではない) で、使わない側の枝も構文として通る必要があるため、ARCH 固有の呼び出しは
 // ここ (依存名のテンプレート) に包む。
 template <class A, class Context>
-[[gnu::always_inline]] inline bool header_has_room_of(const Context &context) {
+[[gnu::always_inline]] inline bool header_has_room_of(const Context &context, uint32_t caller_object) {
   if constexpr (arch_call_in_place<A>())
-    return A::call_header_has_room(context);
+    return A::call_header_has_room(context, caller_object);
   else
     return false;
 }
@@ -54,7 +58,7 @@ template <class A, class Thread, class Context, class Frame>
                                                   uint32_t /*floor*/) {
   if constexpr (arch_call_in_place<A>()) {
     if (thread.ledger == nullptr || thread.call_stack.depth >= thread.ledger_capacity ||
-        !A::call_header_has_room(context))
+        !A::call_header_has_room(context, thread.identity_object()))
       return false;
 #if defined(SHIZUKU_LEAN_LEDGER)
     // 戻りの権威は特権の台帳に置く (user stack にヘッダは書かない)。段の中身 (object・handler・kind・
@@ -129,19 +133,32 @@ template <class K>
   if constexpr (arch_call_in_place<A>()) {
     const uint32_t depth = thread.call_stack.depth;
 #if defined(SHIZUKU_LEAN_LEDGER)
-    // 戻りの権威は台帳の項目 (ret_*)。caller の識別は call_top を一つ外側の call 段へ戻すだけ。
+    // Return authority (PC/SP/privilege/window/caller chain) comes only from protected ledger memory.
     const auto &entry = thread.ledger[depth - 1];
     const uint8_t via = entry.via;
     const bool is_call = via == K::LEDGER_CALL || via == K::LEDGER_DESCRIPTOR_CALL;
     if (is_call && thread.call_stack.call_count == 0)
       return false;
+    if (entry.ret_privileged > 1u || entry.prev_call >= depth ||
+        entry.prev_call > thread.ledger_capacity)
+      return false;
+    const uint32_t caller_object = entry.prev_call != 0
+        ? thread.ledger[entry.prev_call - 1].object
+        : thread.base_object;
     if (is_call) {
       thread.call_stack.call_count--;
       thread.call_stack.call_top = entry.prev_call;
     }
-    if (restore)
+    if (restore) {
       frame = A::call_resume_at(context, entry.ret_pc, entry.ret_sp, entry.ret_privileged != 0,
                                 entry.ret_region_base, entry.ret_region_limit, scrub);
+#if defined(SHIZUKU_C6_UMODE)
+      if (!context.privileged) {
+        A::set_unprivileged_resume_metadata(*frame, entry.ret_sp, A::trusted_stack_top(), scrub);
+        A::switch_caller_pmp(caller_object);
+      }
+#endif
+    }
     thread.call_stack.depth = depth - 1;
 #else
     const uint8_t via = thread.ledger[depth - 1].via;
@@ -192,7 +209,7 @@ template <class K, class KObj>
       return kernel_error::NO_STACK;
     const uint32_t depth = stack.depth; // 呼び先の unwind floor
     if (depth > UINT16_MAX || thread.ledger == nullptr || depth >= thread.ledger_capacity ||
-        !A::call_header_has_room(context))
+        !A::call_header_has_room(context, thread.identity_object()))
       return kernel_error::NO_STACK;
     typename K::FRAME &frame = *context.sp;
 #if defined(SHIZUKU_LEAN_LEDGER)

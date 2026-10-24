@@ -221,6 +221,7 @@ shizuku_rv32_restore:
   lw a0, RV32_F_A0(sp)
   lw a1, RV32_F_A1(sp)
   addi sp, sp, RV32_FRAME_BYTES
+  csrw mscratch, zero
   mret
 // ---- ECALL からの戻り (RV32_TAG_ECALL_SCRUB、消去)。
 //   callee が自分の意思で戻らない巻き戻し (多段の EXIT_METHOD / RETURN、FORWARD_CHILD_EXIT) と、
@@ -262,6 +263,7 @@ shizuku_rv32_restore:
   mv s9, zero
   mv s10, zero
   mv s11, zero
+  csrw mscratch, zero
   mret
 // ---- 呼び先の入口 (RV32_TAG_ENTRY、素通し。CALL_METHOD / descriptor call / kobj への dispatch)。
 //   引数 a0-a7 と ra (戻り口)・mepc (入口)・sp だけをカーネルが決める。s*/gp/tp は caller の値の
@@ -282,6 +284,7 @@ shizuku_rv32_restore:
   lw a6, RV32_F_A6(sp)
   lw a7, RV32_F_A7(sp)
   addi sp, sp, RV32_FRAME_BYTES
+  csrw mscratch, zero
   mret
 
 // ---- U-mode 高速出口 (RV32_TAG_U_*)

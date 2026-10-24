@@ -108,6 +108,18 @@ assert 'shizuku_rv32_trap_dispatch' in trap_src and 'shizuku_rv32_return_failed'
 # 切替えが起きない ecall_direct には無い (上で context_to_frame を禁じている)。
 assert trap_src.count('const auto *const entered = context;') == 4
 assert trap_src.count('if (context != entered) arch::scrub_on_switch(*context);') == 4
+# U-mode selftest assembly follows the ECALL caller ABI: returning raw ECALL probes preserve RA.
+stage1 = (root / 'source/selftest/c6_stage1_safety.cpp').read_text()
+for label, next_label in (
+    ('.Lprobe_ecall', '.Lprobe_unpriv'),
+    ('.Lprobe_unpriv', '.Lprobe_caller_stack'),
+    ('.Lprobe_multi_trap_combo', '.Lprobe_u_to_u_call_1'),
+):
+    block = stage1.split(f'"{label}:\\n"', 1)[1].split(f'"{next_label}:\\n"', 1)[0]
+    ecall_pos = block.index('"  ecall\\n"')
+    assert block.index('"  sw ra, 12(sp)\\n"') < ecall_pos
+    assert block.index('"  lw ra, 12(sp)\\n"', ecall_pos) > ecall_pos
+    assert block.index('"  addi sp, sp, 16\\n"', ecall_pos) < block.rindex('"  ret\\n"')
 c5_src = (root / 'chips/esp32_c5/trap.cpp').read_text()
 assert c5_src.count('const auto *const entered = context;') == 3
 assert c5_src.count('if (context != entered) arch::scrub_on_switch(*context);') == 3

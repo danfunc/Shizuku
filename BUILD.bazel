@@ -69,6 +69,10 @@ cc_library(
     name = "internal_headers",
     hdrs = glob(["internal_headers/**/*.hpp"]),
     includes = ["internal_headers"],
+    defines = select({
+        "//configs:c6_umode_ledger_enabled": ["SHIZUKU_LEAN_LEDGER=1"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
     deps = [":object_ids"],
 )
@@ -108,6 +112,30 @@ cc_test(
         "-include",
         "source/selftest/test_dispatcher_v1_config.hpp",
     ],
+    local_defines = ["SHIZUKU_C6_SKELETON_PERMITTED=1"],
+    deps = [
+        ":internal_headers",
+        "//boards/esp32_c6:headers",
+        "//chips/esp32_c6:headers",
+        "//configs:config",
+    ],
+)
+
+# The kernel-resident return ledger must preserve dispatch/call behavior and reject invalid unwinds.
+cc_test(
+    name = "dispatcher_v1_lean_ledger_test",
+    srcs = [
+        "source/kernel/dispatch.cpp",
+        "source/kernel/thread.cpp",
+        "source/selftest/test_dispatcher_v1.cpp",
+        "source/selftest/test_dispatcher_v1_config.hpp",
+    ],
+    copts = [
+        "-std=c++20",
+        "-include",
+        "source/selftest/test_dispatcher_v1_config.hpp",
+    ],
+    defines = ["SHIZUKU_LEAN_LEDGER=1"],
     local_defines = ["SHIZUKU_C6_SKELETON_PERMITTED=1"],
     deps = [
         ":internal_headers",

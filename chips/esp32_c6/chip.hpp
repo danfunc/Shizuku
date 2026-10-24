@@ -41,6 +41,7 @@ struct plic_vector_mode {
   static bool is_kstack_address(uintptr_t addr);
   static uintptr_t kstack_limit();
   static uintptr_t kstack_top();
+  static bool user_stack_bounds(uint32_t object_id, uintptr_t &base, uintptr_t &limit);
   static void switch_object_pmp(uint32_t object_id);
   template <class Context, class Frame>
   static void enter_u_object(Context &context, Frame &frame, uint32_t callee_id);

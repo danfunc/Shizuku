@@ -411,7 +411,7 @@ void install_traps() {
 // (caller が自分で退避する ABI) ので、フレームと文脈の間でコピーするものは無い。
 SHIZUKU_HOT void frame_to_context(arch::exception_frame_t &f, arch::context_t &c) {
   c.sp = &f;
-  c.privileged = (f.mstatus & RV32_MSTATUS_MPP) == RV32_MSTATUS_MPP;
+  arch::set_context_privilege_from_frame(c, f);
 }
 SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
   auto &f = *c.sp;
@@ -543,7 +543,10 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
       active_stop_phase = 0xE004u;
       stop(0xE004);
     }
-    const uintptr_t new_sp = shizuku_c6_get_m_handler_stack(f.reserved0, reinterpret_cast<uintptr_t>(c.sp));
+    const uintptr_t current_sp = f.reserved0 != 0
+        ? static_cast<uintptr_t>(f.reserved0)
+        : reinterpret_cast<uintptr_t>(c.sp) + RV32_FRAME_BYTES;
+    const uintptr_t new_sp = shizuku_c6_get_m_handler_stack(current_sp, reinterpret_cast<uintptr_t>(c.sp));
     if (new_sp == 0) {
       active_context = &c;
       active_frame = c.sp;
@@ -645,7 +648,7 @@ SHIZUKU_HOT inline arch::exception_frame_t *ecall_run(arch::exception_frame_t *f
 #else
   if ((frame->mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) {
     if (shizuku_c6_u_mode_diag[2] == 0) {
-      shizuku_c6_u_ecall_diag[0] = frame->mcause;
+      shizuku_c6_u_ecall_diag[0] = (frame->mcause == RV32_TAG_U_ECALL) ? 8u : frame->mcause;
       shizuku_c6_u_ecall_diag[1] = frame->mepc;
       shizuku_c6_u_ecall_diag[2] = frame->mtval;
     }
@@ -753,7 +756,19 @@ SHIZUKU_HOT [[gnu::always_inline]] inline arch::exception_frame_t *ecall_direct(
   if (__builtin_expect(!kernel.svc_native_route_of(thread), 0)) return ecall_other(frame);
   arch::context_t *context = thread.context;
   context->sp = frame;
-  context->privileged = true;
+  // Keep the trapped caller privilege. U-mode ECALL handlers execute in M-mode, but native_call
+  // must ledger the caller as U so the return path restores its user SP, PMP window, and U tag.
+  arch::set_context_privilege_from_frame(*context, *frame);
+#if defined(SHIZUKU_C6_UMODE)
+  if ((frame->mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) {
+    if (shizuku_c6_u_mode_diag[2] == 0) {
+      shizuku_c6_u_ecall_diag[0] = 8u;
+      shizuku_c6_u_ecall_diag[1] = frame->mepc;
+      shizuku_c6_u_ecall_diag[2] = frame->mtval;
+    }
+    shizuku_c6_u_mode_diag[2] = shizuku_c6_u_mode_diag[2] + 1;
+  }
+#endif
   const shizuku::native::status result = body(kernel, thread, *context);
   if (__builtin_expect(result != shizuku::native::status::DONE, 0)) {
     if (result == shizuku::native::status::CORRUPT) return ecall_fault_corrupt(frame);
@@ -1175,6 +1190,24 @@ uintptr_t plic_vector_mode::kstack_top() {
   return reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack + sizeof(shizuku_c6_kernel_stack));
 }
 
+bool plic_vector_mode::user_stack_bounds(uint32_t object_id, uintptr_t &base, uintptr_t &limit) {
+#if defined(SHIZUKU_C6_UMODE)
+  const c6_stage1_object_bounds *bounds = nullptr;
+  if (g_c6_stage1_u_bounds.owner_id != 0 && object_id == g_c6_stage1_u_bounds.owner_id) {
+    bounds = &g_c6_stage1_u_bounds;
+  } else if (g_c6_stage1_driver_bounds.owner_id != 0 && object_id == g_c6_stage1_driver_bounds.owner_id) {
+    bounds = &g_c6_stage1_driver_bounds;
+  }
+  if (bounds == nullptr || bounds->stack_base == 0 || bounds->stack_limit <= bounds->stack_base)
+    return false;
+  base = bounds->stack_base;
+  limit = bounds->stack_limit;
+  return true;
+#else
+  (void)object_id; (void)base; (void)limit;
+  return false;
+#endif
+}
 void plic_vector_mode::switch_object_pmp(uint32_t object_id) {
 #if defined(SHIZUKU_C6_UMODE)
   const c6_stage1_object_bounds *bounds = nullptr;
@@ -1183,9 +1216,8 @@ void plic_vector_mode::switch_object_pmp(uint32_t object_id) {
   } else if (g_c6_stage1_driver_bounds.owner_id != 0 && object_id == g_c6_stage1_driver_bounds.owner_id) {
     bounds = &g_c6_stage1_driver_bounds;
   }
-  if (bounds != nullptr) {
-    shizuku::chips::esp32_c6::pmp_controller::switch_to_precomputed(bounds->precomputed);
-  }
+  if (bounds == nullptr) stop(0xE004); // unknown caller window must never retain stale PMP state
+  shizuku::chips::esp32_c6::pmp_controller::switch_to_precomputed(bounds->precomputed);
 #else
   (void)object_id;
 #endif

@@ -147,6 +147,23 @@ void plic_vector_mode::pend_context_switch() {}
 template <>
 bool plic_vector_mode::faulted_in_thread_mode<shizuku::archs::rv32_c6::context_t>(
     const shizuku::archs::rv32_c6::context_t &) { return true; }
+#if defined(SHIZUKU_C6_UMODE)
+static uintptr_t g_simulated_stack_base = 0;
+static uintptr_t g_simulated_stack_limit = 0;
+uintptr_t plic_vector_mode::kstack_top() { return 0x40812000u; }
+void plic_vector_mode::switch_object_pmp(uint32_t) {}
+bool plic_vector_mode::is_kstack_address(uintptr_t) { return false; }
+uintptr_t plic_vector_mode::kstack_limit() { return 0; }
+bool plic_vector_mode::user_stack_bounds(uint32_t, uintptr_t &base, uintptr_t &limit) {
+  base = g_simulated_stack_base;
+  limit = g_simulated_stack_limit;
+  return base != 0 && limit > base;
+}
+template <class Context, class Frame>
+void plic_vector_mode::enter_u_object(Context &, Frame &, uint32_t) {}
+template void plic_vector_mode::enter_u_object<shizuku::archs::rv32_c6::context_t, shizuku::archs::rv32_c6::exception_frame_t>(
+    shizuku::archs::rv32_c6::context_t &, shizuku::archs::rv32_c6::exception_frame_t &, uint32_t);
+#endif
 }
 
 using namespace shizuku;
@@ -238,6 +255,10 @@ static void run_dispatcher_tests() {
       ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
 
   alignas(16) static uint8_t simulated_stack[16384]; // A→B→C の 3 段が余白検査に収まる大きさ
+#if defined(SHIZUKU_C6_UMODE)
+  chips::esp32_c6::g_simulated_stack_base = reinterpret_cast<uintptr_t>(simulated_stack);
+  chips::esp32_c6::g_simulated_stack_limit = reinterpret_cast<uintptr_t>(simulated_stack + sizeof(simulated_stack));
+#endif
   auto *ctx = kernel_instance.current_context();
   ARCH::stack_limit_set(*ctx, reinterpret_cast<uintptr_t>(simulated_stack));
   // exception_frame placed on stack with room for frames
@@ -431,6 +452,9 @@ static void run_dispatcher_tests() {
   // 5. Unprivileged origin: privilege preservation & privileged API rejection
   // -------------------------------------------------------------------------
   ctx->privileged = false;
+#if defined(SHIZUKU_C6_UMODE)
+  ARCH::set_u_stack_pointer(*frame, reinterpret_cast<uintptr_t>(frame) + sizeof(ARCH::exception_frame_t));
+#endif
 
   // 5a. Direct GET with unprivileged origin
   frame->a0 = (uintptr_t)object_api::GET_CURRENT_OBJECT;
@@ -566,6 +590,9 @@ static void run_dispatcher_tests() {
     ctx->sp = frame;
     ctx->privileged = privileged;
     frame->a4 = 0;
+#if defined(SHIZUKU_C6_UMODE)
+    ARCH::set_u_stack_pointer(*frame, reinterpret_cast<uintptr_t>(frame) + sizeof(ARCH::exception_frame_t));
+#endif
   };
   fresh(ROOT_APP_ID, true);
   frame->a0 = (uintptr_t)primitive::RETURN;
@@ -698,7 +725,7 @@ static void run_dispatcher_tests() {
     assert(rec.prev_call == 0 && rec.ret_pc == A_PC && rec.ret_privileged == 1);
     assert(rec.ret_region_base == 0 && rec.ret_region_limit == 0 && rec.generation == 0);
     assert(thread.call_stack.call_top == 1 && thread.call_stack.call_count == 1);
-    assert(thread.identity_object() == B_ID && thread.call_caller_object() == 0 /* fresh() の base */);
+    assert(thread.identity_object() == B_ID && thread.call_caller_object() == ROOT_APP_ID /* fresh() の base */);
 #else
     const auto *h = (const ARCH::call_header_t *)thread.call_stack.top;
     assert((uintptr_t)h == reinterpret_cast<uintptr_t>(frame) + sizeof(KERNEL::FRAME));
@@ -881,6 +908,11 @@ static void run_dispatcher_tests() {
 
   // 8h. CALL_METHOD_DESCRIPTOR (33)。A (ROOT_APP_ID, 世代 0) が持つ記述子 3 = B、4 = C (非特権、窓あり)。
   //     記述子の検査は表の錠の中 (取り・放しの対が 1 回)。台帳段は LEDGER_DESCRIPTOR_CALL で dispatch 段なし。
+  for (uint32_t o = 0; o < KERNEL_OBJECT::OBJECT_COUNT; ++o) {
+    for (uint32_t i = 0; i < KERNEL_OBJECT::METHOD_DESCRIPTOR_CAPACITY; ++i) {
+      access::invalidate_descriptor(o, i);
+    }
+  }
   constexpr uintptr_t ENTRY_BD = 0x42040000, ENTRY_CD = 0x42041000;
   access::declare(ROOT_APP_ID, 5, reinterpret_cast<KERNEL_OBJECT::method_t>(0x42001000), 0,
                   ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY); // A を表に作る (記述子の持ち主は created であること)
@@ -1552,6 +1584,7 @@ static void run_dispatcher_tests() {
       assert(thread.call_stack.call_top == i + 1);
       // 各段の caller の再開点は前の段の再開点より下 (スタックは下へ伸びる)。
       assert(i == 0 || rec.ret_sp < thread.ledger[i - 1].ret_sp);
+      (void)headers;
 #else
       headers[i] = thread.call_stack.top;
       assert(headers[i] == reinterpret_cast<uintptr_t>(cur) + sizeof(KERNEL::FRAME));

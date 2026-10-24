@@ -41,6 +41,77 @@ int main() {
     assert(depth == 0);
   }
   assert(ecalls == 2 && irqs == 2 && faults == 1);
+  // The direct ECALL path records the trapped caller's MPP, not handler privilege.
+  using c6_arch_t = shizuku::archs::rv32_c6;
+  c6_arch_t::context_t caller_context{};
+  frame_t caller_frame{};
+  caller_context.privileged = true;
+  caller_frame.mstatus = RV32_MSTATUS_MPIE; // U caller (MPP=00)
+  c6_arch_t::set_context_privilege_from_frame(caller_context, caller_frame);
+  assert(!caller_context.privileged);
+  caller_context.privileged = false;
+  caller_frame.mstatus = RV32_MSTATUS_MPP | RV32_MSTATUS_MPIE; // M caller
+  c6_arch_t::set_context_privilege_from_frame(caller_context, caller_frame);
+  assert(caller_context.privileged);
+
+  // U trap frames live on the trusted stack; call metadata must use the saved user SP.
+  alignas(16) std::array<uint8_t, 2048> user_stack{};
+  constexpr uintptr_t user_stack_base = 0x40820000u; // synthetic RV32 object stack range
+  constexpr uintptr_t user_stack_limit = user_stack_base + 2048u;
+  constexpr uintptr_t user_sp = user_stack_base + 1536u;
+  auto *user_frame = reinterpret_cast<frame_t *>(user_stack.data() + 1024u);
+  user_frame->reserved0 = static_cast<uint32_t>(user_sp);
+  caller_context.sp = user_frame;
+  caller_context.stack_limit = user_stack_base;
+  caller_context.privileged = false;
+  assert(reinterpret_cast<uintptr_t>(c6_arch_t::call_header_slot(caller_context)) == user_sp);
+  assert(c6_arch_t::call_return_sp(caller_context) == user_sp);
+  assert(c6_arch_t::call_header_has_room_in_user_stack(caller_context, user_stack_base,
+                                                       user_stack_limit));
+  user_frame->reserved0 = static_cast<uint32_t>(user_stack_base + 256u);
+  assert(!c6_arch_t::call_header_has_room_in_user_stack(caller_context, user_stack_base,
+                                                        user_stack_limit));
+  user_frame->reserved0 = static_cast<uint32_t>(user_sp - 4u);
+  assert(!c6_arch_t::call_header_has_room_in_user_stack(caller_context, user_stack_base,
+                                                        user_stack_limit));
+
+  // The protected ledger supplies the resume SP and privilege marker; metadata is rebuilt for U mret.
+  c6_arch_t::set_unprivileged_resume_metadata(*user_frame, user_sp,
+                                               0x40812000u, false);
+  assert(user_frame->reserved0 == user_sp);
+  assert(user_frame->reserved1 == 0x40812000u);
+  assert(user_frame->mcause == RV32_TAG_U_ECALL);
+  assert((user_frame->mstatus & RV32_MSTATUS_MPP) == 0u);
+  c6_arch_t::set_unprivileged_resume_metadata(*user_frame, user_sp,
+                                               0x40812000u, true);
+  assert(user_frame->mcause == RV32_TAG_U_SCRUB);
+
+  // call_resume_at restores the M SP needed by context_to_frame; U metadata then overrides it.
+  alignas(16) std::array<uint8_t, 512> resume_memory{};
+  auto *resume_storage = reinterpret_cast<frame_t *>(resume_memory.data() + 112u);
+  const uintptr_t resume_sp = reinterpret_cast<uintptr_t>(resume_storage) + sizeof(frame_t);
+  auto *m_resume = c6_arch_t::call_resume_at(caller_context, 0x12345678u,
+      resume_sp, true, 0u, 0u, false);
+  assert(m_resume == resume_storage);
+  assert(m_resume->reserved0 == static_cast<uint32_t>(resume_sp));
+  assert(m_resume->reserved1 == 0u);
+  auto *u_resume = c6_arch_t::call_resume_at(caller_context, 0x42001000u,
+      resume_sp, false, 0u, 0u, false);
+  assert(u_resume == resume_storage && u_resume->reserved0 == static_cast<uint32_t>(resume_sp));
+  c6_arch_t::set_unprivileged_resume_metadata(*u_resume, user_sp, 0x40812000u, false);
+  assert(u_resume->reserved0 == user_sp);
+  assert(u_resume->reserved1 == 0x40812000u && u_resume->mcause == RV32_TAG_U_ECALL);
+
+  // M caller layout remains trap-frame-relative.
+  alignas(16) std::array<uint8_t, 2048> m_stack{};
+  const uintptr_t m_stack_base = reinterpret_cast<uintptr_t>(m_stack.data());
+  auto *m_frame = reinterpret_cast<frame_t *>(m_stack_base + 1024u);
+  caller_context.sp = m_frame;
+  caller_context.stack_limit = m_stack_base;
+  caller_context.privileged = true;
+  const uintptr_t m_header = reinterpret_cast<uintptr_t>(m_frame) + sizeof(frame_t);
+  assert(reinterpret_cast<uintptr_t>(c6_arch_t::call_header_slot(caller_context)) == m_header);
+  assert(c6_arch_t::call_return_sp(caller_context) == m_header);
   frame_t outer{}; outer.mcause = 0x80000001;
   route_trap(outer, depth, [] { assert(false); }, [&] {
     assert(depth == 1);

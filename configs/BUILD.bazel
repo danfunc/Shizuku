@@ -53,6 +53,11 @@ config_setting(
     flag_values = {":c6_umode": "disabled"},
     visibility = ["//visibility:public"],
 )
+config_setting(
+    name = "c6_umode_ledger_enabled",
+    flag_values = {":c6_umode": "enabled", ":board": "esp32_c6"},
+    visibility = ["//visibility:public"],
+)
 string_flag(
     name = "bootsel_support",
     build_setting_default = "disabled",
