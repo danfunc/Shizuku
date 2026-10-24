@@ -586,8 +586,8 @@ template <> SHIZUKU_HOT bool KERNEL::svc_forward_child_exit(KERNEL::CONTEXT *con
 //   kobj の中継 (call_method → primitive CALL) をやめ、m_objects[id].methods[method] を
 //   O(1) で引いて呼び先へ直接入る。台帳段は本当の呼び出し元の上に積まれるので、
 //   呼び先から見た GET_CALLER_OBJECT は呼び出し元そのものになる。
-//   エラーの種類・順序は従来と同じ (BAD_OBJECT → BAD_METHOD → UNDECLARED_METHOD →
-//   NO_STACK)。応答は (error, 0)。
+//   エラーの種類・順序は BAD_OBJECT → NOT_PRIVILEGED → BAD_METHOD → UNDECLARED_METHOD →
+//   NO_STACK。応答は (error, 0)。
 template <> SHIZUKU_HOT bool KERNEL::svc_call_method(KERNEL::CONTEXT *context) {
   THREAD &thread = current_thread();
   // ヘッダ枠方式 (RV32) の本体は native_call.hpp (例外入口が 1 関数に展開するものと同じ)。
@@ -598,7 +598,7 @@ template <> SHIZUKU_HOT bool KERNEL::svc_call_method(KERNEL::CONTEXT *context) {
   FRAME *frame = context->sp;
   call_request request{};
   const object_error lookup = kernel_object_instance.method_call_request(
-      ARCH::arg(*frame, 1), ARCH::arg(*frame, 2), request);
+      ARCH::arg(*frame, 1), ARCH::arg(*frame, 2), thread.identity_object(), request);
   if (lookup != object_error::OK) {
     ARCH::set_result(*frame, (uintptr_t)lookup, 0);
     return true;

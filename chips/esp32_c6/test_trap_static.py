@@ -193,24 +193,29 @@ assert 'method_descriptor_entry m_descriptors[OBJECT_COUNT][METHOD_DESCRIPTOR_CA
 entry_struct = ko.split('struct method_descriptor_entry {')[1].split('};')[0]
 for field in ('target_entry', 'parent_handler_entry', 'owner_generation', 'target_generation',
               'instance_generation', 'region_base', 'region_limit', 'callee', 'kind',
-              'parent_handler_object', 'privileged'):
-    assert f' {field};' in entry_struct, field
+              'parent_handler_object', 'privileged', 'seq'):
+    assert (f' {field};' in entry_struct or f' {field} :' in entry_struct or f' {field}:' in entry_struct), field
 assert 'const object_t *target' not in entry_struct
 assert 'static constexpr uint8_t DESCRIPTOR_NONE = 0xFF;' in ko
 find_desc = ko.split('SHIZUKU_HOT const method_descriptor_entry *find_method_descriptor(')[1].split(
     'SHIZUKU_HOT callee_view view_of_descriptor')[0]
 assert 'm_descriptors[caller_id][index]' in find_desc
 assert find_desc.count('m_objects[') == 1 and 'm_objects[callee]' in find_desc  # 照合の version の 1 語だけ
-assert 'desc.callee, __ATOMIC_ACQUIRE' in find_desc or '&desc.callee, __ATOMIC_ACQUIRE' in find_desc
+assert 'desc.seq, __ATOMIC_ACQUIRE' in find_desc or '&desc.seq, __ATOMIC_ACQUIRE' in find_desc
 view_desc = ko.split('SHIZUKU_HOT callee_view view_of_descriptor(')[1].split('// 呼び先の行から入場の形')[0]
 assert 'm_objects[' not in view_desc and 'row' not in view_desc
 pub = ko.split('void publish_descriptor(')[1].split('// 項目を無効にする')[0]
-assert '__atomic_store_n(&desc.callee, (uint8_t)callee_id, __ATOMIC_RELEASE)' in pub  # 最後に公開する
-assert pub.index('__atomic_store_n') > pub.index('desc.privileged')
+assert '__atomic_store_n(&desc.seq,' in pub  # 最後に偶数 seq で公開する
+assert pub.rindex('__atomic_store_n') > pub.index('desc.callee')
 nc = (root / 'internal_headers/shizuku/native_call.hpp').read_text()
 call_desc = nc.split('inline void call_descriptor_in_place(')[1].split('// EXIT_METHOD (2, Forward')[0]
 assert 'row' not in call_desc and 'kobj.row_id' not in call_desc and 'callee_row' not in call_desc
-assert 'enter_in_place<K, KObj>(' in call_desc and 'kobj.view_of_descriptor(*desc)' in call_desc
+assert 'enter_in_place<K, KObj>(' in call_desc and 'kobj.view_of_descriptor(local_desc)' in call_desc
+# trap 内の desc call 経路に表の錠 (table_lock) や LR/SC (cas32)、後方分岐の再試行ループが無いこと
+assert 'table_lock' not in call_desc and 'table_unlock' not in call_desc
+assert 'cas32' not in call_desc and 'lr.w' not in call_desc and 'sc.w' not in call_desc
+assert 'while' not in call_desc and 'for ' not in call_desc and 'goto' not in call_desc
+assert 'desc.seq' in call_desc
 enter_body = nc.split('inline kernel_error enter_in_place(')[1].split('// CALL_METHOD (4)')[0]
 assert 'row.' not in enter_body and 'kobj.' not in enter_body  # 入場は形 (view) だけを読む
 

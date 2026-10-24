@@ -151,6 +151,12 @@ asm(
     "  beq a0, t0, .Lprobe_u_to_u_call_2\n"
     "  li t0, 16\n"
     "  beq a0, t0, .Lprobe_u_to_u_call_fault\n"
+    "  li t0, 17\n"
+    "  beq a0, t0, .Lprobe_create_driver\n"
+    "  li t0, 18\n"
+    "  beq a0, t0, .Lprobe_call_driver_mmio\n"
+    "  li t0, 19\n"
+    "  beq a0, t0, .Lprobe_call_driver_app_data\n"
     "  li a0, 0\n"
     "  ret\n"
     "\n"
@@ -432,6 +438,71 @@ asm(
     "  li a0, 0xDEAD0005\n"
     "  ret\n"
     "\n"
+    ".Lprobe_create_driver:\n"
+    "  addi sp, sp, -32\n"
+    "  sw ra, 28(sp)\n"
+    "  sw s0, 24(sp)\n"
+    "  sw s1, 20(sp)\n"
+    "  la s0, u_mode_stage1_data_pool\n"
+    "  lw s1, 20(s0)\n"
+    "  li a0, 1\n"
+    "  mv a1, s1\n"
+    "  la a2, u_mode_driver_worker\n"
+    "  li a3, 1\n"
+    "  li a4, 0\n"
+    "  ecall\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    "\n"
+    ".Lprobe_call_driver_mmio:\n"
+    "  addi sp, sp, -32\n"
+    "  sw ra, 28(sp)\n"
+    "  sw s0, 24(sp)\n"
+    "  sw s1, 20(sp)\n"
+    "  sw s2, 16(sp)\n"
+    "  la s0, u_mode_stage1_data_pool\n"
+    "  lw s1, 20(s0)\n"
+    "  lw s2, 24(s0)\n"
+    "  li a0, 4\n"
+    "  mv a1, s1\n"
+    "  mv a2, s2\n"
+    "  li a3, 1\n"
+    "  li a4, 0\n"
+    "  ecall\n"
+    "  mv a0, a1\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  lw s2, 16(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    "\n"
+    ".Lprobe_call_driver_app_data:\n"
+    "  addi sp, sp, -32\n"
+    "  sw ra, 28(sp)\n"
+    "  sw s0, 24(sp)\n"
+    "  sw s1, 20(sp)\n"
+    "  sw s2, 16(sp)\n"
+    "  la s0, u_mode_stage1_data_pool\n"
+    "  lw s1, 20(s0)\n"
+    "  lw s2, 24(s0)\n"
+    "  li a0, 4\n"
+    "  mv a1, s1\n"
+    "  mv a2, s2\n"
+    "  li a3, 2\n"
+    "  li a4, 0\n"
+    "  ecall\n"
+    "  mv a0, a1\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  lw s2, 16(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    "\n"
     ".size u_mode_probe_worker, .-u_mode_probe_worker\n"
     "\n"
     ".balign 4\n"
@@ -495,7 +566,23 @@ const char c6_stage1_probe_app_mmio_fault_insn_addr[] = "";
 const char c6_stage1_probe_app_driver_data_fault_insn_addr[] = "";
 const char c6_stage1_probe_driver_mmio_insn_addr[] = "";
 const char c6_stage1_probe_driver_app_data_fault_insn_addr[] = "";
-uintptr_t u_mode_probe_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) { return 0; }
+uintptr_t u_mode_probe_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
+  if (cmd == 17) {
+    const auto res = ARCH::syscall(
+        static_cast<uintptr_t>(object_api::CREATE_OBJECT),
+        OBJECT_STAGE1_DRIVER,
+        reinterpret_cast<uintptr_t>(&u_mode_driver_worker),
+        OBJECT_UNPRIVILEGED);
+    return res.error;
+  }
+  if (cmd == 18) {
+    return 0;
+  }
+  if (cmd == 19) {
+    return 0xE012u;
+  }
+  return 0;
+}
 uintptr_t u_mode_driver_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) { return 0; }
 #endif
 
@@ -624,6 +711,7 @@ void c6_stage1_safety() {
   drv_pool_words[1] = reinterpret_cast<uintptr_t>(u_mode_stage1_data_pool);
 
   // 1. オブジェクト登録
+  // PROBE は純粋な非特権 (OBJECT_UNPRIVILEGED) として登録 (kernel_role は付与しない)。
   const auto create_res = ARCH::syscall(
       static_cast<uintptr_t>(object_api::CREATE_OBJECT),
       OBJECT_STAGE1_PROBE,
@@ -632,13 +720,17 @@ void c6_stage1_safety() {
   record_check("stage1: create unprivileged probe object",
                create_res.error == 0, create_res.error, 0);
 
+  // PROBE (親) から直接の子として DRIVER (OBJECT_STAGE1_DRIVER) を CREATE_OBJECT させる。
+  // 発行時の current_object は OBJECT_STAGE1_PROBE となるため、DRIVER の creator は PROBE となり
+  // 正当な親子関係が樹立される (U 側の kernel_role 回避)。
   const auto create_drv_res = ARCH::syscall(
-      static_cast<uintptr_t>(object_api::CREATE_OBJECT),
-      OBJECT_STAGE1_DRIVER,
-      reinterpret_cast<uintptr_t>(&u_mode_driver_worker),
-      OBJECT_UNPRIVILEGED);
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      17 /* cmd=17: create driver child object */);
   record_check("stage1: create unprivileged driver object",
-               create_drv_res.error == 0, create_drv_res.error, 0);
+               create_drv_res.error == 0 && create_drv_res.value == 0,
+               create_drv_res.error == 0 ? create_drv_res.value : create_drv_res.error, 0);
 
   if (create_res.error != 0 || create_drv_res.error != 0) {
     BOARD::diag_printf("[C6_STAGE1] ABORT: probe object creation failed; dependent tests aborted\n");
@@ -938,12 +1030,12 @@ void c6_stage1_safety() {
                shizuku_c6_u_mode_diag[5], reinterpret_cast<uintptr_t>(&c6_stage1_probe_upmpcfg_insn_addr));
 
   // 12. アプリ⇄ドライバ窓分離テスト (MMIO 窓と private data 窓の分離)
-  // 12a. ドライバは MMIO 窓 (0x60000008) を正常に読める
+  // 12a. ドライバは MMIO 窓 (0x60000008) を正常に読める (親 PROBE 経由の中継)
   const auto drv_mmio_res = ARCH::syscall(
       static_cast<uintptr_t>(object_api::CALL_METHOD),
-      OBJECT_STAGE1_DRIVER,
+      OBJECT_STAGE1_PROBE,
       METHOD_STAGE1_PROBE,
-      1 /* cmd=1: driver read mmio */);
+      18 /* cmd=18: probe call driver read mmio */);
   record_check("stage1: driver reads MMIO successfully without fault",
                drv_mmio_res.error == 0 && shizuku_c6_u_mode_diag[13] == 0u,
                drv_mmio_res.error, 0);
@@ -981,13 +1073,13 @@ void c6_stage1_safety() {
   record_check("stage1: app driver data fault exact mcause is 5",
                shizuku_c6_u_mode_diag[4] == 5u, shizuku_c6_u_mode_diag[4], 5u);
 
-  // 12d. ドライバはアプリの private data pool に触れると PMP Load Access Fault
+  // 12d. ドライバはアプリの private data pool に触れると PMP Load Access Fault (親 PROBE 経由の中継)
   g_c6_probe_driver_app_data_fault_pc = reinterpret_cast<uintptr_t>(&c6_stage1_probe_driver_app_data_fault_insn_addr);
   const auto drv_app_data_res = ARCH::syscall(
       static_cast<uintptr_t>(object_api::CALL_METHOD),
-      OBJECT_STAGE1_DRIVER,
+      OBJECT_STAGE1_PROBE,
       METHOD_STAGE1_PROBE,
-      2 /* cmd=2: driver read app data */);
+      19 /* cmd=19: probe call driver read app data */);
   g_c6_probe_driver_app_data_fault_pc = 0;
   record_check("stage1: driver access to app private data denied by PMP (fault trapped)",
                drv_app_data_res.value == 0xE012u && shizuku_c6_u_mode_diag[15] == 1u,

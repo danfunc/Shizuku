@@ -42,6 +42,7 @@ constexpr uintptr_t CMD_SETUP = 0x01;
 constexpr uintptr_t CMD_RECREATE = 0x02;
 constexpr uintptr_t CMD_MKGC = 0x50; // 子の svc: H に孫を作らせる
 constexpr uintptr_t CMD_WHO = 0x51;  // 子の svc: 受け手が H なら 0x4848
+constexpr uintptr_t CMD_CALL_GC = 0x52; // H から直接の子 GC を呼ぶ
 constexpr uintptr_t CMD_YIELD = 0x60; // 子の svc: H の枠の中で YIELD する
 constexpr uintptr_t CMD_EXIT = 0x61;  // 子の svc: H に自分の thread を終了させる
 constexpr uintptr_t WHO_H = 0x4848;
@@ -132,6 +133,10 @@ uintptr_t handler_entry(uintptr_t a0, uintptr_t a1, uintptr_t a2,
   }
   if (a0 == CMD_WHO)
     return WHO_H;
+  if (a0 == CMD_CALL_GC) {
+    const auto res = api(object_api::CALL_METHOD, OBJ_GC, 0, 0);
+    return res.value;
+  }
   if (a0 == CMD_YIELD) {
     g_h_phase = 1;
     api(object_api::YIELD); // HANDLER 枠のまま貸し手へ戻る
@@ -202,7 +207,7 @@ void compat_premise_probe() {
   check("(a) grandchild parent handler is H (not root kobj)",
         gc_parent == OBJ_H, gc_parent, OBJ_H);
 
-  const auto who = api(object_api::CALL_METHOD, OBJ_GC, 0, 0);
+  const auto who = api(object_api::CALL_METHOD, OBJ_H, 0, CMD_CALL_GC);
   shizuku_compat_probe_state[4] = (uint32_t)g_gc_who_value;
   BOARD::diag_printf(
       "[COMPAT-PROBE] (a) grandchild raw svc: call error=%lu value=%lu raw error=%lu raw value=%lu\n",

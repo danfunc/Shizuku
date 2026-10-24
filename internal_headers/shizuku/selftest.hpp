@@ -38,6 +38,7 @@ extern uint32_t cost_baseline;
 extern uint32_t cost_direct;
 extern uint32_t cost_svc;
 extern uint32_t cost_call1;
+extern uint32_t cost_call_parent_child;
 extern uint32_t cost_call2;
 
 // スレッドと実行権の梯子: 1 本起こす → 譲り合う → 時限つきで貸す → 返さない相手を

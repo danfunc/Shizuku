@@ -270,7 +270,7 @@ template <class K, class KObj>
 }
 
 // CALL_METHOD (4): a1 = オブジェクト ID, a2 = メソッド番号, a3 = 引数。応答は (error, 0)。
-//   エラーの種類・順序: BAD_OBJECT → BAD_METHOD → UNDECLARED_METHOD → NO_STACK。
+//   エラーの種類・順序: BAD_OBJECT → NOT_PRIVILEGED → BAD_METHOD → UNDECLARED_METHOD → NO_STACK。
 template <class K, class KObj>
 [[gnu::always_inline]] inline void call_method_in_place(K &kernel,
                                                         typename K::THREAD &thread,
@@ -280,9 +280,10 @@ template <class K, class KObj>
   if constexpr (arch_call_in_place<A>()) {
     typename K::FRAME &frame = *context.sp;
     const uintptr_t id = A::arg(frame, 1);
+    const uint32_t caller_id = thread.identity_object();
     object_error error;
     typename KObj::method_t entry;
-    const auto *row = kobj.find_method_row(id, A::arg(frame, 2), error, entry);
+    const auto *row = kobj.find_method_row(id, A::arg(frame, 2), caller_id, error, entry);
     if (row == nullptr) {
       A::set_result(frame, (uintptr_t)error, 0);
       return;
@@ -310,9 +311,10 @@ template <class K, class KObj>
 }
 
 // CALL_METHOD_DESCRIPTOR (33): a1 = 記述子の index, a2..a7 = 呼び先の引数 6 個 (a0..a5 へ渡る)。
-//   記述子の引きと呼び先の読み出し・台帳段の積みは表の錠の中 (区間は短く、syscall を含まない)。
+//   trap 内で表の錠 (table_lock) は取らず、版番号 seq による読み取り検証を行う。
 //   項目は呼び先の前計算 (入口・種別・親・窓・特権・instance 世代) を持つので、行を引かず、表は [持ち主][index]
 //   の 32 バイト項目をシフトで引く。
+//   trap 内で再試行ループを回さない、錠を取らない、LR/SC を使わない。
 template <class K, class KObj>
 [[gnu::always_inline]] inline void call_descriptor_in_place(K &kernel,
                                                             typename K::THREAD &thread,
@@ -323,20 +325,67 @@ template <class K, class KObj>
     typename K::FRAME &frame = *context.sp;
     const uint32_t caller_id = thread.identity_object();
     const uint32_t caller_generation = thread.identity_generation();
-    object_error error = object_error::OK;
-    kobj.table_lock_inline();
-    const auto *desc = kobj.find_method_descriptor(caller_id, (uint32_t)A::arg(frame, 1),
-                                                   caller_generation, error);
-    if (desc == nullptr) {
-      kobj.table_unlock_inline();
-      A::set_result(frame, (uintptr_t)error, 0);
+    const uint32_t index = (uint32_t)A::arg(frame, 1);
+
+    if (index >= KObj::METHOD_DESCRIPTOR_CAPACITY || caller_id >= KObj::OBJECT_COUNT) {
+      A::set_result(frame, (uintptr_t)object_error::BAD_DESCRIPTOR, 0);
       return;
     }
-    // 入場の形は項目の前計算から作る (呼び先の行を引かない)。錠の中で読む (照合と写しを同じ区間で読む)。
+
+    const auto &desc = kobj.descriptor_entry(caller_id, index);
+
+    // 1. seq を load-acquire (単一コアなら acquire fence 不要、RELAXED + コンパイラバリア)
+    uint8_t seq1;
+    if constexpr (K::CORE_COUNT == 1) {
+      seq1 = __atomic_load_n(&desc.seq, __ATOMIC_RELAXED);
+      asm volatile("" ::: "memory");
+    } else {
+      seq1 = __atomic_load_n(&desc.seq, __ATOMIC_ACQUIRE);
+    }
+
+    // 奇数なら書込み中なので即 STALE
+    if ((seq1 & 1u) != 0) {
+      A::set_result(frame, (uintptr_t)object_error::STALE_DESCRIPTOR, 0);
+      return;
+    }
+
+    // 2. 必要な値をローカルに写す
+    const typename KObj::method_descriptor_entry local_desc = desc;
+
+    // 3. seq を再読し、変わっていれば即 STALE
+    uint8_t seq2;
+    if constexpr (K::CORE_COUNT == 1) {
+      asm volatile("" ::: "memory");
+      seq2 = __atomic_load_n(&desc.seq, __ATOMIC_RELAXED);
+    } else {
+      seq2 = __atomic_load_n(&desc.seq, __ATOMIC_ACQUIRE);
+    }
+    if (seq1 != seq2) {
+      A::set_result(frame, (uintptr_t)object_error::STALE_DESCRIPTOR, 0);
+      return;
+    }
+
+    // 4. 写した値に対する照合 (順序: BAD_DESCRIPTOR -> STALE_DESCRIPTOR)
+    const uint8_t callee = local_desc.callee;
+    if (callee == KObj::DESCRIPTOR_NONE || callee >= KObj::OBJECT_COUNT) {
+      A::set_result(frame, (uintptr_t)object_error::BAD_DESCRIPTOR, 0);
+      return;
+    }
+    if (local_desc.owner_generation != caller_generation) {
+      A::set_result(frame, (uintptr_t)object_error::STALE_DESCRIPTOR, 0);
+      return;
+    }
+    const uint32_t version = kobj.object_version(callee);
+    if (version == 0 || local_desc.target_generation != version) {
+      A::set_result(frame, (uintptr_t)object_error::STALE_DESCRIPTOR, 0);
+      return;
+    }
+
+    // 5. 写した値から入場の形を作る (呼び先の行を引かない)。
     const kernel_error entered = enter_in_place<K, KObj>(
-        kernel, thread, context, kobj.view_of_descriptor(*desc), desc->target_entry,
+        kernel, thread, context, kobj.view_of_descriptor(local_desc), local_desc.target_entry,
         K::LEDGER_DESCRIPTOR_CALL);
-    kobj.table_unlock_inline();
+
     if (entered != kernel_error::OK) {
       A::set_result(frame, (uintptr_t)(entered == kernel_error::NO_STACK
                                            ? object_error::NO_STACK

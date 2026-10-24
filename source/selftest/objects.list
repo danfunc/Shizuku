@@ -46,3 +46,10 @@ cost_dinner
 cost_owner
 c6_stage1_probe
 c6_stage1_driver
+# call_cost の親子比較測定用 (kernel_role なしの親 cost_parent が子 cost_child を呼ぶ)
+cost_parent
+cost_child
+# call_cost の 2-hop 測定用 (cost_nest の直接の子)
+cost_leaf2
+# unprivileged の kernel_role 呼出し検証用 (親子関係にない相手への CALL_METHOD 許可)
+kernel_caller

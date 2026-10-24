@@ -64,6 +64,7 @@ static const name_id_entry kMapping[] = {
     {"nested CALL/RETURN across handlers", 0x2012},
     {"depth fully restored after nested calls", 0x2013},
     {"nested CALL/RETURN with fixed nonzero child argument", 0x2014},
+    {"nested CALL/RETURN across handlers (H_B branch)", 0x2015},
 
     // 0x3000 番台: thread_ladder
     {"spawn: error", 0x3001},
