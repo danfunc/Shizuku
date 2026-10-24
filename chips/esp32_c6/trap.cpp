@@ -629,8 +629,9 @@ SHIZUKU_HOT void run_pending_switch() {
 // ごとの処理 (Body) の前後に付けたもの。割込み・例外は従来どおり shizuku_rv32_trap_dispatch。
 using ecall_fn = arch::exception_frame_t *(*)(arch::exception_frame_t *);
 #if defined(SHIZUKU_C6_UMODE)
+static uintptr_t s_u_ecall_frame_latch = 0;
 [[gnu::always_inline]] inline void record_u_mode_ecall_diag(const arch::exception_frame_t *frame) {
-  arch::record_u_mode_ecall_diag(*frame, shizuku_c6_u_ecall_diag, shizuku_c6_u_mode_diag);
+  arch::record_u_mode_ecall_diag(*frame, shizuku_c6_u_ecall_diag, shizuku_c6_u_mode_diag, &s_u_ecall_frame_latch);
 }
 #endif
 template <class Body>
@@ -679,6 +680,9 @@ SHIZUKU_HOT inline arch::exception_frame_t *ecall_run(arch::exception_frame_t *f
   active_frame = nullptr;
   active_context = nullptr;
   active_stop_phase = 0u;
+#if defined(SHIZUKU_C6_UMODE)
+  s_u_ecall_frame_latch = 0;
+#endif
   return result;
 }
 // trap 内で直接処理する API (svc_attributes の mode == handler)。native の経路に立てていれば Body、
@@ -723,6 +727,9 @@ __attribute__((noinline, noipa)) arch::exception_frame_t *ecall_fault_unprivileg
     result->mstatus = (result->mstatus & ~RV32_MSTATUS_MPP) | RV32_MSTATUS_MPIE;
     context_to_frame(*context);
   }
+#if defined(SHIZUKU_C6_UMODE)
+  s_u_ecall_frame_latch = 0;
+#endif
   return result;
 }
 // 本体が kobj へ回した (スレッドの最外のメソッドが戻る・起点スレッドの YIELD): dispatch 段を積んで
@@ -747,9 +754,6 @@ __attribute__((noinline, noipa)) arch::exception_frame_t *ecall_to_kobj(arch::co
 template <class Body>
 SHIZUKU_HOT [[gnu::always_inline]] inline arch::exception_frame_t *ecall_direct(
     arch::exception_frame_t *frame, Body body) {
-#if defined(SHIZUKU_C6_UMODE)
-  record_u_mode_ecall_diag(frame);
-#endif
   const uint32_t probe = trap_probe_interval_count;
   if (__builtin_expect((probe & (kStackProbeInterval - 1u)) == kStackProbeInterval - 1u, 0))
     return ecall_other(frame);
@@ -758,6 +762,9 @@ SHIZUKU_HOT [[gnu::always_inline]] inline arch::exception_frame_t *ecall_direct(
   auto &kernel = shizuku::kernel_instance;
   auto &thread = kernel.current_thread();
   if (__builtin_expect(!kernel.svc_native_route_of(thread), 0)) return ecall_other(frame);
+#if defined(SHIZUKU_C6_UMODE)
+  record_u_mode_ecall_diag(frame);
+#endif
   arch::context_t *context = thread.context;
   context->sp = frame;
   // Keep the trapped caller privilege. U-mode ECALL handlers execute in M-mode, but native_call
@@ -1056,6 +1063,9 @@ extern "C" SHIZUKU_HOT arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch:
   active_frame = nullptr;
   active_context = nullptr;
   active_stop_phase = 0u;
+#if defined(SHIZUKU_C6_UMODE)
+  s_u_ecall_frame_latch = 0;
+#endif
   return result;
 }
 extern "C" [[noreturn]] void shizuku_rv32_return_failed() { stop(0xE005); }

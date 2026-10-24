@@ -450,12 +450,22 @@ public:
 #if defined(SHIZUKU_C6_UMODE)
   static void record_u_mode_ecall_diag(const exception_frame_t &frame,
                                        volatile uint32_t *u_ecall_diag,
-                                       volatile uint32_t *u_mode_diag) {
+                                       volatile uint32_t *u_mode_diag,
+                                       uintptr_t *event_latch = nullptr) {
     if ((frame.mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) {
+      if (event_latch != nullptr) {
+        const uintptr_t event_id = reinterpret_cast<uintptr_t>(&frame);
+        if (*event_latch == event_id) {
+          return;
+        }
+        *event_latch = event_id;
+      }
       if (u_ecall_diag != nullptr) {
-        u_ecall_diag[0] = (frame.mcause == RV32_TAG_U_ECALL) ? 8u : frame.mcause;
-        u_ecall_diag[1] = frame.mepc;
-        u_ecall_diag[2] = frame.mtval;
+        if (u_ecall_diag[0] == 0u) {
+          u_ecall_diag[0] = (frame.mcause == RV32_TAG_U_ECALL) ? 8u : frame.mcause;
+          u_ecall_diag[1] = frame.mepc;
+          u_ecall_diag[2] = frame.mtval;
+        }
       }
       if (u_mode_diag != nullptr) {
         u_mode_diag[2] = u_mode_diag[2] + 1;

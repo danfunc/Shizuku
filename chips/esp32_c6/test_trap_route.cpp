@@ -105,9 +105,14 @@ int main() {
 
   // Regression: U-mode ecall diagnostics must record properly even when prior global counter > 0
   // and u_ecall_diag was reset to 0 before invocation (verifying fix for 0x6011, 0x6012, 0x6013).
+  // Also verify that subsequent EXIT_METHOD ECALL does not overwrite probe mepc,
+  // that M-mode events do not alter U diagnostics, that clearing diag array permits recapture,
+  // and that direct-to-slow fallback does not double-count on the same frame.
   std::array<uint32_t, 3> mock_u_ecall_diag{0, 0, 0};
   std::array<uint32_t, 16> mock_u_mode_diag{};
   mock_u_mode_diag[2] = 5u; // simulate 5 previous U-mode ecalls
+  uintptr_t event_latch = 0;
+
   frame_t u_ecall_frame{};
   u_ecall_frame.mstatus = RV32_MSTATUS_MPIE; // MPP == 0 (U-mode)
   u_ecall_frame.mcause = RV32_TAG_U_ECALL;
@@ -115,21 +120,60 @@ int main() {
   constexpr uintptr_t expected_probe_mtval = 0x0u;
   u_ecall_frame.mepc = expected_probe_ecall_pc;
   u_ecall_frame.mtval = expected_probe_mtval;
-  c6_arch_t::record_u_mode_ecall_diag(u_ecall_frame, mock_u_ecall_diag.data(), mock_u_mode_diag.data());
+
+  // 1. First U-mode probe ECALL: captures diag and increments counter
+  c6_arch_t::record_u_mode_ecall_diag(u_ecall_frame, mock_u_ecall_diag.data(), mock_u_mode_diag.data(), &event_latch);
   assert(mock_u_mode_diag[2] == 6u);
   assert(mock_u_ecall_diag[0] == 8u);
   assert(mock_u_ecall_diag[1] == expected_probe_ecall_pc);
   assert(mock_u_ecall_diag[2] == expected_probe_mtval);
 
-  // M-mode ecall must not touch U-mode diagnostics
+  // 2. Direct-to-slow fallback on same frame: must not double-count
+  c6_arch_t::record_u_mode_ecall_diag(u_ecall_frame, mock_u_ecall_diag.data(), mock_u_mode_diag.data(), &event_latch);
+  assert(mock_u_mode_diag[2] == 6u); // still 6!
+  assert(mock_u_ecall_diag[1] == expected_probe_ecall_pc);
+
+  // 3. Trap completes, M return: event_latch cleared
+  event_latch = 0;
+
+  // 4. Subsequent EXIT_METHOD ECALL: counter increments, but probe mepc is preserved
+  frame_t exit_ecall_frame{};
+  exit_ecall_frame.mstatus = RV32_MSTATUS_MPIE; // MPP == 0 (U-mode)
+  exit_ecall_frame.mcause = RV32_TAG_U_ECALL;
+  constexpr uintptr_t trampoline_exit_pc = 0x42007010u;
+  exit_ecall_frame.mepc = trampoline_exit_pc;
+  exit_ecall_frame.mtval = 0u;
+  c6_arch_t::record_u_mode_ecall_diag(exit_ecall_frame, mock_u_ecall_diag.data(), mock_u_mode_diag.data(), &event_latch);
+  assert(mock_u_mode_diag[2] == 7u); // counter incremented for new U ECALL
+  assert(mock_u_ecall_diag[0] == 8u);
+  assert(mock_u_ecall_diag[1] == expected_probe_ecall_pc); // PROBE PC PRESERVED!
+
+  // 5. M return and M-mode ecall: must not touch U-mode diagnostics
+  event_latch = 0;
   frame_t m_ecall_frame{};
   m_ecall_frame.mstatus = RV32_MSTATUS_MPP | RV32_MSTATUS_MPIE; // MPP == M-mode
   m_ecall_frame.mcause = RV32_TAG_ECALL;
   m_ecall_frame.mepc = 0x42009004u;
-  c6_arch_t::record_u_mode_ecall_diag(m_ecall_frame, mock_u_ecall_diag.data(), mock_u_mode_diag.data());
-  assert(mock_u_mode_diag[2] == 6u);
+  c6_arch_t::record_u_mode_ecall_diag(m_ecall_frame, mock_u_ecall_diag.data(), mock_u_mode_diag.data(), &event_latch);
+  assert(mock_u_mode_diag[2] == 7u); // untouched
   assert(mock_u_ecall_diag[0] == 8u);
-  assert(mock_u_ecall_diag[1] == expected_probe_ecall_pc);
+  assert(mock_u_ecall_diag[1] == expected_probe_ecall_pc); // still probe pc
+
+  // 6. Explicit clear diag array: re-arms capture
+  for (size_t i = 0; i < 3; ++i) mock_u_ecall_diag[i] = 0;
+  assert(mock_u_ecall_diag[0] == 0u);
+
+  // 7. Second U ECALL: captures new pc
+  event_latch = 0;
+  frame_t second_u_frame{};
+  second_u_frame.mstatus = RV32_MSTATUS_MPIE;
+  second_u_frame.mcause = RV32_TAG_U_ECALL;
+  constexpr uintptr_t second_probe_pc = 0x42008888u;
+  second_u_frame.mepc = second_probe_pc;
+  c6_arch_t::record_u_mode_ecall_diag(second_u_frame, mock_u_ecall_diag.data(), mock_u_mode_diag.data(), &event_latch);
+  assert(mock_u_mode_diag[2] == 8u);
+  assert(mock_u_ecall_diag[0] == 8u);
+  assert(mock_u_ecall_diag[1] == second_probe_pc); // CAPTURED NEW PC!
 #endif
 
   // M caller layout remains trap-frame-relative.
