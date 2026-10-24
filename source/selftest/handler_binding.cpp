@@ -28,6 +28,7 @@ constexpr uintptr_t CMD_COMPUTE         = 0x10;
 constexpr uintptr_t CMD_CALL_KOBJ       = 0x20;
 constexpr uintptr_t CMD_CALL_KOBJ_GET   = 0x21;
 constexpr uintptr_t CMD_NEST            = 0x30;
+constexpr uintptr_t CMD_NEST_NONZERO    = 0x31;
 constexpr uintptr_t CMD_SETUP_PRIMITIVE = 0x40;
 constexpr uintptr_t CMD_SETUP_COMPUTE   = 0x41;
 
@@ -154,9 +155,11 @@ uintptr_t handler_a_entry(uintptr_t a0, uintptr_t a1, uintptr_t a2,
     const auto res = ARCH::syscall((uintptr_t)object_api::GET_CURRENT_OBJECT);
     return (res.error == 0 && res.value == OBJ_PARENT_A) ? 0x8888 : 0xEEEE;
   }
-  if (a0 == CMD_NEST) {
-    // ネスト呼び出し: 親ハンドラ A から子 B のメソッドを呼ぶ
-    const auto res = call_method(OBJ_CHILD_B, 0, a1);
+  if (a0 == CMD_NEST || a0 == CMD_NEST_NONZERO) {
+    // CALL_METHOD は a0 に 1 引数だけを渡す。root の a1 は object ID なので参照せず、
+    // command ごとに固定した値を child B へ渡して nested call の往復を検証する。
+    const uintptr_t child_argument = a0 == CMD_NEST ? 0 : 7;
+    const auto res = call_method(OBJ_CHILD_B, 0, child_argument);
     return res.value + 1;
   }
   return 0xEEEE;
@@ -313,9 +316,15 @@ void handler_binding_probe() {
         repl_comp_res.value == OBJ_CHILD_A, repl_comp_res.value, OBJ_CHILD_A);
 
   const auto nest_res = call_method(OBJ_PARENT_A, 0, CMD_NEST);
-  // handler_a から child_b (arg=0, +200) を呼び出し、+1 して 201
+  // handler_a が child_b に 0 を渡し、+200 の戻りに +1 して 201
   check("nested CALL/RETURN across handlers",
-        nest_res.value == 201, nest_res.value, 201);
+        nest_res.error == (uintptr_t)object_error::OK && nest_res.value == 201,
+        nest_res.value, 201);
+  const auto nest_nonzero_res = call_method(OBJ_PARENT_A, 0, CMD_NEST_NONZERO);
+  check("nested CALL/RETURN with fixed nonzero child argument",
+        nest_nonzero_res.error == (uintptr_t)object_error::OK &&
+            nest_nonzero_res.value == 208,
+        nest_nonzero_res.value, 208);
   check("depth fully restored after nested calls",
         kernel_instance.current_depth() == 0,
         kernel_instance.current_depth(), 0);

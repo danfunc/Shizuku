@@ -1269,17 +1269,23 @@ void call_ladder() {
             g_desc_calls == calls_before + 1,
             (unsigned long)g_desc_calls, (unsigned long)(calls_before + 1));
     }
-    const api_result legacy_abi = api(object_api::CALL_METHOD, OBJECT_DESC_TEST,
-                                      2, 42);
+#if defined(__riscv)
+    // §4 の caller-input ABI に従い、未使用レジスタを検査するときは caller が値を明示する。
+    const auto legacy_abi = ARCH::syscall((uintptr_t)object_api::CALL_METHOD,
+                                          OBJECT_DESC_TEST, 2, 42, 0, 0, 0, 0);
+#else
+    const auto legacy_abi = ARCH::syscall((uintptr_t)object_api::CALL_METHOD,
+                                          OBJECT_DESC_TEST, 2, 42);
+#endif
     check("descriptor: legacy four-argument ABI probe returns 77",
           legacy_abi.error == (uintptr_t)object_error::OK && legacy_abi.value == 77,
           (unsigned long)legacy_abi.value, 77);
 #if defined(__riscv)
-    check("descriptor: legacy four-argument entry sees a4/a5 zero",
-          g_desc_legacy_a4 == 0 && g_desc_legacy_a5 == 0,
-          (unsigned long)(g_desc_legacy_a4 | g_desc_legacy_a5), 0);
-    // 旧 4 引数 CALL_METHOD の経路 (CALL 段の積み込み = set_args) へ、呼出し側の a4/a5 に
-    // ゴミを入れて撃つ。callee の a4/a5 は 0 のまま (呼出し側の値が届いてはならない)。
+    check("descriptor: caller-supplied zero a4 reaches legacy entry",
+          g_desc_legacy_a4 == 0, (unsigned long)g_desc_legacy_a4, 0);
+    check("descriptor: caller-supplied zero a5 reaches legacy entry",
+          g_desc_legacy_a5 == 0, (unsigned long)g_desc_legacy_a5, 0);
+    // レジスタは caller の入力として素通しする。未宣言の値も kernel が消さず、callee に届く。
     g_desc_legacy_a4 = UINTPTR_MAX;
     g_desc_legacy_a5 = UINTPTR_MAX;
     const auto dirty = ARCH::syscall((uintptr_t)object_api::CALL_METHOD, OBJECT_DESC_TEST,
@@ -1287,9 +1293,12 @@ void call_ladder() {
     check("descriptor: legacy four-argument call with dirty caller a4/a5 returns 77",
           dirty.error == (uintptr_t)object_error::OK && dirty.value == 77,
           (unsigned long)dirty.value, 77);
-    check("descriptor: dirty caller a4/a5 do not reach the four-argument callee",
-          g_desc_legacy_a4 == 0 && g_desc_legacy_a5 == 0,
-          (unsigned long)(g_desc_legacy_a4 | g_desc_legacy_a5), 0);
+    check("descriptor: dirty caller a4 reaches the four-argument callee",
+          g_desc_legacy_a4 == 0x5A5A5A5Au,
+          (unsigned long)g_desc_legacy_a4, 0x5A5A5A5Au);
+    check("descriptor: dirty caller a5 reaches the four-argument callee",
+          g_desc_legacy_a5 == 0xC3C3C3C3u,
+          (unsigned long)g_desc_legacy_a5, 0xC3C3C3C3u);
 #endif
 
     // ---- 呼び出し元の識別: A (ルート) -> B (desc_relay) -> C (desc_relay_target, 記述子で直接呼出し) ----
