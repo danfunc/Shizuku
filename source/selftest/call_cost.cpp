@@ -41,7 +41,12 @@ using BOARD = KERNEL::BOARD;
 
 constexpr uintptr_t OBJECT_COST_LEAF = object_id::cost_leaf;
 constexpr uintptr_t OBJECT_COST_NEST = object_id::cost_nest;
+constexpr uintptr_t OBJECT_COST_PARENT = object_id::cost_parent;
+constexpr uintptr_t OBJECT_COST_CHILD = object_id::cost_child;
 constexpr uintptr_t METHOD_MAIN = 0;
+// main の引数の取り決め。測定の引数 (0 / 41) と衝突しない値を使う。
+constexpr uintptr_t MODE_SETUP = UINTPTR_MAX;
+constexpr uintptr_t MODE_MEASURE = UINTPTR_MAX - 1;
 // 1 回の測定の標本数 (min と mean の母数)。記述子・作成の測定も同じ数に揃える。
 constexpr uint32_t ROUNDS = 2048;
 static_assert(ROUNDS >= 128, "call_cost sample rounds must be >= 128");
@@ -112,6 +117,7 @@ uint32_t cost_baseline = 0;
 uint32_t cost_direct = 0;
 uint32_t cost_svc = 0;
 uint32_t cost_call1 = 0;
+uint32_t cost_call_parent_child = 0;
 uint32_t cost_call2 = 0;
 
 namespace {
@@ -286,6 +292,30 @@ void report(const char *name, stat_t raw, stat_t baseline,
 }
 
 
+// 親 (cost_parent) が直接の子 (cost_child) を呼ぶ 1 回分の計測区間。
+// 既存の op_call と同じく call_method を 1 回呼ぶだけの同一の形。
+SHIZUKU_HOT __attribute__((noinline)) uintptr_t op_call_child(uintptr_t argument) {
+  return call_method(OBJECT_COST_CHILD, argument).value;
+}
+
+// 親子比較の測定用親オブジェクト (cost_parent)。
+// kernel_role を持たない通常の親オブジェクトとして、SETUP 時に子 (cost_child) を作成し、
+// MEASURE 時に子への CALL_METHOD を measure 枠で計測する。
+// (撃つのが cost_parent なので caller は cost_parent となり、can_call_method の親子比較を通る)
+stat_t g_parent_child_stat{};
+SHIZUKU_HOT SHIZUKU_ZERO_USED_REGS uintptr_t cost_parent(uintptr_t argument, uintptr_t, uintptr_t, uintptr_t) {
+  if (argument == MODE_SETUP) {
+    api(object_api::CREATE_OBJECT, OBJECT_COST_CHILD,
+        method_entry<ARCH, &cost_leaf>(), 0);
+    return 0;
+  }
+  if (argument == MODE_MEASURE) {
+    g_parent_child_stat = measure<ARCH>(op_call_child, ROUNDS);
+    return 0;
+  }
+  return call_method(OBJECT_COST_CHILD, argument).value;
+}
+
 #if defined(__riscv)
 // ---- 記述子の計測 (riscv 限定。CALL_METHOD_DESCRIPTOR は trap 内の直接処理にだけある) --
 // 記述子は**呼び手 (current object) の表**から引かれ、作れるのは「自分自身・作成者・
@@ -297,9 +327,6 @@ constexpr uintptr_t OBJECT_COST_OWNER = object_id::cost_owner;
 constexpr uintptr_t OBJECT_COST_DLEAF = object_id::cost_dleaf;
 constexpr uintptr_t OBJECT_COST_DNEST = object_id::cost_dnest;
 constexpr uintptr_t OBJECT_COST_DINNER = object_id::cost_dinner;
-// main の引数の取り決め。測定の引数 (0 / 41) と衝突しない値を使う。
-constexpr uintptr_t MODE_SETUP = UINTPTR_MAX;
-constexpr uintptr_t MODE_MEASURE = UINTPTR_MAX - 1;
 
 // 下の index は呼び手の表を指す (g_dnest_index だけは cost_dnest の表)。
 volatile uintptr_t g_desc1_index = 0; // D -> cost_dleaf
@@ -450,11 +477,21 @@ template <typename A> void bench() {
   struct entry_t {
     uintptr_t object;
     uintptr_t main; // 入口 stub (method_entry) のアドレス
-  } const entries[] = {{OBJECT_COST_LEAF, method_entry<ARCH, &cost_leaf>()},
-                       {OBJECT_COST_NEST, method_entry<ARCH, &cost_nest>()}};
+    uintptr_t flags;
+  } const entries[] = {
+      {OBJECT_COST_LEAF, method_entry<ARCH, &cost_leaf>(), 0},
+      // ★cost_nest の kernel_role について:
+      //   cost_nest と cost_leaf はともに ROOT_OBJECT が生成した兄弟オブジェクトである。
+      //   cost_nest の本体 (計測区間) を変更せずに leaf の親にするには、cost_nest 内部で
+      //   CREATE_OBJECT を呼ぶなどの改造が必要になり「既存の計測区間を変えない」制約に反する。
+      //   そのため cost_nest には特権役 INTERNAL_FLAG_KERNEL_ROLE を残して 2-hop 呼出しを成立させ、
+      //   親子比較を通る費用は独立に追加した「method call (parent->child)」で精密に測定する。
+      {OBJECT_COST_NEST, method_entry<ARCH, &cost_nest>(),
+       KERNEL_OBJECT::INTERNAL_FLAG_KERNEL_ROLE},
+      {OBJECT_COST_PARENT, method_entry<ARCH, &cost_parent>(), 0}};
   for (const entry_t &entry : entries) {
     const api_result created =
-        api(object_api::CREATE_OBJECT, entry.object, entry.main);
+        api(object_api::CREATE_OBJECT, entry.object, entry.main, entry.flags);
     if (created.error != (uintptr_t)object_error::OK) {
       BOARD::diag_printf("[COST] FAIL create object %lu: error %lu\n",
                           (unsigned long)entry.object,
@@ -463,6 +500,11 @@ template <typename A> void bench() {
       return;
     }
   }
+
+  // 親子比較の呼出し計測 (cost_parent が子 cost_child を生成し、その中で計測)
+  call_method(OBJECT_COST_PARENT, MODE_SETUP);
+  call_method(OBJECT_COST_PARENT, MODE_MEASURE);
+  const stat_t call_pc = g_parent_child_stat;
 
   // ★ウォームアップは measure の中で行う (呼び出し経路そのものを温めるため)。
 
@@ -499,6 +541,7 @@ template <typename A> void bench() {
   report("direct call", direct, nothing, cycles_per_us);
   report("svc round trip", svc, nothing, cycles_per_us);
   report("method call (1 hop)", call1, nothing, cycles_per_us);
+  report("method call (parent->child)", call_pc, nothing, cycles_per_us);
   report("method call (2 hops)", call2, nothing, cycles_per_us);
 #if defined(__riscv)
   report("desc call (1 hop)", desc1, nothing, cycles_per_us);
@@ -513,6 +556,7 @@ template <typename A> void bench() {
   cost_direct = net(direct);
   cost_svc = net(svc);
   cost_call1 = net(call1);
+  cost_call_parent_child = net(call_pc);
   cost_call2 = net(call2);
 
 #if defined(__riscv)

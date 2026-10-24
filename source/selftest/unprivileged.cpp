@@ -41,7 +41,27 @@ uintptr_t probe(uintptr_t selector, uintptr_t, uintptr_t, uintptr_t) {
     return ARCH::syscall((uintptr_t)object_api::KILL_THREAD, UINT32_MAX).error;
   if (selector == 3)
     return ARCH::syscall((uintptr_t)object_api::FORWARD_CHILD_EXIT, 0, 0).error;
+  if (selector == 4) // 自分自身への呼出し (許可)
+    return ARCH::syscall((uintptr_t)object_api::CALL_METHOD, OBJECT_PRIV_PROBE, METHOD_MAIN, 0).error;
+  if (selector == 5) // 兄弟への呼出し (NOT_PRIVILEGED)
+    return ARCH::syscall((uintptr_t)object_api::CALL_METHOD, OBJECT_UNPRIV_PROBE, METHOD_MAIN, 0).error;
+  if (selector == 6) // 親への呼出し (権限は許可、BAD_OBJECT/NOT_PRIVILEGED にならない)
+    return ARCH::syscall((uintptr_t)object_api::CALL_METHOD, KERNEL_OBJECT::ROOT_OBJECT, 0, 0).error;
+  if (selector == 7) // 存在しない相手への呼出し (BAD_OBJECT)
+    return ARCH::syscall((uintptr_t)object_api::CALL_METHOD, KERNEL_OBJECT::OBJECT_COUNT, 0, 0).error;
+  if (selector == 8) // 兄弟への BAD_METHOD 相当呼出し (NOT_PRIVILEGED が優先)
+    return ARCH::syscall((uintptr_t)object_api::CALL_METHOD, OBJECT_UNPRIV_PROBE, KERNEL_OBJECT::METHOD_COUNT, 0).error;
+  if (selector == 9) // 兄弟への UNDECLARED_METHOD 相当呼出し (NOT_PRIVILEGED が優先)
+    return ARCH::syscall((uintptr_t)object_api::CALL_METHOD, OBJECT_UNPRIV_PROBE, 1, 0).error;
+  if (selector == 10) // 許可される自分自身への BAD_METHOD 呼出し (BAD_METHOD が返る)
+    return ARCH::syscall((uintptr_t)object_api::CALL_METHOD, OBJECT_PRIV_PROBE, KERNEL_OBJECT::METHOD_COUNT, 0).error;
+  if (selector == 11) // 許可される自分自身への UNDECLARED_METHOD 呼出し (UNDECLARED_METHOD が返る)
+    return ARCH::syscall((uintptr_t)object_api::CALL_METHOD, OBJECT_PRIV_PROBE, 1, 0).error;
   return ARCH::control_register();
+}
+
+uintptr_t krole_probe(uintptr_t target, uintptr_t, uintptr_t, uintptr_t) {
+  return ARCH::syscall((uintptr_t)object_api::CALL_METHOD, target, 0, 0).error;
 }
 
 // ★拒否のテスト。許可のテストだけでは「保護が効いている」ことの証拠にならない
@@ -123,6 +143,79 @@ void unprivileged_probe() {
         !svc_permission_allows(27, object == OBJECT_PRIV_PROBE, false, false) &&
         denied.error == 0 && denied.value == (uintptr_t)object_error::NOT_PRIVILEGED,
         denied.value, (uintptr_t)object_error::NOT_PRIVILEGED);
+  }
+
+  // ---- CALL_METHOD 親子・権限チェックの検証 ----
+  {
+    // 1. 兄弟への CALL_METHOD は NOT_PRIVILEGED
+    const auto sib_res = ARCH::syscall((uintptr_t)object_api::CALL_METHOD,
+                                       OBJECT_PRIV_PROBE, METHOD_MAIN, 5);
+    check("method parent check: sibling call refused with NOT_PRIVILEGED",
+          sib_res.error == 0 && sib_res.value == (uintptr_t)object_error::NOT_PRIVILEGED,
+          sib_res.value, (uintptr_t)object_error::NOT_PRIVILEGED);
+
+    // 2. 自分自身への CALL_METHOD は OK
+    const auto self_res = ARCH::syscall((uintptr_t)object_api::CALL_METHOD,
+                                        OBJECT_PRIV_PROBE, METHOD_MAIN, 4);
+    check("method parent check: self call allowed",
+          self_res.error == 0 && self_res.value == (uintptr_t)object_error::OK,
+          self_res.value, (uintptr_t)object_error::OK);
+
+    // 3. 親 (ROOT_OBJECT) への CALL_METHOD は権限許可 (NOT_PRIVILEGED にならない)
+    const auto parent_res = ARCH::syscall((uintptr_t)object_api::CALL_METHOD,
+                                          OBJECT_PRIV_PROBE, METHOD_MAIN, 6);
+    check("method parent check: parent call allowed by permission check",
+          parent_res.error == 0 && parent_res.value != (uintptr_t)object_error::NOT_PRIVILEGED &&
+              parent_res.value != (uintptr_t)object_error::BAD_OBJECT,
+          parent_res.value, (uintptr_t)object_error::OK);
+
+    // 4. 存在しない相手は BAD_OBJECT のまま
+    const auto absent_res = ARCH::syscall((uintptr_t)object_api::CALL_METHOD,
+                                          OBJECT_PRIV_PROBE, METHOD_MAIN, 7);
+    check("method parent check: absent target returns BAD_OBJECT",
+          absent_res.error == 0 && absent_res.value == (uintptr_t)object_error::BAD_OBJECT,
+          absent_res.value, (uintptr_t)object_error::BAD_OBJECT);
+
+    // 5. エラー順序: NOT_PRIVILEGED は BAD_METHOD / UNDECLARED_METHOD より先
+    const auto sib_bm_res = ARCH::syscall((uintptr_t)object_api::CALL_METHOD,
+                                          OBJECT_PRIV_PROBE, METHOD_MAIN, 8);
+    check("method parent check: sibling BAD_METHOD yields NOT_PRIVILEGED",
+          sib_bm_res.error == 0 && sib_bm_res.value == (uintptr_t)object_error::NOT_PRIVILEGED,
+          sib_bm_res.value, (uintptr_t)object_error::NOT_PRIVILEGED);
+
+    const auto sib_um_res = ARCH::syscall((uintptr_t)object_api::CALL_METHOD,
+                                          OBJECT_PRIV_PROBE, METHOD_MAIN, 9);
+    check("method parent check: sibling UNDECLARED yields NOT_PRIVILEGED",
+          sib_um_res.error == 0 && sib_um_res.value == (uintptr_t)object_error::NOT_PRIVILEGED,
+          sib_um_res.value, (uintptr_t)object_error::NOT_PRIVILEGED);
+
+    // 許可される自分自身への BAD_METHOD / UNDECLARED_METHOD
+    const auto self_bm_res = ARCH::syscall((uintptr_t)object_api::CALL_METHOD,
+                                           OBJECT_PRIV_PROBE, METHOD_MAIN, 10);
+    check("method parent check: self BAD_METHOD yields BAD_METHOD",
+          self_bm_res.error == 0 && self_bm_res.value == (uintptr_t)object_error::BAD_METHOD,
+          self_bm_res.value, (uintptr_t)object_error::BAD_METHOD);
+
+    const auto self_um_res = ARCH::syscall((uintptr_t)object_api::CALL_METHOD,
+                                           OBJECT_PRIV_PROBE, METHOD_MAIN, 11);
+    check("method parent check: self UNDECLARED yields UNDECLARED_METHOD",
+          self_um_res.error == 0 && self_um_res.value == (uintptr_t)object_error::UNDECLARED_METHOD,
+          self_um_res.value, (uintptr_t)object_error::UNDECLARED_METHOD);
+
+    // 6. kernel 役からの呼出しは相手を問わず許可
+    // ★kernel_role 付与の正当性:
+    //   「kernel 役 (kernel_role) を持つ呼び出し元は、親子関係にない相手 (兄弟など) であっても
+    //   CALL_METHOD が即許可される」という仕様境界そのものを検証するための専用テストケースである。
+    ARCH::syscall((uintptr_t)object_api::CREATE_OBJECT, OBJECT_TRESPASSER,
+                  method_entry<ARCH, &krole_probe>(),
+                  KERNEL_OBJECT::INTERNAL_FLAG_KERNEL_ROLE | OBJECT_REPLACE);
+    // kernel 役から兄弟 (OBJECT_UNPRIV_PROBE) を呼ぶ
+    const auto krole_call = ARCH::syscall((uintptr_t)object_api::CALL_METHOD,
+                                          OBJECT_TRESPASSER, METHOD_MAIN,
+                                          OBJECT_UNPRIV_PROBE);
+    check("method parent check: kernel_role caller calls sibling successfully",
+          krole_call.error == 0 && krole_call.value == (uintptr_t)object_error::OK,
+          krole_call.value, (uintptr_t)object_error::OK);
   }
 
   // ---- 拒否のテスト: 触れないはずの場所を触ったら、そのスレッドだけが止まる ----

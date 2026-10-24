@@ -374,12 +374,33 @@ public:
   //  どちらも待たず・syscall を撃たず・ループしない。錠は取らない (kobj 経由だった
   //  従来も取っていなかった。表の書き換えと競っても、古い値で 1 回呼ぶだけ)。
 
+  // 呼び出し元 (caller_id) が対象 (target_id) を呼び出せるか、または方法記述子を作成できるかを判定する。
+  // 規則:
+  // - 呼び元が kernel 役 (kernel_role) なら相手を問わず可
+  // - 自分自身 (target_id == caller_id)
+  // - 親 (target_id == m_objects[caller_id].creator_object)
+  // - 直接の子 (m_objects[target_id].creator_object == caller_id)
+  // は可。兄弟・孫・無関係は不可 (NOT_PRIVILEGED)。
+  SHIZUKU_HOT bool can_call_method(uintptr_t caller_id, uintptr_t target_id) const {
+    if (caller_id >= OBJECT_COUNT_T || !m_objects[caller_id].created)
+      return false;
+    if (target_id >= OBJECT_COUNT_T || !m_objects[target_id].created)
+      return false;
+    const bool caller_is_kernel_role = m_objects[caller_id].kernel_role;
+    return caller_is_kernel_role || target_id == caller_id ||
+           m_objects[caller_id].creator_object == target_id ||
+           m_objects[target_id].creator_object == caller_id;
+  }
+
   // (id, method) から呼び先の CALL 要求を O(1) で引く。OK 以外のとき request は触らない。
-  // 判定と順序は従来と同じ: BAD_OBJECT → BAD_METHOD → UNDECLARED_METHOD。
+  // 判定と順序: BAD_OBJECT → NOT_PRIVILEGED → BAD_METHOD → UNDECLARED_METHOD。
   SHIZUKU_HOT object_error method_call_request(uintptr_t id, uintptr_t method,
+                                               uintptr_t caller_id,
                                                call_request &request) const {
     if (id >= OBJECT_COUNT_T || !m_objects[id].created)
       return object_error::BAD_OBJECT;
+    if (!can_call_method(caller_id, id))
+      return object_error::NOT_PRIVILEGED;
     if (method >= METHOD_COUNT_T)
       return object_error::BAD_METHOD;
     const method_t entry = m_objects[id].methods[method];
@@ -388,11 +409,16 @@ public:
     request = callee_request(id, (uintptr_t)entry);
     return object_error::OK;
   }
-  // method 表の引き (method_call_request と同じ判定と順序: BAD_OBJECT → BAD_METHOD → UNDECLARED_METHOD)。
+  // method 表の引き (method_call_request と同じ判定と順序: BAD_OBJECT → NOT_PRIVILEGED → BAD_METHOD → UNDECLARED_METHOD)。
   // OK のとき入口を返し、そうでなければ nullptr と error。
-  SHIZUKU_HOT method_t find_method(uintptr_t id, uintptr_t method, object_error &error) const {
+  SHIZUKU_HOT method_t find_method(uintptr_t id, uintptr_t method, uintptr_t caller_id,
+                                   object_error &error) const {
     if (id >= OBJECT_COUNT_T || !m_objects[id].created) {
       error = object_error::BAD_OBJECT;
+      return nullptr;
+    }
+    if (!can_call_method(caller_id, id)) {
+      error = object_error::NOT_PRIVILEGED;
       return nullptr;
     }
     if (method >= METHOD_COUNT_T) {
@@ -409,12 +435,17 @@ public:
   }
   // find_method の行つき版: 表の行 (呼び先の id の行) も一緒に返す。呼び出し側がその行を台帳段・入口フレームの
   // 書き出しにそのまま使えるので、id から行のアドレス (id × 行の大きさ) を作り直さない。判定と順序は
-  // find_method と同じ。OK のとき行を返して entry に入口を入れ、そうでなければ nullptr と error。
-  SHIZUKU_HOT const auto *find_method_row(uintptr_t id, uintptr_t method, object_error &error,
-                                          method_t &entry) const {
+  // find_method と同じ (BAD_OBJECT → NOT_PRIVILEGED → BAD_METHOD → UNDECLARED_METHOD)。
+  // OK のとき行を返して entry に入口を入れ、そうでなければ nullptr と error。
+  SHIZUKU_HOT const auto *find_method_row(uintptr_t id, uintptr_t method, uintptr_t caller_id,
+                                          object_error &error, method_t &entry) const {
     const auto *row = id < OBJECT_COUNT_T ? &m_objects[id] : nullptr;
     if (row == nullptr || !row->created) {
       error = object_error::BAD_OBJECT;
+      return decltype(row)(nullptr);
+    }
+    if (!can_call_method(caller_id, id)) {
+      error = object_error::NOT_PRIVILEGED;
       return decltype(row)(nullptr);
     }
     if (method >= METHOD_COUNT_T) {

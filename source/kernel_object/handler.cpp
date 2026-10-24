@@ -668,14 +668,10 @@ uintptr_t KERNEL_OBJECT::create_method_descriptor(uintptr_t target_id,
   // ★作成権限 (方針)。自分自身 / 親 (対象が呼び出し元の creator) / 直接の子 (呼び出し元が
   //   対象の creator) は許可。呼び出し元が kernel 役 (kernel_role) を負うなら相手を問わず
   //   許可 (役で判定し、ID では判定しない)。兄弟・孫・無関係は NOT_PRIVILEGED。
+  //   共通の can_call_method で判定する。
   //   拒否はここで返すので、枠も表も副作用は無い (枠探索より前)。
   //   NOT_PRIVILEGED を使うのは、既存の「権限の無い呼び出し」の拒否と同じ語彙に揃えるため。
-  const bool caller_is_kernel_role = m_objects[caller_id].kernel_role;
-  const bool permitted =
-      caller_is_kernel_role || target_id == caller_id ||
-      m_objects[caller_id].creator_object == target_id ||
-      m_objects[target_id].creator_object == caller_id;
-  if (!permitted) {
+  if (!can_call_method(caller_id, target_id)) {
     error = object_error::NOT_PRIVILEGED;
     return 0;
   }

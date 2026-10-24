@@ -253,7 +253,7 @@ template <class K, class KObj>
 }
 
 // CALL_METHOD (4): a1 = オブジェクト ID, a2 = メソッド番号, a3 = 引数。応答は (error, 0)。
-//   エラーの種類・順序: BAD_OBJECT → BAD_METHOD → UNDECLARED_METHOD → NO_STACK。
+//   エラーの種類・順序: BAD_OBJECT → NOT_PRIVILEGED → BAD_METHOD → UNDECLARED_METHOD → NO_STACK。
 template <class K, class KObj>
 [[gnu::always_inline]] inline void call_method_in_place(K &kernel,
                                                         typename K::THREAD &thread,
@@ -263,9 +263,10 @@ template <class K, class KObj>
   if constexpr (arch_call_in_place<A>()) {
     typename K::FRAME &frame = *context.sp;
     const uintptr_t id = A::arg(frame, 1);
+    const uint32_t caller_id = thread.identity_object();
     object_error error;
     typename KObj::method_t entry;
-    const auto *row = kobj.find_method_row(id, A::arg(frame, 2), error, entry);
+    const auto *row = kobj.find_method_row(id, A::arg(frame, 2), caller_id, error, entry);
     if (row == nullptr) {
       A::set_result(frame, (uintptr_t)error, 0);
       return;

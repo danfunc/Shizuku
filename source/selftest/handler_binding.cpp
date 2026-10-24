@@ -31,6 +31,7 @@ constexpr uintptr_t CMD_NEST            = 0x30;
 constexpr uintptr_t CMD_NEST_NONZERO    = 0x31;
 constexpr uintptr_t CMD_SETUP_PRIMITIVE = 0x40;
 constexpr uintptr_t CMD_SETUP_COMPUTE   = 0x41;
+constexpr uintptr_t CMD_CALL_CHILD      = 0x5000;
 
 void check(const char *name, bool ok, unsigned long got, unsigned long want) {
   if (ok) {
@@ -155,11 +156,17 @@ uintptr_t handler_a_entry(uintptr_t a0, uintptr_t a1, uintptr_t a2,
     const auto res = ARCH::syscall((uintptr_t)object_api::GET_CURRENT_OBJECT);
     return (res.error == 0 && res.value == OBJ_PARENT_A) ? 0x8888 : 0xEEEE;
   }
+  if ((a0 & 0xFF00) == CMD_CALL_CHILD) {
+    const auto res = call_method(OBJ_CHILD_A, 0, a0 & 0xFF);
+    return res.error == 0 ? res.value : 0xEEEE;
+  }
   if (a0 == CMD_NEST || a0 == CMD_NEST_NONZERO) {
-    // CALL_METHOD は a0 に 1 引数だけを渡す。root の a1 は object ID なので参照せず、
-    // command ごとに固定した値を child B へ渡して nested call の往復を検証する。
-    const uintptr_t child_argument = a0 == CMD_NEST ? 0 : 7;
-    const auto res = call_method(OBJ_CHILD_B, 0, child_argument);
+    // 親子チェック規則により、H_A から別親の子 OBJ_CHILD_B を直接 CALL_METHOD できない (兄弟の子)。
+    // ハンドラ境界をまたぐ nested call は、自身の子 OBJ_CHILD_A を呼び、OBJ_CHILD_A の SVC が
+    // 親 H_A へ配送されることで検証する。
+    // child_argument を 100 / 107 とすることで、親の +100 と加算 +1 により期待値 201 / 208 を維持する。
+    const uintptr_t child_argument = a0 == CMD_NEST ? 100 : 107;
+    const auto res = call_method(OBJ_CHILD_A, 0, child_argument);
     return res.value + 1;
   }
   return 0xEEEE;
@@ -172,6 +179,10 @@ uintptr_t handler_b_entry(uintptr_t a0, uintptr_t a1, uintptr_t a2,
     const auto res = api(object_api::CREATE_OBJECT, OBJ_CHILD_B,
                          method_entry<ARCH, &child_b_compute>(), 0);
     return res.error == 0 ? res.value : 0;
+  }
+  if ((a0 & 0xFF00) == CMD_CALL_CHILD) {
+    const auto res = call_method(OBJ_CHILD_B, 0, a0 & 0xFF);
+    return res.error == 0 ? res.value : 0xFFFF;
   }
   if (a0 == CMD_COMPUTE) {
     return a1 + 200;
@@ -250,20 +261,21 @@ void handler_binding_probe() {
         kernel_object_instance.object_parent_handler(OBJ_CHILD_B), OBJ_PARENT_B);
 
   // 4. 同一 API 番号 (0x10) の独立解釈 & child SVC → 登録済み parent (重大指摘 2: reply & exit forwarding)
-  const auto res_a = call_method(OBJ_CHILD_A, 0, 10);
+  // ROOT から孫へは直接 CALL_METHOD できないため、親 (H_A/H_B) の中継経由で呼ぶ
+  const auto res_a = call_method(OBJ_PARENT_A, 0, CMD_CALL_CHILD | 10);
   check("child_a SVC routed to parent_a (+100) and exit forwarded",
         res_a.error == 0 && res_a.value == 110, res_a.value, 110);
 
-  const auto res_b = call_method(OBJ_CHILD_B, 0, 10);
+  const auto res_b = call_method(OBJ_PARENT_B, 0, CMD_CALL_CHILD | 10);
   check("child_b SVC routed to parent_b (+200) and exit forwarded",
         res_b.error == 0 && res_b.value == 210, res_b.value, 210);
 
   // 4b. 段V1: native API と同一番号 (5, 6) の raw SVC が親ハンドラへ配送されることの検証
-  const auto raw5_res = call_method(OBJ_CHILD_A, 0, 55);
+  const auto raw5_res = call_method(OBJ_PARENT_A, 0, CMD_CALL_CHILD | 55);
   check("child_a raw SVC 5 delivered to handler_a unchanged",
         raw5_res.error == 0 && raw5_res.value == 0x5555, raw5_res.value, 0x5555);
 
-  const auto raw6_res = call_method(OBJ_CHILD_A, 0, 66);
+  const auto raw6_res = call_method(OBJ_PARENT_A, 0, CMD_CALL_CHILD | 66);
   check("child_a raw SVC 6 delivered to handler_a unchanged",
         raw6_res.error == 0 && raw6_res.value == 0x6666, raw6_res.value, 0x6666);
 
@@ -305,7 +317,7 @@ void handler_binding_probe() {
         kernel_object_instance.object_parent_handler(OBJ_CHILD_A) == OBJ_PARENT_A,
         kernel_object_instance.object_parent_handler(OBJ_CHILD_A), OBJ_PARENT_A);
 
-  const auto prim_res = call_method(OBJ_CHILD_A, 0, 0);
+  const auto prim_res = call_method(OBJ_PARENT_A, 0, CMD_CALL_CHILD | 0);
   check("child cannot invoke kernel primitive directly (routed to handler as SVC)",
         prim_res.value == 0x7777, prim_res.value, 0x7777);
 
@@ -316,7 +328,7 @@ void handler_binding_probe() {
         repl_comp_res.value == OBJ_CHILD_A, repl_comp_res.value, OBJ_CHILD_A);
 
   const auto nest_res = call_method(OBJ_PARENT_A, 0, CMD_NEST);
-  // handler_a が child_b に 0 を渡し、+200 の戻りに +1 して 201
+  // handler_a が child_a に 100 を渡し、+100 の戻りに +1 して 201
   check("nested CALL/RETURN across handlers",
         nest_res.error == (uintptr_t)object_error::OK && nest_res.value == 201,
         nest_res.value, 201);

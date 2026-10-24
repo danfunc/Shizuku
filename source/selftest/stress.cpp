@@ -221,10 +221,11 @@ uintptr_t blink(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       //   消えるので (実際に USB CDC のバッファ溢れで落ちた)、いつ繋いでも
       //   数字が読めるようにする。単位はサイクル、測定枠の費用は引いてある。
       BOARD::diag_printf(
-          "[COST] direct=%lu svc=%lu call1=%lu call2=%lu cyc "
+          "[COST] direct=%lu svc=%lu call1=%lu call_pc=%lu call2=%lu cyc "
           "(harness %lu cyc, clk %lu MHz)\n",
           (unsigned long)cost_direct, (unsigned long)cost_svc,
-          (unsigned long)cost_call1, (unsigned long)cost_call2,
+          (unsigned long)cost_call1, (unsigned long)cost_call_parent_child,
+          (unsigned long)cost_call2,
           (unsigned long)cost_baseline,
           (unsigned long)BOARD::cycles_per_us());
       replay_fails();
@@ -248,8 +249,12 @@ uint32_t stress_launch() {
   // ★blink は LED = CYW43 を叩く。CYW43 は**初期化したコアからしか触れない**ので
   //   core0 に固定する。実測でここを外すと、blink が core1 へ移った瞬間に
   //   pico-sdk の assert が発火してそのスレッドが止まった (系は継続した)。
+  // ★kernel_role 付与の正当性:
+  //   OBJECT_BLINK は独立スレッドとして走り、システム初期化時に ROOT_OBJECT が生成した
+  //   周辺ドライバ objects::LED_OBJECT を直接 CALL_METHOD する特権サービススレッドである。
+  //   LED_OBJECT と BLINK は親子関係を結べないため、kernel_role による直接呼出し権限を保持する。
   syscall_value(object_api::CREATE_OBJECT, OBJECT_BLINK, method_entry<ARCH, &blink>(),
-                OBJECT_ON_CORE(0));
+                OBJECT_ON_CORE(0) | KERNEL_OBJECT::INTERNAL_FLAG_KERNEL_ROLE);
   syscall_value(object_api::CREATE_OBJECT, OBJECT_LOAD, method_entry<ARCH, &load>(), 0);
 
   // ★測る前に一度叩いておく。無線チップ側の LED は最初の 1 回でチップの立ち上げ
