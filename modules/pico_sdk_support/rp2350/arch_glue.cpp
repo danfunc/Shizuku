@@ -58,17 +58,12 @@ extern "C" void shizuku_restore_region_window() {
   using ARCH = shizuku::archs::armv8m<shizuku::chips::rp2350::chip::kMpuRegionCount,shizuku::chips::rp2350::chip::kNvicPriorityBits>;
   const auto *context = shizuku::kernel_instance.current_context();
   if (context->region_limit != 0) {
-    // ★PMSAv8 は 32B 粒度: RLAR.LIMIT はその 32B ブロックの**末尾まで丸ごと**
-    //   カバーする。下丸めしても「削れる」わけではない (region_set 自身が
-    //   & ~0x1F するのは単に RLAR のフィールド仕様であって、有効範囲を狭める
-    //   効果は無い)。だから**要求された範囲を丸ごと覆う**には上丸めが要る —
-    //   丸めずに渡すと hardware 側の丸め方向 (実質切り上げ) に運任せになり、
-    //   境界ちょうどのバイトが読めたり読めなかったりする (実測で踏んだ:
-    //   1 バイト外を読ませたら、たまたま同じブロックに収まって落ちなかった)。
-    //   これは粒度の限界であって、**この extent の直後 32B 未満は道連れで
-    //   読めてしまい得る** — 隣接ファイルとの間に十分な余白を置くのは
+    // ★PMSAv8 は 32B 粒度。RLAR.LIMIT は**含む側の最後の 32B ブロック**なので、排他的な終端から
+    //   1 を引いたバイトを含むブロックを指す (grant_window_limit)。終端をそのまま入れると
+    //   隣の 32B ブロックまで開いてしまう。粒度の限界として、要求範囲の前後は最大 31B だけ
+    //   同じブロックの道連れで読めてしまい得る — 隣接ファイルとの間に 32B 以上の余白を置くのは
     //   呼び出し側 (flash_fs のセクタ境界配置) の仕事。
-    const uint32_t limit = (context->region_limit + 31u) & ~31u;
+    const uint32_t limit = ARCH::grant_window_limit(context->region_limit);
     ARCH::region_set(ARCH::GRANT_REGION_INDEX, context->region_base, limit,
                      ARCH::ACCESS_RO_ALL, false, 0);
   } else {

@@ -382,6 +382,10 @@ public:
     context.region_limit = (uint32_t)limit;
   }
   static constexpr bool HAS_OBJECT_PROTECTION = true;
+  // 貸与窓の RLAR.LIMIT: 排他的な終端 end を含む最後の 32B ブロックの先頭 (end-1 を 32B に切り下げ)。
+  static constexpr uint32_t grant_window_limit(uintptr_t end) {
+    return (uint32_t)((end - 1u) & ~(uintptr_t)0x1Fu);
+  }
   // stack 窓は 32B 境界。arena の stack はこの境界に置いて、窓が隣のブロックの header にかからないようにする。
   static constexpr uintptr_t STACK_WINDOW_ALIGN = 32;
   static bool context_unprivileged(const context_t &c) { return (c.control & 1u) != 0; }

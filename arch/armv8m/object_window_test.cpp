@@ -49,6 +49,13 @@ int main() {
     assert((s.rlar & ~0x1Fu) == 0x200207E0u);
   }
 
+  // ---- 貸与窓: LIMIT は終端を含む最後の 32B ブロック (終端ちょうどの次のブロックは開けない) ----
+  {
+    assert(arch::grant_window_limit(0x20010100u) == 0x200100E0u);  // 32B 境界の終端
+    assert(arch::grant_window_limit(0x20010101u) == 0x20010100u);  // 1 バイトはみ出す終端
+    assert(arch::grant_window_limit(0x20010001u) == 0x20010000u);
+  }
+
   // ---- 窓の表: 上限内だけ登録でき、上限外は false (黙って空窓にしない) ----
   {
     assert(arch::set_object_bounds(5, 0x20030000u, 0x20030100u, 0, 0));
@@ -69,8 +76,15 @@ int main() {
     bool priv = true;
     assert(thread_t::ledger_accessor::restore_caller_return_authority(t, 3, pc, sp, priv, base,
                                                                       limit));
-    assert(pc == 0x1001u && sp == 0x20001000u && !priv);
+    // 記録した ret_privileged=1 (= 戻り先は特権) がそのまま特権として戻る。
+    assert(pc == 0x1001u && sp == 0x20001000u && priv);
     assert(base == 0x20000000u && limit == 0x20000100u);
+    // 非特権の戻り先 (ret_privileged=0) は非特権として戻る。
+    assert(thread_t::ledger_accessor::record_caller_return_authority(t, 4, 0x2001u, 0x20002000u, 0,
+                                                                    0, 0, 1, 0));
+    assert(thread_t::ledger_accessor::restore_caller_return_authority(t, 4, pc, sp, priv, base,
+                                                                      limit));
+    assert(pc == 0x2001u && sp == 0x20002000u && !priv);
     // 範囲外の段は記録も復元も失敗する (user stack の値に逃げない)。
     assert(!thread_t::ledger_accessor::record_caller_return_authority(t, 34, 1, 1, 0, 0, 0, 0, 0));
     assert(!thread_t::ledger_accessor::restore_caller_return_authority(t, 34, pc, sp, priv, base,
