@@ -14,10 +14,16 @@ int main() {
   {
     const auto w = arch::encode_data_window(0x20010020u, 0x20010060u);
     assert(w.rbar == (0x20010020u | (arch::ACCESS_RW_ALL << 1) | 1u));
-    assert(w.rlar == (0x20010060u | (1u << 1) | 1u));
-    // 末尾が 32B 境界でないときは上丸め (要求範囲を丸ごと覆う)。
+    // RLAR.LIMIT は含む側の最後の 32B ブロック (0x20010040..0x2001005F) を指す。排他的な終端
+    // 0x20010060 をそのまま入れると 1 ブロック余分に開いて隣のオブジェクトに届く。
+    assert(w.rlar == (0x20010040u | (1u << 1) | 1u));
+    // 末尾が 32B 境界でないときは、そのバイトを含むブロックまで上丸め (要求範囲を丸ごと覆う)。
     const auto up = arch::encode_data_window(0x20010020u, 0x20010041u);
-    assert((up.rlar & ~0x1Fu) == 0x20010060u);
+    assert((up.rlar & ~0x1Fu) == 0x20010040u);
+    // 隣接する 256B ずつの 2 つの窓が重ならない (A の最後のブロックは B の先頭の手前)。
+    const auto a = arch::encode_data_window(0x20010000u, 0x20010100u);
+    const auto b = arch::encode_data_window(0x20010100u, 0x20010200u);
+    assert((a.rlar & ~0x1Fu) == 0x200100E0u && (b.rbar & ~0x1Fu) == 0x20010100u);
     // 空・逆転・base==0 は「窓なし」(rlar==0 = 無効) で、広い窓に化けない。
     assert(arch::encode_data_window(0x20010000u, 0x20010000u).rlar == 0);
     assert(arch::encode_data_window(0x20010100u, 0x20010000u).rlar == 0);
@@ -40,7 +46,7 @@ int main() {
   {
     const auto s = arch::encode_stack_window(0x20020000u, 0x20020800u);
     assert(s.rbar == (0x20020000u | (arch::ACCESS_RW_ALL << 1) | 1u));
-    assert((s.rlar & ~0x1Fu) == 0x20020800u);
+    assert((s.rlar & ~0x1Fu) == 0x200207E0u);
   }
 
   // ---- 窓の表: 上限内だけ登録でき、上限外は false (黙って空窓にしない) ----

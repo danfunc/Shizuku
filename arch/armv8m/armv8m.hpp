@@ -421,8 +421,9 @@ public:
   static inline constexpr mpu_window_entry encode_data_window(uintptr_t base, uintptr_t limit) {
     if (limit <= base || base == 0) return {0, 0};
     uint32_t rbar = ((uint32_t)base & ~0x1Fu) | (ACCESS_RW_ALL << 1) | 1u; // XN=1
-    uint32_t lim32 = (uint32_t)((limit + 31u) & ~31u);
-    uint32_t rlar = (lim32 & ~0x1Fu) | (1u << 1) | 1u; // Attr 1 (Normal Non-cacheable), Enable=1
+    // RLAR.LIMIT は含む側の最後の 32B ブロック。排他的な終端 (limit) から 1 を引いてそのブロックを指す。
+    uint32_t lim32 = (uint32_t)((limit - 1u) & ~31u);
+    uint32_t rlar = lim32 | (1u << 1) | 1u; // Attr 1 (Normal Non-cacheable), Enable=1
     return {rbar, rlar};
   }
 
@@ -430,16 +431,17 @@ public:
     if (limit <= base || base == 0) return {0, 0};
     if (is_dma_or_system_peripheral(base, limit)) return {0, 0};
     uint32_t rbar = ((uint32_t)base & ~0x1Fu) | (ACCESS_RW_ALL << 1) | 1u; // XN=1
-    uint32_t lim32 = (uint32_t)((limit + 31u) & ~31u);
-    uint32_t rlar = (lim32 & ~0x1Fu) | (2u << 1) | 1u; // Attr 2 (Device-nGnRE), Enable=1
+    uint32_t lim32 = (uint32_t)((limit - 1u) & ~31u);
+    uint32_t rlar = lim32 | (2u << 1) | 1u; // Attr 2 (Device-nGnRE), Enable=1
     return {rbar, rlar};
   }
 
   static inline constexpr mpu_window_entry encode_stack_window(uintptr_t base, uintptr_t limit) {
     if (limit <= base || base == 0) return {0, 0};
     uint32_t rbar = ((uint32_t)base & ~0x1Fu) | (ACCESS_RW_ALL << 1) | 1u; // XN=1
-    uint32_t lim32 = (uint32_t)((limit + 31u) & ~31u);
-    uint32_t rlar = (lim32 & ~0x1Fu) | (1u << 1) | 1u; // Attr 1 (Normal Non-cacheable), Enable=1
+    // RLAR.LIMIT は含む側の最後の 32B ブロック。排他的な終端 (limit) から 1 を引いてそのブロックを指す。
+    uint32_t lim32 = (uint32_t)((limit - 1u) & ~31u);
+    uint32_t rlar = lim32 | (1u << 1) | 1u; // Attr 1 (Normal Non-cacheable), Enable=1
     return {rbar, rlar};
   }
 
@@ -603,6 +605,7 @@ public:
 // context_t のレイアウトは region 数・優先度 bit 数に依らないので、RP2350 の実体で代表して検査する。
 using armv8m_rp2350 = armv8m<8, 4>;
 // armv8m_ctx.S の .equ と一致させる (ズレたら文脈が黙って壊れる)。
+#if UINTPTR_MAX == 0xFFFFFFFFu  // asm のオフセットは 32bit の実機の配置。host (64bit) では検査しない
 static_assert(offsetof(armv8m_rp2350::context_t, sp) == 32,
               "context_t layout mismatch: sp offset (asm CTX_SP)");
 static_assert(offsetof(armv8m_rp2350::context_t, exc_return) == 36,
@@ -617,6 +620,7 @@ static_assert(offsetof(armv8m_rp2350::context_t, region_base) == 112,
               "context_t layout mismatch: region_base offset");
 static_assert(offsetof(armv8m_rp2350::context_t, region_limit) == 116,
               "context_t layout mismatch: region_limit offset");
+#endif
 // 戻り口 (armv8m_ctx.S) が即値で埋め込んでいる ABI 定数との一致。
 static_assert((uintptr_t)shizuku::primitive::RETURN == 2,
               "armv8m_ctx.S の return stub が撃つ番号と一致させること");
