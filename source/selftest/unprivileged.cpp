@@ -31,6 +31,7 @@ using BOARD = KERNEL::BOARD;
 constexpr uintptr_t OBJECT_UNPRIV_PROBE = object_id::unpriv_probe;
 constexpr uintptr_t OBJECT_PRIV_PROBE = object_id::priv_probe;
 constexpr uintptr_t OBJECT_TRESPASSER = object_id::trespasser;
+constexpr uintptr_t OBJECT_KERNEL_CALLER = object_id::kernel_caller;
 constexpr uintptr_t METHOD_MAIN = 0;
 
 // 自分の CONTROL を読んで返すだけ。触るのはレジスタと自分のスタックのみ。
@@ -206,12 +207,12 @@ void unprivileged_probe() {
     // ★kernel_role 付与の正当性:
     //   「kernel 役 (kernel_role) を持つ呼び出し元は、親子関係にない相手 (兄弟など) であっても
     //   CALL_METHOD が即許可される」という仕様境界そのものを検証するための専用テストケースである。
-    ARCH::syscall((uintptr_t)object_api::CREATE_OBJECT, OBJECT_TRESPASSER,
+    ARCH::syscall((uintptr_t)object_api::CREATE_OBJECT, OBJECT_KERNEL_CALLER,
                   method_entry<ARCH, &krole_probe>(),
-                  KERNEL_OBJECT::INTERNAL_FLAG_KERNEL_ROLE | OBJECT_REPLACE);
+                  KERNEL_OBJECT::INTERNAL_FLAG_KERNEL_ROLE);
     // kernel 役から兄弟 (OBJECT_UNPRIV_PROBE) を呼ぶ
     const auto krole_call = ARCH::syscall((uintptr_t)object_api::CALL_METHOD,
-                                          OBJECT_TRESPASSER, METHOD_MAIN,
+                                          OBJECT_KERNEL_CALLER, METHOD_MAIN,
                                           OBJECT_UNPRIV_PROBE);
     check("method parent check: kernel_role caller calls sibling successfully",
           krole_call.error == 0 && krole_call.value == (uintptr_t)object_error::OK,

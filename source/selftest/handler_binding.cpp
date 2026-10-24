@@ -184,6 +184,11 @@ uintptr_t handler_b_entry(uintptr_t a0, uintptr_t a1, uintptr_t a2,
     const auto res = call_method(OBJ_CHILD_B, 0, a0 & 0xFF);
     return res.error == 0 ? res.value : 0xFFFF;
   }
+  if (a0 == CMD_NEST || a0 == CMD_NEST_NONZERO) {
+    const uintptr_t child_argument = a0 == CMD_NEST ? 0 : 7;
+    const auto res = call_method(OBJ_CHILD_B, 0, child_argument);
+    return res.value + 1;
+  }
   if (a0 == CMD_COMPUTE) {
     return a1 + 200;
   }
@@ -337,6 +342,11 @@ void handler_binding_probe() {
         nest_nonzero_res.error == (uintptr_t)object_error::OK &&
             nest_nonzero_res.value == 208,
         nest_nonzero_res.value, 208);
+  const auto nest_b_res = call_method(OBJ_PARENT_B, 0, CMD_NEST);
+  // handler_b が child_b に 0 を渡し、+200 の戻りに +1 して 201
+  check("nested CALL/RETURN across handlers (H_B branch)",
+        nest_b_res.error == (uintptr_t)object_error::OK && nest_b_res.value == 201,
+        nest_b_res.value, 201);
   check("depth fully restored after nested calls",
         kernel_instance.current_depth() == 0,
         kernel_instance.current_depth(), 0);
