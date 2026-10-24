@@ -107,6 +107,17 @@ cc_test(
 )
 
 cc_test(
+    name = "trap_route_umode_off_test",
+    srcs = ["//chips/esp32_c6:test_trap_route.cpp"],
+    copts = ["-std=c++20"],
+    deps = [
+        "//arch/riscv:pmp",
+        "//chips/esp32_c6:headers",
+        "//:internal_headers",
+    ],
+)
+
+cc_test(
     name = "stop_capture_test",
     srcs = ["//chips/esp32_c6:stop_capture_test.cpp"],
     copts = ["-std=c++20"],

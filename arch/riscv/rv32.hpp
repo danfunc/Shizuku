@@ -291,8 +291,9 @@ public:
     auto *frame = call_resume_at(context, header->pc, reinterpret_cast<uintptr_t>(header),
                           header->privileged != 0, header->region_base, header->region_limit,
                           scrub);
-#if defined(SHIZUKU_C6_UMODE)
     frame->reserved0 = header->reserved;
+    frame->reserved1 = 0;
+#if defined(SHIZUKU_C6_UMODE)
     if (!context.privileged) {
       set_unprivileged_resume_metadata(*frame, header->reserved, IntMode::kstack_top(), scrub);
       IntMode::switch_object_pmp(header->caller_object);
@@ -341,12 +342,10 @@ public:
     frame->mepc = pc;
     frame->mstatus = 0; // 呼び出し側が特権・MPIE を足す
     frame->mcause = scrub ? RV32_TAG_ECALL_SCRUB : RV32_TAG_ECALL;
-#if defined(SHIZUKU_C6_UMODE)
     // M return needs the saved caller SP for the handler-stack switch. A U resume
     // replaces these fields below with the ledger's U SP and trusted stack cursor.
     frame->reserved0 = static_cast<uint32_t>(sp);
     frame->reserved1 = 0;
-#endif
     context.sp = frame;
     context.privileged = privileged;
     context.region_base = region_base;
@@ -448,6 +447,23 @@ public:
 #endif
   }
 
+#if defined(SHIZUKU_C6_UMODE)
+  static void record_u_mode_ecall_diag(const exception_frame_t &frame,
+                                       volatile uint32_t *u_ecall_diag,
+                                       volatile uint32_t *u_mode_diag) {
+    if ((frame.mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) {
+      if (u_ecall_diag != nullptr) {
+        u_ecall_diag[0] = (frame.mcause == RV32_TAG_U_ECALL) ? 8u : frame.mcause;
+        u_ecall_diag[1] = frame.mepc;
+        u_ecall_diag[2] = frame.mtval;
+      }
+      if (u_mode_diag != nullptr) {
+        u_mode_diag[2] = u_mode_diag[2] + 1;
+      }
+    }
+  }
+#endif
+
   // RV32 A 拡張 (LR.W / SC.W) によるアトミック操作
   static bool cas32(volatile uint32_t *address, uint32_t expected,
                     uint32_t desired) {
@@ -508,12 +524,9 @@ public:
     frame->a1 = frame->a2 = frame->a3 = frame->a4 = 0;
     frame->mstatus = context.privileged ? RV32_MSTATUS_MPP : 0;
     // MPIE stays clear until the interrupt matrix and timer are owned.
-#if defined(SHIZUKU_C6_UMODE)
-    frame->reserved0 = (stack_top & ~static_cast<uintptr_t>(15));
+    frame->reserved0 = static_cast<uint32_t>(stack_top & ~static_cast<uintptr_t>(15));
+    frame->reserved1 = 0;
     context.sp = frame;
-#else
-    context.sp = frame;
-#endif
   }
 
   // タイマ・割込み方式の処理は IntMode (チップ側) に委ねる。

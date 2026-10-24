@@ -18,6 +18,7 @@
 .global shizuku_rv32_trap_entry
 .type shizuku_rv32_trap_entry,@function
 shizuku_rv32_trap_entry:
+#if defined(SHIZUKU_C6_UMODE)
   // 段1安全不変条件:
   // U-mode 走行時は mscratch に trusted stack cursor (非0) が格納されている。
   // M-mode 走行時は mscratch に 0 が格納されている。
@@ -64,6 +65,18 @@ shizuku_rv32_trap_entry:
   addi t0, t0, 3
   bnez t0, .Lrv32_full_save
   li t1, RV32_TAG_U_ECALL
+#else
+  // U-mode off: M-mode 専用の高速直接退避 (cae459f と同一の旧命令列)
+  addi sp, sp, -RV32_FRAME_BYTES
+  sw t0, RV32_F_T0(sp)
+  csrr t0, mcause
+  bltz t0, .Lrv32_full_save
+  slli t0, t0, 20
+  srli t0, t0, 20
+  addi t0, t0, -11
+  bnez t0, .Lrv32_full_save
+  li t1, RV32_TAG_ECALL
+#endif
 
 .Lrv32_is_ecall:
   // ---- ECALL: caller-saved ABI。入力と戻りに要るものだけ保存する。
@@ -160,12 +173,14 @@ shizuku_rv32_restore:
   beq t0, t1, .Lrv32_exit_entry
   li t1, RV32_TAG_ECALL_SCRUB
   beq t0, t1, .Lrv32_exit_scrub
+#if defined(SHIZUKU_C6_UMODE)
   li t1, RV32_TAG_U_ENTRY
   beq t0, t1, .Lrv32_umode_exit_entry
   li t1, RV32_TAG_U_SCRUB
   beq t0, t1, .Lrv32_umode_exit_scrub
   li t1, RV32_TAG_U_ECALL
   beq t0, t1, .Lrv32_umode_exit_ecall
+#endif
 1:
   lw t0, RV32_F_MEPC(sp)
   csrw mepc, t0
@@ -201,6 +216,7 @@ shizuku_rv32_restore:
   lw s11, RV32_F_S11(sp)
   lw gp, RV32_F_GP(sp)
   lw tp, RV32_F_TP(sp)
+#if defined(SHIZUKU_C6_UMODE)
   // 復帰先特権モードに応じた mscratch 設定:
   // RESERVED1 には復帰先が U-mode のときは trusted_stack_cursor、
   // M-mode のときは 0 が格納されている。
@@ -209,6 +225,10 @@ shizuku_rv32_restore:
   lw t0, RV32_F_T0(sp)
   lw sp, RV32_F_RESERVED0(sp)
   mret
+#else
+  addi sp, sp, RV32_FRAME_BYTES
+  mret
+#endif
 // ---- ECALL からの戻り (RV32_TAG_ECALL、素通し)。
 //   a0/a1 (戻り値) と mepc/mstatus/sp だけを戻す。ほかのレジスタには触らない (カーネルを抜けた時点の
 //   値のまま)。caller は a0/a1 以外を信用せず、自分の s*・ra・gp・tp を自分のスタックから戻す。
@@ -221,7 +241,9 @@ shizuku_rv32_restore:
   lw a0, RV32_F_A0(sp)
   lw a1, RV32_F_A1(sp)
   addi sp, sp, RV32_FRAME_BYTES
+#if defined(SHIZUKU_C6_UMODE)
   csrw mscratch, zero
+#endif
   mret
 // ---- ECALL からの戻り (RV32_TAG_ECALL_SCRUB、消去)。
 //   callee が自分の意思で戻らない巻き戻し (多段の EXIT_METHOD / RETURN、FORWARD_CHILD_EXIT) と、
@@ -263,7 +285,9 @@ shizuku_rv32_restore:
   mv s9, zero
   mv s10, zero
   mv s11, zero
+#if defined(SHIZUKU_C6_UMODE)
   csrw mscratch, zero
+#endif
   mret
 // ---- 呼び先の入口 (RV32_TAG_ENTRY、素通し。CALL_METHOD / descriptor call / kobj への dispatch)。
 //   引数 a0-a7 と ra (戻り口)・mepc (入口)・sp だけをカーネルが決める。s*/gp/tp は caller の値の
@@ -284,10 +308,13 @@ shizuku_rv32_restore:
   lw a6, RV32_F_A6(sp)
   lw a7, RV32_F_A7(sp)
   addi sp, sp, RV32_FRAME_BYTES
+#if defined(SHIZUKU_C6_UMODE)
   csrw mscratch, zero
+#endif
   mret
 
 // ---- U-mode 高速出口 (RV32_TAG_U_*)
+#if defined(SHIZUKU_C6_UMODE)
 //   復帰先が U-mode の場合、mscratch に trusted stack cursor を戻し、
 //   sp に U-mode の元のスタックポインタ (RESERVED0) を戻して mret する。
 .Lrv32_umode_exit_entry:
@@ -358,6 +385,7 @@ shizuku_rv32_restore:
   csrw mscratch, t0
   lw sp, RV32_F_RESERVED0(sp)
   mret
+#endif
 .size shizuku_rv32_trap_entry, .-shizuku_rv32_trap_entry
 .global shizuku_rv32_first_return
 .type shizuku_rv32_first_return,@function

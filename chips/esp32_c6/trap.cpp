@@ -403,9 +403,8 @@ void install_traps() {
       shizuku_c6_stack_diag[1] != kStackDiagVersion)
     stack_diag_init();
   initialize_kernel_stack_canary();
-  const auto top = reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack + sizeof(shizuku_c6_kernel_stack));
   const auto vector = reinterpret_cast<uintptr_t>(&shizuku_c6_vectors) | 1u;
-  asm volatile("csrw mscratch, %0\n csrw mtvec, %1" :: "r"(top), "r"(vector) : "memory");
+  asm volatile("csrw mscratch, zero\n csrw mtvec, %0" :: "r"(vector) : "memory");
 }
 // frame が s0-s11 などの本物の保持者 (文脈の s* は使わない)。ECALL のフレームは s* を保存しない
 // (caller が自分で退避する ABI) ので、フレームと文脈の間でコピーするものは無い。
@@ -554,6 +553,10 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
       stop(0xE004);
     }
     f.reserved0 = new_sp;
+#else
+    if (f.reserved0 == 0) {
+      f.reserved0 = reinterpret_cast<uintptr_t>(c.sp) + RV32_FRAME_BYTES;
+    }
 #endif
   }
 }
@@ -625,6 +628,11 @@ SHIZUKU_HOT void run_pending_switch() {
 // 直接入る。route_trap の ecall 分岐 (mepc += 4 は asm 入口へ移した) と lambda の前後処理を、番号
 // ごとの処理 (Body) の前後に付けたもの。割込み・例外は従来どおり shizuku_rv32_trap_dispatch。
 using ecall_fn = arch::exception_frame_t *(*)(arch::exception_frame_t *);
+#if defined(SHIZUKU_C6_UMODE)
+[[gnu::always_inline]] inline void record_u_mode_ecall_diag(const arch::exception_frame_t *frame) {
+  arch::record_u_mode_ecall_diag(*frame, shizuku_c6_u_ecall_diag, shizuku_c6_u_mode_diag);
+}
+#endif
 template <class Body>
 SHIZUKU_HOT inline arch::exception_frame_t *ecall_run(arch::exception_frame_t *frame, Body body) {
   // stack probe は従来どおり 1024 回の trap に 1 回 (ECALL も数える)。
@@ -646,14 +654,7 @@ SHIZUKU_HOT inline arch::exception_frame_t *ecall_run(arch::exception_frame_t *f
 #if !defined(SHIZUKU_C6_UMODE)
   if ((frame->mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) stop(0xE004);
 #else
-  if ((frame->mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) {
-    if (shizuku_c6_u_mode_diag[2] == 0) {
-      shizuku_c6_u_ecall_diag[0] = (frame->mcause == RV32_TAG_U_ECALL) ? 8u : frame->mcause;
-      shizuku_c6_u_ecall_diag[1] = frame->mepc;
-      shizuku_c6_u_ecall_diag[2] = frame->mtval;
-    }
-    shizuku_c6_u_mode_diag[2] = shizuku_c6_u_mode_diag[2] + 1;
-  }
+  record_u_mode_ecall_diag(frame);
 #endif
   auto &kernel = shizuku::kernel_instance;
   auto *context = kernel.current_context();
@@ -746,6 +747,9 @@ __attribute__((noinline, noipa)) arch::exception_frame_t *ecall_to_kobj(arch::co
 template <class Body>
 SHIZUKU_HOT [[gnu::always_inline]] inline arch::exception_frame_t *ecall_direct(
     arch::exception_frame_t *frame, Body body) {
+#if defined(SHIZUKU_C6_UMODE)
+  record_u_mode_ecall_diag(frame);
+#endif
   const uint32_t probe = trap_probe_interval_count;
   if (__builtin_expect((probe & (kStackProbeInterval - 1u)) == kStackProbeInterval - 1u, 0))
     return ecall_other(frame);
@@ -759,16 +763,6 @@ SHIZUKU_HOT [[gnu::always_inline]] inline arch::exception_frame_t *ecall_direct(
   // Keep the trapped caller privilege. U-mode ECALL handlers execute in M-mode, but native_call
   // must ledger the caller as U so the return path restores its user SP, PMP window, and U tag.
   arch::set_context_privilege_from_frame(*context, *frame);
-#if defined(SHIZUKU_C6_UMODE)
-  if ((frame->mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) {
-    if (shizuku_c6_u_mode_diag[2] == 0) {
-      shizuku_c6_u_ecall_diag[0] = 8u;
-      shizuku_c6_u_ecall_diag[1] = frame->mepc;
-      shizuku_c6_u_ecall_diag[2] = frame->mtval;
-    }
-    shizuku_c6_u_mode_diag[2] = shizuku_c6_u_mode_diag[2] + 1;
-  }
-#endif
   const shizuku::native::status result = body(kernel, thread, *context);
   if (__builtin_expect(result != shizuku::native::status::DONE, 0)) {
     if (result == shizuku::native::status::CORRUPT) return ecall_fault_corrupt(frame);
@@ -974,14 +968,7 @@ extern "C" SHIZUKU_HOT arch::exception_frame_t *shizuku_rv32_trap_dispatch(arch:
 #if !defined(SHIZUKU_C6_UMODE)
     if ((frame->mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) stop(0xE004);
 #else
-    if ((frame->mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) {
-      if (shizuku_c6_u_mode_diag[2] == 0) {
-        shizuku_c6_u_ecall_diag[0] = frame->mcause;
-        shizuku_c6_u_ecall_diag[1] = frame->mepc;
-        shizuku_c6_u_ecall_diag[2] = frame->mtval;
-      }
-      shizuku_c6_u_mode_diag[2] = shizuku_c6_u_mode_diag[2] + 1;
-    }
+    record_u_mode_ecall_diag(frame);
 #endif
     auto &kernel = shizuku::kernel_instance;
     auto *context = kernel.current_context();
