@@ -165,12 +165,8 @@ extern "C" void shizuku_restore_region_window(){
   // スレッド切替えで別スレッドの窓が残らないよう、stack 窓と(非特権なら)オブジェクト窓を張り直す。
   const auto &thread=shizuku::kernel_instance.current_thread();
   A::apply_stack_window(thread.stack_rbar,thread.stack_rlar);
-  A::invalidate_active_object();
-  if(A::context_unprivileged(*c)){
-    A::switch_caller_protection(thread.identity_object());
-  }else{
-    A::region_disable(A::REGION_DATA);A::region_disable(A::REGION_MMIO);
-  }
+  // 非特権へ戻るときだけ窓をそろえる (すでにそうなら書かない)。特権へ戻るときは触らない。
+  if(A::context_unprivileged(*c))A::switch_caller_protection(thread.identity_object());
 }
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
 // frame は armv6m_ctx.S の systick_entry が渡す、割り込まれた側の例外フレーム。

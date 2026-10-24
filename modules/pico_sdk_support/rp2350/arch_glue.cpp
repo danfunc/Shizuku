@@ -77,15 +77,10 @@ extern "C" void shizuku_restore_region_window() {
   const auto &thread = shizuku::kernel_instance.current_thread();
   ARCH::apply_stack_window(thread.stack_rbar, thread.stack_rlar);
 
-  // スレッド切替え時の窓再適用と s_active_object_id の無効化
-  ARCH::invalidate_active_object();
-  if (ARCH::context_unprivileged(*context)) {
-    const uint32_t active_obj = thread.identity_object();
-    ARCH::switch_caller_protection(active_obj);
-  } else {
-    ARCH::region_disable(ARCH::REGION_DATA);
-    ARCH::region_disable(ARCH::REGION_MMIO);
-  }
+  // 非特権へ戻るときだけ、その thread のオブジェクトの窓にそろえる (すでにそうなら書かない)。
+  // 特権へ戻るときは窓を触らない: 特権は窓に制限されず、次に非特権へ入るときに張り直す。
+  if (ARCH::context_unprivileged(*context))
+    ARCH::switch_caller_protection(thread.identity_object());
 }
 
 // タイマ例外。文脈を触らないので普通の C 関数でよい — ここは期限を見て

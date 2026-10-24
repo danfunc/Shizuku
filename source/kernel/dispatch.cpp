@@ -317,9 +317,9 @@ SHIZUKU_HOT bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT 
   const uint32_t caller_obj = thread.call_stack.call_count == 0
       ? thread.base_object
       : thread.call_stack.current_call_object;
-  if constexpr (requires { ARCH::switch_caller_protection(caller_obj); }) {
+  // 戻り先が特権なら窓は要らない (特権は窓に制限されない)。非特権のときだけ、同じ窓なら省いて戻す。
+  if (is_context_unprivileged(context))
     ARCH::switch_caller_protection(caller_obj);
-  }
   return true;
 }
 

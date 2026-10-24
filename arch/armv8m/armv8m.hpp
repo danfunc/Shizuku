@@ -443,12 +443,15 @@ public:
     return {rbar, rlar};
   }
 
-  static constexpr size_t kMaxObjectWindows = 64;
+  static constexpr size_t kMaxObjectWindows = 72;  // OBJECT_COUNT (configs/kit.bzl) 以上にする
   static inline object_protection_window s_object_windows[kMaxObjectWindows] = {};
-  static inline uint32_t s_active_object_id = 0xFFFFFFFFu;
+  // MPU は core ごとに持つので、「今 region 3/4 に張ってある窓の持ち主」も core ごとに覚える。
+  static uint32_t core_slot() { return *(volatile const uint32_t *)0xD0000000u & 1u; }
+  static inline uint32_t s_programmed_object[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
+  static inline uint32_t s_programmed_stack[2][2] = {};
 
   static void invalidate_active_object() {
-    s_active_object_id = 0xFFFFFFFFu;
+    s_programmed_object[core_slot()] = 0xFFFFFFFFu;
   }
 
   static bool has_object_bounds(uint32_t object_id) {
@@ -465,6 +468,8 @@ public:
     return true;
   }
 
+  // 窓の書込みは例外復帰の前にしか呼ばれない。例外復帰は文脈同期イベントなので ISB は要らず、
+  // 書込みの完了待ち (DSB) だけ置く。
   static void apply_object_window(const object_protection_window &win) {
     if (win.data.rlar != 0) {
       ppb::mpu->rnr = REGION_DATA;
@@ -480,59 +485,50 @@ public:
     } else {
       region_disable(REGION_MMIO);
     }
-    asm volatile("dsb\nisb" ::: "memory");
+    asm volatile("dsb" ::: "memory");
   }
 
+  // 前回張った値と同じなら書かない (同じ thread へ戻る例外復帰は毎回ここを通る)。
   static void apply_stack_window(uint32_t rbar, uint32_t rlar) {
+    auto &cache = s_programmed_stack[core_slot()];
+    if (cache[0] == rbar && cache[1] == rlar) return;
     if (rlar != 0) {
       ppb::mpu->rnr = REGION_STACK;
       ppb::mpu->rbar = rbar;
       ppb::mpu->rlar = rlar;
-      asm volatile("dsb\nisb" ::: "memory");
+      asm volatile("dsb" ::: "memory");
     } else {
       region_disable(REGION_STACK);
     }
+    cache[0] = rbar;
+    cache[1] = rlar;
+  }
+
+  // 非特権の窓 (region 3/4) を id のものにする。すでにそうなら何も書かない。特権は PRIVDEFENA で
+  // 全域に触れ、窓に制限されないので、特権の呼び先/呼び元のときは窓を触らない (呼ばない)。
+  static void ensure_object_window(uint32_t id) {
+    uint32_t &programmed = s_programmed_object[core_slot()];
+    if (programmed == id) return;  // 同じ窓の組は書換えを省く
+    if (id >= kMaxObjectWindows) {
+      region_disable(REGION_DATA);
+      region_disable(REGION_MMIO);
+      programmed = 0xFFFFFFFFu;
+      return;
+    }
+    apply_object_window(s_object_windows[id]);
+    programmed = id;
   }
 
   template <class Frame>
   static void switch_callee_protection(context_t &context, Frame &frame, uint32_t callee_id, bool privileged) {
     (void)context;
     (void)frame;
-    if (privileged) {
-      if (s_active_object_id != callee_id) {
-        region_disable(REGION_DATA);
-        region_disable(REGION_MMIO);
-        s_active_object_id = callee_id;
-      }
-      return;
-    }
-    if (callee_id >= kMaxObjectWindows) {
-      region_disable(REGION_DATA);
-      region_disable(REGION_MMIO);
-      s_active_object_id = 0xFFFFFFFFu;
-      return;
-    }
-    if (s_active_object_id == callee_id) {
-      return; // 同一窓の呼出しは書換えを省く
-    }
-    const auto &win = s_object_windows[callee_id];
-    apply_object_window(win);
-    s_active_object_id = callee_id;
+    if (!privileged) ensure_object_window(callee_id);
   }
 
+  // 呼び元が非特権のときだけ呼ぶ (戻り先の窓を戻す)。
   static void switch_caller_protection(uint32_t caller_object) {
-    if (caller_object >= kMaxObjectWindows) {
-      region_disable(REGION_DATA);
-      region_disable(REGION_MMIO);
-      s_active_object_id = 0xFFFFFFFFu;
-      return;
-    }
-    if (s_active_object_id == caller_object) {
-      return; // 同一窓の呼出しは書換えを省く
-    }
-    const auto &win = s_object_windows[caller_object];
-    apply_object_window(win);
-    s_active_object_id = caller_object;
+    ensure_object_window(caller_object);
   }
   static void stack_limit_set(context_t &context, uintptr_t limit) {
     context.psplim = (uint32_t)limit;
