@@ -186,6 +186,8 @@ void shizuku::app_entry() {
 #endif
   shizuku::selftest::unprivileged_probe();
   shizuku::selftest::rp2350_u_cost();
+  shizuku::selftest::register_leak_test();
+
 
 
   // ★2 本目のコアを起こす。ここまでの自己テストが 1 コアで通っていることを

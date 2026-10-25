@@ -58,4 +58,8 @@ kernel_caller
 # U->U call_cost 計測用 (非特権親 cost_u_parent が非特権子 cost_u_child を呼ぶ)
 cost_u_parent
 cost_u_child
+# レジスタ漏洩試験用 (非特権 leak_caller が非特権 leak_callee を呼ぶ)
+leak_caller
+leak_callee
+
 

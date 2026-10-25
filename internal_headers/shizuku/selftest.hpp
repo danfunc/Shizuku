@@ -34,6 +34,9 @@ void kernel_services_isr_result();
 void call_cost();
 // RP2350 (ARMv8-M): 非特権 (U-mode) 同士の IPC コスト実測 (CALL_METHOD / CALL_METHOD_DESCRIPTOR)
 void rp2350_u_cost();
+// レジスタ漏洩防止試験 (Register Leakage Prevention Test)
+void register_leak_test();
+
 
 // ★結果は生存表示にも載せる (起動時の出力はホストが繋ぐ前に消えるため)。
 // 単位はサイクル。測定枠の費用 (cost_baseline) は既に引いてある。

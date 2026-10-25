@@ -28,7 +28,7 @@ uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t arg1, uintptr_t arg2, ui
 uintptr_t u_cost_child_worker(uintptr_t arg0, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3);
 }
 
-#if defined(__arm__) || defined(__thumb__)
+#if defined(__ARM_ARCH_8M_MAIN__)
 __attribute__((naked)) uintptr_t u_cost_child_worker(uintptr_t arg0, uintptr_t, uintptr_t, uintptr_t) {
   asm volatile(
       ".syntax unified\n"
