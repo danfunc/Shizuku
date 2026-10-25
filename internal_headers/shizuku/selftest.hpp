@@ -32,6 +32,9 @@ void kernel_services_isr_result();
 // 呼び出しの費用の実測 (svc 往復 / メソッド呼び出し)。DWT CYCCNT でサイクルを数える。
 // ★「約 600 cycle」という主張に測定コードが無かったので、その穴を埋めるもの。
 void call_cost();
+// RP2350 (ARMv8-M): 非特権 (U-mode) 同士の IPC コスト実測 (CALL_METHOD / CALL_METHOD_DESCRIPTOR)
+void rp2350_u_cost();
+
 // ★結果は生存表示にも載せる (起動時の出力はホストが繋ぐ前に消えるため)。
 // 単位はサイクル。測定枠の費用 (cost_baseline) は既に引いてある。
 extern uint32_t cost_baseline;

@@ -55,3 +55,7 @@ cost_child
 cost_leaf2
 # unprivileged の kernel_role 呼出し検証用 (親子関係にない相手への CALL_METHOD 許可)
 kernel_caller
+# U->U call_cost 計測用 (非特権親 cost_u_parent が非特権子 cost_u_child を呼ぶ)
+cost_u_parent
+cost_u_child
+

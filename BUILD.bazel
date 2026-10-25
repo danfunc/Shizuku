@@ -249,6 +249,7 @@ cc_library(
         "source/selftest/stress.cpp",
         "source/selftest/thread_ladder.cpp",
         "source/selftest/unprivileged.cpp",
+        "source/selftest/rp2350_u_cost.cpp",
     ],
     visibility = ["//visibility:public"],
     # flash_stream はカーネルの stream と flash_ops / flash_map を直接試す (FlashFS は使わない)。
