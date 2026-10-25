@@ -65,25 +65,25 @@ template <class A, class Thread, class Context, class Frame>
     // via・floor) は呼び出し側が depth - 1 の項目へ書く。ここでは戻りに要るものだけを書く。
     auto &entry = thread.ledger[thread.call_stack.depth];
     entry.generation = 0;
-    entry.ret_pc = frame.mepc;
+    entry.ret_pc = A::frame_pc(frame);
     entry.ret_sp = A::call_return_sp(context);
     entry.ret_region_base = context.region_base;
     entry.ret_region_limit = context.region_limit;
     entry.prev_call = (uint16_t)thread.call_stack.call_top;
-    entry.ret_privileged = context.privileged ? 1 : 0;
+    entry.ret_privileged = A::context_privileged(context) ? 1 : 0;
     thread.call_stack.depth++;
     return true;
 #else
     auto *header = A::call_header_slot(context);
     header->prev = thread.call_stack.top;
-    header->pc = frame.mepc;
+    header->pc = A::frame_pc(frame);
     header->caller_object = thread.call_stack.caller_object;
     header->caller_generation = thread.call_stack.caller_generation;
     header->region_base = context.region_base;
     header->region_limit = context.region_limit;
-    header->privileged = context.privileged ? 1 : 0;
-    if constexpr (requires { header->reserved; frame.reserved0; }) {
-      header->reserved = frame.reserved0;
+    header->privileged = A::context_privileged(context) ? 1 : 0;
+    if constexpr (requires { A::set_call_header_extra(*header, frame); }) {
+      A::set_call_header_extra(*header, frame);
     }
     thread.call_stack.top = reinterpret_cast<uintptr_t>(header);
     thread.call_stack.depth++;
@@ -152,7 +152,7 @@ template <class K>
     if (restore) {
       frame = A::call_resume_at(context, entry.ret_pc, entry.ret_sp, entry.ret_privileged != 0,
                                 entry.ret_region_base, entry.ret_region_limit, scrub);
-      if (!context.privileged) {
+      if (!A::context_privileged(context)) {
         if constexpr (requires { A::set_unprivileged_resume_metadata(*frame, entry.ret_sp, A::trusted_stack_top(), scrub); }) {
           A::set_unprivileged_resume_metadata(*frame, entry.ret_sp, A::trusted_stack_top(), scrub);
         }
@@ -226,12 +226,12 @@ template <class K, class KObj>
     entry.via = via;
     entry.unwind_floor = (uint16_t)depth;
     entry.generation = view.instance_generation;
-    entry.ret_pc = frame.mepc;
+    entry.ret_pc = A::frame_pc(frame);
     entry.ret_sp = A::call_return_sp(context);
     entry.ret_region_base = context.region_base;
     entry.ret_region_limit = context.region_limit;
     entry.prev_call = (uint16_t)stack.call_top;
-    entry.ret_privileged = context.privileged ? 1 : 0;
+    entry.ret_privileged = A::context_privileged(context) ? 1 : 0;
     stack.depth = depth + 1;
     stack.call_count = stack.call_count + 1;
     stack.call_top = depth + 1;
@@ -239,15 +239,15 @@ template <class K, class KObj>
 #else
     auto *header = A::call_header_slot(context);
     header->prev = stack.top;
-    header->pc = frame.mepc;
+    header->pc = A::frame_pc(frame);
     header->caller_object = stack.caller_object;
     header->caller_generation = stack.caller_generation;
     header->region_base = context.region_base;
     header->region_limit = context.region_limit;
     // unwind_floor / via はヘッダに書かない: 同じ値を台帳 (下の thread.ledger[depth]) が持つ。
-    header->privileged = context.privileged ? 1 : 0;
-    if constexpr (requires { header->reserved; frame.reserved0; }) {
-      header->reserved = frame.reserved0;
+    header->privileged = A::context_privileged(context) ? 1 : 0;
+    if constexpr (requires { A::set_call_header_extra(*header, frame); }) {
+      A::set_call_header_extra(*header, frame);
     }
     stack.top = reinterpret_cast<uintptr_t>(header);
     stack.depth = depth + 1;
@@ -306,9 +306,9 @@ template <class K, class KObj>
                     0);
       return;
     }
-    // 呼び先の引数は a0 = argument だけ。a1 以降は書かない (caller の入力のまま素通し。
+    // 呼び先の引数は a0 (ARM では r0) = argument だけ。a1 以降は書かない (caller の入力のまま素通し。
     // 呼び先は宣言した引数以外を信用しない)。
-    frame.a0 = argument;
+    A::set_method_argument(frame, argument);
   }
 }
 
@@ -396,14 +396,9 @@ template <class K, class KObj>
       return;
     }
     // enter_in_place は pc/ra/tag と context/台帳だけを書き、引数欄を触らない。
-    // 検査がすべて通ったあとで前からずらす。6 引数を入口処理をまたいでレジスタに
-    // 保持する必要がなく、失敗時にも caller の入力はそのまま残る (応答 a0/a1 以外)。
-    frame.a0 = frame.a2;
-    frame.a1 = frame.a3;
-    frame.a2 = frame.a4;
-    frame.a3 = frame.a5;
-    frame.a4 = frame.a6;
-    frame.a5 = frame.a7;
+    // 検査がすべて通ったあとで前からずらす。6 引数 (ARM では 1 引数) を入口処理をまたいでレジスタに
+    // 保持する必要がなく、失敗時にも caller の入力はそのまま残る (応答 a0/a1 または r0/r1 以外)。
+    A::move_descriptor_arguments(frame);
   }
 }
 

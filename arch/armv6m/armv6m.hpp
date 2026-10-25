@@ -100,7 +100,9 @@ public:
   // first/last eighth; any remaining expansion is deliberately documented.
   static constexpr uint32_t ACCESS_RW_ALL=3, ACCESS_RO_ALL=6;
   static bool region_range_representable(uintptr_t b,uintptr_t e){
-    if(!e)return true;uint32_t rb,ra;if(!region_encode(b,e,rb,ra,ACCESS_RO_ALL,true))return false;
+    if (!e) return true;
+    uint32_t rb, ra;
+    if (!region_encode(b, e, rb, ra, ACCESS_RO_ALL, true)) return false;
     const unsigned log=((ra>>1)&0x1Fu)+1u;const uintptr_t size=(uintptr_t)1<<log,lo=rb;
     return size<2048?(b==lo&&e==lo+size):(((b-lo)%(size/8)==0)&&((e-lo)%(size/8)==0));
   }
@@ -156,6 +158,18 @@ public:
   static bool set_region_window(context_t &c,uintptr_t b,uintptr_t e){return e==0?(c.region_base=c.region_limit=0,true):grant_set(c,b,e);}
   static constexpr bool HAS_OBJECT_PROTECTION = true;
   static bool context_unprivileged(const context_t &c){return (c.control&1u)!=0;}
+  [[gnu::always_inline]] static inline bool context_privileged(const context_t &c) {
+    return (c.control & 1u) == 0;
+  }
+  [[gnu::always_inline]] static inline void set_method_argument(exception_frame_t &f, uintptr_t arg) {
+    f.r0 = (uint32_t)arg;
+  }
+  [[gnu::always_inline]] static inline void move_descriptor_arguments(exception_frame_t &f) {
+    f.r0 = f.r2;
+  }
+  struct inplace_payload_t {
+    uint32_t r4_r11[8] = {};
+  };
 
   // Region 配置 (PMSAv6, 8 本): 0 Flash コード (固定) / 1 空き / 2 スレッド stack 窓 /
   // 3 オブジェクト data 窓 / 4 オブジェクト MMIO 窓 / 5 貸与窓 / 6,7 空き。

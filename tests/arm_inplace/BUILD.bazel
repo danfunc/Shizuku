@@ -1,0 +1,63 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# ARMv8-M in-place native templates & payload trait host test (non-LEAN)
+cc_test(
+    name = "armv8m_inplace_test",
+    srcs = [
+        "arm_inplace_fixture.hpp",
+        "armv8m_inplace_test.cpp",
+    ],
+    copts = ["-std=c++20"],
+    deps = [
+        "//:internal_headers",
+        "//arch/armv8m:headers",
+        "//arch/riscv:rv32",
+    ],
+)
+
+# ARMv8-M in-place native templates & payload trait host test (LEAN ledger)
+cc_test(
+    name = "armv8m_inplace_lean_test",
+    srcs = [
+        "arm_inplace_fixture.hpp",
+        "armv8m_inplace_test.cpp",
+    ],
+    copts = ["-std=c++20"],
+    defines = ["SHIZUKU_LEAN_LEDGER=1"],
+    deps = [
+        "//:internal_headers",
+        "//arch/armv8m:headers",
+        "//arch/riscv:rv32",
+    ],
+)
+
+# ARMv6-M in-place native templates & payload trait host test (non-LEAN)
+cc_test(
+    name = "armv6m_inplace_test",
+    srcs = [
+        "arm_inplace_fixture.hpp",
+        "armv6m_inplace_test.cpp",
+    ],
+    copts = ["-std=c++20"],
+    deps = [
+        "//:internal_headers",
+        "//arch/armv6m:headers",
+    ],
+)
+
+# ARMv6-M in-place native templates & payload trait host test (LEAN ledger)
+cc_test(
+    name = "armv6m_inplace_lean_test",
+    srcs = [
+        "arm_inplace_fixture.hpp",
+        "armv6m_inplace_test.cpp",
+    ],
+    copts = ["-std=c++20"],
+    defines = ["SHIZUKU_LEAN_LEDGER=1"],
+    deps = [
+        "//:internal_headers",
+        "//arch/armv6m:headers",
+    ],
+)

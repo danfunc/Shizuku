@@ -1,6 +1,7 @@
 #ifndef SHIZUKU_TEMPLATE_THREAD_HPP
 #define SHIZUKU_TEMPLATE_THREAD_HPP
 #include <cstdint>
+#include <type_traits>
 #include "shizuku/kernel_abi.hpp"
 namespace shizuku {
 
@@ -16,6 +17,10 @@ struct caller_return_record {
   uint8_t reserved = 0;
   uint32_t generation = 0;
 };
+
+// in-place 復帰で台帳に付く arch 固有の型付き payload の既定 (空)。実体は無いので
+// [[no_unique_address]] で台帳項目のサイズを増やさない (C6: 非 LEAN 16B / LEAN 40B のまま)。
+struct empty_ledger_payload {};
 
 namespace templates {
 
@@ -37,6 +42,21 @@ template <typename CONTEXT>
 struct call_identity_capacity<CONTEXT> {
   static constexpr uint32_t value = 1;
 };
+
+// call_ledger_entry の payload の型。context_t が ledger_payload_t を宣言した arch だけが
+// 持つ (S2 で ARM が arch::inplace_payload_t を宣言する。S1 時点の ARM 本番は宣言せず空)。
+template <typename CONTEXT, typename = void>
+struct ledger_payload_trait {
+  using type = empty_ledger_payload;
+};
+
+template <typename CONTEXT>
+struct ledger_payload_trait<CONTEXT, std::void_t<typename CONTEXT::ledger_payload_t>> {
+  using type = typename CONTEXT::ledger_payload_t;
+};
+
+template <typename CONTEXT>
+using ledger_payload_of = typename ledger_payload_trait<CONTEXT>::type;
 
 template <typename CONTEXT> struct thread {
   static constexpr uint32_t CALL_IDENTITY_CAPACITY = 32;
@@ -101,6 +121,7 @@ template <typename CONTEXT> struct thread {
     uint8_t ret_privileged;   // caller の特権
     uint8_t reserved;
 #endif
+    [[no_unique_address]] ledger_payload_of<CONTEXT> payload{};
   };
 
   caller_return_record *return_records = nullptr;

@@ -165,6 +165,20 @@ public:
     // 引数以外を信用しない)。5 引数目 (a4) が要る呼び先は set_handler_args が書く。
   }
 
+  [[gnu::always_inline]] static inline void set_method_argument(exception_frame_t &frame,
+                                                                uintptr_t argument) {
+    frame.a0 = argument;
+  }
+
+  [[gnu::always_inline]] static inline void move_descriptor_arguments(exception_frame_t &frame) {
+    frame.a0 = frame.a2;
+    frame.a1 = frame.a3;
+    frame.a2 = frame.a4;
+    frame.a3 = frame.a5;
+    frame.a4 = frame.a6;
+    frame.a5 = frame.a7;
+  }
+
   static void set_args_6(exception_frame_t &frame, const uintptr_t *args) {
     frame.a0 = args[0];
     frame.a1 = args[1];
@@ -222,6 +236,13 @@ public:
   // 実機 (32bit) では枠にちょうど収まること。host 試験 (64bit) は uintptr_t が太いので検査しない。
   static_assert(sizeof(uintptr_t) != 4 || sizeof(call_header_t) == RV32_CALL_HEADER_BYTES);
   static_assert(RV32_CALL_HEADER_BYTES == rv32_abi::CALL_HEADER_BYTES);
+
+  template <class Header, class Frame>
+  [[gnu::always_inline]] static inline void set_call_header_extra(Header &header, const Frame &frame) {
+    if constexpr (requires { header.reserved; frame.reserved0; }) {
+      header.reserved = frame.reserved0;
+    }
+  }
 
   // ecall した caller の枠。M caller は trap frame の直上、U caller は trap entry が
   // RESERVED0 に保存した元の U SP (ABI wrapper が32B header分を空けた場所) に置く。
@@ -400,7 +421,7 @@ public:
   // trap 深さの問い合わせは IntMode に委ねる。ECALL は割込みではない。
   static bool in_interrupt() { return IntMode::in_interrupt(); }
 
-  static uintptr_t frame_pc(const exception_frame_t &frame) {
+  [[gnu::always_inline]] static inline uintptr_t frame_pc(const exception_frame_t &frame) {
     return frame.mepc;
   }
   static uintptr_t frame_lr(const exception_frame_t &frame) {
@@ -409,6 +430,10 @@ public:
 
   // 特権の判定は IntMode に委ねる (trap 内の保存 MPP など)。
   static bool current_priv() { return IntMode::current_priv(); }
+
+  [[gnu::always_inline]] static inline bool context_privileged(const context_t &context) {
+    return context.privileged;
+  }
 
   static void set_priv(context_t &context, bool privileged) {
     context.privileged = privileged;

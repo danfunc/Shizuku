@@ -373,6 +373,20 @@ public:
   static void set_priv(context_t &context, bool privileged) {
     context.control = privileged ? CONTROL_PRIV_PSP : CONTROL_UNPRIV_PSP;
   }
+  [[gnu::always_inline]] static inline bool context_privileged(const context_t &context) {
+    return (context.control & 1u) == 0;
+  }
+  [[gnu::always_inline]] static inline void set_method_argument(exception_frame_t &frame,
+                                                                uintptr_t argument) {
+    frame.r0 = (uint32_t)argument;
+  }
+  [[gnu::always_inline]] static inline void move_descriptor_arguments(exception_frame_t &frame) {
+    frame.r0 = frame.r2;
+  }
+  // S1: 将来の ARM in-place 復帰用型付き payload (r4-r11)。製品 ARM ではまだ未有効化。
+  struct inplace_payload_t {
+    uint32_t r4_r11[8] = {};
+  };
   // ★set_priv と同じ形 (Q8 / DESIGN §11.3)。ここでは値を持たせるだけで、
   //   実際に MPU region へ書くのは復帰の直前 (shizuku_restore_region_window)。
   //   limit==0 は「窓なし」。
