@@ -104,6 +104,10 @@ template <typename CONTEXT> struct thread {
   };
 
   caller_return_record *return_records = nullptr;
+  // 呼び手の r4-r11 の退避域 (深さごとに 8 語)。戻り記録と別にしてあるのは、使わない ARCH
+  // (RP2040 など) が .bss を払わないため。
+  static constexpr uint32_t callee_saved_depth = 34;
+  uint32_t (*callee_saved_records)[8] = nullptr;
 
   // 台帳への読み書きを 1 か所に閉じ込めるアクセサ
   struct ledger_accessor {
@@ -137,6 +141,19 @@ template <typename CONTEXT> struct thread {
       rec.generation = generation;
       return true;
 #endif
+    }
+
+    // 呼び手の callee-saved (r4-r11) を特権の退避域 (callee_saved_records) へ退避/復元する
+    // (ARCH::SCRUB_CALLEE_SAVED_ON_CALL の ARCH だけが使う)。記録先が無いとき false = fail closed。
+    static bool save_callee_saved(thread &t, uint32_t depth, const uint32_t (&regs)[8]) {
+      if (t.callee_saved_records == nullptr || depth >= callee_saved_depth) return false;
+      for (unsigned i = 0; i < 8; ++i) t.callee_saved_records[depth][i] = regs[i];
+      return true;
+    }
+    static bool restore_callee_saved(const thread &t, uint32_t depth, uint32_t (&regs)[8]) {
+      if (t.callee_saved_records == nullptr || depth >= callee_saved_depth) return false;
+      for (unsigned i = 0; i < 8; ++i) regs[i] = t.callee_saved_records[depth][i];
+      return true;
     }
 
     // 記録が無い (台帳/退避域が未設定、depth が範囲外) とき false。呼び元は false のとき

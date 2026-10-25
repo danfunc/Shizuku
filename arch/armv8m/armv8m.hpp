@@ -382,6 +382,8 @@ public:
     context.region_limit = (uint32_t)limit;
   }
   static constexpr bool HAS_OBJECT_PROTECTION = true;
+  // 呼出しで呼び手の r4-r11 を特権の退避域へ移し、呼び先へは 0 で渡す (戻りで戻す)。
+  static constexpr bool SCRUB_CALLEE_SAVED_ON_CALL = true;
   // 貸与窓の RLAR.LIMIT: 排他的な終端 end を含む最後の 32B ブロックの先頭 (end-1 を 32B に切り下げ)。
   static constexpr uint32_t grant_window_limit(uintptr_t end) {
     return (uint32_t)((end - 1u) & ~(uintptr_t)0x1Fu);

@@ -25,6 +25,17 @@ namespace {
 static constexpr size_t kMaxReturnThreads = 32;
 static constexpr size_t kMaxReturnDepth = 34;
 alignas(8) caller_return_record s_thread_returns[kMaxReturnThreads][kMaxReturnDepth] = {};
+// 呼び手の r4-r11 の退避域。ARCH::SCRUB_CALLEE_SAVED_ON_CALL の ARCH だけが確保する (RP2040 は .bss を払わない)。
+template <class A> constexpr size_t callee_saved_threads() {
+  if constexpr (requires { A::SCRUB_CALLEE_SAVED_ON_CALL; }) {
+    return A::SCRUB_CALLEE_SAVED_ON_CALL ? kMaxReturnThreads : 0;
+  } else {
+    return 0;
+  }
+}
+constexpr size_t kCalleeSavedThreads =
+    callee_saved_threads<KERNEL::ARCH>() == 0 ? 1 : callee_saved_threads<KERNEL::ARCH>();
+alignas(8) uint32_t s_thread_callee_saved[kCalleeSavedThreads][kMaxReturnDepth][8] = {};
 #endif
 }
 
@@ -67,6 +78,8 @@ template <> void KERNEL::set_thread_storage(void *memory, uintptr_t bytes) {
     if constexpr (requires { ARCH::HAS_OBJECT_PROTECTION; } && ARCH::HAS_OBJECT_PROTECTION) {
       if (index < kMaxReturnThreads) {
         m_threads[index].thread.return_records = s_thread_returns[index];
+        if constexpr (callee_saved_threads<ARCH>() != 0)
+          m_threads[index].thread.callee_saved_records = s_thread_callee_saved[index];
       }
     }
 #endif
@@ -89,6 +102,8 @@ template <> void KERNEL::set_thread_ledger(
   if constexpr (requires { ARCH::HAS_OBJECT_PROTECTION; } && ARCH::HAS_OBJECT_PROTECTION) {
     if (id < kMaxReturnThreads) {
       thread.return_records = s_thread_returns[id];
+      if constexpr (callee_saved_threads<ARCH>() != 0)
+        thread.callee_saved_records = s_thread_callee_saved[id];
     }
   }
 #endif

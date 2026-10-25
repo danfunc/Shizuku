@@ -89,6 +89,17 @@ __attribute__((naked)) uintptr_t leak_caller_worker(uintptr_t, uintptr_t, uintpt
       ".thumb\n"
       // Caller は呼び出し前に callee-saved (r4-r11) に 0xDEAD0000 | reg をセット
       "push {r4-r7, lr}\n"
+      // 呼び先は呼び手の子でなければ呼べない (CALL_METHOD は親子だけ) ので、呼び手が自分で作る。
+      // leak_caller_data: [0] = callee_id, [16] = callee entry, [17] = CREATE_OBJECT の error (出力)
+      "ldr  r0, =leak_caller_data\n"
+      "ldr  r1, [r0, #0]\n"
+      "ldr  r2, [r0, #64]\n"
+      "movs r0, #1\n"                // CREATE_OBJECT = 1
+      "movs r3, #2\n"                // OBJECT_UNPRIVILEGED
+      "mov  r12, #0\n"
+      "svc  0\n"
+      "ldr  r2, =leak_caller_data\n"
+      "str  r0, [r2, #68]\n"
       // leak_caller_data[0] から callee_id を取得
       "ldr  r0, =leak_caller_data\n"
       "ldr  r1, [r0, #0]\n"   // callee_id
@@ -196,15 +207,10 @@ void register_leak_test() {
   }
   caller_data[0] = OBJECT_LEAK_CALLEE;
 
-  // 2. Caller と Callee を CREATE_OBJECT (非特権 OBJECT_UNPRIVILEGED=2)
-  const auto create_callee_res = ARCH::syscall(
-      static_cast<uintptr_t>(object_api::CREATE_OBJECT),
-      OBJECT_LEAK_CALLEE,
-      reinterpret_cast<uintptr_t>(&leak_callee_worker),
-      OBJECT_UNPRIVILEGED);
-  if (create_callee_res.error != 0) {
-    BOARD::panic("register_leak_test: failed to create callee");
-  }
+  // 2. Caller を CREATE_OBJECT (非特権 OBJECT_UNPRIVILEGED=2)。Callee は Caller が自分で作る
+  //    (兄弟どうしの CALL_METHOD は NOT_PRIVILEGED になるため)。
+  caller_data[16] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&leak_callee_worker));
+  caller_data[17] = 0xFFFFFFFFu;
 
   const auto create_caller_res = ARCH::syscall(
       static_cast<uintptr_t>(object_api::CREATE_OBJECT),
@@ -238,8 +244,13 @@ void register_leak_test() {
   }
   const bool callee_executed = (callee_seen[9] == CALLEE_EXECUTED_MARKER);
   const bool ok_a = (call_res.error == 0) && callee_executed && !leak_to_callee;
+  // got は原因の切り分け用のビット: 1 = 外側の呼出し失敗, 2 = 子の CREATE_OBJECT 失敗,
+  // 4 = 呼び先が走っていない, 8 = 呼び手の r4-r11 が見えた
+  const unsigned long a_diag = (call_res.error != 0 ? 1ul : 0ul) |
+                               (caller_data[17] != 0 ? 2ul : 0ul) |
+                               (callee_executed ? 0ul : 4ul) | (leak_to_callee ? 8ul : 0ul);
   record_check("leak_test: Caller -> Callee callee-saved registers scrubbed",
-               ok_a, ok_a ? 0 : 1, 0);
+               ok_a, a_diag, 0);
 
   // 試験 B1: 呼び先から呼び手への漏洩防止 (Callee -> Caller)
   // Caller 復帰直後、戻り値以外のスクラッチレジスタ (r2, r3, r12, lr) に Callee のカナリア 0xCAFE.... が残っていないこと

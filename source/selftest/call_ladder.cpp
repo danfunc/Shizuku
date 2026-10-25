@@ -306,7 +306,7 @@ uintptr_t namer(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 }
 
 // 記述子での呼出し。riscv では trap 内の直接処理に届く (a2..a7 = 1..6 を渡して、
-// 呼ばれた側に引数が全部届くことも検査する)。それ以外では UNKNOWN_API が返る。
+// 呼ばれた側に引数が全部届くことも検査する)。それ以外 (ARM) は a2 の 1 引数だけが届く。
 [[gnu::always_inline]] inline api_result call_descriptor(uintptr_t index) {
 #if defined(__riscv)
   const auto result = ARCH::syscall((uintptr_t)object_api::CALL_METHOD_DESCRIPTOR,
@@ -334,12 +334,14 @@ uint32_t g_desc_calls = 0;
 uint32_t g_desc_v2_calls = 0;
 uintptr_t g_desc_self = 0;
 uintptr_t g_desc_caller = 0;
+uintptr_t g_desc_a0 = 0; // 呼び先が受け取った第 1 引数 (ARM は a0..a3 以外がスタック上のゴミなので和は見ない)
 bool g_desc_export_v2 = false;
 bool g_owner_probe_old_index = false;
 uintptr_t g_owner_old_index_error = (uintptr_t)object_error::UNKNOWN_API;
 
 uintptr_t desc_target_fn(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f) {
   ++g_desc_calls;
+  g_desc_a0 = a;
   g_desc_self = api(object_api::GET_CURRENT_OBJECT).value;
   g_desc_caller = api(object_api::GET_CALLER_OBJECT).value;
   return a + b + c + d + e + f;
@@ -993,10 +995,24 @@ void call_ladder() {
             (unsigned long)KERNEL_OBJECT::ROOT_OBJECT);
     }
 #else
-    const api_result unknown_desc = call_descriptor(desc_idx);
-    check("descriptor: non-riscv rejects CALL_METHOD_DESCRIPTOR with UNKNOWN_API (1)",
-          unknown_desc.error == (uintptr_t)object_error::UNKNOWN_API,
-          (unsigned long)unknown_desc.error, (unsigned long)object_error::UNKNOWN_API);
+    // 非 riscv (ARM): do_call 経由。引数は a2 の 1 個だけが呼び先の a0 に届く (残りは 0)。
+    {
+      const uint32_t calls_before = g_desc_calls;
+      const auto depth_before = kernel_instance.current_depth();
+      const api_result arm_desc = api(object_api::CALL_METHOD_DESCRIPTOR, desc_idx, 5);
+      check("descriptor: non-riscv direct call error is OK",
+            arm_desc.error == (uintptr_t)object_error::OK,
+            (unsigned long)arm_desc.error, 0);
+      // 呼び先は 6 引数で、ARM では e・f がスタックのゴミなので、返り値の和ではなく a0 を見る。
+      check("descriptor: non-riscv direct call passes a2 to callee a0",
+            g_desc_a0 == 5, (unsigned long)g_desc_a0, 5);
+      check("descriptor: non-riscv direct return restores the ledger",
+            kernel_instance.current_depth() == depth_before,
+            (unsigned long)kernel_instance.current_depth(), (unsigned long)depth_before);
+      check("descriptor: non-riscv callee ran exactly once",
+            g_desc_calls == calls_before + 1,
+            (unsigned long)g_desc_calls, (unsigned long)(calls_before + 1));
+    }
 #endif
 
     const api_result bad_obj = api(object_api::CREATE_METHOD_DESCRIPTOR, 9999, 1);
