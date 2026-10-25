@@ -39,6 +39,10 @@ __attribute__((naked)) uintptr_t leak_callee_worker(uintptr_t, uintptr_t, uintpt
       "str  r10, [r0, #24]\n"
       "str  r11, [r0, #28]\n"
       "str  r12, [r0, #32]\n"
+      // 到達フラグ (CALLEE_EXECUTED_MARKER = 0xCAFEBEEF) を記録
+      "movw r1, #0xBEEF\n"
+      "movt r1, #0xCAFE\n"
+      "str  r1, [r0, #36]\n"
       "pop  {r0, r1}\n"
 
       // 戻る前に全レジスタに 0xCAFE0000 | reg をセット (戻り値 r0 以外)
@@ -67,7 +71,14 @@ __attribute__((naked)) uintptr_t leak_callee_worker(uintptr_t, uintptr_t, uintpt
 
       // 戻り値 r0 = 42
       "movs r0, #42\n"
-      "bx   lr\n"
+      // lr (return stub) をスタックへ退避し、r1 と lr にカナリアを置いてから pop {pc} で復帰
+      "mov  r1, lr\n"
+      "push {r1}\n"
+      "movw r1, #0x0001\n"
+      "movt r1, #0xCAFE\n"
+      "movw lr, #0x000E\n"
+      "movt lr, #0xCAFE\n"
+      "pop  {pc}\n"
       ".ltorg\n"
   );
 }
@@ -121,6 +132,7 @@ __attribute__((naked)) uintptr_t leak_caller_worker(uintptr_t, uintptr_t, uintpt
       "str  r2, [r0, #36]\n"  // restored_r2
       "str  r3, [r0, #40]\n"  // restored_r3
       "str  r12, [r0, #44]\n" // restored_r12
+      "str  lr, [r0, #56]\n"  // restored_lr
       "pop  {r0, r1}\n"
       "ldr  r2, =leak_caller_data\n"
       "str  r0, [r2, #48]\n"  // err
@@ -211,23 +223,32 @@ void register_leak_test() {
       0);
 
   // 4. アサーション検証
+  // 到達フラグ用の固有印 (callee が観測を書き終えたときに callee_seen[9] へ記録)
+  constexpr uint32_t CALLEE_EXECUTED_MARKER = 0xCAFEBEEFu;
+
   // 試験 A: 呼び手から呼び先への漏洩防止 (Caller -> Callee)
-  // Callee 入口で、Caller のカナリア 0xDEAD0004..0xDEAD000B が見えていないこと (消去されていること)
+  // - call_res.error == 0 であること
+  // - Callee が実際に実行されたこと (callee_seen[9] == CALLEE_EXECUTED_MARKER)
+  // - Callee 入口で、Caller のカナリア 0xDEAD0004..0xDEAD000B が見えていないこと (消去されていること)
   bool leak_to_callee = false;
   for (int i = 0; i < 8; ++i) {
     if (callee_seen[i] == (0xDEAD0004u + i)) {
       leak_to_callee = true;
     }
   }
+  const bool callee_executed = (callee_seen[9] == CALLEE_EXECUTED_MARKER);
+  const bool ok_a = (call_res.error == 0) && callee_executed && !leak_to_callee;
   record_check("leak_test: Caller -> Callee callee-saved registers scrubbed",
-               !leak_to_callee, leak_to_callee ? 1 : 0, 0);
+               ok_a, ok_a ? 0 : 1, 0);
 
   // 試験 B1: 呼び先から呼び手への漏洩防止 (Callee -> Caller)
-  // Caller 復帰直後、戻り値以外のスクラッチレジスタ (r2, r3, r12) に Callee のカナリア 0xCAFE.... が残っていないこと
-  // caller_data[9] = r2, [10] = r3, [11] = r12
+  // Caller 復帰直後、戻り値以外のスクラッチレジスタ (r2, r3, r12, lr) に Callee のカナリア 0xCAFE.... が残っていないこと
+  // caller_data[9] = r2, [10] = r3, [11] = r12, [14] = lr
+  // (注: r1 は Shizuku の ARMv8-M syscall ABI において戻り値 value の受け渡しスロットとして使用されるため除外)
   bool leak_to_caller = (caller_data[9] == 0xCAFE0002u) ||
                         (caller_data[10] == 0xCAFE0003u) ||
-                        (caller_data[11] == 0xCAFE000Cu);
+                        (caller_data[11] == 0xCAFE000Cu) ||
+                        (caller_data[14] == 0xCAFE000Eu);
   record_check("leak_test: Callee -> Caller scratch registers scrubbed",
                !leak_to_caller, leak_to_caller ? 1 : 0, 0);
 
