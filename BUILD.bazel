@@ -145,6 +145,14 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "test_u_cost_invariants",
+    srcs = ["tests/test_u_cost_invariants.cpp"],
+    deps = [
+        ":internal_headers",
+    ],
+)
+
 # カーネル本体のソース。//:kernel と //:shizuku_kernel (ESP32-C6 の .a) で共有する。
 KERNEL_SRCS = [
     "source/cpu_manager/init.cpp",

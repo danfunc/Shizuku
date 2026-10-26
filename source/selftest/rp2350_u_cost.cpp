@@ -13,6 +13,7 @@
 #include "shizuku/object_api.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/selftest.hpp"
+#include "shizuku/u_cost_invariants.hpp"
 
 // 親 P 用データ領域・スタック (32B 整列: ARMv8-M の MPU 境界 32B)
 alignas(32) uint8_t u_cost_p_data_pool[256];
@@ -42,7 +43,7 @@ __attribute__((naked)) uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t, 
   asm volatile(
       ".syntax unified\n"
       ".thumb\n"
-      "push {r4-r7, lr}\n"
+      "push {r4-r8, lr}\n"
       "ldr  r4, =u_cost_p_data_pool\n"
       "cmp  r0, #1\n"
       "beq  .Lp_cmd_create_child\n"
@@ -56,8 +57,25 @@ __attribute__((naked)) uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t, 
       "beq  .Lp_cmd_baseline_desc\n"
       "cmp  r0, #6\n"
       "beq  .Lp_cmd_measure_desc\n"
+      // 6A Corrected series commands
+      "cmp  r0, #10\n"
+      "beq  .Lp_cmd_warmup_method\n"
+      "cmp  r0, #11\n"
+      "beq  .Lp_cmd_warmup_desc\n"
+      "cmp  r0, #12\n"
+      "beq  .Lp_cmd_baseline_method_corr\n"
+      "cmp  r0, #13\n"
+      "beq  .Lp_cmd_measure_method_corr\n"
+      "cmp  r0, #14\n"
+      "beq  .Lp_cmd_verify_method\n"
+      "cmp  r0, #15\n"
+      "beq  .Lp_cmd_baseline_desc_corr\n"
+      "cmp  r0, #16\n"
+      "beq  .Lp_cmd_measure_desc_corr\n"
+      "cmp  r0, #17\n"
+      "beq  .Lp_cmd_verify_desc\n"
       "movs r0, #0\n"
-      "pop  {r4-r7, pc}\n"
+      "pop  {r4-r8, pc}\n"
 
       // cmd=1: 子 C (OBJECT_U_COST_C) を CREATE_OBJECT
       ".Lp_cmd_create_child:\n"
@@ -67,7 +85,7 @@ __attribute__((naked)) uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t, 
       "movs r3, #2\n"         // OBJECT_UNPRIVILEGED = 2 (1u << 1)
       "mov  r12, #0\n"
       "svc  0\n"
-      "pop  {r4-r7, pc}\n"
+      "pop  {r4-r8, pc}\n"
 
       // cmd=2: method baseline 測定 (2048 回、svc なし空ループ)
       ".Lp_cmd_baseline_method:\n"
@@ -95,7 +113,7 @@ __attribute__((naked)) uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t, 
       "bne  .Lbase_meth_loop\n"
       "str  r7, [r4, #16]\n"  // baseline_meth_rounds_executed
       "mov  r0, r7\n"         // return rounds (2048)
-      "pop  {r4-r7, pc}\n"
+      "pop  {r4-r8, pc}\n"
 
       // cmd=3: method call 測定 (2048 回、svc あり、時間計測なし)
       ".Lp_cmd_measure_method:\n"
@@ -134,7 +152,7 @@ __attribute__((naked)) uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t, 
       "str  r1, [r4, #40]\n"  // meth_check_val
       "str  r0, [r4, #44]\n"  // meth_check_err
       "mov  r0, r7\n"         // return rounds (2048)
-      "pop  {r4-r7, pc}\n"
+      "pop  {r4-r8, pc}\n"
 
       // cmd=4: descriptor 作成 (CREATE_METHOD_DESCRIPTOR = 32)
       ".Lp_cmd_create_desc:\n"
@@ -145,7 +163,7 @@ __attribute__((naked)) uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t, 
       "mov  r12, #0\n"
       "svc  0\n"
       "str  r1, [r4, #8]\n"   // desc_index
-      "pop  {r4-r7, pc}\n"
+      "pop  {r4-r8, pc}\n"
 
       // cmd=5: descriptor baseline 測定 (2048 回、svc なし空ループ)
       ".Lp_cmd_baseline_desc:\n"
@@ -172,7 +190,7 @@ __attribute__((naked)) uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t, 
       "bne  .Lbase_desc_loop\n"
       "str  r7, [r4, #24]\n"  // baseline_desc_rounds_executed
       "mov  r0, r7\n"
-      "pop  {r4-r7, pc}\n"
+      "pop  {r4-r8, pc}\n"
 
       // cmd=6: descriptor call 測定 (2048 回、svc あり、時間計測なし)
       ".Lp_cmd_measure_desc:\n"
@@ -211,7 +229,159 @@ __attribute__((naked)) uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t, 
       "str  r1, [r4, #60]\n"  // desc_check_val
       "str  r0, [r4, #64]\n"  // desc_check_err
       "mov  r0, r7\n"
-      "pop  {r4-r7, pc}\n"
+      "pop  {r4-r8, pc}\n"
+
+      // =====================================================================
+      // 6A Corrected series:
+      // =====================================================================
+
+      // cmd=10: method warm-up (32 回、計測区間外)
+      ".Lp_cmd_warmup_method:\n"
+      "ldr  r6, [r4, #0]\n"   // child_id
+      "movs r5, #32\n"
+      ".Lmeth_warm_corr:\n"
+      "movs r0, #4\n"
+      "mov  r1, r6\n"
+      "movs r2, #0\n"
+      "movs r3, #0\n"
+      "mov  r12, #0\n"
+      "svc  0\n"
+      "subs r5, r5, #1\n"
+      "bne  .Lmeth_warm_corr\n"
+      "movs r0, #32\n"
+      "pop  {r4-r8, pc}\n"
+
+      // cmd=11: desc warm-up (32 回、計測区間外)
+      ".Lp_cmd_warmup_desc:\n"
+      "ldr  r6, [r4, #8]\n"   // desc_index
+      "movs r5, #32\n"
+      ".Ldesc_warm_corr:\n"
+      "movs r0, #33\n"
+      "mov  r1, r6\n"
+      "movs r2, #0\n"
+      "movs r3, #0\n"
+      "mov  r12, #0\n"
+      "svc  0\n"
+      "subs r5, r5, #1\n"
+      "bne  .Ldesc_warm_corr\n"
+      "movs r0, #32\n"
+      "pop  {r4-r8, pc}\n"
+
+      // cmd=12: method baseline corrected (2048 回、連鎖と orr 累積を含む空ループ)
+      ".Lp_cmd_baseline_method_corr:\n"
+      "ldr  r7, [r4, #12]\n"  // rounds (2048)
+      "ldr  r6, [r4, #0]\n"   // child_id
+      "mov  r5, r7\n"
+      "movs r3, #0\n"         // 初期連鎖値 0
+      "movs r8, #0\n"         // 累積エラー 0
+      ".Lbase_meth_corr_loop:\n"
+      "movs r0, #0\n"         // 模擬エラー 0
+      "adds r1, r3, #1\n"     // 模擬子加算 (0->1, 1->2, ... -> 2048)
+      "mov  r3, r1\n"         // 次周回への値連鎖
+      "orr  r8, r8, r0\n"     // エラー論理和累積
+      "subs r5, r5, #1\n"
+      "bne  .Lbase_meth_corr_loop\n"
+      "str  r1, [r4, #72]\n"  // offset 72: base_meth_final_val
+      "str  r8, [r4, #76]\n"  // offset 76: base_meth_accum_err
+      "str  r7, [r4, #80]\n"  // offset 80: base_meth_rounds
+      "mov  r0, r7\n"
+      "pop  {r4-r8, pc}\n"
+
+      // cmd=13: method measure corrected (2048 回、値連鎖 r3<-r1、orr r8, r8, r0 累積)
+      ".Lp_cmd_measure_method_corr:\n"
+      "ldr  r7, [r4, #12]\n"  // rounds (2048)
+      "ldr  r6, [r4, #0]\n"   // child_id
+      "mov  r5, r7\n"
+      "movs r3, #0\n"         // 初期連鎖値 0
+      "movs r8, #0\n"         // 累積エラー 0
+      ".Lmeth_corr_loop:\n"
+      "movs r0, #4\n"         // CALL_METHOD = 4
+      "mov  r1, r6\n"
+      "movs r2, #0\n"
+      "// r3 に前周回の戻り値 r1 が入っている\n"
+      "mov  r12, #0\n"
+      "svc  0\n"
+      "orr  r8, r8, r0\n"     // 全周回のエラー論理和累積
+      "mov  r3, r1\n"         // 戻り値 r1 を次周回の引数 r3 へ連鎖
+      "subs r5, r5, #1\n"
+      "bne  .Lmeth_corr_loop\n"
+      "str  r1, [r4, #84]\n"  // offset 84: meth_corr_final_val
+      "str  r8, [r4, #88]\n"  // offset 88: meth_corr_accum_err
+      "str  r7, [r4, #92]\n"  // offset 92: meth_corr_rounds
+      "mov  r0, r7\n"
+      "pop  {r4-r8, pc}\n"
+
+      // cmd=14: method verify check (41->42、計測区間外)
+      ".Lp_cmd_verify_method:\n"
+      "ldr  r6, [r4, #0]\n"
+      "movs r0, #4\n"
+      "mov  r1, r6\n"
+      "movs r2, #0\n"
+      "movs r3, #41\n"
+      "mov  r12, #0\n"
+      "svc  0\n"
+      "str  r1, [r4, #40]\n"  // meth_check_val (want 42)
+      "str  r0, [r4, #44]\n"  // meth_check_err (want 0)
+      "mov  r0, #1\n"
+      "pop  {r4-r8, pc}\n"
+
+      // cmd=15: desc baseline corrected (2048 回、連鎖と orr 累積を含む空ループ)
+      ".Lp_cmd_baseline_desc_corr:\n"
+      "ldr  r7, [r4, #12]\n"  // rounds (2048)
+      "ldr  r6, [r4, #8]\n"   // desc_index
+      "mov  r5, r7\n"
+      "movs r2, #0\n"         // 初期連鎖値 0
+      "movs r8, #0\n"         // 累積エラー 0
+      ".Lbase_desc_corr_loop:\n"
+      "movs r0, #0\n"         // 模擬エラー 0
+      "adds r1, r2, #1\n"     // 模擬子加算
+      "mov  r2, r1\n"         // 次周回への値連鎖
+      "orr  r8, r8, r0\n"     // エラー論理和累積
+      "subs r5, r5, #1\n"
+      "bne  .Lbase_desc_corr_loop\n"
+      "str  r1, [r4, #96]\n"  // offset 96: base_desc_final_val
+      "str  r8, [r4, #100]\n" // offset 100: base_desc_accum_err
+      "str  r7, [r4, #104]\n" // offset 104: base_desc_rounds
+      "mov  r0, r7\n"
+      "pop  {r4-r8, pc}\n"
+
+      // cmd=16: desc measure corrected (2048 回、値連鎖 r2<-r1、orr r8, r8, r0 累積)
+      ".Lp_cmd_measure_desc_corr:\n"
+      "ldr  r7, [r4, #12]\n"  // rounds (2048)
+      "ldr  r6, [r4, #8]\n"   // desc_index
+      "mov  r5, r7\n"
+      "movs r2, #0\n"         // 初期連鎖値 0
+      "movs r8, #0\n"         // 累積エラー 0
+      ".Ldesc_corr_loop:\n"
+      "movs r0, #33\n"        // CALL_METHOD_DESCRIPTOR = 33
+      "mov  r1, r6\n"
+      "// r2 に前周回の戻り値 r1 が入っている\n"
+      "movs r3, #0\n"
+      "mov  r12, #0\n"
+      "svc  0\n"
+      "orr  r8, r8, r0\n"     // 全周回のエラー論理和累積
+      "mov  r2, r1\n"         // 戻り値 r1 を次周回の引数 r2 へ連鎖
+      "subs r5, r5, #1\n"
+      "bne  .Ldesc_corr_loop\n"
+      "str  r1, [r4, #108]\n" // offset 108: desc_corr_final_val
+      "str  r8, [r4, #112]\n" // offset 112: desc_corr_accum_err
+      "str  r7, [r4, #116]\n" // offset 116: desc_corr_rounds
+      "mov  r0, r7\n"
+      "pop  {r4-r8, pc}\n"
+
+      // cmd=17: desc verify check (41->42、計測区間外)
+      ".Lp_cmd_verify_desc:\n"
+      "ldr  r6, [r4, #8]\n"
+      "movs r0, #33\n"
+      "mov  r1, r6\n"
+      "movs r2, #41\n"
+      "movs r3, #0\n"
+      "mov  r12, #0\n"
+      "svc  0\n"
+      "str  r1, [r4, #60]\n"  // desc_check_val (want 42)
+      "str  r0, [r4, #64]\n"  // desc_check_err (want 0)
+      "mov  r0, #1\n"
+      "pop  {r4-r8, pc}\n"
       ".ltorg\n"
   );
 }
@@ -251,30 +421,43 @@ template <typename A> inline uint32_t cycles_now() {
 
 struct shizuku_rp2350_u_cost_record_t {
   uint32_t magic;                 // 0x55554353 ("UUCS")
-  uint32_t version;               // 2
+  uint32_t version;               // 3
   uint32_t rounds;                // 2048
-  uint32_t baseline_method_mean;  // baseline mean for method call
-  uint32_t baseline_desc_mean;    // baseline mean for desc call
-  uint32_t method_raw_mean;
-  uint32_t method_net_mean;
-  uint32_t desc_raw_mean;
-  uint32_t desc_net_mean;
-  uint32_t checked_ok;
+  uint32_t baseline_method_mean;  // baseline mean for method call (legacy)
+  uint32_t baseline_desc_mean;    // baseline mean for desc call (legacy)
+  uint32_t method_raw_mean;       // (legacy)
+  uint32_t method_net_mean;       // (legacy)
+  uint32_t desc_raw_mean;         // (legacy)
+  uint32_t desc_net_mean;         // (legacy)
+  uint32_t checked_ok;            // (legacy)
+  // 6A Corrected series:
+  uint32_t corr_baseline_method_mean;
+  uint32_t corr_baseline_desc_mean;
+  uint32_t corr_method_raw_mean;
+  uint32_t corr_method_net_mean;
+  uint32_t corr_desc_raw_mean;
+  uint32_t corr_desc_net_mean;
+  uint32_t corr_checked_ok;
 };
-static_assert(sizeof(shizuku_rp2350_u_cost_record_t) == 40, "shizuku_rp2350_u_cost_record_t size");
+static_assert(sizeof(shizuku_rp2350_u_cost_record_t) == 68, "shizuku_rp2350_u_cost_record_t size");
 
 volatile shizuku_rp2350_u_cost_record_t shizuku_rp2350_u_cost_record = {};
 volatile uint32_t shizuku_rp2350_u_cost_stage = 0;
 
+template <typename BOARD_TYPE>
+void drain_diag_if_supported() {
+  if constexpr (requires { BOARD_TYPE::diag_drain(); }) BOARD_TYPE::diag_drain();
+}
+
 void record_check(const char *name, bool ok, unsigned long got, unsigned long want) {
+  account_selftest_check(passed, failed, ok);
   if (ok) {
-    ++passed;
     BOARD::diag_printf("[COST] PASS %s (=%lu)\n", name, got);
   } else {
-    ++failed;
     record_fail(name, got, want);
     BOARD::diag_printf("[COST] FAIL %s: got %lu want %lu\n", name, got, want);
   }
+  drain_diag_if_supported<BOARD>();
 }
 
 } // namespace
@@ -443,21 +626,121 @@ void rp2350_u_cost() {
                                        : 0;
 
     BOARD::diag_printf(
-        "[COST] %-24s net mean %5lu cyc  [raw mean %lu, baseline mean %lu]\n",
+        "[COST-LEGACY] %-24s net mean %5lu cyc  [raw mean %lu, baseline mean %lu]\n",
         "U->U method call (1 hop)",
         (unsigned long)net_meth_mean,
         (unsigned long)meth_raw_mean,
         (unsigned long)base_meth_mean);
     BOARD::diag_printf(
-        "[COST] %-24s net mean %5lu cyc  [raw mean %lu, baseline mean %lu]\n",
+        "[COST-LEGACY] %-24s net mean %5lu cyc  [raw mean %lu, baseline mean %lu]\n",
         "U->U desc call (1 hop)",
         (unsigned long)net_desc_mean,
         (unsigned long)desc_raw_mean,
         (unsigned long)base_desc_mean);
 
+    // =======================================================================
+    // 6A Corrected series:
+    // =======================================================================
+    shizuku_rp2350_u_cost_stage = 0xC05100u;
+    const bool counter_enabled = ARCH::cycle_counter_enable();
+
+    // 11. 親 P に cmd=10 (warm-up method: 計測区間外) を実行させる
+    const auto corr_meth_warmup_res = ARCH::syscall(
+        static_cast<uintptr_t>(object_api::CALL_METHOD), OBJECT_U_COST_P, 0, 10 /* cmd=10 */);
+
+    // 12. 親 P に cmd=12 (baseline method corrected) を実行させる
+    shizuku_rp2350_u_cost_stage = 0xC05110u;
+    const uint32_t t_corr_base_meth_start = cycles_now<ARCH>();
+    const auto corr_base_meth_res = ARCH::syscall(
+        static_cast<uintptr_t>(object_api::CALL_METHOD),
+        OBJECT_U_COST_P, 0, 12 /* cmd=12 */);
+    const uint32_t t_corr_base_meth_end = cycles_now<ARCH>();
+    const uint32_t corr_base_meth_cycles = t_corr_base_meth_end - t_corr_base_meth_start;
+
+    // 13. 親 P に cmd=13 (measure method corrected) を実行させる
+    shizuku_rp2350_u_cost_stage = 0xC05120u;
+    const uint32_t t_corr_meth_start = cycles_now<ARCH>();
+    const auto corr_meth_res = ARCH::syscall(
+        static_cast<uintptr_t>(object_api::CALL_METHOD),
+        OBJECT_U_COST_P, 0, 13 /* cmd=13 */);
+    const uint32_t t_corr_meth_end = cycles_now<ARCH>();
+    const uint32_t corr_meth_cycles = t_corr_meth_end - t_corr_meth_start;
+
+    // 14. 親 P に cmd=14 (verify method check 41->42: 計測区間外) を実行させる
+    shizuku_rp2350_u_cost_stage = 0xC05130u;
+    const auto corr_meth_check_res = ARCH::syscall(
+        static_cast<uintptr_t>(object_api::CALL_METHOD),
+        OBJECT_U_COST_P, 0, 14 /* cmd=14 */);
+
+    // 15. 親 P に cmd=11 (warm-up desc: 計測区間外) を実行させる
+    const auto corr_desc_warmup_res = ARCH::syscall(
+        static_cast<uintptr_t>(object_api::CALL_METHOD), OBJECT_U_COST_P, 0, 11 /* cmd=11 */);
+
+    // 16. 親 P に cmd=15 (baseline desc corrected) を実行させる
+    shizuku_rp2350_u_cost_stage = 0xC05140u;
+    const uint32_t t_corr_base_desc_start = cycles_now<ARCH>();
+    const auto corr_base_desc_res = ARCH::syscall(
+        static_cast<uintptr_t>(object_api::CALL_METHOD),
+        OBJECT_U_COST_P, 0, 15 /* cmd=15 */);
+    const uint32_t t_corr_base_desc_end = cycles_now<ARCH>();
+    const uint32_t corr_base_desc_cycles = t_corr_base_desc_end - t_corr_base_desc_start;
+
+    // 17. 親 P に cmd=16 (measure desc corrected) を実行させる
+    shizuku_rp2350_u_cost_stage = 0xC05150u;
+    const uint32_t t_corr_desc_start = cycles_now<ARCH>();
+    const auto corr_desc_res = ARCH::syscall(
+        static_cast<uintptr_t>(object_api::CALL_METHOD),
+        OBJECT_U_COST_P, 0, 16 /* cmd=16 */);
+    const uint32_t t_corr_desc_end = cycles_now<ARCH>();
+    const uint32_t corr_desc_cycles = t_corr_desc_end - t_corr_desc_start;
+
+    // 18. 親 P に cmd=17 (verify desc check 41->42: 計測区間外) を実行させる
+    shizuku_rp2350_u_cost_stage = 0xC05160u;
+    const auto corr_desc_check_res = ARCH::syscall(
+        static_cast<uintptr_t>(object_api::CALL_METHOD),
+        OBJECT_U_COST_P, 0, 17 /* cmd=17 */);
+
+    // 結果抽出
+    const uint32_t corr_meth_final = shared[21];       // offset 84 (want ROUNDS)
+    const uint32_t corr_meth_accum_err = shared[22];   // offset 88 (want 0)
+    const uint32_t corr_desc_final = shared[27];       // offset 108 (want ROUNDS)
+    const uint32_t corr_desc_accum_err = shared[28];   // offset 112 (want 0)
+
+    const uint32_t corr_meth_check_val = shared[10];   // offset 40 (want 42)
+    const uint32_t corr_meth_check_err = shared[11];   // offset 44 (want 0)
+    const uint32_t corr_desc_check_val = shared[15];   // offset 60 (want 42)
+    const uint32_t corr_desc_check_err = shared[16];   // offset 64 (want 0)
+
+    const uint32_t corr_base_meth_mean = corr_base_meth_cycles / ROUNDS;
+    const uint32_t corr_meth_raw_mean = corr_meth_cycles / ROUNDS;
+    const uint32_t corr_net_meth_mean = corr_meth_cycles > corr_base_meth_cycles
+                                           ? (corr_meth_cycles - corr_base_meth_cycles) / ROUNDS
+                                           : 0;
+
+    const uint32_t corr_base_desc_mean = corr_base_desc_cycles / ROUNDS;
+    const uint32_t corr_desc_raw_mean = corr_desc_cycles / ROUNDS;
+    const uint32_t corr_net_desc_mean = corr_desc_cycles > corr_base_desc_cycles
+                                           ? (corr_desc_cycles - corr_base_desc_cycles) / ROUNDS
+                                           : 0;
+
+    BOARD::diag_printf(
+        "[COST-CORRECTED] %-24s net mean %5lu cyc  [raw mean %lu, baseline mean %lu]\n",
+        "U->U method call (1 hop)",
+        (unsigned long)corr_net_meth_mean,
+        (unsigned long)corr_meth_raw_mean,
+        (unsigned long)corr_base_meth_mean);
+    drain_diag_if_supported<BOARD>();
+    BOARD::diag_printf(
+        "[COST-CORRECTED] %-24s net mean %5lu cyc  [raw mean %lu, baseline mean %lu]\n",
+        "U->U desc call (1 hop)",
+        (unsigned long)corr_net_desc_mean,
+        (unsigned long)corr_desc_raw_mean,
+        (unsigned long)corr_base_desc_mean);
+    drain_diag_if_supported<BOARD>();
+
     // RAM レコードへの記録
     shizuku_rp2350_u_cost_record.magic = 0x55554353u; // "UUCS"
-    shizuku_rp2350_u_cost_record.version = 2;
+    shizuku_rp2350_u_cost_record.version = 3;
     shizuku_rp2350_u_cost_record.rounds = ROUNDS;
     shizuku_rp2350_u_cost_record.baseline_method_mean = base_meth_mean;
     shizuku_rp2350_u_cost_record.baseline_desc_mean = base_desc_mean;
@@ -466,14 +749,86 @@ void rp2350_u_cost() {
     shizuku_rp2350_u_cost_record.desc_raw_mean = desc_raw_mean;
     shizuku_rp2350_u_cost_record.desc_net_mean = net_desc_mean;
 
-    // PASS/FAIL アサーション
+    shizuku_rp2350_u_cost_record.corr_baseline_method_mean = corr_base_meth_mean;
+    shizuku_rp2350_u_cost_record.corr_baseline_desc_mean = corr_base_desc_mean;
+    shizuku_rp2350_u_cost_record.corr_method_raw_mean = corr_meth_raw_mean;
+    shizuku_rp2350_u_cost_record.corr_method_net_mean = corr_net_meth_mean;
+    shizuku_rp2350_u_cost_record.corr_desc_raw_mean = corr_desc_raw_mean;
+    shizuku_rp2350_u_cost_record.corr_desc_net_mean = corr_net_desc_mean;
+
+    // PASS/FAIL アサーション (D7 Legacy)
     const bool meth_ok = (meth_err == 0 && meth_val == 42);
-    record_check("u_cost: U->U method call returns 42", meth_ok, meth_val, 42);
+    record_check("u_cost [LEGACY]: U->U method call returns 42", meth_ok, meth_val, 42);
 
     const bool desc_ok = (desc_err == 0 && desc_val == 42);
-    record_check("u_cost: U->U descriptor call returns 42", desc_ok, desc_val, 42);
+    record_check("u_cost [LEGACY]: U->U descriptor call returns 42", desc_ok, desc_val, 42);
 
     shizuku_rp2350_u_cost_record.checked_ok = (meth_ok && desc_ok) ? 1u : 0u;
+
+    // PASS/FAIL アサーション (6A Corrected)
+    const bool counter_ok = counter_enabled &&
+                            (corr_base_meth_cycles > 0) &&
+                            (corr_meth_cycles > corr_base_meth_cycles) &&
+                            (corr_base_desc_cycles > 0) &&
+                            (corr_desc_cycles > corr_base_desc_cycles);
+    record_check("u_cost [CORRECTED]: DWT cycle counter progressed and valid", counter_ok, counter_ok ? 1 : 0, 1);
+
+    const uint32_t desc_create_inner_error = static_cast<uint32_t>(desc_create_res.value);
+    const bool desc_create_ok = (desc_create_res.error == 0 && desc_create_inner_error == 0);
+    record_check("u_cost [CORRECTED]: CREATE_METHOD_DESCRIPTOR succeeded", desc_create_ok,
+                 desc_create_ok ? 0 : 1, 0);
+
+    u_cost_eval_input_t meth_eval{
+        .counter_enabled = counter_enabled,
+        .base_cycles = corr_base_meth_cycles,
+        .measure_cycles = corr_meth_cycles,
+        .final_chain_value = corr_meth_final,
+        .accumulated_error = corr_meth_accum_err,
+        .verify_value = corr_meth_check_val,
+        .verify_error = corr_meth_check_err,
+        .verify_outer_error = static_cast<uint32_t>(corr_meth_check_res.error),
+        .verify_outer_value = static_cast<uint32_t>(corr_meth_check_res.value),
+        .desc_create_error = desc_create_inner_error,
+        .desc_create_outer_error = static_cast<uint32_t>(desc_create_res.error),
+        .expected_rounds = ROUNDS,
+        .outer_error = static_cast<uint32_t>(corr_meth_res.error),
+        .outer_value = static_cast<uint32_t>(corr_meth_res.value),
+        .executed_rounds = shared[23],
+        .baseline_outer_error = static_cast<uint32_t>(corr_base_meth_res.error),
+        .baseline_outer_value = static_cast<uint32_t>(corr_base_meth_res.value),
+        .baseline_executed_rounds = shared[20],
+        .warmup_outer_error = static_cast<uint32_t>(corr_meth_warmup_res.error),
+        .warmup_rounds = static_cast<uint32_t>(corr_meth_warmup_res.value),
+    };
+    const bool corr_meth_ok = evaluate_u_cost_invariants(meth_eval);
+    record_check("u_cost [CORRECTED]: method call chain & error accumulation", corr_meth_ok, corr_meth_final, ROUNDS);
+
+    u_cost_eval_input_t desc_eval{
+        .counter_enabled = counter_enabled,
+        .base_cycles = corr_base_desc_cycles,
+        .measure_cycles = corr_desc_cycles,
+        .final_chain_value = corr_desc_final,
+        .accumulated_error = corr_desc_accum_err,
+        .verify_value = corr_desc_check_val,
+        .verify_error = corr_desc_check_err,
+        .verify_outer_error = static_cast<uint32_t>(corr_desc_check_res.error),
+        .verify_outer_value = static_cast<uint32_t>(corr_desc_check_res.value),
+        .desc_create_error = desc_create_inner_error,
+        .desc_create_outer_error = static_cast<uint32_t>(desc_create_res.error),
+        .expected_rounds = ROUNDS,
+        .outer_error = static_cast<uint32_t>(corr_desc_res.error),
+        .outer_value = static_cast<uint32_t>(corr_desc_res.value),
+        .executed_rounds = shared[29],
+        .baseline_outer_error = static_cast<uint32_t>(corr_base_desc_res.error),
+        .baseline_outer_value = static_cast<uint32_t>(corr_base_desc_res.value),
+        .baseline_executed_rounds = shared[26],
+        .warmup_outer_error = static_cast<uint32_t>(corr_desc_warmup_res.error),
+        .warmup_rounds = static_cast<uint32_t>(corr_desc_warmup_res.value),
+    };
+    const bool corr_desc_ok = evaluate_u_cost_invariants(desc_eval);
+    record_check("u_cost [CORRECTED]: descriptor call chain & error accumulation", corr_desc_ok, corr_desc_final, ROUNDS);
+
+    shizuku_rp2350_u_cost_record.corr_checked_ok = (counter_ok && desc_create_ok && corr_meth_ok && corr_desc_ok) ? 1u : 0u;
     shizuku_rp2350_u_cost_stage = 0xC050FFu;
   }
 #endif
