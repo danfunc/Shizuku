@@ -119,8 +119,15 @@ struct dispatcher_test_access {
   static void set_creator(uint32_t id, uint32_t creator) {
     kernel_object_instance.m_objects[id].creator_object = creator;
   }
+  static void set_kind(uint32_t id, object_kind kind) {
+    kernel_object_instance.m_objects[id].kind = kind;
+  }
   static void set_kernel_role(uint32_t id, bool role) {
     kernel_object_instance.m_objects[id].kernel_role = role;
+  }
+  static void set_parent_handler(uint32_t id, uint32_t parent, uintptr_t entry) {
+    kernel_object_instance.m_objects[id].parent_handler_object = parent;
+    kernel_object_instance.m_objects[id].parent_handler_entry = entry;
   }
   static void undeclare(uint32_t id, uintptr_t method) {
     kernel_object_instance.m_objects[id].methods[method] = nullptr;
@@ -2195,6 +2202,280 @@ static void run_dispatcher_tests() {
     ARCH::scrub_on_switch(resumed);
     assert(parked.mcause == 0x80000007u);
     printf("  18e. scrub_on_switch: only a frame parked at an ECALL (RV32_TAG_ECALL) becomes RV32_TAG_ECALL_SCRUB; full-restore frames / ENTRY / already-scrubbed untouched: PASS\n");
+  }
+
+  // -------------------------------------------------------------------------
+  // 19. 4A Boundary: Alternating dedicated handlers and calls reaching depth=33,
+  //     call_count < 32. Verify that call entrance reserves the final ledger slot
+  //     for return dispatch.
+  // -------------------------------------------------------------------------
+  {
+    printf("[19] 4A boundary: alternating dedicated handlers and calls reaching depth=33...\n");
+    thread.call_stack.depth = 0;
+    thread.call_stack.call_count = 0;
+    thread.call_stack.top = 0;
+    thread.call_stack.call_top = 0;
+    thread.call_stack.caller_object = 0;
+    thread.call_stack.current_call_object = 0;
+
+    alignas(8) static KERNEL::call_ledger_entry ledger_34[34];
+    for (size_t i = 0; i < 34; ++i) ledger_34[i] = {};
+
+    constexpr uint32_t APP0_ID = 2;
+    constexpr uint32_t H_BASE_ID = 10; // H1..H16: 11..26
+    constexpr uint32_t C_BASE_ID = 30; // C1..C18: 31..48
+
+    access::declare(APP0_ID, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(0x50000000), 0,
+                    ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+    access::set_creator(APP0_ID, ROOT_APP_ID);
+    access::set_kernel_role(APP0_ID, false);
+
+    kernel_instance.set_thread_ledger(
+        0, ledger_34, 34, APP0_ID, (uint32_t)object_kind::PLAIN,
+        ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+
+    for (uint32_t k = 1; k <= 16; ++k) {
+      uint32_t hk_id = H_BASE_ID + k;
+      uintptr_t hk_entry = 0x51000000 + k * 0x10000;
+      access::declare(hk_id, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(hk_entry), 0,
+                      ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+      access::set_kind(hk_id, object_kind::HANDLER);
+      access::set_creator(hk_id, ROOT_APP_ID);
+      access::set_kernel_role(hk_id, false);
+
+      uint32_t ck_id = C_BASE_ID + k;
+      uintptr_t ck_entry = 0x61000000 + k * 0x10000;
+      access::declare(ck_id, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(ck_entry), 0,
+                      hk_id, hk_entry);
+      access::set_creator(ck_id, (k == 1 ? APP0_ID : (C_BASE_ID + (k - 1))));
+      access::set_kernel_role(ck_id, false);
+    }
+
+    // 19a. Reach depth=32 via alternating calls and dispatches:
+    //      H_{k-1} calls C_k (call, depth 2k - 1), C_k raw SVC -> H_k (dispatch, depth 2k)
+    for (uint32_t k = 1; k <= 16; ++k) {
+      uint32_t ck_id = C_BASE_ID + k;
+      uint32_t hk_id = H_BASE_ID + k;
+
+      ctx->sp = frame;
+      frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+      frame->a1 = ck_id;
+      frame->a2 = 0;
+      frame->a3 = k * 10;
+      kernel_instance.svc_dispatch(ctx);
+      assert(thread.call_stack.depth == 2 * k - 1);
+      assert(thread.call_stack.call_count == k);
+      assert(thread.ledger[2 * k - 2].via == KERNEL::LEDGER_CALL);
+      assert(thread.ledger[2 * k - 2].object == ck_id);
+
+      ctx->sp = frame;
+      frame->a0 = 0x100 + k;
+      kernel_instance.svc_dispatch(ctx);
+      assert(thread.call_stack.depth == 2 * k);
+      assert(thread.call_stack.call_count == k);
+      assert(thread.ledger[2 * k - 1].via == KERNEL::LEDGER_DISPATCH);
+      assert(thread.ledger[2 * k - 1].object == hk_id);
+    }
+
+    // At this point (k=16 completed):
+    // depth == 32, call_count == 16, H16 is running at depth 32.
+    assert(thread.call_stack.depth == 32);
+    assert(thread.call_stack.call_count == 16);
+
+    // H16 calls C17 (parent handler ROOT_KOBJ_ID so C17 can issue CALL_METHOD directly to trap)
+    uint32_t c17_id = C_BASE_ID + 17;
+    uintptr_t c17_entry = 0x61000000 + 17 * 0x10000;
+    access::declare(c17_id, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(c17_entry), 0,
+                    ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+    access::set_creator(c17_id, C_BASE_ID + 16);
+    access::set_kernel_role(c17_id, false);
+
+    ctx->sp = frame;
+    frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+    frame->a1 = c17_id;
+    frame->a2 = 0;
+    frame->a3 = 170;
+    kernel_instance.svc_dispatch(ctx);
+    assert(thread.call_stack.depth == 33);
+    assert(thread.call_stack.call_count == 17);
+    assert(thread.ledger[32].via == KERNEL::LEDGER_CALL);
+    assert(thread.ledger[32].object == c17_id);
+
+    // Now we are at:
+    // depth == 33 (entries 0..32 filled, exactly 1 slot left: slot 33)
+    // call_count == 17 (< 32)
+    // ledger_capacity == 34
+    assert(thread.call_stack.depth == 33);
+    assert(thread.call_stack.call_count == 17);
+    assert(thread.ledger_capacity == 34);
+
+    // Declare C18 (child of C17)
+    uint32_t c18_id = C_BASE_ID + 18;
+    uintptr_t c18_entry = 0x61000000 + 18 * 0x10000;
+    access::declare(c18_id, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(c18_entry), 0,
+                    ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+    access::set_creator(c18_id, c17_id);
+    access::set_kernel_role(c18_id, false);
+
+    // Snapshot entire state before attempting CALL_METHOD at depth=33
+    const uint32_t depth_before = thread.call_stack.depth;
+    const uint32_t call_count_before = thread.call_stack.call_count;
+    const uint32_t call_top_before = thread.call_stack.call_top;
+    const uintptr_t reg_base_before = ctx->region_base;
+    const uintptr_t reg_limit_before = ctx->region_limit;
+    const bool priv_before = ctx->privileged;
+    const void *sp_before = ctx->sp;
+
+    KERNEL::call_ledger_entry ledger_saved[34];
+    for (size_t i = 0; i < 34; ++i) ledger_saved[i] = thread.ledger[i];
+
+    // C17 attempts to call C18 via CALL_METHOD.
+    // 4A: this MUST be rejected with NO_STACK because slot 33 is reserved for return dispatch!
+    ctx->sp = frame;
+    frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+    frame->a1 = c18_id;
+    frame->a2 = 0;
+    frame->a3 = 999;
+    frame->a4 = 0xAA55;
+    frame->a5 = 0x55AA;
+    kernel_instance.svc_dispatch(ctx);
+
+    // 4A assertions:
+    assert(frame->a0 == (uintptr_t)object_error::NO_STACK);
+    assert(frame->a1 == 0); // response value register
+    assert(frame->a2 == 0);
+    assert(frame->a3 == 999);
+    assert(frame->a4 == 0xAA55);
+    assert(frame->a5 == 0x55AA);
+    assert(thread.call_stack.depth == depth_before);
+    assert(thread.call_stack.call_count == call_count_before);
+    assert(thread.call_stack.call_top == call_top_before);
+    assert(ctx->region_base == reg_base_before);
+    assert(ctx->region_limit == reg_limit_before);
+    assert(ctx->privileged == priv_before);
+    assert(ctx->sp == sp_before);
+    // Entire ledger must be completely untouched!
+    for (size_t i = 0; i < 34; ++i) {
+      assert(thread.ledger[i].object == ledger_saved[i].object);
+      assert(thread.ledger[i].via == ledger_saved[i].via);
+      assert(thread.ledger[i].kind == ledger_saved[i].kind);
+      assert(thread.ledger[i].handler_object == ledger_saved[i].handler_object);
+      assert(thread.ledger[i].unwind_floor == ledger_saved[i].unwind_floor);
+    }
+    printf("  19a-1. 4A boundary at depth=33, call_count=17: CALL_METHOD rejected with NO_STACK, full invariants (all 34 ledger entries, context, frame inputs) preserved: PASS\n");
+
+    // 19a-2. Return dispatch (svc_forward) CAN use the reserved slot 33 -> reaching depth=34!
+    // Set C17's parent handler to H16 (both in object table and in active call ledger frame)
+    uint32_t h16_id = H_BASE_ID + 16;
+    uintptr_t h16_entry = 0x51000000 + 16 * 0x10000;
+    access::set_parent_handler(c17_id, h16_id, h16_entry);
+    thread.ledger[32].handler_object = h16_id;
+    thread.ledger[32].handler_entry = h16_entry;
+
+    // C17 returns to dedicated parent handler H16 (to_root == false) via raw SVC
+    ctx->sp = frame;
+    frame->a0 = 0x77; // raw SVC notification to parent handler H16
+    kernel_instance.svc_dispatch(ctx);
+    assert(thread.call_stack.depth == 34); // The 34th slot (index 33) is used by return dispatch!
+    assert(thread.call_stack.call_count == 17);
+    assert(thread.ledger[33].via == KERNEL::LEDGER_DISPATCH);
+    assert(thread.ledger[33].object == h16_id);
+    assert(thread.ledger[33].kind == (uint8_t)object_kind::HANDLER);
+    printf("  19a-2. return dispatch (svc_forward) successfully uses the reserved 34th slot (depth=34, object=H16): PASS\n");
+
+    // 19a-3. FORWARD_CHILD_EXIT from depth 34 unwinds back to depth 32 (H16)
+    ctx->sp->a0 = (uintptr_t)object_api::FORWARD_CHILD_EXIT;
+    ctx->sp->a1 = 32; // target depth: unwinds H16 dispatch (slot 33) and C17 call (slot 32)
+    ctx->sp->a2 = 0x88; // return value
+    ctx->sp->a3 = 0; // return error
+    kernel_instance.svc_dispatch(ctx);
+    assert(thread.call_stack.depth == 32);
+    assert(thread.call_stack.call_count == 16);
+    assert(ctx->sp->a0 == (uintptr_t)object_error::OK);
+    assert(ctx->sp->a1 == 0x88);
+    printf("  19a-3. FORWARD_CHILD_EXIT from depth=34 pops both frames cleanly back to depth=32 (value=0x88): PASS\n");
+
+    // 19b. Verify normal 32-level call nesting is preserved
+    // Built purely with creator relationships (no kernel_role bypass)
+    // and distinct stack frames per depth (safe for non-LEAN user-stack headers)
+    thread.call_stack.depth = 0;
+    thread.call_stack.call_count = 0;
+    thread.call_stack.top = 0;
+    thread.call_stack.call_top = 0;
+    kernel_instance.set_thread_ledger(
+        0, ledger_34, 34, ROOT_APP_ID, (uint32_t)object_kind::PLAIN,
+        ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+
+    access::set_kernel_role(ROOT_APP_ID, false);
+    for (uint32_t i = 1; i <= 32; ++i) {
+      uint32_t nid = C_BASE_ID + i;
+      access::declare(nid, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(0x70000000 + i * 0x1000), 0,
+                      ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+      access::set_kernel_role(nid, false);
+      access::set_creator(nid, (i == 1) ? ROOT_APP_ID : (C_BASE_ID + (i - 1)));
+    }
+
+    // Allocate stack frames per depth in simulated_stack
+    KERNEL::FRAME *cur = frame;
+    KERNEL::FRAME *frames[32];
+    for (uint32_t i = 0; i < 32; ++i) {
+      cur->mepc = A_PC + 0x10 * i;
+      cur->a0 = (uintptr_t)object_api::CALL_METHOD;
+      cur->a1 = C_BASE_ID + 1 + i;
+      cur->a2 = 0;
+      cur->a3 = 0x5500 + i;
+      frames[i] = cur;
+      ctx->sp = cur;
+      kernel_instance.svc_dispatch(ctx);
+      assert(thread.call_stack.depth == i + 1);
+      assert(thread.call_stack.call_count == i + 1);
+      assert(ARCH::arg(*ctx->sp, 0) == 0x5500 + i);
+      // Move down stack for next depth
+      cur = reinterpret_cast<KERNEL::FRAME *>(reinterpret_cast<uint8_t *>(cur) - 400);
+    }
+    assert(thread.call_stack.depth == 32);
+    assert(thread.call_stack.call_count == 32);
+
+    // Call 33 rejected with NO_STACK because call_count == MAX_DEPTH
+    cur->a0 = (uintptr_t)object_api::CALL_METHOD;
+    cur->a1 = C_BASE_ID + 32;
+    cur->a2 = 0;
+    cur->a3 = 999;
+    ctx->sp = cur;
+    kernel_instance.svc_dispatch(ctx);
+    assert(cur->a0 == (uintptr_t)object_error::NO_STACK);
+    assert(thread.call_stack.depth == 32);
+    assert(thread.call_stack.call_count == 32);
+
+    // Unwind all 32 levels back to depth 0
+    for (uint32_t i = 32; i-- > 0;) {
+      cur->a0 = (uintptr_t)primitive::RETURN;
+      cur->a1 = 1;
+      cur->a2 = 0x70 + i;
+      cur->a3 = 0;
+      cur->a4 = RETURN_STUB_MARKER;
+      ctx->sp = cur;
+      kernel_instance.svc_dispatch(ctx);
+      assert(thread.call_stack.depth == i);
+      assert(thread.call_stack.call_count == i);
+      cur = ctx->sp;
+      assert(cur == frames[i]);
+      assert(cur->a0 == (uintptr_t)object_error::OK && cur->a1 == 0x70 + i);
+    }
+    assert(thread.call_stack.depth == 0);
+    assert(thread.call_stack.call_count == 0);
+    assert(cur == frame);
+    printf("  19b. normal 32-level call nesting (pure creator chain, distinct stack frames, call 33 rejected, full 32-level unwind): PASS\n");
+
+    // Clean up
+    thread.call_stack.depth = 0;
+    thread.call_stack.call_count = 0;
+    thread.call_stack.top = 0;
+    thread.call_stack.call_top = 0;
+    kernel_instance.set_thread_ledger(
+        0, ledger, 32, ROOT_APP_ID, (uint32_t)object_kind::PLAIN,
+        ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+    ctx->sp = frame;
   }
 
   // 後始末

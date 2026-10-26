@@ -395,7 +395,9 @@ SHIZUKU_HOT kernel_error KERNEL::enter_call(KERNEL::THREAD &thread, KERNEL::CONT
     if (!ARCH::call_entry_has_return_room(*context, sizeof(call_frame_header)))
       return kernel_error::NO_STACK;
   }
-  if (unwind_floor > UINT16_MAX ||
+  // 4A: 最後の 1 枠 (ledger_capacity - 1) は return dispatch 専用に先取り予約する。
+  if (unwind_floor > UINT16_MAX || thread.ledger == nullptr ||
+      unwind_floor + 1u >= thread.ledger_capacity ||
       !(arch_call_in_place<ARCH>()
             ? header_push_of<ARCH>(thread, *context, **frame, via, unwind_floor)
             : call_frame_push(thread, context, frame)))

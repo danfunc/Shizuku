@@ -451,6 +451,18 @@ void run_inplace_method_failures_ledger_invariant(const char *tag) {
   assert(thread.call_stack.depth == 0);
   assert(thread.call_stack.call_count == mock_kobj::MAX_DEPTH);
 
+  // 6. 4A: depth + 1 >= ledger_capacity (reserving final slot for return dispatch)
+  thread.call_stack.call_count = 1;
+  thread.call_stack.depth = thread.ledger_capacity - 1; // 15 when capacity is 16
+  frame.r0 = 4;
+  frame.r1 = 5;
+  frame.r2 = 0;
+  frame.r3 = 42;
+  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj);
+  assert(frame.r0 == (uint32_t)shizuku::object_error::NO_STACK);
+  assert(thread.call_stack.depth == thread.ledger_capacity - 1);
+  assert(thread.call_stack.call_count == 1);
+
   printf("  [%s] PASS: method_failures_ledger_invariant\n", tag);
 }
 

@@ -210,7 +210,8 @@ template <class K, class KObj>
     if (stack.call_count >= KObj::MAX_DEPTH)
       return kernel_error::NO_STACK;
     const uint32_t depth = stack.depth; // 呼び先の unwind floor
-    if (depth > UINT16_MAX || thread.ledger == nullptr || depth >= thread.ledger_capacity ||
+    // 4A: 最後の 1 枠 (ledger_capacity - 1) は return dispatch 専用に先取り予約する。
+    if (depth > UINT16_MAX || thread.ledger == nullptr || depth + 1u >= thread.ledger_capacity ||
         !A::call_header_has_room(context, thread.identity_object()))
       return kernel_error::NO_STACK;
     typename K::FRAME &frame = *context.sp;
