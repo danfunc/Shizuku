@@ -10,6 +10,9 @@ void thread_ladder();
 void memory_ladder();
 void stream_ladder();
 void call_cost();
+#if defined(SHIZUKU_C6_UMODE)
+void c6_stage1_safety();
+#endif
 }
 }
 
@@ -53,6 +56,13 @@ extern "C" void shizuku_c6_run_selftests(void) {
     shizuku::selftest::call_cost();
     shizuku_c6_selftest_record.passed = shizuku::selftest::passed;
     shizuku_c6_selftest_record.failed = shizuku::selftest::failed;
+
+    // 7. c6_stage1_safety (段1: U-mode + PMP + アプリ⇄ドライバ窓分離)
+#if defined(SHIZUKU_C6_UMODE)
+    shizuku::selftest::c6_stage1_safety();
+    shizuku_c6_selftest_record.passed = shizuku::selftest::passed;
+    shizuku_c6_selftest_record.failed = shizuku::selftest::failed;
+#endif
 
     shizuku_c6_selftest_record_finish();
 }

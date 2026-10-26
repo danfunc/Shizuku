@@ -326,9 +326,9 @@ public:
     ppb::mpu->rnr = index;
     ppb::mpu->rlar = 0;
   }
-  // attr0 = 通常メモリ (書き戻し), attr1 = 通常メモリ (キャッシュしない)。
+  // attr0 = 通常メモリ (書き戻し), attr1 = 通常メモリ (キャッシュしない), attr2 = Device-nGnRE
   static void protection_enable() {
-    *ppb::mpu_mair0 = 0xFFu | (0x44u << 8);
+    *ppb::mpu_mair0 = 0xFFu | (0x44u << 8) | (0x04u << 16);
     // ★PRIVDEFENA: region で明示していない場所は「特権だけが触れる」。これが
     //   単一アドレス空間における「カーネル空間」の実体で、MMU が無くても
     //   非特権から見えない領域を作れる (DESIGN §11.1)。
@@ -373,6 +373,20 @@ public:
   static void set_priv(context_t &context, bool privileged) {
     context.control = privileged ? CONTROL_PRIV_PSP : CONTROL_UNPRIV_PSP;
   }
+  [[gnu::always_inline]] static inline bool context_privileged(const context_t &context) {
+    return (context.control & 1u) == 0;
+  }
+  [[gnu::always_inline]] static inline void set_method_argument(exception_frame_t &frame,
+                                                                uintptr_t argument) {
+    frame.r0 = (uint32_t)argument;
+  }
+  [[gnu::always_inline]] static inline void move_descriptor_arguments(exception_frame_t &frame) {
+    frame.r0 = frame.r2;
+  }
+  // S1: 将来の ARM in-place 復帰用型付き payload (r4-r11)。製品 ARM ではまだ未有効化。
+  struct inplace_payload_t {
+    uint32_t r4_r11[8] = {};
+  };
   // ★set_priv と同じ形 (Q8 / DESIGN §11.3)。ここでは値を持たせるだけで、
   //   実際に MPU region へ書くのは復帰の直前 (shizuku_restore_region_window)。
   //   limit==0 は「窓なし」。
@@ -381,9 +395,163 @@ public:
     context.region_base = (uint32_t)base;
     context.region_limit = (uint32_t)limit;
   }
-  // GRANT_REGION が使う MPU region。0/1 は固定 (board.cpp)、2
-  // 以降は空いている。
-  static constexpr uint32_t GRANT_REGION_INDEX = 2;
+  static constexpr bool HAS_OBJECT_PROTECTION = true;
+  // 呼出しで呼び手の r4-r11 を特権の退避域へ移し、呼び先へは 0 で渡す (戻りで戻す)。
+  static constexpr bool SCRUB_CALLEE_SAVED_ON_CALL = true;
+  // 貸与窓の RLAR.LIMIT: 排他的な終端 end を含む最後の 32B ブロックの先頭 (end-1 を 32B に切り下げ)。
+  static constexpr uint32_t grant_window_limit(uintptr_t end) {
+    return (uint32_t)((end - 1u) & ~(uintptr_t)0x1Fu);
+  }
+  // stack 窓は 32B 境界。arena の stack はこの境界に置いて、窓が隣のブロックの header にかからないようにする。
+  static constexpr uintptr_t STACK_WINDOW_ALIGN = 32;
+  static bool context_unprivileged(const context_t &c) { return (c.control & 1u) != 0; }
+
+  // Region 配置 (Plan §4.1)
+  // Region 0: Flash コード固定
+  // Region 1: 無効 (PRIVDEFENA でカーネルのみアクセス可)
+  // Region 2: スレッドスタック窓
+  // Region 3: オブジェクトデータ窓
+  // Region 4: オブジェクト MMIO 窓
+  // Region 5: 動的貸与窓 (GRANT_REGION_INDEX)
+  static constexpr uint32_t REGION_FLASH = 0;
+  static constexpr uint32_t REGION_UNUSED = 1;
+  static constexpr uint32_t REGION_STACK = 2;
+  static constexpr uint32_t REGION_DATA = 3;
+  static constexpr uint32_t REGION_MMIO = 4;
+  static constexpr uint32_t GRANT_REGION_INDEX = 5;
+
+  struct mpu_window_entry {
+    uint32_t rbar = 0;
+    uint32_t rlar = 0;
+  };
+
+  struct object_protection_window {
+    uint32_t owner_id = 0;
+    mpu_window_entry data{};
+    mpu_window_entry mmio{};
+  };
+
+  static inline constexpr bool is_dma_or_system_peripheral(uintptr_t base, uintptr_t limit) {
+    if (base < 0xE0100000u && limit > 0xE0000000u) return true; // PPB / NVIC / SCB
+    if (base < 0x50010000u && limit > 0x50000000u) return true; // RP2350 DMA コントローラ
+    if (base < 0x50500000u && limit > 0x50200000u) return true; // RP2350 PIO0..2
+    return false;
+  }
+
+  static inline constexpr mpu_window_entry encode_data_window(uintptr_t base, uintptr_t limit) {
+    if (limit <= base || base == 0) return {0, 0};
+    uint32_t rbar = ((uint32_t)base & ~0x1Fu) | (ACCESS_RW_ALL << 1) | 1u; // XN=1
+    // RLAR.LIMIT は含む側の最後の 32B ブロック。排他的な終端 (limit) から 1 を引いてそのブロックを指す。
+    uint32_t lim32 = (uint32_t)((limit - 1u) & ~31u);
+    uint32_t rlar = lim32 | (1u << 1) | 1u; // Attr 1 (Normal Non-cacheable), Enable=1
+    return {rbar, rlar};
+  }
+
+  static inline constexpr mpu_window_entry encode_mmio_window(uintptr_t base, uintptr_t limit) {
+    if (limit <= base || base == 0) return {0, 0};
+    if (is_dma_or_system_peripheral(base, limit)) return {0, 0};
+    uint32_t rbar = ((uint32_t)base & ~0x1Fu) | (ACCESS_RW_ALL << 1) | 1u; // XN=1
+    uint32_t lim32 = (uint32_t)((limit - 1u) & ~31u);
+    uint32_t rlar = lim32 | (2u << 1) | 1u; // Attr 2 (Device-nGnRE), Enable=1
+    return {rbar, rlar};
+  }
+
+  static inline constexpr mpu_window_entry encode_stack_window(uintptr_t base, uintptr_t limit) {
+    if (limit <= base || base == 0) return {0, 0};
+    uint32_t rbar = ((uint32_t)base & ~0x1Fu) | (ACCESS_RW_ALL << 1) | 1u; // XN=1
+    // RLAR.LIMIT は含む側の最後の 32B ブロック。排他的な終端 (limit) から 1 を引いてそのブロックを指す。
+    uint32_t lim32 = (uint32_t)((limit - 1u) & ~31u);
+    uint32_t rlar = lim32 | (1u << 1) | 1u; // Attr 1 (Normal Non-cacheable), Enable=1
+    return {rbar, rlar};
+  }
+
+  static constexpr size_t kMaxObjectWindows = 72;  // OBJECT_COUNT (configs/kit.bzl) 以上にする
+  static inline object_protection_window s_object_windows[kMaxObjectWindows] = {};
+  // MPU は core ごとに持つので、「今 region 3/4 に張ってある窓の持ち主」も core ごとに覚える。
+  static uint32_t core_slot() { return *(volatile const uint32_t *)0xD0000000u & 1u; }
+  static inline uint32_t s_programmed_object[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
+  static inline uint32_t s_programmed_stack[2][2] = {};
+
+  static void invalidate_active_object() {
+    s_programmed_object[core_slot()] = 0xFFFFFFFFu;
+  }
+
+  static bool has_object_bounds(uint32_t object_id) {
+    if (object_id >= kMaxObjectWindows) return false;
+    return s_object_windows[object_id].owner_id != 0;
+  }
+
+  static bool set_object_bounds(uint32_t object_id, uintptr_t data_base, uintptr_t data_limit,
+                                uintptr_t mmio_base, uintptr_t mmio_limit) {
+    if (object_id >= kMaxObjectWindows) return false;
+    s_object_windows[object_id].owner_id = object_id;
+    s_object_windows[object_id].data = encode_data_window(data_base, data_limit);
+    s_object_windows[object_id].mmio = encode_mmio_window(mmio_base, mmio_limit);
+    return true;
+  }
+
+  // 窓の書込みは例外復帰の前にしか呼ばれない。例外復帰は文脈同期イベントなので ISB は要らず、
+  // 書込みの完了待ち (DSB) だけ置く。
+  static void apply_object_window(const object_protection_window &win) {
+    if (win.data.rlar != 0) {
+      ppb::mpu->rnr = REGION_DATA;
+      ppb::mpu->rbar = win.data.rbar;
+      ppb::mpu->rlar = win.data.rlar;
+    } else {
+      region_disable(REGION_DATA);
+    }
+    if (win.mmio.rlar != 0) {
+      ppb::mpu->rnr = REGION_MMIO;
+      ppb::mpu->rbar = win.mmio.rbar;
+      ppb::mpu->rlar = win.mmio.rlar;
+    } else {
+      region_disable(REGION_MMIO);
+    }
+    asm volatile("dsb" ::: "memory");
+  }
+
+  // 前回張った値と同じなら書かない (同じ thread へ戻る例外復帰は毎回ここを通る)。
+  static void apply_stack_window(uint32_t rbar, uint32_t rlar) {
+    auto &cache = s_programmed_stack[core_slot()];
+    if (cache[0] == rbar && cache[1] == rlar) return;
+    if (rlar != 0) {
+      ppb::mpu->rnr = REGION_STACK;
+      ppb::mpu->rbar = rbar;
+      ppb::mpu->rlar = rlar;
+      asm volatile("dsb" ::: "memory");
+    } else {
+      region_disable(REGION_STACK);
+    }
+    cache[0] = rbar;
+    cache[1] = rlar;
+  }
+
+  // 非特権の窓 (region 3/4) を id のものにする。すでにそうなら何も書かない。特権は PRIVDEFENA で
+  // 全域に触れ、窓に制限されないので、特権の呼び先/呼び元のときは窓を触らない (呼ばない)。
+  static void ensure_object_window(uint32_t id) {
+    uint32_t &programmed = s_programmed_object[core_slot()];
+    if (programmed == id) return;  // 同じ窓の組は書換えを省く
+    if (id >= kMaxObjectWindows) {
+      region_disable(REGION_DATA);
+      region_disable(REGION_MMIO);
+      programmed = 0xFFFFFFFFu;
+      return;
+    }
+    apply_object_window(s_object_windows[id]);
+    programmed = id;
+  }
+
+  template <class Frame>
+  static void switch_callee_protection(context_t &context, Frame &frame, uint32_t callee_id, bool privileged) {
+    (void)context;
+    (void)frame;
+    if (!privileged) ensure_object_window(callee_id);
+  }
+
+  // 呼び元が非特権のときだけ呼ぶ (戻り先の窓を戻す)。
+  static void switch_caller_protection(uint32_t caller_object) {
+    ensure_object_window(caller_object);
+  }
   static void stack_limit_set(context_t &context, uintptr_t limit) {
     context.psplim = (uint32_t)limit;
   }
@@ -457,6 +625,7 @@ public:
 // context_t のレイアウトは region 数・優先度 bit 数に依らないので、RP2350 の実体で代表して検査する。
 using armv8m_rp2350 = armv8m<8, 4>;
 // armv8m_ctx.S の .equ と一致させる (ズレたら文脈が黙って壊れる)。
+#if UINTPTR_MAX == 0xFFFFFFFFu  // asm のオフセットは 32bit の実機の配置。host (64bit) では検査しない
 static_assert(offsetof(armv8m_rp2350::context_t, sp) == 32,
               "context_t layout mismatch: sp offset (asm CTX_SP)");
 static_assert(offsetof(armv8m_rp2350::context_t, exc_return) == 36,
@@ -471,6 +640,7 @@ static_assert(offsetof(armv8m_rp2350::context_t, region_base) == 112,
               "context_t layout mismatch: region_base offset");
 static_assert(offsetof(armv8m_rp2350::context_t, region_limit) == 116,
               "context_t layout mismatch: region_limit offset");
+#endif
 // 戻り口 (armv8m_ctx.S) が即値で埋め込んでいる ABI 定数との一致。
 static_assert((uintptr_t)shizuku::primitive::RETURN == 2,
               "armv8m_ctx.S の return stub が撃つ番号と一致させること");

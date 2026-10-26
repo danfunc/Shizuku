@@ -185,6 +185,10 @@ void shizuku::app_entry() {
   boot_stage(kUnprivileged);
 #endif
   shizuku::selftest::unprivileged_probe();
+  shizuku::selftest::rp2350_u_cost();
+  shizuku::selftest::register_leak_test();
+
+
 
   // ★2 本目のコアを起こす。ここまでの自己テストが 1 コアで通っていることを
   //   確かめてから起こす — 先に起こすと、失敗したときに「並行のせいか元からか」を

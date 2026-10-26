@@ -137,6 +137,34 @@ template <> uintptr_t KERNEL::caller_object(uint32_t thread_id) const {
 #if defined(SHIZUKU_DEEP_DIAG)
 extern "C" { volatile uint32_t shizuku_push_diag[6]; volatile uint32_t shizuku_push_diag_n; volatile uint32_t shizuku_push_diag_kind; volatile uint32_t shizuku_push_diag_reject_kind; }
 #endif
+// 呼び手の r4-r11 を台帳へ退避して消す / 台帳から戻す。r4 を持たない文脈 (RV32) では何もしない
+// (型に依存させてあるので、RV32 でも discard された枝が検査で落ちない)。
+template <class A, class Thread, class Ctx, class Header>
+static bool stash_callee_saved(Thread &thread, Ctx *context, Header *header) {
+  if constexpr (requires { A::SCRUB_CALLEE_SAVED_ON_CALL; } && requires { context->r4; }) {
+    const uint32_t regs[8] = {context->r4, context->r5, context->r6, context->r7,
+                              context->r8, context->r9, context->r10, context->r11};
+    if (!Thread::ledger_accessor::save_callee_saved(thread, thread.call_stack.depth, regs))
+      return false;
+    context->r4 = context->r5 = context->r6 = context->r7 = 0;
+    context->r8 = context->r9 = context->r10 = context->r11 = 0;
+    header->saved.r4 = header->saved.r5 = header->saved.r6 = header->saved.r7 = 0;
+    header->saved.r8 = header->saved.r9 = header->saved.r10 = header->saved.r11 = 0;
+  }
+  return true;
+}
+template <class A, class Thread, class Ctx>
+static bool unstash_callee_saved(Thread &thread, Ctx *context) {
+  if constexpr (requires { A::SCRUB_CALLEE_SAVED_ON_CALL; } && requires { context->r4; }) {
+    uint32_t regs[8] = {};
+    if (!Thread::ledger_accessor::restore_callee_saved(thread, thread.call_stack.depth - 1, regs))
+      return false;
+    context->r4 = regs[0]; context->r5 = regs[1]; context->r6 = regs[2]; context->r7 = regs[3];
+    context->r8 = regs[4]; context->r9 = regs[5]; context->r10 = regs[6]; context->r11 = regs[7];
+  }
+  return true;
+}
+
 template <>
 SHIZUKU_HOT bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                              KERNEL::FRAME **frame) {
@@ -202,6 +230,26 @@ SHIZUKU_HOT bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT
   // ★識別情報は非特権から届かない特権 ledger に置く。ここには復帰用文脈だけを残す。
   header->saved = *context; // sp を含めて丸ごと (= 元フレームの位置も記録される)
 
+  // ★戻りの権威を特権台帳に記録 (Plan §5)
+  // in-place 経路を持つ arch (RISC-V) は native_call.hpp 側の台帳が権威なので触らない。
+  if constexpr (ARCH::HAS_OBJECT_PROTECTION && !arch_call_in_place<ARCH>()) {
+    const uintptr_t caller_pc = (context->sp != nullptr) ? ARCH::frame_pc(*context->sp) : 0;
+    if (!THREAD::ledger_accessor::record_caller_return_authority(
+            thread, thread.call_stack.depth,
+            caller_pc,
+            (uintptr_t)context->sp,
+            !is_context_unprivileged(context) ? 1 : 0,
+            context->region_base,
+            context->region_limit,
+            (uint16_t)thread.call_stack.call_count,
+            0))
+      return false;
+    // 呼び手の callee-saved (r4-r11) は台帳へ退避し、呼び先へは消して渡す。user stack の
+    // ヘッダの写しも消す (呼び先から読めるため)。戻りは台帳から戻す (call_frame_pop)。
+    if (!stash_callee_saved<ARCH>(thread, context, header))
+      return false;
+  }
+
   // ★元の例外フレームは動かさない (I-3)。下へ複製するのは書き換え用の作業コピー。
   __builtin_memcpy((void *)callee_frame, (const void *)context->sp, frame_bytes);
   context->sp = (FRAME *)callee_frame;
@@ -236,7 +284,7 @@ SHIZUKU_HOT bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT 
   if (thread.call_stack.depth == 0)
     return false;
 #else
-  if (thread.call_stack.top == 0)
+  if (thread.call_stack.top == 0 || thread.call_stack.depth == 0)
     return false;
 #endif
   if (arch_call_in_place<ARCH>()) {
@@ -261,6 +309,32 @@ SHIZUKU_HOT bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT 
   const call_frame_header *header = (const call_frame_header *)thread.call_stack.top;
   const uintptr_t previous = header->prev;
   *context = header->saved;
+
+  // ★戻りの権威は user stack 上の header ではなく特権台帳 (Plan §5)
+  if constexpr (ARCH::HAS_OBJECT_PROTECTION && !arch_call_in_place<ARCH>()) {
+    uintptr_t ret_pc = 0;
+    uintptr_t ret_sp = 0;
+    bool ret_privileged = false;
+    uintptr_t ret_region_base = 0;
+    uintptr_t ret_region_limit = 0;
+    // 記録が読めないときは panic。header の値で黙って続けると権威が user stack に戻る。
+    if (!THREAD::ledger_accessor::restore_caller_return_authority(
+            thread, thread.call_stack.depth - 1,
+            ret_pc, ret_sp, ret_privileged,
+            ret_region_base, ret_region_limit))
+      BOARD::panic("call return authority missing");
+
+    // 台帳の値を権威として強制反映 (user stack の header からの読み戻し値は上書き)
+    context->sp = (FRAME *)ret_sp;
+    ARCH::set_priv(*context, ret_privileged);
+    ARCH::set_region_window(*context, ret_region_base, ret_region_limit);
+    ARCH::set_entry(*context->sp, ret_pc, ARCH::frame_lr(*context->sp));
+
+    // 呼び手の callee-saved (r4-r11) は台帳から戻す (ヘッダの写しは消してあるため)。
+    if (!unstash_callee_saved<ARCH>(thread, context))
+      BOARD::panic("call return callee-saved missing");
+  }
+
   *frame = context->sp;
   if (is_call) {
     thread.call_stack.call_count--;
@@ -274,6 +348,14 @@ SHIZUKU_HOT bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT 
   }
   thread.call_stack.top = previous;
   thread.call_stack.depth--;
+
+  // 復帰先 caller の保護窓を復元
+  const uint32_t caller_obj = thread.call_stack.call_count == 0
+      ? thread.base_object
+      : thread.call_stack.current_call_object;
+  // 戻り先が特権なら窓は要らない (特権は窓に制限されない)。非特権のときだけ、同じ窓なら省いて戻す。
+  if (is_context_unprivileged(context))
+    ARCH::switch_caller_protection(caller_obj);
   return true;
 }
 
@@ -313,7 +395,9 @@ SHIZUKU_HOT kernel_error KERNEL::enter_call(KERNEL::THREAD &thread, KERNEL::CONT
     if (!ARCH::call_entry_has_return_room(*context, sizeof(call_frame_header)))
       return kernel_error::NO_STACK;
   }
-  if (unwind_floor > UINT16_MAX ||
+  // 4A: 最後の 1 枠 (ledger_capacity - 1) は return dispatch 専用に先取り予約する。
+  if (unwind_floor > UINT16_MAX || thread.ledger == nullptr ||
+      unwind_floor + 1u >= thread.ledger_capacity ||
       !(arch_call_in_place<ARCH>()
             ? header_push_of<ARCH>(thread, *context, **frame, via, unwind_floor)
             : call_frame_push(thread, context, frame)))
@@ -338,9 +422,12 @@ SHIZUKU_HOT kernel_error KERNEL::enter_call(KERNEL::THREAD &thread, KERNEL::CONT
     return kernel_error::OK;
   }
 #endif
-  entry = {request.callee_object, request.parent_handler_object,
-           request.parent_handler_entry, (uint8_t)request.callee_kind,
-           via, (uint16_t)unwind_floor};
+  entry.object = request.callee_object;
+  entry.handler_object = request.parent_handler_object;
+  entry.handler_entry = request.parent_handler_entry;
+  entry.kind = (uint8_t)request.callee_kind;
+  entry.via = via;
+  entry.unwind_floor = (uint16_t)unwind_floor;
   thread.call_stack.caller_object = thread.call_stack.call_count == 0
                                         ? thread.base_object
                                         : thread.call_stack.current_call_object;
@@ -376,6 +463,9 @@ kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
   ARCH::set_args(**frame, request.args);
   ARCH::set_priv(*context, (request.protection & PROTECTION_UNPRIVILEGED) == 0);
   ARCH::set_region_window(*context, request.region_base, request.region_limit);
+  if constexpr (requires { ARCH::switch_callee_protection(*context, **frame, request.callee_object, (request.protection & PROTECTION_UNPRIVILEGED) == 0); }) {
+    ARCH::switch_callee_protection(*context, **frame, request.callee_object, (request.protection & PROTECTION_UNPRIVILEGED) == 0);
+  }
   return kernel_error::OK;
 }
 
@@ -586,8 +676,8 @@ template <> SHIZUKU_HOT bool KERNEL::svc_forward_child_exit(KERNEL::CONTEXT *con
 //   kobj の中継 (call_method → primitive CALL) をやめ、m_objects[id].methods[method] を
 //   O(1) で引いて呼び先へ直接入る。台帳段は本当の呼び出し元の上に積まれるので、
 //   呼び先から見た GET_CALLER_OBJECT は呼び出し元そのものになる。
-//   エラーの種類・順序は従来と同じ (BAD_OBJECT → BAD_METHOD → UNDECLARED_METHOD →
-//   NO_STACK)。応答は (error, 0)。
+//   エラーの種類・順序は BAD_OBJECT → NOT_PRIVILEGED → BAD_METHOD → UNDECLARED_METHOD →
+//   NO_STACK。応答は (error, 0)。
 template <> SHIZUKU_HOT bool KERNEL::svc_call_method(KERNEL::CONTEXT *context) {
   THREAD &thread = current_thread();
   // ヘッダ枠方式 (RV32) の本体は native_call.hpp (例外入口が 1 関数に展開するものと同じ)。
@@ -598,7 +688,7 @@ template <> SHIZUKU_HOT bool KERNEL::svc_call_method(KERNEL::CONTEXT *context) {
   FRAME *frame = context->sp;
   call_request request{};
   const object_error lookup = kernel_object_instance.method_call_request(
-      ARCH::arg(*frame, 1), ARCH::arg(*frame, 2), request);
+      ARCH::arg(*frame, 1), ARCH::arg(*frame, 2), thread.identity_object(), request);
   if (lookup != object_error::OK) {
     ARCH::set_result(*frame, (uintptr_t)lookup, 0);
     return true;
@@ -649,12 +739,37 @@ template <> SHIZUKU_HOT bool KERNEL::svc_set_budget(KERNEL::CONTEXT *context) {
 
 // CALL_METHOD_DESCRIPTOR (33): 記述子の引き・世代・権限の検査は表の錠の中、台帳段は通常の CALL と
 //   同じ形 (via = LEDGER_DESCRIPTOR_CALL)。本体は native_call.hpp (例外入口が 1 関数に展開する
-//   ものと同じ)。ヘッダ枠方式でない ARCH (ARM) は未対応 (UNKNOWN_API)。
+//   ものと同じ)。ヘッダ枠方式でない ARCH (ARM) は do_call 経由 (引数は a2 の 1 個だけ)。
 //   Region grants can change after descriptor creation. The live trusted window is used,
 //   while keeping authorization out of the O(1) call path.
 template <> SHIZUKU_HOT bool KERNEL::svc_call_descriptor(KERNEL::CONTEXT *context) {
   if (!arch_call_in_place<ARCH>()) {
-    ARCH::set_result(*context->sp, (uintptr_t)object_error::UNKNOWN_API, 0);
+    // ヘッダ枠方式でない ARCH (ARM): 記述子の検査は同じ (index・持ち主の世代・呼び先の version)、
+    //   入場は CALL_METHOD と同じ do_call を通す。引数は a2 → 呼び先の a0 (ARM の svc ABI は
+    //   a0..a4 だけなので a3 以降は載せない)。
+    THREAD &thread = current_thread();
+    FRAME *frame = context->sp;
+    object_error lookup = object_error::OK;
+    const auto *desc = kernel_object_instance.find_method_descriptor(
+        thread.identity_object(), (uint32_t)ARCH::arg(*frame, 1), thread.identity_generation(),
+        lookup);
+    if (desc == nullptr) {
+      ARCH::set_result(*frame, (uintptr_t)lookup, 0);
+      return true;
+    }
+    if (thread.call_stack.call_count >= KERNEL_OBJECT::MAX_DEPTH) {
+      ARCH::set_result(*frame, (uintptr_t)object_error::NO_STACK, 0);
+      return true;
+    }
+    call_request request =
+        kernel_object_instance.callee_request(desc->callee, desc->target_entry);
+    request.args[0] = ARCH::arg(*frame, 2);
+    const kernel_error entered = do_call(thread, context, &frame, request);
+    if (entered != kernel_error::OK)
+      ARCH::set_result(*frame, (uintptr_t)(entered == kernel_error::NO_STACK
+                                               ? object_error::NO_STACK
+                                               : object_error::BAD_DESCRIPTOR),
+                       0);
     return true;
   }
 #if defined(SHIZUKU_DEEP_DIAG)

@@ -82,6 +82,19 @@ struct dispatcher_test_access {
   static void invalidate_descriptor(uint32_t owner, uint32_t index) {
     KERNEL_OBJECT::invalidate_descriptor(kernel_object_instance.m_descriptors[owner][index]);
   }
+  static void set_seq(uint32_t owner, uint32_t index, uint8_t seq) {
+    kernel_object_instance.m_descriptors[owner][index].seq = seq;
+  }
+  static uint8_t get_seq(uint32_t owner, uint32_t index) {
+    return kernel_object_instance.m_descriptors[owner][index].seq;
+  }
+  static void init_descriptors() {
+    for (uint32_t o = 0; o < KERNEL_OBJECT::OBJECT_COUNT; ++o) {
+      for (uint32_t i = 0; i < KERNEL_OBJECT::METHOD_DESCRIPTOR_CAPACITY; ++i) {
+        invalidate_descriptor(o, i);
+      }
+    }
+  }
   static void set_version(uint32_t id, uint32_t generation) {
     kernel_object_instance.m_objects[id].generation = generation;
   }
@@ -102,6 +115,19 @@ struct dispatcher_test_access {
     object.parent_handler_object = parent_handler_object;
     object.parent_handler_entry = parent_handler_entry;
     object.methods[method] = entry;
+  }
+  static void set_creator(uint32_t id, uint32_t creator) {
+    kernel_object_instance.m_objects[id].creator_object = creator;
+  }
+  static void set_kind(uint32_t id, object_kind kind) {
+    kernel_object_instance.m_objects[id].kind = kind;
+  }
+  static void set_kernel_role(uint32_t id, bool role) {
+    kernel_object_instance.m_objects[id].kernel_role = role;
+  }
+  static void set_parent_handler(uint32_t id, uint32_t parent, uintptr_t entry) {
+    kernel_object_instance.m_objects[id].parent_handler_object = parent;
+    kernel_object_instance.m_objects[id].parent_handler_entry = entry;
   }
   static void undeclare(uint32_t id, uintptr_t method) {
     kernel_object_instance.m_objects[id].methods[method] = nullptr;
@@ -147,6 +173,23 @@ void plic_vector_mode::pend_context_switch() {}
 template <>
 bool plic_vector_mode::faulted_in_thread_mode<shizuku::archs::rv32_c6::context_t>(
     const shizuku::archs::rv32_c6::context_t &) { return true; }
+#if defined(SHIZUKU_C6_UMODE)
+static uintptr_t g_simulated_stack_base = 0;
+static uintptr_t g_simulated_stack_limit = 0;
+uintptr_t plic_vector_mode::kstack_top() { return 0x40812000u; }
+void plic_vector_mode::switch_object_pmp(uint32_t) {}
+bool plic_vector_mode::is_kstack_address(uintptr_t) { return false; }
+uintptr_t plic_vector_mode::kstack_limit() { return 0; }
+bool plic_vector_mode::user_stack_bounds(uint32_t, uintptr_t &base, uintptr_t &limit) {
+  base = g_simulated_stack_base;
+  limit = g_simulated_stack_limit;
+  return base != 0 && limit > base;
+}
+template <class Context, class Frame>
+void plic_vector_mode::enter_u_object(Context &, Frame &, uint32_t) {}
+template void plic_vector_mode::enter_u_object<shizuku::archs::rv32_c6::context_t, shizuku::archs::rv32_c6::exception_frame_t>(
+    shizuku::archs::rv32_c6::context_t &, shizuku::archs::rv32_c6::exception_frame_t &, uint32_t);
+#endif
 }
 
 using namespace shizuku;
@@ -216,6 +259,7 @@ static bool top_return_privileged(const KERNEL::THREAD &t) {
 
 static void run_dispatcher_tests() {
   printf("[TEST] Running V1 kernel dispatcher host tests...\n");
+  selftest::dispatcher_test_access::init_descriptors();
 
   alignas(8) static uint8_t thread_storage[KERNEL::thread_record_bytes() * 4];
   kernel_instance.set_thread_storage(thread_storage, sizeof(thread_storage));
@@ -238,6 +282,10 @@ static void run_dispatcher_tests() {
       ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
 
   alignas(16) static uint8_t simulated_stack[16384]; // A→B→C の 3 段が余白検査に収まる大きさ
+#if defined(SHIZUKU_C6_UMODE)
+  chips::esp32_c6::g_simulated_stack_base = reinterpret_cast<uintptr_t>(simulated_stack);
+  chips::esp32_c6::g_simulated_stack_limit = reinterpret_cast<uintptr_t>(simulated_stack + sizeof(simulated_stack));
+#endif
   auto *ctx = kernel_instance.current_context();
   ARCH::stack_limit_set(*ctx, reinterpret_cast<uintptr_t>(simulated_stack));
   // exception_frame placed on stack with room for frames
@@ -431,6 +479,9 @@ static void run_dispatcher_tests() {
   // 5. Unprivileged origin: privilege preservation & privileged API rejection
   // -------------------------------------------------------------------------
   ctx->privileged = false;
+#if defined(SHIZUKU_C6_UMODE)
+  ARCH::set_u_stack_pointer(*frame, reinterpret_cast<uintptr_t>(frame) + sizeof(ARCH::exception_frame_t));
+#endif
 
   // 5a. Direct GET with unprivileged origin
   frame->a0 = (uintptr_t)object_api::GET_CURRENT_OBJECT;
@@ -566,6 +617,9 @@ static void run_dispatcher_tests() {
     ctx->sp = frame;
     ctx->privileged = privileged;
     frame->a4 = 0;
+#if defined(SHIZUKU_C6_UMODE)
+    ARCH::set_u_stack_pointer(*frame, reinterpret_cast<uintptr_t>(frame) + sizeof(ARCH::exception_frame_t));
+#endif
   };
   fresh(ROOT_APP_ID, true);
   frame->a0 = (uintptr_t)primitive::RETURN;
@@ -609,10 +663,16 @@ static void run_dispatcher_tests() {
   using access = selftest::dispatcher_test_access;
   constexpr uint32_t B_ID = LEAF_ID, C_ID = NEST_ID;
   constexpr uintptr_t ENTRY_B = 0x42030000, ENTRY_C = 0x42031000;
+  access::declare(ROOT_APP_ID, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(0x42000000), 0,
+                  ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
   access::declare(B_ID, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(ENTRY_B), 0,
                   ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
   access::declare(C_ID, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(ENTRY_C),
                   OBJECT_UNPRIVILEGED, ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+  // 親子関係の樹立: A (ROOT_APP_ID) が B の親、B が C の親 (8c の B->C 呼出しのため)。
+  // B に kernel_role は付けず、正当な親子関係 (A->B, B->C) で検証する。
+  access::set_creator(B_ID, ROOT_APP_ID);
+  access::set_creator(C_ID, B_ID);
   auto count_dispatch_frames = [&]() {
     unsigned n = 0;
     for (uint32_t i = 0; i < thread.call_stack.depth; ++i)
@@ -698,7 +758,7 @@ static void run_dispatcher_tests() {
     assert(rec.prev_call == 0 && rec.ret_pc == A_PC && rec.ret_privileged == 1);
     assert(rec.ret_region_base == 0 && rec.ret_region_limit == 0 && rec.generation == 0);
     assert(thread.call_stack.call_top == 1 && thread.call_stack.call_count == 1);
-    assert(thread.identity_object() == B_ID && thread.call_caller_object() == 0 /* fresh() の base */);
+    assert(thread.identity_object() == B_ID && thread.call_caller_object() == ROOT_APP_ID /* fresh() の base */);
 #else
     const auto *h = (const ARCH::call_header_t *)thread.call_stack.top;
     assert((uintptr_t)h == reinterpret_cast<uintptr_t>(frame) + sizeof(KERNEL::FRAME));
@@ -845,7 +905,17 @@ static void run_dispatcher_tests() {
       assert(ctx->privileged == privileged);
     }
     // NO_STACK: 呼出し段が MAX_DEPTH に達している。
+    // (呼び出し元の識別は call_count != 0 なので current_call_object / ledger から引く)
     fresh(ROOT_APP_ID, privileged);
+#if defined(SHIZUKU_LEAN_LEDGER)
+    thread.ledger[0].object = ROOT_APP_ID;
+    thread.ledger[0].generation = 0;
+    thread.ledger[0].prev_call = 0;
+    thread.call_stack.call_top = 1;
+#else
+    thread.call_stack.current_call_object = ROOT_APP_ID;
+    thread.call_stack.current_call_generation = 0;
+#endif
     thread.call_stack.call_count = KERNEL_OBJECT::MAX_DEPTH;
     frame->a0 = (uintptr_t)object_api::CALL_METHOD;
     frame->a1 = B_ID;
@@ -855,10 +925,18 @@ static void run_dispatcher_tests() {
     assert(frame->a0 == (uintptr_t)object_error::NO_STACK);
     assert(frame->a1 == 0);
     assert(ctx->privileged == privileged);
+#if defined(SHIZUKU_LEAN_LEDGER)
+    thread.call_stack.call_top = 0;
+#else
+    thread.call_stack.current_call_object = 0;
+#endif
+    thread.call_stack.call_count = 0;
   }
   printf("  8f. CALL_METHOD errors BAD_OBJECT x2 / BAD_METHOD / UNDECLARED_METHOD / NO_STACK reply (error,0), depth 0, privilege unchanged: PASS\n");
 
   // 8g. 非特権の呼び出し元が非特権オブジェクトを呼んでも特権化しない。戻りで元の文脈。
+  // 8g では A から C への直接呼出し (親→子) を検証するため、C の作成者を A (ROOT_APP_ID) に設定する。
+  access::set_creator(C_ID, ROOT_APP_ID);
   fresh(ROOT_APP_ID, false);
   frame->a0 = (uintptr_t)object_api::CALL_METHOD;
   frame->a1 = C_ID;
@@ -881,6 +959,11 @@ static void run_dispatcher_tests() {
 
   // 8h. CALL_METHOD_DESCRIPTOR (33)。A (ROOT_APP_ID, 世代 0) が持つ記述子 3 = B、4 = C (非特権、窓あり)。
   //     記述子の検査は表の錠の中 (取り・放しの対が 1 回)。台帳段は LEDGER_DESCRIPTOR_CALL で dispatch 段なし。
+  for (uint32_t o = 0; o < KERNEL_OBJECT::OBJECT_COUNT; ++o) {
+    for (uint32_t i = 0; i < KERNEL_OBJECT::METHOD_DESCRIPTOR_CAPACITY; ++i) {
+      access::invalidate_descriptor(o, i);
+    }
+  }
   constexpr uintptr_t ENTRY_BD = 0x42040000, ENTRY_CD = 0x42041000;
   access::declare(ROOT_APP_ID, 5, reinterpret_cast<KERNEL_OBJECT::method_t>(0x42001000), 0,
                   ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY); // A を表に作る (記述子の持ち主は created であること)
@@ -1098,13 +1181,46 @@ static void run_dispatcher_tests() {
     }
     access::invalidate_descriptor(ROOT_APP_ID, 14);
     access::invalidate_descriptor(ROOT_APP_ID, 15);
+
+    // (5) seq が奇数の項目を読むと STALE (書込み中の検出)。偶数に戻すと正常に通る。
+    access::declare_descriptor(ROOT_APP_ID, 5, B_ID, ENTRY_BD, 0, 7);
+    desc_call(ROOT_APP_ID, 5, 0x41);
+    assert(kernel_instance.current_depth() == 1 && thread.ledger[0].object == B_ID);
+    desc_return(0x42);
+    assert(kernel_instance.current_depth() == 0 && frame->a1 == 0x42);
+    // seq を奇数に据える -> STALE_DESCRIPTOR (項目は有効な呼び先を持つが、書き込み中と判定)
+    access::set_seq(ROOT_APP_ID, 5, 1);
+    desc_call(ROOT_APP_ID, 5, 0x43);
+    assert(frame->a0 == (uintptr_t)object_error::STALE_DESCRIPTOR && kernel_instance.current_depth() == 0);
+    // seq を偶数に戻す -> 通る
+    access::set_seq(ROOT_APP_ID, 5, 2);
+    desc_call(ROOT_APP_ID, 5, 0x44);
+    assert(kernel_instance.current_depth() == 1 && thread.ledger[0].object == B_ID);
+    desc_return(0x45);
+    assert(kernel_instance.current_depth() == 0 && frame->a1 == 0x45);
+
+    // (6) 削除直後・差し替え直後の desc call
+    // 呼び先の差し替え直後: 呼び先オブジェクトが再生成 (REPLACE) されると version が上がり STALE
+    access::set_version(B_ID, 9);
+    desc_call(ROOT_APP_ID, 5, 0x46);
+    assert(frame->a0 == (uintptr_t)object_error::STALE_DESCRIPTOR && kernel_instance.current_depth() == 0);
+    access::set_version(B_ID, 7); // 戻す
+    // 持ち主の差し替え直後: 持ち主の世代不一致は STALE
+    access::declare_descriptor(ROOT_APP_ID, 5, B_ID, ENTRY_BD, 3, 7); // owner_gen = 3 (caller は 0)
+    desc_call(ROOT_APP_ID, 5, 0x47);
+    assert(frame->a0 == (uintptr_t)object_error::STALE_DESCRIPTOR && kernel_instance.current_depth() == 0);
+    // 記述子の無効化 (invalidate_descriptor) 直後: callee=NONE で BAD_DESCRIPTOR
+    access::invalidate_descriptor(ROOT_APP_ID, 5);
+    desc_call(ROOT_APP_ID, 5, 0x48);
+    assert(frame->a0 == (uintptr_t)object_error::BAD_DESCRIPTOR && kernel_instance.current_depth() == 0);
   }
-  printf("  8l. descriptor entry = precomputed window (a row window change without a version bump is not seen), version bump -> STALE and nothing pushed, re-declare picks up the new window, restored version passes again, per-owner tables (owner 7 index 13 != root index 13), uncreatable entries stay invalid: PASS\n");
+  printf("  8l. descriptor entry = precomputed window (a row window change without a version bump is not seen), version bump -> STALE and nothing pushed, re-declare picks up the new window, restored version passes again, per-owner tables (owner 7 index 13 != root index 13), uncreatable entries stay invalid, seq odd -> STALE, replace/invalidate -> STALE/BAD: PASS\n");
 
   // 8k. 深さ上限と BAD_REQUEST が同時に成り立つ CALL_METHOD は、従来どおり NO_STACK を先に返す。
   //     (呼び先が root ハンドラの ID を名乗る場合の BAD_REQUEST → BAD_OBJECT より、深さの検査が先)
   access::declare(ROOT_KOBJ_ID, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(0x42070000), 0,
                   ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+  access::set_creator(ROOT_KOBJ_ID, ROOT_APP_ID);
   fresh(ROOT_APP_ID, true);
   frame->a0 = (uintptr_t)object_api::CALL_METHOD;
   frame->a1 = ROOT_KOBJ_ID;
@@ -1112,13 +1228,160 @@ static void run_dispatcher_tests() {
   kernel_instance.svc_dispatch(ctx);
   assert(kernel_instance.current_depth() == 0 && frame->a0 == (uintptr_t)object_error::BAD_OBJECT && frame->a1 == 0);
   fresh(ROOT_APP_ID, true);
+#if defined(SHIZUKU_LEAN_LEDGER)
+  thread.ledger[0].object = ROOT_APP_ID;
+  thread.ledger[0].generation = 0;
+  thread.ledger[0].prev_call = 0;
+  thread.call_stack.call_top = 1;
+#else
+  thread.call_stack.current_call_object = ROOT_APP_ID;
+  thread.call_stack.current_call_generation = 0;
+#endif
   thread.call_stack.call_count = KERNEL_OBJECT::MAX_DEPTH;
   frame->a0 = (uintptr_t)object_api::CALL_METHOD;
   frame->a1 = ROOT_KOBJ_ID;
   frame->a2 = 0;
   kernel_instance.svc_dispatch(ctx);
   assert(kernel_instance.current_depth() == 0 && frame->a0 == (uintptr_t)object_error::NO_STACK && frame->a1 == 0);
+#if defined(SHIZUKU_LEAN_LEDGER)
+  thread.call_stack.call_top = 0;
+#else
+  thread.call_stack.current_call_object = 0;
+#endif
+  thread.call_stack.call_count = 0;
   printf("  8k. CALL_METHOD to the root handler's ID: BAD_OBJECT (impersonation refused, nothing pushed); with the depth limit also reached NO_STACK wins, as before: PASS\n");
+
+  // 8m. CALL_METHOD 親子・権限チェックの網羅検証:
+  //     - 兄弟・孫・無関係への CALL_METHOD は NOT_PRIVILEGED
+  //     - 親・直接の子・自分自身・kernel 役からは OK
+  //     - 存在しない相手は BAD_OBJECT のまま
+  //     - エラー優先度: BAD_OBJECT → NOT_PRIVILEGED → BAD_METHOD → UNDECLARED_METHOD
+  {
+    constexpr uint32_t P_ID = 20;  // 親
+    constexpr uint32_t X_ID = 21;  // 主体 (caller)
+    constexpr uint32_t S_ID = 22;  // 兄弟 (creator = P_ID)
+    constexpr uint32_t C_ID = 23;  // 直接の子 (creator = X_ID)
+    constexpr uint32_t GC_ID = 24; // 孫 (creator = C_ID)
+    constexpr uint32_t U_ID = 25;  // 無関係 (creator = 30)
+    constexpr uint32_t K_ID = 26;  // kernel 役 (kernel_role = true)
+
+    constexpr uintptr_t ENTRY_P = 0x42080000;
+    constexpr uintptr_t ENTRY_X = 0x42081000;
+    constexpr uintptr_t ENTRY_S = 0x42082000;
+    constexpr uintptr_t ENTRY_C = 0x42083000;
+    constexpr uintptr_t ENTRY_GC = 0x42084000;
+    constexpr uintptr_t ENTRY_U = 0x42085000;
+    constexpr uintptr_t ENTRY_K = 0x42086000;
+
+    access::declare(P_ID, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(ENTRY_P), 0, ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+    access::declare(X_ID, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(ENTRY_X), 0, ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+    access::declare(S_ID, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(ENTRY_S), 0, ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+    access::declare(C_ID, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(ENTRY_C), 0, ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+    access::declare(GC_ID, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(ENTRY_GC), 0, ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+    access::declare(U_ID, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(ENTRY_U), 0, ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+    access::declare(K_ID, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(ENTRY_K), 0, ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+
+    access::set_creator(P_ID, ROOT_APP_ID);
+    access::set_creator(X_ID, P_ID);
+    access::set_creator(S_ID, P_ID);
+    access::set_creator(C_ID, X_ID);
+    access::set_creator(GC_ID, C_ID);
+    access::set_creator(U_ID, 30);
+    access::set_creator(K_ID, ROOT_APP_ID);
+    access::set_kernel_role(K_ID, true);
+
+    auto try_call = [&](uint32_t caller, uint32_t target, uintptr_t method) -> uintptr_t {
+      fresh(caller, true);
+      frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+      frame->a1 = target;
+      frame->a2 = method;
+      frame->a3 = 0x88;
+      kernel_instance.svc_dispatch(ctx);
+      return frame->a0;
+    };
+
+    // 1. 存在しない相手は BAD_OBJECT のまま (NOT_PRIVILEGED より先)
+    assert(try_call(X_ID, KERNEL_OBJECT::OBJECT_COUNT, 0) == (uintptr_t)object_error::BAD_OBJECT);
+    assert(try_call(X_ID, 29, 0) == (uintptr_t)object_error::BAD_OBJECT); // 29 は未作成
+
+    // 2. 権限のない相手 (兄弟・孫・無関係) への呼出しは NOT_PRIVILEGED
+    assert(try_call(X_ID, S_ID, 0) == (uintptr_t)object_error::NOT_PRIVILEGED);
+    assert(try_call(X_ID, GC_ID, 0) == (uintptr_t)object_error::NOT_PRIVILEGED);
+    assert(try_call(X_ID, U_ID, 0) == (uintptr_t)object_error::NOT_PRIVILEGED);
+
+    // 3. エラー順序: NOT_PRIVILEGED は BAD_METHOD / UNDECLARED_METHOD より先に返る
+    // 兄弟 S_ID に対し、存在しない method 番号 (BAD_METHOD 相当) を呼んでも NOT_PRIVILEGED が返る
+    assert(try_call(X_ID, S_ID, KERNEL_OBJECT::METHOD_COUNT) == (uintptr_t)object_error::NOT_PRIVILEGED);
+    // 兄弟 S_ID に対し、未 export の method 1 (UNDECLARED_METHOD 相当) を呼んでも NOT_PRIVILEGED が返る
+    assert(try_call(X_ID, S_ID, 1) == (uintptr_t)object_error::NOT_PRIVILEGED);
+    // 孫 GC_ID に対しても同様
+    assert(try_call(X_ID, GC_ID, KERNEL_OBJECT::METHOD_COUNT) == (uintptr_t)object_error::NOT_PRIVILEGED);
+    assert(try_call(X_ID, GC_ID, 1) == (uintptr_t)object_error::NOT_PRIVILEGED);
+    // 無関係 U_ID に対しても同様
+    assert(try_call(X_ID, U_ID, KERNEL_OBJECT::METHOD_COUNT) == (uintptr_t)object_error::NOT_PRIVILEGED);
+    assert(try_call(X_ID, U_ID, 1) == (uintptr_t)object_error::NOT_PRIVILEGED);
+
+    // 4. 許可される相手への呼出し (親・直接の子・自分自身・kernel 役)
+    // 自分自身:
+    fresh(X_ID, true);
+    frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+    frame->a1 = X_ID;
+    frame->a2 = 0;
+    kernel_instance.svc_dispatch(ctx);
+    assert(kernel_instance.current_depth() == 1 && thread.ledger[0].object == X_ID);
+    assert(ARCH::frame_pc(*ctx->sp) == ENTRY_X);
+
+    // 親:
+    fresh(X_ID, true);
+    frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+    frame->a1 = P_ID;
+    frame->a2 = 0;
+    kernel_instance.svc_dispatch(ctx);
+    assert(kernel_instance.current_depth() == 1 && thread.ledger[0].object == P_ID);
+    assert(ARCH::frame_pc(*ctx->sp) == ENTRY_P);
+
+    // 直接の子:
+    fresh(X_ID, true);
+    frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+    frame->a1 = C_ID;
+    frame->a2 = 0;
+    kernel_instance.svc_dispatch(ctx);
+    assert(kernel_instance.current_depth() == 1 && thread.ledger[0].object == C_ID);
+    assert(ARCH::frame_pc(*ctx->sp) == ENTRY_C);
+
+    // 許可される相手 (子 C_ID) に対する BAD_METHOD と UNDECLARED_METHOD:
+    assert(try_call(X_ID, C_ID, KERNEL_OBJECT::METHOD_COUNT) == (uintptr_t)object_error::BAD_METHOD);
+    assert(try_call(X_ID, C_ID, 1) == (uintptr_t)object_error::UNDECLARED_METHOD);
+
+    // 5. kernel 役からの呼出しは相手を問わず許可
+    // kernel 役 K_ID から兄弟 S_ID へ:
+    fresh(K_ID, true);
+    frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+    frame->a1 = S_ID;
+    frame->a2 = 0;
+    kernel_instance.svc_dispatch(ctx);
+    assert(kernel_instance.current_depth() == 1 && thread.ledger[0].object == S_ID);
+    assert(ARCH::frame_pc(*ctx->sp) == ENTRY_S);
+
+    // kernel 役 K_ID から孫 GC_ID へ:
+    fresh(K_ID, true);
+    frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+    frame->a1 = GC_ID;
+    frame->a2 = 0;
+    kernel_instance.svc_dispatch(ctx);
+    assert(kernel_instance.current_depth() == 1 && thread.ledger[0].object == GC_ID);
+    assert(ARCH::frame_pc(*ctx->sp) == ENTRY_GC);
+
+    // kernel 役 K_ID から無関係 U_ID へ:
+    fresh(K_ID, true);
+    frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+    frame->a1 = U_ID;
+    frame->a2 = 0;
+    kernel_instance.svc_dispatch(ctx);
+    assert(kernel_instance.current_depth() == 1 && thread.ledger[0].object == U_ID);
+    assert(ARCH::frame_pc(*ctx->sp) == ENTRY_U);
+  }
+  printf("  8m. CALL_METHOD parent/child/kernel_role permissions, NOT_PRIVILEGED for siblings/grandchildren/unrelated, error precedence (BAD_OBJECT -> NOT_PRIVILEGED -> BAD_METHOD -> UNDECLARED): PASS\n");
 
   // -------------------------------------------------------------------------
   // 9. RUN_FOR (9): GRANT を trap 内で直接撃つ
@@ -1411,6 +1674,7 @@ static void run_dispatcher_tests() {
   constexpr uint32_t D_ID = 44;
   access::declare(D_ID, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(0x42070000), 0,
                   CUSTOM_HANDLER_ID, CUSTOM_HANDLER_ENTRY);
+  access::set_creator(D_ID, ROOT_APP_ID);
   auto into_handler = [&]() {
     // A → D (親ハンドラは専用 HANDLER 42)。D の raw SVC が専用 HANDLER へ配送され、
     // HANDLER 42 の段 (kind HANDLER, 親 = root) が積まれる。ctx->sp は HANDLER のフレーム。
@@ -1552,6 +1816,7 @@ static void run_dispatcher_tests() {
       assert(thread.call_stack.call_top == i + 1);
       // 各段の caller の再開点は前の段の再開点より下 (スタックは下へ伸びる)。
       assert(i == 0 || rec.ret_sp < thread.ledger[i - 1].ret_sp);
+      (void)headers;
 #else
       headers[i] = thread.call_stack.top;
       assert(headers[i] == reinterpret_cast<uintptr_t>(cur) + sizeof(KERNEL::FRAME));
@@ -1937,6 +2202,280 @@ static void run_dispatcher_tests() {
     ARCH::scrub_on_switch(resumed);
     assert(parked.mcause == 0x80000007u);
     printf("  18e. scrub_on_switch: only a frame parked at an ECALL (RV32_TAG_ECALL) becomes RV32_TAG_ECALL_SCRUB; full-restore frames / ENTRY / already-scrubbed untouched: PASS\n");
+  }
+
+  // -------------------------------------------------------------------------
+  // 19. 4A Boundary: Alternating dedicated handlers and calls reaching depth=33,
+  //     call_count < 32. Verify that call entrance reserves the final ledger slot
+  //     for return dispatch.
+  // -------------------------------------------------------------------------
+  {
+    printf("[19] 4A boundary: alternating dedicated handlers and calls reaching depth=33...\n");
+    thread.call_stack.depth = 0;
+    thread.call_stack.call_count = 0;
+    thread.call_stack.top = 0;
+    thread.call_stack.call_top = 0;
+    thread.call_stack.caller_object = 0;
+    thread.call_stack.current_call_object = 0;
+
+    alignas(8) static KERNEL::call_ledger_entry ledger_34[34];
+    for (size_t i = 0; i < 34; ++i) ledger_34[i] = {};
+
+    constexpr uint32_t APP0_ID = 2;
+    constexpr uint32_t H_BASE_ID = 10; // H1..H16: 11..26
+    constexpr uint32_t C_BASE_ID = 30; // C1..C18: 31..48
+
+    access::declare(APP0_ID, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(0x50000000), 0,
+                    ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+    access::set_creator(APP0_ID, ROOT_APP_ID);
+    access::set_kernel_role(APP0_ID, false);
+
+    kernel_instance.set_thread_ledger(
+        0, ledger_34, 34, APP0_ID, (uint32_t)object_kind::PLAIN,
+        ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+
+    for (uint32_t k = 1; k <= 16; ++k) {
+      uint32_t hk_id = H_BASE_ID + k;
+      uintptr_t hk_entry = 0x51000000 + k * 0x10000;
+      access::declare(hk_id, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(hk_entry), 0,
+                      ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+      access::set_kind(hk_id, object_kind::HANDLER);
+      access::set_creator(hk_id, ROOT_APP_ID);
+      access::set_kernel_role(hk_id, false);
+
+      uint32_t ck_id = C_BASE_ID + k;
+      uintptr_t ck_entry = 0x61000000 + k * 0x10000;
+      access::declare(ck_id, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(ck_entry), 0,
+                      hk_id, hk_entry);
+      access::set_creator(ck_id, (k == 1 ? APP0_ID : (C_BASE_ID + (k - 1))));
+      access::set_kernel_role(ck_id, false);
+    }
+
+    // 19a. Reach depth=32 via alternating calls and dispatches:
+    //      H_{k-1} calls C_k (call, depth 2k - 1), C_k raw SVC -> H_k (dispatch, depth 2k)
+    for (uint32_t k = 1; k <= 16; ++k) {
+      uint32_t ck_id = C_BASE_ID + k;
+      uint32_t hk_id = H_BASE_ID + k;
+
+      ctx->sp = frame;
+      frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+      frame->a1 = ck_id;
+      frame->a2 = 0;
+      frame->a3 = k * 10;
+      kernel_instance.svc_dispatch(ctx);
+      assert(thread.call_stack.depth == 2 * k - 1);
+      assert(thread.call_stack.call_count == k);
+      assert(thread.ledger[2 * k - 2].via == KERNEL::LEDGER_CALL);
+      assert(thread.ledger[2 * k - 2].object == ck_id);
+
+      ctx->sp = frame;
+      frame->a0 = 0x100 + k;
+      kernel_instance.svc_dispatch(ctx);
+      assert(thread.call_stack.depth == 2 * k);
+      assert(thread.call_stack.call_count == k);
+      assert(thread.ledger[2 * k - 1].via == KERNEL::LEDGER_DISPATCH);
+      assert(thread.ledger[2 * k - 1].object == hk_id);
+    }
+
+    // At this point (k=16 completed):
+    // depth == 32, call_count == 16, H16 is running at depth 32.
+    assert(thread.call_stack.depth == 32);
+    assert(thread.call_stack.call_count == 16);
+
+    // H16 calls C17 (parent handler ROOT_KOBJ_ID so C17 can issue CALL_METHOD directly to trap)
+    uint32_t c17_id = C_BASE_ID + 17;
+    uintptr_t c17_entry = 0x61000000 + 17 * 0x10000;
+    access::declare(c17_id, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(c17_entry), 0,
+                    ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+    access::set_creator(c17_id, C_BASE_ID + 16);
+    access::set_kernel_role(c17_id, false);
+
+    ctx->sp = frame;
+    frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+    frame->a1 = c17_id;
+    frame->a2 = 0;
+    frame->a3 = 170;
+    kernel_instance.svc_dispatch(ctx);
+    assert(thread.call_stack.depth == 33);
+    assert(thread.call_stack.call_count == 17);
+    assert(thread.ledger[32].via == KERNEL::LEDGER_CALL);
+    assert(thread.ledger[32].object == c17_id);
+
+    // Now we are at:
+    // depth == 33 (entries 0..32 filled, exactly 1 slot left: slot 33)
+    // call_count == 17 (< 32)
+    // ledger_capacity == 34
+    assert(thread.call_stack.depth == 33);
+    assert(thread.call_stack.call_count == 17);
+    assert(thread.ledger_capacity == 34);
+
+    // Declare C18 (child of C17)
+    uint32_t c18_id = C_BASE_ID + 18;
+    uintptr_t c18_entry = 0x61000000 + 18 * 0x10000;
+    access::declare(c18_id, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(c18_entry), 0,
+                    ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+    access::set_creator(c18_id, c17_id);
+    access::set_kernel_role(c18_id, false);
+
+    // Snapshot entire state before attempting CALL_METHOD at depth=33
+    const uint32_t depth_before = thread.call_stack.depth;
+    const uint32_t call_count_before = thread.call_stack.call_count;
+    const uint32_t call_top_before = thread.call_stack.call_top;
+    const uintptr_t reg_base_before = ctx->region_base;
+    const uintptr_t reg_limit_before = ctx->region_limit;
+    const bool priv_before = ctx->privileged;
+    const void *sp_before = ctx->sp;
+
+    KERNEL::call_ledger_entry ledger_saved[34];
+    for (size_t i = 0; i < 34; ++i) ledger_saved[i] = thread.ledger[i];
+
+    // C17 attempts to call C18 via CALL_METHOD.
+    // 4A: this MUST be rejected with NO_STACK because slot 33 is reserved for return dispatch!
+    ctx->sp = frame;
+    frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+    frame->a1 = c18_id;
+    frame->a2 = 0;
+    frame->a3 = 999;
+    frame->a4 = 0xAA55;
+    frame->a5 = 0x55AA;
+    kernel_instance.svc_dispatch(ctx);
+
+    // 4A assertions:
+    assert(frame->a0 == (uintptr_t)object_error::NO_STACK);
+    assert(frame->a1 == 0); // response value register
+    assert(frame->a2 == 0);
+    assert(frame->a3 == 999);
+    assert(frame->a4 == 0xAA55);
+    assert(frame->a5 == 0x55AA);
+    assert(thread.call_stack.depth == depth_before);
+    assert(thread.call_stack.call_count == call_count_before);
+    assert(thread.call_stack.call_top == call_top_before);
+    assert(ctx->region_base == reg_base_before);
+    assert(ctx->region_limit == reg_limit_before);
+    assert(ctx->privileged == priv_before);
+    assert(ctx->sp == sp_before);
+    // Entire ledger must be completely untouched!
+    for (size_t i = 0; i < 34; ++i) {
+      assert(thread.ledger[i].object == ledger_saved[i].object);
+      assert(thread.ledger[i].via == ledger_saved[i].via);
+      assert(thread.ledger[i].kind == ledger_saved[i].kind);
+      assert(thread.ledger[i].handler_object == ledger_saved[i].handler_object);
+      assert(thread.ledger[i].unwind_floor == ledger_saved[i].unwind_floor);
+    }
+    printf("  19a-1. 4A boundary at depth=33, call_count=17: CALL_METHOD rejected with NO_STACK, full invariants (all 34 ledger entries, context, frame inputs) preserved: PASS\n");
+
+    // 19a-2. Return dispatch (svc_forward) CAN use the reserved slot 33 -> reaching depth=34!
+    // Set C17's parent handler to H16 (both in object table and in active call ledger frame)
+    uint32_t h16_id = H_BASE_ID + 16;
+    uintptr_t h16_entry = 0x51000000 + 16 * 0x10000;
+    access::set_parent_handler(c17_id, h16_id, h16_entry);
+    thread.ledger[32].handler_object = h16_id;
+    thread.ledger[32].handler_entry = h16_entry;
+
+    // C17 returns to dedicated parent handler H16 (to_root == false) via raw SVC
+    ctx->sp = frame;
+    frame->a0 = 0x77; // raw SVC notification to parent handler H16
+    kernel_instance.svc_dispatch(ctx);
+    assert(thread.call_stack.depth == 34); // The 34th slot (index 33) is used by return dispatch!
+    assert(thread.call_stack.call_count == 17);
+    assert(thread.ledger[33].via == KERNEL::LEDGER_DISPATCH);
+    assert(thread.ledger[33].object == h16_id);
+    assert(thread.ledger[33].kind == (uint8_t)object_kind::HANDLER);
+    printf("  19a-2. return dispatch (svc_forward) successfully uses the reserved 34th slot (depth=34, object=H16): PASS\n");
+
+    // 19a-3. FORWARD_CHILD_EXIT from depth 34 unwinds back to depth 32 (H16)
+    ctx->sp->a0 = (uintptr_t)object_api::FORWARD_CHILD_EXIT;
+    ctx->sp->a1 = 32; // target depth: unwinds H16 dispatch (slot 33) and C17 call (slot 32)
+    ctx->sp->a2 = 0x88; // return value
+    ctx->sp->a3 = 0; // return error
+    kernel_instance.svc_dispatch(ctx);
+    assert(thread.call_stack.depth == 32);
+    assert(thread.call_stack.call_count == 16);
+    assert(ctx->sp->a0 == (uintptr_t)object_error::OK);
+    assert(ctx->sp->a1 == 0x88);
+    printf("  19a-3. FORWARD_CHILD_EXIT from depth=34 pops both frames cleanly back to depth=32 (value=0x88): PASS\n");
+
+    // 19b. Verify normal 32-level call nesting is preserved
+    // Built purely with creator relationships (no kernel_role bypass)
+    // and distinct stack frames per depth (safe for non-LEAN user-stack headers)
+    thread.call_stack.depth = 0;
+    thread.call_stack.call_count = 0;
+    thread.call_stack.top = 0;
+    thread.call_stack.call_top = 0;
+    kernel_instance.set_thread_ledger(
+        0, ledger_34, 34, ROOT_APP_ID, (uint32_t)object_kind::PLAIN,
+        ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+
+    access::set_kernel_role(ROOT_APP_ID, false);
+    for (uint32_t i = 1; i <= 32; ++i) {
+      uint32_t nid = C_BASE_ID + i;
+      access::declare(nid, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(0x70000000 + i * 0x1000), 0,
+                      ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+      access::set_kernel_role(nid, false);
+      access::set_creator(nid, (i == 1) ? ROOT_APP_ID : (C_BASE_ID + (i - 1)));
+    }
+
+    // Allocate stack frames per depth in simulated_stack
+    KERNEL::FRAME *cur = frame;
+    KERNEL::FRAME *frames[32];
+    for (uint32_t i = 0; i < 32; ++i) {
+      cur->mepc = A_PC + 0x10 * i;
+      cur->a0 = (uintptr_t)object_api::CALL_METHOD;
+      cur->a1 = C_BASE_ID + 1 + i;
+      cur->a2 = 0;
+      cur->a3 = 0x5500 + i;
+      frames[i] = cur;
+      ctx->sp = cur;
+      kernel_instance.svc_dispatch(ctx);
+      assert(thread.call_stack.depth == i + 1);
+      assert(thread.call_stack.call_count == i + 1);
+      assert(ARCH::arg(*ctx->sp, 0) == 0x5500 + i);
+      // Move down stack for next depth
+      cur = reinterpret_cast<KERNEL::FRAME *>(reinterpret_cast<uint8_t *>(cur) - 400);
+    }
+    assert(thread.call_stack.depth == 32);
+    assert(thread.call_stack.call_count == 32);
+
+    // Call 33 rejected with NO_STACK because call_count == MAX_DEPTH
+    cur->a0 = (uintptr_t)object_api::CALL_METHOD;
+    cur->a1 = C_BASE_ID + 32;
+    cur->a2 = 0;
+    cur->a3 = 999;
+    ctx->sp = cur;
+    kernel_instance.svc_dispatch(ctx);
+    assert(cur->a0 == (uintptr_t)object_error::NO_STACK);
+    assert(thread.call_stack.depth == 32);
+    assert(thread.call_stack.call_count == 32);
+
+    // Unwind all 32 levels back to depth 0
+    for (uint32_t i = 32; i-- > 0;) {
+      cur->a0 = (uintptr_t)primitive::RETURN;
+      cur->a1 = 1;
+      cur->a2 = 0x70 + i;
+      cur->a3 = 0;
+      cur->a4 = RETURN_STUB_MARKER;
+      ctx->sp = cur;
+      kernel_instance.svc_dispatch(ctx);
+      assert(thread.call_stack.depth == i);
+      assert(thread.call_stack.call_count == i);
+      cur = ctx->sp;
+      assert(cur == frames[i]);
+      assert(cur->a0 == (uintptr_t)object_error::OK && cur->a1 == 0x70 + i);
+    }
+    assert(thread.call_stack.depth == 0);
+    assert(thread.call_stack.call_count == 0);
+    assert(cur == frame);
+    printf("  19b. normal 32-level call nesting (pure creator chain, distinct stack frames, call 33 rejected, full 32-level unwind): PASS\n");
+
+    // Clean up
+    thread.call_stack.depth = 0;
+    thread.call_stack.call_count = 0;
+    thread.call_stack.top = 0;
+    thread.call_stack.call_top = 0;
+    kernel_instance.set_thread_ledger(
+        0, ledger, 32, ROOT_APP_ID, (uint32_t)object_kind::PLAIN,
+        ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
+    ctx->sp = frame;
   }
 
   // 後始末

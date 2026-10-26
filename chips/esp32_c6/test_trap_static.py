@@ -47,9 +47,15 @@ assert '#define RV32_ECALL_TABLE_ENTRIES 34' in layout
 # 再開フレーム (call_resume) は mepc / mstatus / 目印だけを書くので、消去はこの出口の仕事。
 assert '#define RV32_TAG_ECALL 11' in layout and '#define RV32_TAG_ENTRY 0x100' in layout
 assert '#define RV32_TAG_ECALL_SCRUB 0x101' in layout
+assert '#define RV32_TAG_U_ENTRY 0x110' in layout
+assert '#define RV32_TAG_U_ECALL 0x111' in layout
+assert '#define RV32_TAG_U_SCRUB 0x112' in layout
 restore = asm.split('shizuku_rv32_restore:')[1].split('.Lrv32_exit_ecall:')[0]
 assert 'beq t0, t1, .Lrv32_exit_ecall' in restore and 'beq t0, t1, .Lrv32_exit_entry' in restore
 assert 'li t1, RV32_TAG_ECALL_SCRUB\n  beq t0, t1, .Lrv32_exit_scrub' in restore
+assert 'li t1, RV32_TAG_U_ENTRY\n  beq t0, t1, .Lrv32_umode_exit_entry' in restore
+assert 'li t1, RV32_TAG_U_SCRUB\n  beq t0, t1, .Lrv32_umode_exit_scrub' in restore
+assert 'li t1, RV32_TAG_U_ECALL\n  beq t0, t1, .Lrv32_umode_exit_ecall' in restore
 exit_ecall = asm.split('.Lrv32_exit_ecall:')[1].split('// ---- ECALL からの戻り (RV32_TAG_ECALL_SCRUB')[0]
 assert sorted(re.findall(r'lw (\w+), RV32_F_(\w+)\(sp\)', exit_ecall)) == sorted(
     [('t0', 'MEPC'), ('t0', 'MSTATUS'), ('a0', 'A0'), ('a1', 'A1')])
@@ -63,11 +69,15 @@ expected_cleared = {'ra', *(f't{i}' for i in range(7)), *(f'a{i}' for i in range
                     *(f's{i}' for i in range(12))}
 assert cleared == expected_cleared, sorted(cleared ^ expected_cleared)
 assert exit_scrub.rstrip().endswith('mret')
-exit_entry = asm.split('.Lrv32_exit_entry:')[1].split('.size shizuku_rv32_trap_entry')[0]
+exit_entry = asm.split('.Lrv32_exit_entry:')[1].split('// ---- U-mode 高速出口')[0]
 assert sorted(re.findall(r'lw (\w+), RV32_F_(\w+)\(sp\)', exit_entry)) == sorted(
     [('t0', 'MEPC'), ('t0', 'MSTATUS'), ('ra', 'RA')] + [(f'a{i}', f'A{i}') for i in range(8)])
 assert not re.findall(r'mv (\w+), zero', exit_entry)  # 入口も何も消さない
 assert exit_entry.rstrip().endswith('mret')
+# U-mode 高速出口: 復帰先特権 U-mode 時に mscratch に trusted stack cursor、sp に U-mode sp を復帰
+u_exit = asm.split('// ---- U-mode 高速出口 (RV32_TAG_U_*)')[1].split('.size shizuku_rv32_trap_entry')[0]
+assert 'csrw mscratch, t0' in u_exit
+assert 'lw sp, RV32_F_RESERVED0(sp)' in u_exit
 # 再開フレームを作るのは call_resume_at (ヘッダ版の call_resume も、SHIZUKU_LEAN_LEDGER の台帳版もここへ来る)。
 call_resume = header.split('static exception_frame_t *call_resume_at(')[1].split('\n  }\n')[0]
 assert 'frame->mcause = scrub ? RV32_TAG_ECALL_SCRUB : RV32_TAG_ECALL' in call_resume
@@ -98,6 +108,18 @@ assert 'shizuku_rv32_trap_dispatch' in trap_src and 'shizuku_rv32_return_failed'
 # 切替えが起きない ecall_direct には無い (上で context_to_frame を禁じている)。
 assert trap_src.count('const auto *const entered = context;') == 4
 assert trap_src.count('if (context != entered) arch::scrub_on_switch(*context);') == 4
+# U-mode selftest assembly follows the ECALL caller ABI: returning raw ECALL probes preserve RA.
+stage1 = (root / 'source/selftest/c6_stage1_safety.cpp').read_text()
+for label, next_label in (
+    ('.Lprobe_ecall', '.Lprobe_unpriv'),
+    ('.Lprobe_unpriv', '.Lprobe_caller_stack'),
+    ('.Lprobe_multi_trap_combo', '.Lprobe_u_to_u_call_1'),
+):
+    block = stage1.split(f'"{label}:\\n"', 1)[1].split(f'"{next_label}:\\n"', 1)[0]
+    ecall_pos = block.index('"  ecall\\n"')
+    assert block.index('"  sw ra, 12(sp)\\n"') < ecall_pos
+    assert block.index('"  lw ra, 12(sp)\\n"', ecall_pos) > ecall_pos
+    assert block.index('"  addi sp, sp, 16\\n"', ecall_pos) < block.rindex('"  ret\\n"')
 c5_src = (root / 'chips/esp32_c5/trap.cpp').read_text()
 assert c5_src.count('const auto *const entered = context;') == 3
 assert c5_src.count('if (context != entered) arch::scrub_on_switch(*context);') == 3
@@ -171,24 +193,29 @@ assert 'method_descriptor_entry m_descriptors[OBJECT_COUNT][METHOD_DESCRIPTOR_CA
 entry_struct = ko.split('struct method_descriptor_entry {')[1].split('};')[0]
 for field in ('target_entry', 'parent_handler_entry', 'owner_generation', 'target_generation',
               'instance_generation', 'region_base', 'region_limit', 'callee', 'kind',
-              'parent_handler_object', 'privileged'):
-    assert f' {field};' in entry_struct, field
+              'parent_handler_object', 'privileged', 'seq'):
+    assert (f' {field};' in entry_struct or f' {field} :' in entry_struct or f' {field}:' in entry_struct), field
 assert 'const object_t *target' not in entry_struct
 assert 'static constexpr uint8_t DESCRIPTOR_NONE = 0xFF;' in ko
 find_desc = ko.split('SHIZUKU_HOT const method_descriptor_entry *find_method_descriptor(')[1].split(
     'SHIZUKU_HOT callee_view view_of_descriptor')[0]
 assert 'm_descriptors[caller_id][index]' in find_desc
 assert find_desc.count('m_objects[') == 1 and 'm_objects[callee]' in find_desc  # 照合の version の 1 語だけ
-assert 'desc.callee, __ATOMIC_ACQUIRE' in find_desc or '&desc.callee, __ATOMIC_ACQUIRE' in find_desc
+assert 'desc.seq, __ATOMIC_ACQUIRE' in find_desc or '&desc.seq, __ATOMIC_ACQUIRE' in find_desc
 view_desc = ko.split('SHIZUKU_HOT callee_view view_of_descriptor(')[1].split('// 呼び先の行から入場の形')[0]
 assert 'm_objects[' not in view_desc and 'row' not in view_desc
 pub = ko.split('void publish_descriptor(')[1].split('// 項目を無効にする')[0]
-assert '__atomic_store_n(&desc.callee, (uint8_t)callee_id, __ATOMIC_RELEASE)' in pub  # 最後に公開する
-assert pub.index('__atomic_store_n') > pub.index('desc.privileged')
+assert '__atomic_store_n(&desc.seq,' in pub  # 最後に偶数 seq で公開する
+assert pub.rindex('__atomic_store_n') > pub.index('desc.callee')
 nc = (root / 'internal_headers/shizuku/native_call.hpp').read_text()
 call_desc = nc.split('inline void call_descriptor_in_place(')[1].split('// EXIT_METHOD (2, Forward')[0]
 assert 'row' not in call_desc and 'kobj.row_id' not in call_desc and 'callee_row' not in call_desc
-assert 'enter_in_place<K, KObj>(' in call_desc and 'kobj.view_of_descriptor(*desc)' in call_desc
+assert 'enter_in_place<K, KObj>(' in call_desc and 'kobj.view_of_descriptor(local_desc)' in call_desc
+# trap 内の desc call 経路に表の錠 (table_lock) や LR/SC (cas32)、後方分岐の再試行ループが無いこと
+assert 'table_lock' not in call_desc and 'table_unlock' not in call_desc
+assert 'cas32' not in call_desc and 'lr.w' not in call_desc and 'sc.w' not in call_desc
+assert 'while' not in call_desc and 'for ' not in call_desc and 'goto' not in call_desc
+assert 'desc.seq' in call_desc
 enter_body = nc.split('inline kernel_error enter_in_place(')[1].split('// CALL_METHOD (4)')[0]
 assert 'row.' not in enter_body and 'kobj.' not in enter_body  # 入場は形 (view) だけを読む
 

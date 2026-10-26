@@ -33,6 +33,31 @@ string_flag(
     values = ["disabled", "controller_init"],
     visibility = ["//visibility:public"],
 )
+# C6 U-mode + PMP (既定 enabled、無効化は --//configs:c6_umode=disabled または --config=c6_umode_off)
+string_flag(
+    name = "c6_umode",
+    build_setting_default = "enabled",
+    values = [
+        "enabled",
+        "disabled",
+    ],
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "c6_umode_enabled",
+    flag_values = {":c6_umode": "enabled"},
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "c6_umode_disabled",
+    flag_values = {":c6_umode": "disabled"},
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "c6_umode_ledger_enabled",
+    flag_values = {":c6_umode": "enabled", ":board": "esp32_c6"},
+    visibility = ["//visibility:public"],
+)
 string_flag(
     name = "bootsel_support",
     build_setting_default = "disabled",

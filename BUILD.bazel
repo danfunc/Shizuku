@@ -18,6 +18,11 @@ RV_KERNEL_COPTS = select({
     "//conditions:default": [],
 })
 
+exports_files([
+    "source/kernel_object/handler.cpp",
+    "source/selftest/call_cost.cpp",
+])
+
 # オブジェクト番号の生成。★**CMake とまったく同じスクリプトを呼ぶ** —
 # 番号を振る規則を 2 つ持つと、片方だけ直して番号がずれる。名前の一覧も
 # objects.list を共有するので、二重に書く場所がどこにも無い (D28)。
@@ -32,7 +37,7 @@ genrule(
     outs = ["generated_object_ids/shizuku/object_ids.hpp"],
     cmd = "python3 $(location //tools:gen_object_ids.py)" +
           " --template $(location //tools:object_ids.hpp.in)" +
-          " --out $@ --limit 64" +
+          " --out $@ --limit 72" +
           " $(location source/apps/objects.list)" +
           " $(location source/selftest/objects.list)" +
           " $(location //modules/pico_sdk_support:objects.list)",
@@ -64,6 +69,10 @@ cc_library(
     name = "internal_headers",
     hdrs = glob(["internal_headers/**/*.hpp"]),
     includes = ["internal_headers"],
+    defines = select({
+        "//configs:c6_umode_ledger_enabled": ["SHIZUKU_LEAN_LEDGER=1"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
     deps = [":object_ids"],
 )
@@ -109,6 +118,38 @@ cc_test(
         "//boards/esp32_c6:headers",
         "//chips/esp32_c6:headers",
         "//configs:config",
+    ],
+)
+
+# The kernel-resident return ledger must preserve dispatch/call behavior and reject invalid unwinds.
+cc_test(
+    name = "dispatcher_v1_lean_ledger_test",
+    srcs = [
+        "source/kernel/dispatch.cpp",
+        "source/kernel/thread.cpp",
+        "source/selftest/test_dispatcher_v1.cpp",
+        "source/selftest/test_dispatcher_v1_config.hpp",
+    ],
+    copts = [
+        "-std=c++20",
+        "-include",
+        "source/selftest/test_dispatcher_v1_config.hpp",
+    ],
+    defines = ["SHIZUKU_LEAN_LEDGER=1"],
+    local_defines = ["SHIZUKU_C6_SKELETON_PERMITTED=1"],
+    deps = [
+        ":internal_headers",
+        "//boards/esp32_c6:headers",
+        "//chips/esp32_c6:headers",
+        "//configs:config",
+    ],
+)
+
+cc_test(
+    name = "test_u_cost_invariants",
+    srcs = ["tests/test_u_cost_invariants.cpp"],
+    deps = [
+        ":internal_headers",
     ],
 )
 
@@ -165,8 +206,8 @@ cc_library(
     }),
 )
 
-# C6 M-only で成立可能な selftest の 5 つのサブセット
-C6_SELFTEST_SRCS = [
+# C5 / C6 で成立可能な selftest の 5 つのサブセット
+C5_SELFTEST_SRCS = [
     "source/selftest/call_ladder.cpp",
     "source/selftest/compat_premise_probe.cpp",
     "source/selftest/handler_binding.cpp",
@@ -175,13 +216,28 @@ C6_SELFTEST_SRCS = [
     "source/selftest/thread_ladder.cpp",
 ]
 
+C6_SELFTEST_SRCS = C5_SELFTEST_SRCS + select({
+    "//configs:c6_umode_enabled": ["source/selftest/c6_stage1_safety.cpp"],
+    "//conditions:default": [],
+})
+
+exports_files(
+    ["source/selftest/c6_stage1_safety.cpp"],
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "c6_selftest",
     srcs = C6_SELFTEST_SRCS,
+    defines = select({
+        "//configs:c6_umode_enabled": ["SHIZUKU_C6_UMODE=1"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
     deps = [
         ":internal_headers",
         ":kernel_object",
+        "//chips/esp32_c6:headers",
     ],
 )
 
@@ -201,6 +257,8 @@ cc_library(
         "source/selftest/stress.cpp",
         "source/selftest/thread_ladder.cpp",
         "source/selftest/unprivileged.cpp",
+        "source/selftest/rp2350_u_cost.cpp",
+        "source/selftest/register_leak_test.cpp",
     ],
     visibility = ["//visibility:public"],
     # flash_stream はカーネルの stream と flash_ops / flash_map を直接試す (FlashFS は使わない)。
@@ -218,7 +276,7 @@ cc_library(
 cc_library(
     name = "shizuku_kernel_c5",
     copts = RV_KERNEL_COPTS,
-    srcs = KERNEL_SRCS + KERNEL_OBJECT_SRCS + C6_SELFTEST_SRCS + [
+    srcs = KERNEL_SRCS + KERNEL_OBJECT_SRCS + C5_SELFTEST_SRCS + [
         "source/memory_manager/freestanding.cpp",
         "//modules/esp_idf_support/c5:early_boot.cpp",
         "//modules/esp_idf_support/c5:link_stubs.cpp",

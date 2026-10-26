@@ -252,9 +252,10 @@ public:
     uint32_t region_base;
     uint32_t region_limit;
     uint8_t callee;
-    uint8_t kind;
     uint8_t parent_handler_object;
-    uint8_t privileged;
+    uint8_t kind : 4;
+    uint8_t privileged : 4;
+    uint8_t seq;
   };
   static constexpr uint8_t DESCRIPTOR_NONE = 0xFF;
   static_assert(OBJECT_COUNT_T < DESCRIPTOR_NONE,
@@ -265,13 +266,17 @@ public:
   template <class Row> uint32_t row_id(const Row &row) const {
     return (uint32_t)(&row - m_objects);
   }
+  // 記述子項目を引く。trap 内の直接 call がシフトで届く。
+  SHIZUKU_HOT const method_descriptor_entry &descriptor_entry(uint32_t owner, uint32_t index) const {
+    return m_descriptors[owner][index];
+  }
   // 行の version (generation) を読む。
   template <class Row> uint32_t row_version(const Row &row) const {
     return ARCH::load_acquire32(const_cast<volatile uint32_t *>(&row.generation));
   }
   // 記述子の引きと検査 (index・持ち主の世代・呼び先の version)。通れば項目を返し、通らなければ
   // nullptr と error。コピーしないので trap 内の直接 call はこれを読む。
-  // 順序: index / 持ち主の範囲 (BAD) → 無効 (BAD) → 持ち主の世代 (STALE) → 呼び先の version (STALE)。
+  // 順序: index / 持ち主の範囲 (BAD) → seq 奇数 (STALE) → 無効 (BAD) → 持ち主の世代 (STALE) → 呼び先の version (STALE)。
   // 呼び先の行を読むのは version の 1 語だけ (種別・窓などは項目の写しを使う)。
   SHIZUKU_HOT const method_descriptor_entry *find_method_descriptor(
       uint32_t caller_id, uint32_t index, uint32_t caller_generation,
@@ -281,7 +286,12 @@ public:
       return nullptr;
     }
     const auto &desc = m_descriptors[caller_id][index];
-    const uint8_t callee = __atomic_load_n(&desc.callee, __ATOMIC_ACQUIRE);
+    const uint8_t seq = __atomic_load_n(&desc.seq, __ATOMIC_ACQUIRE);
+    if ((seq & 1u) != 0) {
+      error = object_error::STALE_DESCRIPTOR;
+      return nullptr;
+    }
+    const uint8_t callee = desc.callee;
     if (callee == DESCRIPTOR_NONE) {
       error = object_error::BAD_DESCRIPTOR;
       return nullptr;
@@ -316,11 +326,14 @@ public:
                        row.region_base,
                        row.region_limit};
   }
-  // 項目に呼び先の前計算を書き、最後に callee を release で公開する (作成と試験の据付けが共有する)。
+  // 項目に呼び先の前計算を書き、最後に偶数 seq を release で公開する (作成と試験の据付けが共有する)。
+  // 書く側は seq を奇数にしてから中身を書き、書き終えたら偶数に進めて store-release で公開。
   // 呼び先は created・入口 0 でないことを呼出し側が確かめてあること。
   void publish_descriptor(method_descriptor_entry &desc, uintptr_t callee_id,
                           uintptr_t target_entry, uint32_t owner_generation) {
     const object_t &row = m_objects[callee_id];
+    const uint8_t cur_seq = desc.seq;
+    __atomic_store_n(&desc.seq, (uint8_t)(cur_seq + 1u), __ATOMIC_RELEASE);
     desc.target_entry = target_entry;
     desc.parent_handler_entry = row.parent_handler_entry;
     desc.owner_generation = owner_generation;
@@ -331,11 +344,16 @@ public:
     desc.kind = (uint8_t)row.kind;
     desc.parent_handler_object = (uint8_t)row.parent_handler_object;
     desc.privileged = (row.flags & OBJECT_UNPRIVILEGED) == 0 ? 1 : 0;
-    __atomic_store_n(&desc.callee, (uint8_t)callee_id, __ATOMIC_RELEASE);
+    desc.callee = (uint8_t)callee_id;
+    __atomic_store_n(&desc.seq, (uint8_t)(cur_seq + 2u), __ATOMIC_RELEASE);
   }
   // 項目を無効にする (持ち主の差し替え・初期化)。
+  // 削除は無効化 (callee=DESCRIPTOR_NONE 等) してから seq を進める。
   static void invalidate_descriptor(method_descriptor_entry &desc) {
-    __atomic_store_n(&desc.callee, DESCRIPTOR_NONE, __ATOMIC_RELEASE);
+    const uint8_t cur_seq = desc.seq;
+    __atomic_store_n(&desc.seq, (uint8_t)(cur_seq + 1u), __ATOMIC_RELEASE);
+    desc.callee = DESCRIPTOR_NONE;
+    __atomic_store_n(&desc.seq, (uint8_t)(cur_seq + 2u), __ATOMIC_RELEASE);
   }
   SHIZUKU_HOT bool validate_method_descriptor(uint32_t caller_id,
                                               uint32_t index,
@@ -374,12 +392,33 @@ public:
   //  どちらも待たず・syscall を撃たず・ループしない。錠は取らない (kobj 経由だった
   //  従来も取っていなかった。表の書き換えと競っても、古い値で 1 回呼ぶだけ)。
 
+  // 呼び出し元 (caller_id) が対象 (target_id) を呼び出せるか、または方法記述子を作成できるかを判定する。
+  // 規則:
+  // - 呼び元が kernel 役 (kernel_role) なら相手を問わず可
+  // - 自分自身 (target_id == caller_id)
+  // - 親 (target_id == m_objects[caller_id].creator_object)
+  // - 直接の子 (m_objects[target_id].creator_object == caller_id)
+  // は可。兄弟・孫・無関係は不可 (NOT_PRIVILEGED)。
+  SHIZUKU_HOT bool can_call_method(uintptr_t caller_id, uintptr_t target_id) const {
+    if (caller_id >= OBJECT_COUNT_T || !m_objects[caller_id].created)
+      return false;
+    if (target_id >= OBJECT_COUNT_T || !m_objects[target_id].created)
+      return false;
+    const bool caller_is_kernel_role = m_objects[caller_id].kernel_role;
+    return caller_is_kernel_role || target_id == caller_id ||
+           m_objects[caller_id].creator_object == target_id ||
+           m_objects[target_id].creator_object == caller_id;
+  }
+
   // (id, method) から呼び先の CALL 要求を O(1) で引く。OK 以外のとき request は触らない。
-  // 判定と順序は従来と同じ: BAD_OBJECT → BAD_METHOD → UNDECLARED_METHOD。
+  // 判定と順序: BAD_OBJECT → NOT_PRIVILEGED → BAD_METHOD → UNDECLARED_METHOD。
   SHIZUKU_HOT object_error method_call_request(uintptr_t id, uintptr_t method,
+                                               uintptr_t caller_id,
                                                call_request &request) const {
     if (id >= OBJECT_COUNT_T || !m_objects[id].created)
       return object_error::BAD_OBJECT;
+    if (!can_call_method(caller_id, id))
+      return object_error::NOT_PRIVILEGED;
     if (method >= METHOD_COUNT_T)
       return object_error::BAD_METHOD;
     const method_t entry = m_objects[id].methods[method];
@@ -388,11 +427,16 @@ public:
     request = callee_request(id, (uintptr_t)entry);
     return object_error::OK;
   }
-  // method 表の引き (method_call_request と同じ判定と順序: BAD_OBJECT → BAD_METHOD → UNDECLARED_METHOD)。
+  // method 表の引き (method_call_request と同じ判定と順序: BAD_OBJECT → NOT_PRIVILEGED → BAD_METHOD → UNDECLARED_METHOD)。
   // OK のとき入口を返し、そうでなければ nullptr と error。
-  SHIZUKU_HOT method_t find_method(uintptr_t id, uintptr_t method, object_error &error) const {
+  SHIZUKU_HOT method_t find_method(uintptr_t id, uintptr_t method, uintptr_t caller_id,
+                                   object_error &error) const {
     if (id >= OBJECT_COUNT_T || !m_objects[id].created) {
       error = object_error::BAD_OBJECT;
+      return nullptr;
+    }
+    if (!can_call_method(caller_id, id)) {
+      error = object_error::NOT_PRIVILEGED;
       return nullptr;
     }
     if (method >= METHOD_COUNT_T) {
@@ -409,12 +453,17 @@ public:
   }
   // find_method の行つき版: 表の行 (呼び先の id の行) も一緒に返す。呼び出し側がその行を台帳段・入口フレームの
   // 書き出しにそのまま使えるので、id から行のアドレス (id × 行の大きさ) を作り直さない。判定と順序は
-  // find_method と同じ。OK のとき行を返して entry に入口を入れ、そうでなければ nullptr と error。
-  SHIZUKU_HOT const auto *find_method_row(uintptr_t id, uintptr_t method, object_error &error,
-                                          method_t &entry) const {
+  // find_method と同じ (BAD_OBJECT → NOT_PRIVILEGED → BAD_METHOD → UNDECLARED_METHOD)。
+  // OK のとき行を返して entry に入口を入れ、そうでなければ nullptr と error。
+  SHIZUKU_HOT const auto *find_method_row(uintptr_t id, uintptr_t method, uintptr_t caller_id,
+                                          object_error &error, method_t &entry) const {
     const auto *row = id < OBJECT_COUNT_T ? &m_objects[id] : nullptr;
     if (row == nullptr || !row->created) {
       error = object_error::BAD_OBJECT;
+      return decltype(row)(nullptr);
+    }
+    if (!can_call_method(caller_id, id)) {
+      error = object_error::NOT_PRIVILEGED;
       return decltype(row)(nullptr);
     }
     if (method >= METHOD_COUNT_T) {

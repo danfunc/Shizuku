@@ -6,15 +6,19 @@ load("@rules_cc//cc:defs.bzl", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
-sh_test(
+cc_test(
     name = "selftest_record_test",
-    srcs = ["//chips/esp32_c6:test_selftest_record.sh"],
-    data = [
+    srcs = [
         "//chips/esp32_c6:selftest_adapter.cpp",
-        "//chips/esp32_c6:selftest_record.h",
         "//chips/esp32_c6:test_selftest_record.cpp",
     ],
+    copts = ["-std=c++20"],
+    deps = [
+        "//chips/esp32_c6:headers",
+    ],
 )
+
+
 
 cc_test(
     name = "c6_concepts_test",
@@ -24,6 +28,15 @@ cc_test(
         "//boards/esp32_c6:headers",
         "//chips/esp32_c6:headers",
         "//:internal_headers",
+    ],
+)
+
+cc_test(
+    name = "pma_c6_test",
+    srcs = ["//chips/esp32_c6:test_pma_c6.cpp"],
+    copts = ["-std=c++20"],
+    deps = [
+        "//chips/esp32_c6:headers",
     ],
 )
 
@@ -63,6 +76,7 @@ sh_test(
         "//arch/riscv:rv32_trap.S",
         "//chips/esp32_c6:c6_vectors.S",
         "//chips/esp32_c6:rv32_c6.hpp",
+        "//chips/esp32_c6:chip.hpp",
         "//chips/esp32_c6:test_trap_static.py",
         "//chips/esp32_c6:trap.cpp",
         "//chips/esp32_c6:trap_api.hpp",
@@ -71,6 +85,9 @@ sh_test(
         "//chips/esp32_c5:trap.cpp",
         "//modules/esp_idf_support/c6:early_boot.cpp",
         "//modules/esp_idf_support/firmware:main/early_diag.c",
+        "//:source/kernel_object/handler.cpp",
+        "//:source/selftest/call_cost.cpp",
+        "//:source/selftest/c6_stage1_safety.cpp",
         "//:c6_test_headers",
     ],
 )
@@ -79,6 +96,18 @@ sh_test(
 # 使うので chips 側の型に依存する (arch -> chips の逆依存は作らない)。
 cc_test(
     name = "trap_route_test",
+    srcs = ["//chips/esp32_c6:test_trap_route.cpp"],
+    copts = ["-std=c++20"],
+    local_defines = ["SHIZUKU_C6_UMODE=1"],
+    deps = [
+        "//arch/riscv:pmp",
+        "//chips/esp32_c6:headers",
+        "//:internal_headers",
+    ],
+)
+
+cc_test(
+    name = "trap_route_umode_off_test",
     srcs = ["//chips/esp32_c6:test_trap_route.cpp"],
     copts = ["-std=c++20"],
     deps = [
@@ -95,5 +124,15 @@ cc_test(
     deps = [
         "//chips/esp32_c6:headers",
         "//:internal_headers",
+    ],
+)
+
+cc_test(
+    name = "region_capability_test",
+    srcs = ["test_region_capability.cpp"],
+    copts = ["-std=c++20"],
+    deps = [
+        "//:internal_headers",
+        "//chips/esp32_c6:headers",
     ],
 )

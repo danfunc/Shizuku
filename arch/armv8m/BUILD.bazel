@@ -1,4 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -9,6 +9,16 @@ cc_library(
     deps = [
         "//arch:ppb",
         "//:arch_headers",
+    ],
+)
+
+# MPU レジスタに触らず、窓の前計算値と戻り先の権威 (台帳) だけを host で縛る。
+cc_test(
+    name = "object_window_test",
+    srcs = ["object_window_test.cpp"],
+    deps = [
+        ":headers",
+        "//:internal_headers",
     ],
 )
 

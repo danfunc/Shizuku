@@ -1,8 +1,27 @@
 #ifndef SHIZUKU_TEMPLATE_THREAD_HPP
 #define SHIZUKU_TEMPLATE_THREAD_HPP
 #include <cstdint>
+#include <type_traits>
 #include "shizuku/kernel_abi.hpp"
 namespace shizuku {
+
+// SHIZUKU_LEAN_LEDGER 未定義時でも、user stack 上の header を権威とせず、
+// 特権メモリで戻り先 (PC, SP, 特権, 窓) を保証するための特権退避域
+struct caller_return_record {
+  uintptr_t ret_pc = 0;
+  uintptr_t ret_sp = 0;
+  uintptr_t ret_region_base = 0;
+  uintptr_t ret_region_limit = 0;
+  uint16_t prev_call = 0;
+  uint8_t ret_privileged = 0;
+  uint8_t reserved = 0;
+  uint32_t generation = 0;
+};
+
+// in-place 復帰で台帳に付く arch 固有の型付き payload の既定 (空)。実体は無いので
+// [[no_unique_address]] で台帳項目のサイズを増やさない (C6: 非 LEAN 16B / LEAN 40B のまま)。
+struct empty_ledger_payload {};
+
 namespace templates {
 
 // スレッド = カーネルが知る唯一の実行単位 (DESIGN §5)。
@@ -23,6 +42,21 @@ template <typename CONTEXT>
 struct call_identity_capacity<CONTEXT> {
   static constexpr uint32_t value = 1;
 };
+
+// call_ledger_entry の payload の型。context_t が ledger_payload_t を宣言した arch だけが
+// 持つ (S2 で ARM が arch::inplace_payload_t を宣言する。S1 時点の ARM 本番は宣言せず空)。
+template <typename CONTEXT, typename = void>
+struct ledger_payload_trait {
+  using type = empty_ledger_payload;
+};
+
+template <typename CONTEXT>
+struct ledger_payload_trait<CONTEXT, std::void_t<typename CONTEXT::ledger_payload_t>> {
+  using type = typename CONTEXT::ledger_payload_t;
+};
+
+template <typename CONTEXT>
+using ledger_payload_of = typename ledger_payload_trait<CONTEXT>::type;
 
 template <typename CONTEXT> struct thread {
   static constexpr uint32_t CALL_IDENTITY_CAPACITY = 32;
@@ -78,10 +112,6 @@ template <typename CONTEXT> struct thread {
     uint16_t unwind_floor; // earliest depth this activation may return to
 #if defined(SHIZUKU_LEAN_LEDGER)
     // ---- [SHIZUKU_LEAN_LEDGER] 戻りと識別の権威を 1 つの記録 (この特権メモリの台帳) に集める ----
-    //   既定の版は同じ情報を user stack 上のヘッダ (call_header_t)・台帳・call_stack の 3 か所に書く。
-    //   ヘッダは callee の窓の外でも、呼び元オブジェクトの別スレッドからは書ける (pc / sp / 特権 /
-    //   窓 / 識別 / 世代 / prev を偽装できる) ので権威にならない。この版はヘッダを書かず、戻りに要るものを
-    //   ここ (非特権から届かない特権メモリ) に置く。caller / current の識別は call 段の列から導く。
     uint32_t generation;      // call 段: 入ったときの呼び先の instance 世代。dispatch 段: 0
     uintptr_t ret_pc;         // この段から戻ったとき caller が再開する pc (ecall の次の命令)
     uintptr_t ret_sp;         // caller の ecall 時点の SP (再開フレームはこの直下)
@@ -91,7 +121,93 @@ template <typename CONTEXT> struct thread {
     uint8_t ret_privileged;   // caller の特権
     uint8_t reserved;
 #endif
+    [[no_unique_address]] ledger_payload_of<CONTEXT> payload{};
   };
+
+  caller_return_record *return_records = nullptr;
+  // 呼び手の r4-r11 の退避域 (深さごとに 8 語)。戻り記録と別にしてあるのは、使わない ARCH
+  // (RP2040 など) が .bss を払わないため。
+  static constexpr uint32_t callee_saved_depth = 34;
+  uint32_t (*callee_saved_records)[8] = nullptr;
+
+  // 台帳への読み書きを 1 か所に閉じ込めるアクセサ
+  struct ledger_accessor {
+    // 記録先が無い/範囲外なら false (呼び元は呼出しを拒否する = fail closed)。
+    static bool record_caller_return_authority(
+        thread &t, uint32_t depth,
+        uintptr_t ret_pc, uintptr_t ret_sp,
+        uint8_t ret_privileged,
+        uintptr_t ret_region_base, uintptr_t ret_region_limit,
+        uint16_t prev_call, uint32_t generation) {
+#if defined(SHIZUKU_LEAN_LEDGER)
+      if (t.ledger == nullptr || depth >= t.ledger_capacity) return false;
+      auto &entry = t.ledger[depth];
+      entry.ret_pc = ret_pc;
+      entry.ret_sp = ret_sp;
+      entry.ret_privileged = ret_privileged;
+      entry.ret_region_base = ret_region_base;
+      entry.ret_region_limit = ret_region_limit;
+      entry.prev_call = prev_call;
+      entry.generation = generation;
+      return true;
+#else
+      if (t.return_records == nullptr || depth >= 34) return false;
+      auto &rec = t.return_records[depth];
+      rec.ret_pc = ret_pc;
+      rec.ret_sp = ret_sp;
+      rec.ret_privileged = ret_privileged;
+      rec.ret_region_base = ret_region_base;
+      rec.ret_region_limit = ret_region_limit;
+      rec.prev_call = prev_call;
+      rec.generation = generation;
+      return true;
+#endif
+    }
+
+    // 呼び手の callee-saved (r4-r11) を特権の退避域 (callee_saved_records) へ退避/復元する
+    // (ARCH::SCRUB_CALLEE_SAVED_ON_CALL の ARCH だけが使う)。記録先が無いとき false = fail closed。
+    static bool save_callee_saved(thread &t, uint32_t depth, const uint32_t (&regs)[8]) {
+      if (t.callee_saved_records == nullptr || depth >= callee_saved_depth) return false;
+      for (unsigned i = 0; i < 8; ++i) t.callee_saved_records[depth][i] = regs[i];
+      return true;
+    }
+    static bool restore_callee_saved(const thread &t, uint32_t depth, uint32_t (&regs)[8]) {
+      if (t.callee_saved_records == nullptr || depth >= callee_saved_depth) return false;
+      for (unsigned i = 0; i < 8; ++i) regs[i] = t.callee_saved_records[depth][i];
+      return true;
+    }
+
+    // 記録が無い (台帳/退避域が未設定、depth が範囲外) とき false。呼び元は false のとき
+    // 出力を使わず、従来の復帰経路をそのまま使う。
+    static bool restore_caller_return_authority(
+        const thread &t, uint32_t depth,
+        uintptr_t &ret_pc, uintptr_t &ret_sp,
+        bool &ret_privileged,
+        uintptr_t &ret_region_base, uintptr_t &ret_region_limit) {
+#if defined(SHIZUKU_LEAN_LEDGER)
+      if (t.ledger == nullptr || depth >= t.ledger_capacity) return false;
+      const auto &entry = t.ledger[depth];
+      ret_pc = entry.ret_pc;
+      ret_sp = entry.ret_sp;
+      ret_privileged = (entry.ret_privileged != 0);
+      ret_region_base = entry.ret_region_base;
+      ret_region_limit = entry.ret_region_limit;
+      return true;
+#else
+      if (t.return_records == nullptr || depth >= 34) return false;
+      const auto &rec = t.return_records[depth];
+      ret_pc = rec.ret_pc;
+      ret_sp = rec.ret_sp;
+      ret_privileged = (rec.ret_privileged != 0);
+      ret_region_base = rec.ret_region_base;
+      ret_region_limit = rec.ret_region_limit;
+      return true;
+#endif
+    }
+  };
+
+  uint32_t stack_rbar = 0;
+  uint32_t stack_rlar = 0;
   call_ledger_entry *ledger = nullptr;
   uint32_t ledger_capacity = 0;
   uint32_t base_object = 0;

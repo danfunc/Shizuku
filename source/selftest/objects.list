@@ -9,6 +9,8 @@ sleeper
 unpriv_probe
 priv_probe
 trespasser
+win_a
+win_b
 blink
 load
 counter
@@ -44,3 +46,20 @@ cost_dleaf
 cost_dnest
 cost_dinner
 cost_owner
+c6_stage1_probe
+c6_stage1_driver
+# call_cost の親子比較測定用 (kernel_role なしの親 cost_parent が子 cost_child を呼ぶ)
+cost_parent
+cost_child
+# call_cost の 2-hop 測定用 (cost_nest の直接の子)
+cost_leaf2
+# unprivileged の kernel_role 呼出し検証用 (親子関係にない相手への CALL_METHOD 許可)
+kernel_caller
+# U->U call_cost 計測用 (非特権親 cost_u_parent が非特権子 cost_u_child を呼ぶ)
+cost_u_parent
+cost_u_child
+# レジスタ漏洩試験用 (非特権 leak_caller が非特権 leak_callee を呼ぶ)
+leak_caller
+leak_callee
+
+

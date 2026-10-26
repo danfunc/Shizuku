@@ -49,6 +49,11 @@ template <> void KERNEL::bootstrap(
   //   経由せずプリミティブとして解釈されてしまう)。
   thread.set_state(THREAD::state_t::RUNNING);
   ARCH::stack_limit_set(*thread.context, limit);
+  if constexpr (ARCH::HAS_OBJECT_PROTECTION) {
+    const auto boot_stack_win = ARCH::encode_stack_window(base, base + stack_bytes);
+    thread.stack_rbar = boot_stack_win.rbar;
+    thread.stack_rlar = boot_stack_win.rlar;
+  }
   ARCH::set_priv(*thread.context, true);
   set_current(BOARD::core_num(), 0);
 
@@ -84,6 +89,11 @@ void KERNEL::bootstrap_secondary(uint32_t thread, void (*entry)(),
   adopted.affinity = 1u << BOARD::core_num();
   adopted.set_state(THREAD::state_t::RUNNING);
   ARCH::stack_limit_set(*adopted.context, limit);
+  if constexpr (ARCH::HAS_OBJECT_PROTECTION) {
+    const auto sec_stack_win = ARCH::encode_stack_window(stack_base, stack_base + stack_bytes);
+    adopted.stack_rbar = sec_stack_win.rbar;
+    adopted.stack_rlar = sec_stack_win.rlar;
+  }
   ARCH::set_priv(*adopted.context, true);
   set_current(BOARD::core_num(), thread);
 

@@ -108,6 +108,22 @@ public:
   static constexpr uint32_t CALL_HEADROOM = IntMode::CALL_HEADROOM;
   static constexpr uint32_t EXC_FRAME_MAX_BYTES = sizeof(exception_frame_t);
   static constexpr uint32_t HANDLER_STACK_ARG_BYTES = 0;
+
+  static uintptr_t u_stack_pointer(const exception_frame_t &f) {
+    if constexpr (sizeof(uintptr_t) > 4) {
+      uint64_t val = static_cast<uint64_t>(f.reserved0) | (static_cast<uint64_t>(f.reserved1) << 32);
+      return static_cast<uintptr_t>(val);
+    } else {
+      return f.reserved0;
+    }
+  }
+
+  static void set_u_stack_pointer(exception_frame_t &f, uintptr_t sp) {
+    f.reserved0 = static_cast<uint32_t>(sp);
+    if constexpr (sizeof(uintptr_t) > 4) {
+      f.reserved1 = static_cast<uint32_t>(static_cast<uint64_t>(sp) >> 32);
+    }
+  }
   static constexpr uint32_t FAULT_CONTEXT_BYTES = sizeof(context_t);
   static constexpr bool HAS_CYCLE_COUNTER = IntMode::HAS_CYCLE_COUNTER;
   static constexpr uint32_t TIMER_MAX_CYCLES = IntMode::TIMER_MAX_CYCLES;
@@ -147,6 +163,20 @@ public:
     frame.a3 = args[3];
     // a4 以降は書かない: レジスタは全部 caller からの入力として素通しする (callee は宣言した
     // 引数以外を信用しない)。5 引数目 (a4) が要る呼び先は set_handler_args が書く。
+  }
+
+  [[gnu::always_inline]] static inline void set_method_argument(exception_frame_t &frame,
+                                                                uintptr_t argument) {
+    frame.a0 = argument;
+  }
+
+  [[gnu::always_inline]] static inline void move_descriptor_arguments(exception_frame_t &frame) {
+    frame.a0 = frame.a2;
+    frame.a1 = frame.a3;
+    frame.a2 = frame.a4;
+    frame.a3 = frame.a5;
+    frame.a4 = frame.a6;
+    frame.a5 = frame.a7;
   }
 
   static void set_args_6(exception_frame_t &frame, const uintptr_t *args) {
@@ -207,28 +237,64 @@ public:
   static_assert(sizeof(uintptr_t) != 4 || sizeof(call_header_t) == RV32_CALL_HEADER_BYTES);
   static_assert(RV32_CALL_HEADER_BYTES == rv32_abi::CALL_HEADER_BYTES);
 
-  // ecall した caller の枠。trap フレーム (context.sp) の直上 = caller の ecall 時点の SP。
-  static call_header_t *call_header_slot(const context_t &context) {
-    return reinterpret_cast<call_header_t *>(
-        reinterpret_cast<uintptr_t>(context.sp) + sizeof(exception_frame_t));
+  template <class Header, class Frame>
+  [[gnu::always_inline]] static inline void set_call_header_extra(Header &header, const Frame &frame) {
+    if constexpr (requires { header.reserved; frame.reserved0; }) {
+      header.reserved = frame.reserved0;
+    }
   }
 
-  // 枠に書いたあと呼び先の窓の上端になるアドレス (= 枠の下端 = ecall 時点の SP)。
+  // ecall した caller の枠。M caller は trap frame の直上、U caller は trap entry が
+  // RESERVED0 に保存した元の U SP (ABI wrapper が32B header分を空けた場所) に置く。
+  // U trap frame は kernel stack 上なので、context.sp + frame size を使ってはならない。
+  static call_header_t *call_header_slot(const context_t &context) {
+#if defined(SHIZUKU_C6_UMODE)
+    const uintptr_t header = context.privileged
+        ? reinterpret_cast<uintptr_t>(context.sp) + sizeof(exception_frame_t)
+        : u_stack_pointer(*context.sp);
+#else
+    const uintptr_t header = reinterpret_cast<uintptr_t>(context.sp) + sizeof(exception_frame_t);
+#endif
+    return reinterpret_cast<call_header_t *>(header);
+  }
+
+  // 枠の下端 = caller の ecall 時点の SP。
   static uintptr_t call_window_top(const call_header_t *header) {
     return reinterpret_cast<uintptr_t>(header);
   }
 
   // 呼び先の入口に要る余白: 返りの trap フレーム 1 枚ぶんに加え、呼び先がもう 1 回カーネルを
   // 呼び返せること (トランポリン 1 枚 + fault 入口の退避 + ハンドラ連鎖)。
-  static bool call_header_has_room(const context_t &context) {
+  static bool call_header_has_room_in_user_stack(const context_t &context,
+                                                   uintptr_t stack_base,
+                                                   uintptr_t stack_limit) {
+    if (context.privileged || stack_base == 0 || stack_limit <= stack_base) return false;
+    const uintptr_t sp = u_stack_pointer(*context.sp);
+    constexpr uintptr_t kRequired = 2u * sizeof(exception_frame_t) + EXC_FRAME_MAX_BYTES +
+                                    FAULT_CONTEXT_BYTES + CALL_HEADROOM;
+    if ((sp & 0xFu) != 0u || sp < stack_base || sp > stack_limit ||
+        RV32_CALL_HEADER_BYTES > stack_limit - sp)
+      return false;
+    return sp - stack_base >= kRequired;
+  }
+
+  static bool call_header_has_room(const context_t &context, uint32_t caller_object) {
+#if defined(SHIZUKU_C6_UMODE)
+    if (!context.privileged) {
+      uintptr_t user_base = 0, user_limit = 0;
+      if constexpr (requires { IntMode::user_stack_bounds(caller_object, user_base, user_limit); }) {
+        if (!IntMode::user_stack_bounds(caller_object, user_base, user_limit)) return false;
+        return call_header_has_room_in_user_stack(context, user_base, user_limit);
+      }
+      return false;
+    }
+#endif
     const uintptr_t limit = stack_limit(context);
-    if (limit == 0)
-      return true;
-    const uintptr_t sp = reinterpret_cast<uintptr_t>(context.sp) +
-                         sizeof(exception_frame_t);
-    return sp >= limit &&
-           sp - limit >= 2u * sizeof(exception_frame_t) + EXC_FRAME_MAX_BYTES +
-                             FAULT_CONTEXT_BYTES + CALL_HEADROOM;
+    if (limit == 0) return true;
+    const uintptr_t sp = reinterpret_cast<uintptr_t>(context.sp) + sizeof(exception_frame_t);
+    constexpr uintptr_t kRequired = 2u * sizeof(exception_frame_t) + EXC_FRAME_MAX_BYTES +
+                                    FAULT_CONTEXT_BYTES + CALL_HEADROOM;
+    return sp >= limit && sp - limit >= kRequired;
   }
 
   // 戻り: ヘッダの枠の直下に caller の再開フレームを作る。a0/a1 (戻り値) は呼び出し側が set_result で
@@ -243,13 +309,67 @@ public:
   [[gnu::always_inline]] static exception_frame_t *call_resume(context_t &context,
                                                                 const call_header_t *header,
                                                                 bool scrub) {
-    return call_resume_at(context, header->pc, reinterpret_cast<uintptr_t>(header),
+    auto *frame = call_resume_at(context, header->pc, reinterpret_cast<uintptr_t>(header),
                           header->privileged != 0, header->region_base, header->region_limit,
                           scrub);
+    frame->reserved0 = header->reserved;
+    frame->reserved1 = 0;
+#if defined(SHIZUKU_C6_UMODE)
+    if (!context.privileged) {
+      set_unprivileged_resume_metadata(*frame, header->reserved, IntMode::kstack_top(), scrub);
+      IntMode::switch_object_pmp(header->caller_object);
+    }
+#endif
+    return frame;
+  }
+
+  // Metadata for a U-mode resume is rebuilt from protected ledger values. The caller SP
+  // is ret_sp, and the trusted stack cursor is supplied by the active C6 trap path.
+  static void set_unprivileged_resume_metadata(exception_frame_t &frame, uintptr_t caller_sp,
+                                               uintptr_t trusted_stack_cursor, bool scrub) {
+    frame.reserved0 = static_cast<uint32_t>(caller_sp);
+    frame.reserved1 = static_cast<uint32_t>(trusted_stack_cursor);
+    frame.mcause = scrub ? RV32_TAG_U_SCRUB : RV32_TAG_U_ECALL;
+    frame.mstatus &= ~RV32_MSTATUS_MPP; // U-mode MPP = 0
+  }
+
+  static uintptr_t trusted_stack_top() {
+#if defined(SHIZUKU_C6_UMODE)
+    if constexpr (requires { IntMode::kstack_top(); })
+      return IntMode::kstack_top();
+#endif
+    return 0;
+  }
+
+#if defined(SHIZUKU_C6_UMODE)
+  static constexpr bool HAS_OBJECT_PROTECTION = true;
+#else
+  static constexpr bool HAS_OBJECT_PROTECTION = false;
+#endif
+  // 共通コードが arch を問わず呼べる窓の口。RISC-V の窓は chip 側 (PMP) が持つので、
+  // thread に前計算する stack 窓は無く、非特権オブジェクトの数にも上限を課さない。
+  struct stack_window {
+    uint32_t rbar = 0;
+    uint32_t rlar = 0;
+  };
+  static constexpr stack_window encode_stack_window(uintptr_t, uintptr_t) { return {}; }
+  static constexpr uintptr_t kMaxObjectWindows = UINTPTR_MAX;
+  static constexpr uintptr_t STACK_WINDOW_ALIGN = 8;  // 追加の揃えは要らない
+
+  static void switch_caller_protection(uint32_t caller_object) {
+#if defined(SHIZUKU_C6_UMODE)
+    if constexpr (requires { IntMode::switch_object_pmp(caller_object); })
+      IntMode::switch_object_pmp(caller_object);
+#else
+    (void)caller_object;
+#endif
   }
 
   // caller の ecall 時点の SP (= 再開フレームの上端。ヘッダ枠方式ではヘッダ枠のアドレスと同じ)。
   static uintptr_t call_return_sp(const context_t &context) {
+#if defined(SHIZUKU_C6_UMODE)
+    if (!context.privileged) return u_stack_pointer(*context.sp);
+#endif
     return reinterpret_cast<uintptr_t>(context.sp) + sizeof(exception_frame_t);
   }
 
@@ -264,6 +384,10 @@ public:
     frame->mepc = pc;
     frame->mstatus = 0; // 呼び出し側が特権・MPIE を足す
     frame->mcause = scrub ? RV32_TAG_ECALL_SCRUB : RV32_TAG_ECALL;
+    // M return needs the saved caller SP for the handler-stack switch. A U resume
+    // replaces these fields below with the ledger's U SP and trusted stack cursor.
+    frame->reserved0 = static_cast<uint32_t>(sp);
+    frame->reserved1 = 0;
     context.sp = frame;
     context.privileged = privileged;
     context.region_base = region_base;
@@ -279,6 +403,10 @@ public:
     exception_frame_t *frame = resumed.sp;
     if (frame->mcause == RV32_TAG_ECALL)
       frame->mcause = RV32_TAG_ECALL_SCRUB;
+#if defined(SHIZUKU_C6_UMODE)
+    else if (frame->mcause == RV32_TAG_U_ECALL)
+      frame->mcause = RV32_TAG_U_SCRUB;
+#endif
   }
 
   // ---- ABI converter, callee 側 (shizuku/method_entry.hpp, shizuku/rv32_abi.hpp) ----
@@ -293,15 +421,28 @@ public:
   // trap 深さの問い合わせは IntMode に委ねる。ECALL は割込みではない。
   static bool in_interrupt() { return IntMode::in_interrupt(); }
 
-  static uintptr_t frame_pc(const exception_frame_t &frame) {
+  [[gnu::always_inline]] static inline uintptr_t frame_pc(const exception_frame_t &frame) {
     return frame.mepc;
+  }
+  static uintptr_t frame_lr(const exception_frame_t &frame) {
+    return frame.ra;
   }
 
   // 特権の判定は IntMode に委ねる (trap 内の保存 MPP など)。
   static bool current_priv() { return IntMode::current_priv(); }
 
+  [[gnu::always_inline]] static inline bool context_privileged(const context_t &context) {
+    return context.privileged;
+  }
+
   static void set_priv(context_t &context, bool privileged) {
     context.privileged = privileged;
+  }
+
+  // ECALL handlers run in M-mode; preserve the trapped caller privilege from MPP.
+  static void set_context_privilege_from_frame(context_t &context,
+                                               const exception_frame_t &frame) {
+    context.privileged = (frame.mstatus & RV32_MSTATUS_MPP) == RV32_MSTATUS_MPP;
   }
 
   static void stack_limit_set(context_t &context, uintptr_t limit) {
@@ -309,6 +450,11 @@ public:
   }
 
   static uintptr_t stack_limit(const context_t &context) {
+#if defined(SHIZUKU_C6_UMODE)
+    if (IntMode::is_kstack_address(reinterpret_cast<uintptr_t>(context.sp))) {
+      return IntMode::kstack_limit();
+    }
+#endif
     return context.stack_limit;
   }
   // CALL 時に、戻りの dispatch が積む 1 枚ぶんの余白が残るか (dispatch.cpp の
@@ -335,6 +481,47 @@ public:
     context.region_base = base;
     context.region_limit = limit;
   }
+
+  template <class Frame>
+  static void switch_callee_protection(context_t &context, Frame &frame, uint32_t callee_id, bool privileged) {
+#if defined(SHIZUKU_C6_UMODE)
+    if (!privileged) {
+      IntMode::enter_u_object(context, frame, callee_id);
+    }
+#else
+    (void)context;
+    (void)frame;
+    (void)callee_id;
+    (void)privileged;
+#endif
+  }
+
+#if defined(SHIZUKU_C6_UMODE)
+  static void record_u_mode_ecall_diag(const exception_frame_t &frame,
+                                       volatile uint32_t *u_ecall_diag,
+                                       volatile uint32_t *u_mode_diag,
+                                       uintptr_t *event_latch = nullptr) {
+    if ((frame.mstatus & RV32_MSTATUS_MPP) != RV32_MSTATUS_MPP) {
+      if (event_latch != nullptr) {
+        const uintptr_t event_id = reinterpret_cast<uintptr_t>(&frame);
+        if (*event_latch == event_id) {
+          return;
+        }
+        *event_latch = event_id;
+      }
+      if (u_ecall_diag != nullptr) {
+        if (u_ecall_diag[0] == 0u) {
+          u_ecall_diag[0] = (frame.mcause == RV32_TAG_U_ECALL) ? 8u : frame.mcause;
+          u_ecall_diag[1] = frame.mepc;
+          u_ecall_diag[2] = frame.mtval;
+        }
+      }
+      if (u_mode_diag != nullptr) {
+        u_mode_diag[2] = u_mode_diag[2] + 1;
+      }
+    }
+  }
+#endif
 
   // RV32 A 拡張 (LR.W / SC.W) によるアトミック操作
   static bool cas32(volatile uint32_t *address, uint32_t expected,
@@ -396,6 +583,8 @@ public:
     frame->a1 = frame->a2 = frame->a3 = frame->a4 = 0;
     frame->mstatus = context.privileged ? RV32_MSTATUS_MPP : 0;
     // MPIE stays clear until the interrupt matrix and timer are owned.
+    frame->reserved0 = static_cast<uint32_t>(stack_top & ~static_cast<uintptr_t>(15));
+    frame->reserved1 = 0;
     context.sp = frame;
   }
 

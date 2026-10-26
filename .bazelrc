@@ -87,6 +87,8 @@ build:esp32c6 --action_env=PATH
 build:esp32c6 --per_file_copt=^source/(kernel|kernel_object|cpu_manager)/,^chips/esp32_c6/trap\.cpp$@-O2
 # C6 のカーネルは既定で部分リンク LTO。比較時は esp32c6 の後に kernel_no_lto を指定する。
 build:esp32c6 --config=kernel_lto
+# ESP32-C6 U-mode + PMP 無効化オプション (既定は enabled)
+build:c6_umode_off --//configs:c6_umode=disabled
 
 # ---------------------------------------------------------------------------
 # ESP32-C5 (RV32, CLIC) — C6 と同じ rv32_esp ツールチェーン / platform。board だけが違う。
@@ -122,7 +124,20 @@ build:kernel_no_lto --per_file_copt=^source/(kernel|kernel_object|cpu_manager)/,
 build:esp32c6_ble --config=esp32c6
 build:esp32c6_ble --//configs:ble_profile=controller_init
 build:esp32c6_ble --copt=-DSHIZUKU_ESP_BLE=1
+
+# ---------------------------------------------------------------------------
+# 計測側・stub・selftest・カーネル一括最適化プロファイル
+#   --config=bench_opt_o2: -O2 最適化
+#   --config=bench_opt_o3: -O3 最適化
+#   対象: source/(kernel|kernel_object|cpu_manager|selftest|apps)/, firmware/,
+#         chips/esp32_c[56]/trap.cpp, modules/pico_sdk_support/rp2350/arch_glue.cpp,
+#         modules/pico_sdk_support/rp2040/arch_glue_v6m.cpp
+# ---------------------------------------------------------------------------
+build:bench_opt_o2 --per_file_copt=^source/(kernel|kernel_object|cpu_manager|selftest|apps)/,^firmware/,^chips/esp32_c[56]/trap\.cpp$,^modules/pico_sdk_support/rp2350/arch_glue\.cpp$,^modules/pico_sdk_support/rp2040/arch_glue_v6m\.cpp$@-O2
+build:bench_opt_o3 --per_file_copt=^source/(kernel|kernel_object|cpu_manager|selftest|apps)/,^firmware/,^chips/esp32_c[56]/trap\.cpp$,^modules/pico_sdk_support/rp2350/arch_glue\.cpp$,^modules/pico_sdk_support/rp2040/arch_glue_v6m\.cpp$@-O3
+
 test --platforms=@platforms//host
+
 
 # 試験的な遅延退避 (--config=abi_lazy_save、既定は無効)
 try-import %workspace%/tools/abi_lazy_save.bazelrc

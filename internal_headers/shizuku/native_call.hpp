@@ -15,6 +15,10 @@
 #include "shizuku/object_api.hpp"
 #include "shizuku/svc_attributes.hpp"
 
+#if defined(SHIZUKU_C6_UMODE) && !defined(SHIZUKU_LEAN_LEDGER)
+#error "C6 U-mode requires kernel-resident call return authority (SHIZUKU_LEAN_LEDGER)"
+#endif
+
 namespace shizuku {
 
 // ARCH が in-place call (caller の frame をコピーせず、レジスタは全部 callee への入力、戻りで
@@ -41,9 +45,9 @@ static constexpr bool is_context_unprivileged(const C *ctx) {
 // (テンプレートではない) で、使わない側の枝も構文として通る必要があるため、ARCH 固有の呼び出しは
 // ここ (依存名のテンプレート) に包む。
 template <class A, class Context>
-[[gnu::always_inline]] inline bool header_has_room_of(const Context &context) {
+[[gnu::always_inline]] inline bool header_has_room_of(const Context &context, uint32_t caller_object) {
   if constexpr (arch_call_in_place<A>())
-    return A::call_header_has_room(context);
+    return A::call_header_has_room(context, caller_object);
   else
     return false;
 }
@@ -54,30 +58,33 @@ template <class A, class Thread, class Context, class Frame>
                                                   uint32_t /*floor*/) {
   if constexpr (arch_call_in_place<A>()) {
     if (thread.ledger == nullptr || thread.call_stack.depth >= thread.ledger_capacity ||
-        !A::call_header_has_room(context))
+        !A::call_header_has_room(context, thread.identity_object()))
       return false;
 #if defined(SHIZUKU_LEAN_LEDGER)
     // 戻りの権威は特権の台帳に置く (user stack にヘッダは書かない)。段の中身 (object・handler・kind・
     // via・floor) は呼び出し側が depth - 1 の項目へ書く。ここでは戻りに要るものだけを書く。
     auto &entry = thread.ledger[thread.call_stack.depth];
     entry.generation = 0;
-    entry.ret_pc = frame.mepc;
+    entry.ret_pc = A::frame_pc(frame);
     entry.ret_sp = A::call_return_sp(context);
     entry.ret_region_base = context.region_base;
     entry.ret_region_limit = context.region_limit;
     entry.prev_call = (uint16_t)thread.call_stack.call_top;
-    entry.ret_privileged = context.privileged ? 1 : 0;
+    entry.ret_privileged = A::context_privileged(context) ? 1 : 0;
     thread.call_stack.depth++;
     return true;
 #else
     auto *header = A::call_header_slot(context);
     header->prev = thread.call_stack.top;
-    header->pc = frame.mepc;
+    header->pc = A::frame_pc(frame);
     header->caller_object = thread.call_stack.caller_object;
     header->caller_generation = thread.call_stack.caller_generation;
     header->region_base = context.region_base;
     header->region_limit = context.region_limit;
-    header->privileged = context.privileged ? 1 : 0;
+    header->privileged = A::context_privileged(context) ? 1 : 0;
+    if constexpr (requires { A::set_call_header_extra(*header, frame); }) {
+      A::set_call_header_extra(*header, frame);
+    }
     thread.call_stack.top = reinterpret_cast<uintptr_t>(header);
     thread.call_stack.depth++;
     return true;
@@ -126,19 +133,34 @@ template <class K>
   if constexpr (arch_call_in_place<A>()) {
     const uint32_t depth = thread.call_stack.depth;
 #if defined(SHIZUKU_LEAN_LEDGER)
-    // 戻りの権威は台帳の項目 (ret_*)。caller の識別は call_top を一つ外側の call 段へ戻すだけ。
+    // Return authority (PC/SP/privilege/window/caller chain) comes only from protected ledger memory.
     const auto &entry = thread.ledger[depth - 1];
     const uint8_t via = entry.via;
     const bool is_call = via == K::LEDGER_CALL || via == K::LEDGER_DESCRIPTOR_CALL;
     if (is_call && thread.call_stack.call_count == 0)
       return false;
+    if (entry.ret_privileged > 1u || entry.prev_call >= depth ||
+        entry.prev_call > thread.ledger_capacity)
+      return false;
+    const uint32_t caller_object = entry.prev_call != 0
+        ? thread.ledger[entry.prev_call - 1].object
+        : thread.base_object;
     if (is_call) {
       thread.call_stack.call_count--;
       thread.call_stack.call_top = entry.prev_call;
     }
-    if (restore)
+    if (restore) {
       frame = A::call_resume_at(context, entry.ret_pc, entry.ret_sp, entry.ret_privileged != 0,
                                 entry.ret_region_base, entry.ret_region_limit, scrub);
+      if (!A::context_privileged(context)) {
+        if constexpr (requires { A::set_unprivileged_resume_metadata(*frame, entry.ret_sp, A::trusted_stack_top(), scrub); }) {
+          A::set_unprivileged_resume_metadata(*frame, entry.ret_sp, A::trusted_stack_top(), scrub);
+        }
+        if constexpr (requires { A::switch_caller_protection(caller_object); }) {
+          A::switch_caller_protection(caller_object);
+        }
+      }
+    }
     thread.call_stack.depth = depth - 1;
 #else
     const uint8_t via = thread.ledger[depth - 1].via;
@@ -188,8 +210,9 @@ template <class K, class KObj>
     if (stack.call_count >= KObj::MAX_DEPTH)
       return kernel_error::NO_STACK;
     const uint32_t depth = stack.depth; // 呼び先の unwind floor
-    if (depth > UINT16_MAX || thread.ledger == nullptr || depth >= thread.ledger_capacity ||
-        !A::call_header_has_room(context))
+    // 4A: 最後の 1 枠 (ledger_capacity - 1) は return dispatch 専用に先取り予約する。
+    if (depth > UINT16_MAX || thread.ledger == nullptr || depth + 1u >= thread.ledger_capacity ||
+        !A::call_header_has_room(context, thread.identity_object()))
       return kernel_error::NO_STACK;
     typename K::FRAME &frame = *context.sp;
 #if defined(SHIZUKU_LEAN_LEDGER)
@@ -204,12 +227,12 @@ template <class K, class KObj>
     entry.via = via;
     entry.unwind_floor = (uint16_t)depth;
     entry.generation = view.instance_generation;
-    entry.ret_pc = frame.mepc;
+    entry.ret_pc = A::frame_pc(frame);
     entry.ret_sp = A::call_return_sp(context);
     entry.ret_region_base = context.region_base;
     entry.ret_region_limit = context.region_limit;
     entry.prev_call = (uint16_t)stack.call_top;
-    entry.ret_privileged = context.privileged ? 1 : 0;
+    entry.ret_privileged = A::context_privileged(context) ? 1 : 0;
     stack.depth = depth + 1;
     stack.call_count = stack.call_count + 1;
     stack.call_top = depth + 1;
@@ -217,13 +240,16 @@ template <class K, class KObj>
 #else
     auto *header = A::call_header_slot(context);
     header->prev = stack.top;
-    header->pc = frame.mepc;
+    header->pc = A::frame_pc(frame);
     header->caller_object = stack.caller_object;
     header->caller_generation = stack.caller_generation;
     header->region_base = context.region_base;
     header->region_limit = context.region_limit;
     // unwind_floor / via はヘッダに書かない: 同じ値を台帳 (下の thread.ledger[depth]) が持つ。
-    header->privileged = context.privileged ? 1 : 0;
+    header->privileged = A::context_privileged(context) ? 1 : 0;
+    if constexpr (requires { A::set_call_header_extra(*header, frame); }) {
+      A::set_call_header_extra(*header, frame);
+    }
     stack.top = reinterpret_cast<uintptr_t>(header);
     stack.depth = depth + 1;
     thread.ledger[depth] = {view.id, view.parent_handler_object, view.parent_handler_entry,
@@ -239,6 +265,7 @@ template <class K, class KObj>
 #endif
     A::set_priv(context, view.privileged);
     A::set_region_window(context, view.region_base, view.region_limit);
+    A::switch_callee_protection(context, frame, view.id, view.privileged);
     return kernel_error::OK;
   } else {
     return kernel_error::BAD_REQUEST;
@@ -246,7 +273,7 @@ template <class K, class KObj>
 }
 
 // CALL_METHOD (4): a1 = オブジェクト ID, a2 = メソッド番号, a3 = 引数。応答は (error, 0)。
-//   エラーの種類・順序: BAD_OBJECT → BAD_METHOD → UNDECLARED_METHOD → NO_STACK。
+//   エラーの種類・順序: BAD_OBJECT → NOT_PRIVILEGED → BAD_METHOD → UNDECLARED_METHOD → NO_STACK。
 template <class K, class KObj>
 [[gnu::always_inline]] inline void call_method_in_place(K &kernel,
                                                         typename K::THREAD &thread,
@@ -256,9 +283,10 @@ template <class K, class KObj>
   if constexpr (arch_call_in_place<A>()) {
     typename K::FRAME &frame = *context.sp;
     const uintptr_t id = A::arg(frame, 1);
+    const uint32_t caller_id = thread.identity_object();
     object_error error;
     typename KObj::method_t entry;
-    const auto *row = kobj.find_method_row(id, A::arg(frame, 2), error, entry);
+    const auto *row = kobj.find_method_row(id, A::arg(frame, 2), caller_id, error, entry);
     if (row == nullptr) {
       A::set_result(frame, (uintptr_t)error, 0);
       return;
@@ -279,16 +307,17 @@ template <class K, class KObj>
                     0);
       return;
     }
-    // 呼び先の引数は a0 = argument だけ。a1 以降は書かない (caller の入力のまま素通し。
+    // 呼び先の引数は a0 (ARM では r0) = argument だけ。a1 以降は書かない (caller の入力のまま素通し。
     // 呼び先は宣言した引数以外を信用しない)。
-    frame.a0 = argument;
+    A::set_method_argument(frame, argument);
   }
 }
 
 // CALL_METHOD_DESCRIPTOR (33): a1 = 記述子の index, a2..a7 = 呼び先の引数 6 個 (a0..a5 へ渡る)。
-//   記述子の引きと呼び先の読み出し・台帳段の積みは表の錠の中 (区間は短く、syscall を含まない)。
+//   trap 内で表の錠 (table_lock) は取らず、版番号 seq による読み取り検証を行う。
 //   項目は呼び先の前計算 (入口・種別・親・窓・特権・instance 世代) を持つので、行を引かず、表は [持ち主][index]
 //   の 32 バイト項目をシフトで引く。
+//   trap 内で再試行ループを回さない、錠を取らない、LR/SC を使わない。
 template <class K, class KObj>
 [[gnu::always_inline]] inline void call_descriptor_in_place(K &kernel,
                                                             typename K::THREAD &thread,
@@ -299,20 +328,67 @@ template <class K, class KObj>
     typename K::FRAME &frame = *context.sp;
     const uint32_t caller_id = thread.identity_object();
     const uint32_t caller_generation = thread.identity_generation();
-    object_error error = object_error::OK;
-    kobj.table_lock_inline();
-    const auto *desc = kobj.find_method_descriptor(caller_id, (uint32_t)A::arg(frame, 1),
-                                                   caller_generation, error);
-    if (desc == nullptr) {
-      kobj.table_unlock_inline();
-      A::set_result(frame, (uintptr_t)error, 0);
+    const uint32_t index = (uint32_t)A::arg(frame, 1);
+
+    if (index >= KObj::METHOD_DESCRIPTOR_CAPACITY || caller_id >= KObj::OBJECT_COUNT) {
+      A::set_result(frame, (uintptr_t)object_error::BAD_DESCRIPTOR, 0);
       return;
     }
-    // 入場の形は項目の前計算から作る (呼び先の行を引かない)。錠の中で読む (照合と写しを同じ区間で読む)。
+
+    const auto &desc = kobj.descriptor_entry(caller_id, index);
+
+    // 1. seq を load-acquire (単一コアなら acquire fence 不要、RELAXED + コンパイラバリア)
+    uint8_t seq1;
+    if constexpr (K::CORE_COUNT == 1) {
+      seq1 = __atomic_load_n(&desc.seq, __ATOMIC_RELAXED);
+      asm volatile("" ::: "memory");
+    } else {
+      seq1 = __atomic_load_n(&desc.seq, __ATOMIC_ACQUIRE);
+    }
+
+    // 奇数なら書込み中なので即 STALE
+    if ((seq1 & 1u) != 0) {
+      A::set_result(frame, (uintptr_t)object_error::STALE_DESCRIPTOR, 0);
+      return;
+    }
+
+    // 2. 必要な値をローカルに写す
+    const typename KObj::method_descriptor_entry local_desc = desc;
+
+    // 3. seq を再読し、変わっていれば即 STALE
+    uint8_t seq2;
+    if constexpr (K::CORE_COUNT == 1) {
+      asm volatile("" ::: "memory");
+      seq2 = __atomic_load_n(&desc.seq, __ATOMIC_RELAXED);
+    } else {
+      seq2 = __atomic_load_n(&desc.seq, __ATOMIC_ACQUIRE);
+    }
+    if (seq1 != seq2) {
+      A::set_result(frame, (uintptr_t)object_error::STALE_DESCRIPTOR, 0);
+      return;
+    }
+
+    // 4. 写した値に対する照合 (順序: BAD_DESCRIPTOR -> STALE_DESCRIPTOR)
+    const uint8_t callee = local_desc.callee;
+    if (callee == KObj::DESCRIPTOR_NONE || callee >= KObj::OBJECT_COUNT) {
+      A::set_result(frame, (uintptr_t)object_error::BAD_DESCRIPTOR, 0);
+      return;
+    }
+    if (local_desc.owner_generation != caller_generation) {
+      A::set_result(frame, (uintptr_t)object_error::STALE_DESCRIPTOR, 0);
+      return;
+    }
+    const uint32_t version = kobj.object_version(callee);
+    if (version == 0 || local_desc.target_generation != version) {
+      A::set_result(frame, (uintptr_t)object_error::STALE_DESCRIPTOR, 0);
+      return;
+    }
+
+    // 5. 写した値から入場の形を作る (呼び先の行を引かない)。
     const kernel_error entered = enter_in_place<K, KObj>(
-        kernel, thread, context, kobj.view_of_descriptor(*desc), desc->target_entry,
+        kernel, thread, context, kobj.view_of_descriptor(local_desc), local_desc.target_entry,
         K::LEDGER_DESCRIPTOR_CALL);
-    kobj.table_unlock_inline();
+
     if (entered != kernel_error::OK) {
       A::set_result(frame, (uintptr_t)(entered == kernel_error::NO_STACK
                                            ? object_error::NO_STACK
@@ -321,14 +397,9 @@ template <class K, class KObj>
       return;
     }
     // enter_in_place は pc/ra/tag と context/台帳だけを書き、引数欄を触らない。
-    // 検査がすべて通ったあとで前からずらす。6 引数を入口処理をまたいでレジスタに
-    // 保持する必要がなく、失敗時にも caller の入力はそのまま残る (応答 a0/a1 以外)。
-    frame.a0 = frame.a2;
-    frame.a1 = frame.a3;
-    frame.a2 = frame.a4;
-    frame.a3 = frame.a5;
-    frame.a4 = frame.a6;
-    frame.a5 = frame.a7;
+    // 検査がすべて通ったあとで前からずらす。6 引数 (ARM では 1 引数) を入口処理をまたいでレジスタに
+    // 保持する必要がなく、失敗時にも caller の入力はそのまま残る (応答 a0/a1 または r0/r1 以外)。
+    A::move_descriptor_arguments(frame);
   }
 }
 

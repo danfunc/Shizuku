@@ -55,6 +55,9 @@
 #define RV32_TAG_ECALL 11
 #define RV32_TAG_ENTRY 0x100
 #define RV32_TAG_ECALL_SCRUB 0x101
+#define RV32_TAG_U_ENTRY 0x110
+#define RV32_TAG_U_ECALL 0x111
+#define RV32_TAG_U_SCRUB 0x112
 // M-mode ECALL を a0 の番号で直接振り分ける表 (shizuku_rv32_ecall_table、chip の trap.cpp が持つ) の
 // 要素数。object_api の番号 0..33 (svc_attributes の大きさ) と同じ。範囲外の番号は 0 番の要素
 // (= thread mode の API・primitive・raw 配送を従来どおり決める共通の入口) に落とす。
