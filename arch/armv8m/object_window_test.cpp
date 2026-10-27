@@ -71,31 +71,27 @@ int main() {
     thread_t t;
     t.return_records = records;
     assert(thread_t::ledger_accessor::record_caller_return_authority(
-        t, 3, 0x1001u, 0x20001000u, 1, 0x20000000u, 0x20000100u, 2, 0));
-    uintptr_t pc = 0, sp = 0, base = 0, limit = 0;
+        t, 3, 0x1001u, 0x20001000u, 1, 2, 0));
+    uintptr_t pc = 0, sp = 0;
     bool priv = true;
-    assert(thread_t::ledger_accessor::restore_caller_return_authority(t, 3, pc, sp, priv, base,
-                                                                      limit));
+    assert(thread_t::ledger_accessor::restore_caller_return_authority(t, 3, pc, sp, priv));
     // 記録した ret_privileged=1 (= 戻り先は特権) がそのまま特権として戻る。
     assert(pc == 0x1001u && sp == 0x20001000u && priv);
-    assert(base == 0x20000000u && limit == 0x20000100u);
+    // 窓は戻り権威に含めず、復帰時に呼び手の現在行から求める。
     // 非特権の戻り先 (ret_privileged=0) は非特権として戻る。
     assert(thread_t::ledger_accessor::record_caller_return_authority(t, 4, 0x2001u, 0x20002000u, 0,
-                                                                    0, 0, 1, 0));
-    assert(thread_t::ledger_accessor::restore_caller_return_authority(t, 4, pc, sp, priv, base,
-                                                                      limit));
+                                                                    1, 0));
+    assert(thread_t::ledger_accessor::restore_caller_return_authority(t, 4, pc, sp, priv));
     assert(pc == 0x2001u && sp == 0x20002000u && !priv);
     // 範囲外の段は記録も復元も失敗する (user stack の値に逃げない)。
-    assert(!thread_t::ledger_accessor::record_caller_return_authority(t, 34, 1, 1, 0, 0, 0, 0, 0));
-    assert(!thread_t::ledger_accessor::restore_caller_return_authority(t, 34, pc, sp, priv, base,
-                                                                       limit));
+    assert(!thread_t::ledger_accessor::record_caller_return_authority(t, 34, 1, 1, 0, 0, 0));
+    assert(!thread_t::ledger_accessor::restore_caller_return_authority(t, 34, pc, sp, priv));
     // depth 0 の push 前に pop 側が depth-1 を引いても (unsigned 回り込み) 失敗する。
     assert(!thread_t::ledger_accessor::restore_caller_return_authority(
-        t, static_cast<uint32_t>(0) - 1u, pc, sp, priv, base, limit));
+        t, static_cast<uint32_t>(0) - 1u, pc, sp, priv));
     // 退避域が無いスレッドは記録できない。
     thread_t none;
-    assert(!thread_t::ledger_accessor::record_caller_return_authority(none, 0, 1, 1, 0, 0, 0, 0,
-                                                                      0));
+    assert(!thread_t::ledger_accessor::record_caller_return_authority(none, 0, 1, 1, 0, 0, 0));
   }
   return 0;
 }

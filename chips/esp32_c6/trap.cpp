@@ -781,12 +781,14 @@ using K = shizuku::KERNEL;
 using native_status = shizuku::native::status;
 SHIZUKU_HOT arch::exception_frame_t *ecall_exit_method(arch::exception_frame_t *frame) {
   return ecall_direct(frame, [](K &k, auto &thread, auto &context) {
-    return shizuku::native::exit_in_place<K, false>(k, thread, context);
+    return shizuku::native::exit_in_place<K, shizuku::KERNEL_OBJECT, false>(
+        k, shizuku::kernel_object_instance, thread, context);
   });
 }
 SHIZUKU_HOT arch::exception_frame_t *ecall_forward_child_exit(arch::exception_frame_t *frame) {
   return ecall_direct(frame, [](K &k, auto &thread, auto &context) {
-    return shizuku::native::exit_in_place<K, true>(k, thread, context);
+    return shizuku::native::exit_in_place<K, shizuku::KERNEL_OBJECT, true>(
+        k, shizuku::kernel_object_instance, thread, context);
   });
 }
 SHIZUKU_HOT arch::exception_frame_t *ecall_call_method(arch::exception_frame_t *frame) {

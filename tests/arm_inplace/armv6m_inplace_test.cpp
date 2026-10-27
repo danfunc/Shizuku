@@ -27,12 +27,12 @@ using thread_armv6m_empty = shizuku::templates::thread<armv6m_raw::context_t>;
 using thread_armv6m_with_payload = shizuku::templates::thread<context_with_arm_payload>;
 
 #if defined(SHIZUKU_LEAN_LEDGER)
-static_assert(sizeof(thread_armv6m_empty::call_ledger_entry) == (sizeof(uintptr_t) == 4 ? 40 : 64),
+static_assert(sizeof(thread_armv6m_empty::call_ledger_entry) == (sizeof(uintptr_t) == 4 ? 32 : 48),
               "LEAN ARMv6-M call_ledger_entry with empty payload must not increase in size");
-static_assert(offsetof(thread_armv6m_with_payload::call_ledger_entry, payload) == (sizeof(uintptr_t) == 4 ? 40 : 60),
+static_assert(offsetof(thread_armv6m_with_payload::call_ledger_entry, payload) == (sizeof(uintptr_t) == 4 ? 32 : 44),
               "Payload offset must immediately follow reserved field");
-static_assert(sizeof(thread_armv6m_with_payload::call_ledger_entry) == (sizeof(uintptr_t) == 4 ? 72 : 96),
-              "LEAN call_ledger_entry with ARM payload size (40 + 32 on 32-bit)");
+static_assert(sizeof(thread_armv6m_with_payload::call_ledger_entry) == (sizeof(uintptr_t) == 4 ? 64 : 80),
+              "LEAN call_ledger_entry with ARM payload size (32 + 32 on 32-bit)");
 #else
 static_assert(sizeof(thread_armv6m_empty::call_ledger_entry) == (sizeof(uintptr_t) == 4 ? 16 : 24),
               "Non-LEAN ARMv6-M call_ledger_entry with empty payload must not increase in size");
@@ -94,6 +94,7 @@ int main() {
   run_inplace_method_failures_ledger_invariant<adapter>("ARMv6-M");
   run_inplace_descriptor_failures_ledger_invariant<adapter>("ARMv6-M");
   run_inplace_lean_push_pop<adapter>("ARMv6-M");
+  run_inplace_return_window_current_row<adapter>("ARMv6-M");
   run_inplace_exit_validation<adapter>("ARMv6-M");
 
   printf("All ARMv6-M in-place host tests PASSED successfully!\n");

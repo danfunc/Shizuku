@@ -67,8 +67,6 @@ template <class A, class Thread, class Context, class Frame>
     entry.generation = 0;
     entry.ret_pc = A::frame_pc(frame);
     entry.ret_sp = A::call_return_sp(context);
-    entry.ret_region_base = context.region_base;
-    entry.ret_region_limit = context.region_limit;
     entry.prev_call = (uint16_t)thread.call_stack.call_top;
     entry.ret_privileged = A::context_privileged(context) ? 1 : 0;
     thread.call_stack.depth++;
@@ -121,11 +119,29 @@ namespace native {
 // 呼び出し側が tail call で停止できる)。
 enum class status : uint8_t { DONE, FORWARD, CORRUPT };
 
+struct return_region_window {
+  uintptr_t base;
+  uintptr_t limit;
+};
+
+// Resolve the resumed caller's window independently from the object identity used
+// to find its row. A caller activation entered through dispatch keeps the kernel's
+// closed window; every other caller uses its object's current row.
+template <class OBJECTS>
+[[gnu::always_inline]] inline return_region_window resolve_return_region_window(
+    const OBJECTS &objects, uint8_t caller_via, uint8_t dispatch_via,
+    uint32_t caller_object) {
+  if (caller_via == dispatch_via)
+    return {0, 0};
+  const auto window = objects.return_region(caller_object);
+  return {window.base, window.limit};
+}
+
 // 台帳の最上段を 1 つ落とす (call の段なら識別を戻す)。ヘッダ枠方式 ARCH 専用。
 // 前提: depth >= 1 (呼び出し側が戻り先 d と count を検査済み)。call の段なのに call_count == 0 なら
 // 何も変えず false (不変条件の破れ)。scrub は header_pop_of を見よ。
-template <class K>
-[[gnu::always_inline]] inline bool pop_in_place(typename K::THREAD &thread,
+template <class K, class KObj>
+[[gnu::always_inline]] inline bool pop_in_place(KObj &kobj, typename K::THREAD &thread,
                                                 typename K::CONTEXT &context,
                                                 typename K::FRAME *&frame, bool restore,
                                                 bool scrub) {
@@ -133,9 +149,13 @@ template <class K>
   if constexpr (arch_call_in_place<A>()) {
     const uint32_t depth = thread.call_stack.depth;
 #if defined(SHIZUKU_LEAN_LEDGER)
-    // Return authority (PC/SP/privilege/window/caller chain) comes only from protected ledger memory.
+    // PC/SP/privilege and caller identity come from protected ledger memory. The window is resolved below.
     const auto &entry = thread.ledger[depth - 1];
     const uint8_t via = entry.via;
+    // The resumed caller is the preceding activation. Inspect its via directly so a
+    // dispatch entry is not skipped while resolving the caller object's call chain.
+    const uint8_t caller_via = depth > 1 ? thread.ledger[depth - 2].via : 0;
+    const bool caller_is_dispatch = caller_via == K::LEDGER_DISPATCH;
     const bool is_call = via == K::LEDGER_CALL || via == K::LEDGER_DESCRIPTOR_CALL;
     if (is_call && thread.call_stack.call_count == 0)
       return false;
@@ -151,8 +171,11 @@ template <class K>
     }
     if (restore) {
       frame = A::call_resume_at(context, entry.ret_pc, entry.ret_sp, entry.ret_privileged != 0,
-                                entry.ret_region_base, entry.ret_region_limit, scrub);
-      if (!A::context_privileged(context)) {
+                                0, 0, scrub);
+      const auto window = resolve_return_region_window(
+          kobj, caller_via, K::LEDGER_DISPATCH, caller_object);
+      A::set_region_window(context, window.base, window.limit);
+      if (!caller_is_dispatch && !A::context_privileged(context)) {
         if constexpr (requires { A::set_unprivileged_resume_metadata(*frame, entry.ret_sp, A::trusted_stack_top(), scrub); }) {
           A::set_unprivileged_resume_metadata(*frame, entry.ret_sp, A::trusted_stack_top(), scrub);
         }
@@ -164,10 +187,24 @@ template <class K>
     thread.call_stack.depth = depth - 1;
 #else
     const uint8_t via = thread.ledger[depth - 1].via;
+    const uint8_t caller_via = depth > 1 ? thread.ledger[depth - 2].via : 0;
+    const bool caller_is_dispatch = caller_via == K::LEDGER_DISPATCH;
     const bool is_call = via == K::LEDGER_CALL || via == K::LEDGER_DESCRIPTOR_CALL;
     if (is_call && thread.call_stack.call_count == 0)
       return false;
     header_pop_of<A>(thread, context, frame, is_call, restore, scrub);
+    if (restore) {
+      const uint32_t caller_object = thread.call_stack.call_count != 0
+          ? thread.call_stack.current_call_object
+          : thread.base_object;
+      const auto window = resolve_return_region_window(
+          kobj, caller_via, K::LEDGER_DISPATCH, caller_object);
+      A::set_region_window(context, window.base, window.limit);
+      if (!caller_is_dispatch && !A::context_privileged(context)) {
+        if constexpr (requires { A::switch_caller_protection(caller_object); })
+          A::switch_caller_protection(caller_object);
+      }
+    }
     thread.call_stack.depth = depth - 1;
 #endif
   }
@@ -177,14 +214,14 @@ template <class K>
 // 台帳の上から count 段を落とす。最後に落とした段の caller だけが再開する。
 // 再開の目印は、2 段以上を一度に落とす (callee が自分の意思で戻らない巻き戻し) か forced_scrub
 // (FORWARD_CHILD_EXIT) のとき消去 (RV32_TAG_ECALL_SCRUB)、1 段の普通の戻りのときは素通し。
-template <class K>
-[[gnu::always_inline]] inline bool unwind_in_place(typename K::THREAD &thread,
+template <class K, class KObj>
+[[gnu::always_inline]] inline bool unwind_in_place(KObj &kobj, typename K::THREAD &thread,
                                                    typename K::CONTEXT &context,
                                                    typename K::FRAME *&frame, uintptr_t count,
                                                    bool forced_scrub) {
   const bool scrub = forced_scrub || count > 1;
   for (uintptr_t index = 0; index < count; ++index)
-    if (!pop_in_place<K>(thread, context, frame, index + 1 == count, scrub))
+    if (!pop_in_place<K>(kobj, thread, context, frame, index + 1 == count, scrub))
       return false;
   return true;
 }
@@ -217,7 +254,7 @@ template <class K, class KObj>
     typename K::FRAME &frame = *context.sp;
 #if defined(SHIZUKU_LEAN_LEDGER)
     // 記帳は台帳の 1 項目だけ: 呼び先の同定 (object・handler・kind・via・floor・世代) と、この段から
-    // 戻るときの caller の再開点 (pc・sp・特権・窓) と、ひとつ外側の call 段への鎖 (prev_call)。
+    // 戻るときの caller の再開点 (pc・sp・特権) と、ひとつ外側の call 段への鎖 (prev_call)。窓は復帰時に解決する。
     // user stack のヘッダは書かない。current / caller の識別は call 段の列から導く (call_top だけ更新)。
     auto &entry = thread.ledger[depth];
     entry.object = view.id;
@@ -229,8 +266,6 @@ template <class K, class KObj>
     entry.generation = view.instance_generation;
     entry.ret_pc = A::frame_pc(frame);
     entry.ret_sp = A::call_return_sp(context);
-    entry.ret_region_base = context.region_base;
-    entry.ret_region_limit = context.region_limit;
     entry.prev_call = (uint16_t)stack.call_top;
     entry.ret_privileged = A::context_privileged(context) ? 1 : 0;
     stack.depth = depth + 1;
@@ -410,8 +445,8 @@ template <class K, class KObj>
 // (= 呼び先を積む前の深さ) を d とする。27 は専用 HANDLER からだけ (parent_ledger 権限)。
 // 検査は primitive RETURN と同じ (validate_return_depth)。弾いたら 1 枚も落とさず
 // UNWIND_REJECTED + kernel_error を返す。
-template <class K, bool Forward>
-[[gnu::always_inline]] inline status exit_in_place(K &kernel, typename K::THREAD &thread,
+template <class K, class KObj, bool Forward>
+[[gnu::always_inline]] inline status exit_in_place(K &kernel, KObj &kobj, typename K::THREAD &thread,
                                                    typename K::CONTEXT &context) {
   using A = typename K::ARCH;
   if constexpr (arch_call_in_place<A>()) {
@@ -451,7 +486,7 @@ template <class K, bool Forward>
     const uintptr_t value = A::arg(*frame, 2);
     const uintptr_t error = A::arg(*frame, 3);
     // FORWARD_CHILD_EXIT は親ハンドラが子を取り上げて戻す巻き戻しなので、1 段でも消去の目印。
-    if (!unwind_in_place<K>(thread, context, frame, count, Forward))
+    if (!unwind_in_place<K, KObj>(kobj, thread, context, frame, count, Forward))
       return status::CORRUPT;
     A::set_result(*frame, error, value);
     return status::DONE;

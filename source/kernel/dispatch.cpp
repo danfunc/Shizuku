@@ -239,8 +239,6 @@ SHIZUKU_HOT bool KERNEL::call_frame_push(KERNEL::THREAD &thread, KERNEL::CONTEXT
             caller_pc,
             (uintptr_t)context->sp,
             !is_context_unprivileged(context) ? 1 : 0,
-            context->region_base,
-            context->region_limit,
             (uint16_t)thread.call_stack.call_count,
             0))
       return false;
@@ -288,11 +286,11 @@ SHIZUKU_HOT bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT 
     return false;
 #endif
   if (arch_call_in_place<ARCH>()) {
-    // ヘッダ枠方式: ヘッダから caller の識別・pc・特権・窓を読み、最後の 1 段だけ caller の
+    // ヘッダ枠方式: ヘッダから caller の識別・pc・特権を読み、最後の 1 段だけ caller の
     // 再開フレームを caller の SP の直下に作る (a0/a1 以外は素通し。scrub のときは出口が消す)。
     // frame のコピーも戻しも無い。
     // (call の段の識別の戻しと underflow の検査は trap 内の EXIT_METHOD と共有: native_call.hpp)
-    if (!native::pop_in_place<KERNEL>(thread, *context, *frame, restore, scrub))
+    if (!native::pop_in_place<KERNEL>(kernel_object_instance, thread, *context, *frame, restore, scrub))
       BOARD::panic("call ledger count underflow");
     return true;
   }
@@ -310,24 +308,20 @@ SHIZUKU_HOT bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT 
   const uintptr_t previous = header->prev;
   *context = header->saved;
 
-  // ★戻りの権威は user stack 上の header ではなく特権台帳 (Plan §5)
+  // ★戻りの PC/SP/特権は user stack 上の header ではなく特権台帳 (Plan §5)。窓は復帰先の現在行から解決する。
   if constexpr (ARCH::HAS_OBJECT_PROTECTION && !arch_call_in_place<ARCH>()) {
     uintptr_t ret_pc = 0;
     uintptr_t ret_sp = 0;
     bool ret_privileged = false;
-    uintptr_t ret_region_base = 0;
-    uintptr_t ret_region_limit = 0;
     // 記録が読めないときは panic。header の値で黙って続けると権威が user stack に戻る。
     if (!THREAD::ledger_accessor::restore_caller_return_authority(
             thread, thread.call_stack.depth - 1,
-            ret_pc, ret_sp, ret_privileged,
-            ret_region_base, ret_region_limit))
+            ret_pc, ret_sp, ret_privileged))
       BOARD::panic("call return authority missing");
 
     // 台帳の値を権威として強制反映 (user stack の header からの読み戻し値は上書き)
     context->sp = (FRAME *)ret_sp;
     ARCH::set_priv(*context, ret_privileged);
-    ARCH::set_region_window(*context, ret_region_base, ret_region_limit);
     ARCH::set_entry(*context->sp, ret_pc, ARCH::frame_lr(*context->sp));
 
     // 呼び手の callee-saved (r4-r11) は台帳から戻す (ヘッダの写しは消してあるため)。
@@ -346,15 +340,22 @@ SHIZUKU_HOT bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT 
     thread.call_stack.caller_generation =
         thread.call_stack.identity[restore_index].previous_caller_generation;
   }
+  const uint8_t caller_via = thread.call_stack.depth > 1
+      ? thread.ledger[thread.call_stack.depth - 2].via
+      : 0;
+  const bool caller_is_dispatch = caller_via == LEDGER_DISPATCH;
   thread.call_stack.top = previous;
   thread.call_stack.depth--;
 
-  // 復帰先 caller の保護窓を復元
+  // 戻り窓は保存値を使わず、直前 activation と caller object の現在行から解決する。
   const uint32_t caller_obj = thread.call_stack.call_count == 0
       ? thread.base_object
       : thread.call_stack.current_call_object;
   // 戻り先が特権なら窓は要らない (特権は窓に制限されない)。非特権のときだけ、同じ窓なら省いて戻す。
-  if (is_context_unprivileged(context))
+  const auto window = native::resolve_return_region_window(
+      kernel_object_instance, caller_via, LEDGER_DISPATCH, caller_obj);
+  ARCH::set_region_window(*context, window.base, window.limit);
+  if (!caller_is_dispatch && is_context_unprivileged(context))
     ARCH::switch_caller_protection(caller_obj);
   return true;
 }
@@ -617,8 +618,10 @@ template <> SHIZUKU_HOT bool KERNEL::svc_exit(KERNEL::CONTEXT *context, bool for
   // ヘッダ枠方式 (RV32) の本体は native_call.hpp (例外入口が 1 関数に展開するものと同じ)。
   if (arch_call_in_place<ARCH>()) {
     const native::status result =
-        forward ? native::exit_in_place<KERNEL, true>(*this, thread, *context)
-                : native::exit_in_place<KERNEL, false>(*this, thread, *context);
+        forward ? native::exit_in_place<KERNEL, KERNEL_OBJECT, true>(
+                      *this, kernel_object_instance, thread, *context)
+                : native::exit_in_place<KERNEL, KERNEL_OBJECT, false>(
+                      *this, kernel_object_instance, thread, *context);
     if (result == native::status::CORRUPT)
       BOARD::panic("call ledger count underflow");
     return result == native::status::DONE;

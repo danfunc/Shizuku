@@ -145,11 +145,66 @@ cc_test(
     ],
 )
 
+# The same dispatcher audit with the production KERNEL_OBJECT implementation linked,
+# so 3A can exercise the real grant_region row mutation and handler dispatch path.
+cc_test(
+    name = "dispatcher_v1_3a_real_kobj_lean_test",
+    srcs = [
+        "source/kernel/dispatch.cpp",
+        "source/kernel/thread.cpp",
+        "source/kernel_object/handler.cpp",
+        "source/kernel_object/memory.cpp",
+        "source/memory_manager/freestanding.cpp",
+        "source/selftest/test_dispatcher_v1.cpp",
+        "source/selftest/test_dispatcher_v1_config.hpp",
+    ],
+    copts = [
+        "-std=c++20",
+        "-include",
+        "source/selftest/test_dispatcher_v1_config.hpp",
+    ],
+    defines = ["SHIZUKU_TEST_REAL_KERNEL_OBJECT=1", "SHIZUKU_LEAN_LEDGER=1"],
+    local_defines = ["SHIZUKU_C6_SKELETON_PERMITTED=1"],
+    deps = [
+        ":internal_headers",
+        ":object_ids",
+        "//boards/esp32_c6:headers",
+        "//chips/esp32_c6:headers",
+        "//configs:config",
+    ],
+)
+
 cc_test(
     name = "test_u_cost_invariants",
     srcs = ["tests/test_u_cost_invariants.cpp"],
     deps = [
         ":internal_headers",
+    ],
+)
+
+cc_test(
+    name = "three_a_return_window_test",
+    srcs = ["tests/three_a_return_window_test.cpp"],
+    deps = [":internal_headers"],
+)
+
+cc_test(
+    name = "armv8m_legacy_frame_return_test",
+    srcs = [
+        "tests/arm_legacy_frame_return_test.cpp",
+        "tests/arm_legacy_config/shizuku/config.hpp",
+        "source/kernel/dispatch.cpp",
+        "source/kernel/thread.cpp",
+    ],
+    copts = [
+        "-std=c++20",
+        "-iquote",
+        "tests/arm_legacy_config",
+    ],
+    deps = [
+        ":internal_headers",
+        "//arch/armv8m:headers",
+        "//chips/rp2350:headers",
     ],
 )
 
