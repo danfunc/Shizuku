@@ -46,15 +46,13 @@ struct call_ledger_entry_32bit_empty_lean {
   uint32_t generation;
   uint32_t ret_pc;
   uint32_t ret_sp;
-  uint32_t ret_region_base;
-  uint32_t ret_region_limit;
   uint16_t prev_call;
   uint8_t ret_privileged;
   uint8_t reserved;
   [[no_unique_address]] shizuku::empty_ledger_payload payload{};
 };
-static_assert(sizeof(call_ledger_entry_32bit_empty_lean) == 40,
-              "32-bit LEAN call_ledger_entry with empty payload must be exactly 40 bytes");
+static_assert(sizeof(call_ledger_entry_32bit_empty_lean) == 32,
+              "32-bit LEAN call_ledger_entry with empty payload must be exactly 32 bytes");
 
 struct call_ledger_entry_32bit_with_payload_lean {
   uint32_t object;
@@ -66,17 +64,15 @@ struct call_ledger_entry_32bit_with_payload_lean {
   uint32_t generation;
   uint32_t ret_pc;
   uint32_t ret_sp;
-  uint32_t ret_region_base;
-  uint32_t ret_region_limit;
   uint16_t prev_call;
   uint8_t ret_privileged;
   uint8_t reserved;
   [[no_unique_address]] test_arm_callee_saved_payload payload{};
 };
-static_assert(sizeof(call_ledger_entry_32bit_with_payload_lean) == 72,
-              "32-bit LEAN call_ledger_entry with 32B ARM payload must be exactly 72 bytes (40 + 32)");
-static_assert(offsetof(call_ledger_entry_32bit_with_payload_lean, payload) == 40,
-              "32-bit LEAN payload offset must be at byte 40");
+static_assert(sizeof(call_ledger_entry_32bit_with_payload_lean) == 64,
+              "32-bit LEAN call_ledger_entry with 32B ARM payload must be exactly 64 bytes (32 + 32)");
+static_assert(offsetof(call_ledger_entry_32bit_with_payload_lean, payload) == 32,
+              "32-bit LEAN payload offset must be at byte 32");
 
 // ---------------------------------------------------------------------------
 // 2. Host Test-Only Derived Arch Adapter (Test Seams Only)
@@ -183,6 +179,7 @@ struct mock_kernel {
 
   static constexpr uint8_t LEDGER_CALL = 1;
   static constexpr uint8_t LEDGER_DESCRIPTOR_CALL = 2;
+  static constexpr uint8_t LEDGER_DISPATCH = 3;
   static constexpr uint32_t CORE_COUNT = 1;
 
   uint32_t m_svc_handler_object = 1;
@@ -240,6 +237,23 @@ struct mock_kobj {
   bool m_row_valid[OBJECT_COUNT][16]{};
   uint32_t m_object_versions[OBJECT_COUNT]{};
   method_descriptor_entry m_descriptors[OBJECT_COUNT][METHOD_DESCRIPTOR_CAPACITY]{};
+  uintptr_t m_region_base[OBJECT_COUNT]{};
+  uintptr_t m_region_limit[OBJECT_COUNT]{};
+
+  uintptr_t object_region_base(uintptr_t id) const { return m_region_base[id]; }
+  uintptr_t object_region_limit(uintptr_t id) const { return m_region_limit[id]; }
+  shizuku::native::return_region_window return_region(uintptr_t id) const {
+    return id < OBJECT_COUNT ? shizuku::native::return_region_window{m_region_base[id], m_region_limit[id]}
+                             : shizuku::native::return_region_window{0, 0};
+  }
+  shizuku::call_request callee_request(uintptr_t id, uintptr_t entry) const {
+    shizuku::call_request request{};
+    request.entry_pc = entry;
+    request.callee_object = (uint32_t)id;
+    request.region_base = m_region_base[id];
+    request.region_limit = m_region_limit[id];
+    return request;
+  }
 
   const method_row *find_method_row(uintptr_t id, uintptr_t method_idx, uint32_t caller_id,
                                     shizuku::object_error &err, method_t &entry) const {
@@ -554,8 +568,9 @@ void run_inplace_lean_push_pop(const char *tag) {
   assert(ledger[0].ret_pc == 0x10004000u);
   assert(ledger[0].ret_sp == reinterpret_cast<uintptr_t>(&frame) + sizeof(typename mock_kernel<Adapter>::FRAME));
   assert(ledger[0].ret_privileged == 0);
-  assert(ledger[0].ret_region_base == 0x20000000u);
-  assert(ledger[0].ret_region_limit == 0x20001000u);
+  mock_kobj kobj;
+  kobj.m_region_base[1] = 0x20000000u;
+  kobj.m_region_limit[1] = 0x20001000u;
 
   ledger[0].via = mock_kernel<Adapter>::LEDGER_CALL;
   ledger[0].unwind_floor = 0;
@@ -563,7 +578,8 @@ void run_inplace_lean_push_pop(const char *tag) {
   thread.call_stack.call_top = 1;
 
   typename mock_kernel<Adapter>::FRAME *restored_frame = nullptr;
-  bool popped = shizuku::native::pop_in_place<mock_kernel<Adapter>>(thread, ctx, restored_frame, true, false);
+  bool popped = shizuku::native::pop_in_place<mock_kernel<Adapter>>(
+      kobj, thread, ctx, restored_frame, true, false);
   assert(popped);
   assert(thread.call_stack.depth == 0);
   assert(thread.call_stack.call_count == 0);
@@ -573,6 +589,195 @@ void run_inplace_lean_push_pop(const char *tag) {
 #endif
 
   printf("  [%s] PASS: lean_push_pop\n", tag);
+}
+
+template <typename Adapter>
+void run_inplace_return_window_current_row(const char *tag) {
+  using K = mock_kernel<Adapter>;
+  using Frame = typename K::FRAME;
+  K kernel;
+  mock_kobj kobj;
+  alignas(8) unsigned char storage[1024]{};
+  auto *outer_frame = reinterpret_cast<Frame *>(storage + 256);
+  auto *inner_frame = reinterpret_cast<Frame *>(storage + 512);
+  typename K::CONTEXT ctx{};
+  ctx.sp = outer_frame;
+  ctx.control = Adapter::CONTROL_UNPRIV_PSP;
+  ctx.region_base = 0x20001000u;
+  ctx.region_limit = 0x20002000u;
+
+  typename K::THREAD thread;
+  typename K::THREAD::call_ledger_entry ledger[16]{};
+  thread.ledger = ledger;
+  thread.ledger_capacity = 16;
+  thread.base_object = 1;
+  kobj.m_region_base[1] = 0x20001000u;
+  kobj.m_region_limit[1] = 0x20002000u;
+  kobj.m_region_base[6] = 0x20006000u;
+  kobj.m_region_limit[6] = 0x20007000u;
+  kobj.m_region_base[7] = 0x20007000u;
+  kobj.m_region_limit[7] = 0x20008000u;
+  kobj.m_row_valid[5][0] = true;
+  kobj.m_rows[5][0] = {5, 1, 0, shizuku::object_kind::PLAIN, false, 0, 0, 1, 0x10005000u};
+  kobj.m_row_valid[7][0] = true;
+  kobj.m_rows[7][0] = {7, 1, 0, shizuku::object_kind::PLAIN, false, 0, 0, 1, 0x10007000u};
+
+  // Case 1: a nested native call returns to the object identified by prev_call.
+  // Changing that object's row while the callee runs models grant_region revoke/update;
+  // the return must use the current row, not the saved caller window.
+  kobj.m_row_valid[6][0] = true;
+  kobj.m_rows[6][0] = {6, 1, 0, shizuku::object_kind::PLAIN, false, 0, 0, 1, 0x10006000u};
+  outer_frame->pc = 0x10001000u;
+  outer_frame->r0 = 4;
+  outer_frame->r1 = 6;
+  outer_frame->r2 = 0;
+  outer_frame->r3 = 0x31;
+  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj);
+  assert(thread.call_stack.depth == 1 && thread.call_stack.call_count == 1);
+  assert(ledger[0].via == K::LEDGER_CALL && ledger[0].object == 6);
+
+  ctx.sp = inner_frame;
+  inner_frame->pc = 0x10006100u;
+  inner_frame->r0 = 4;
+  inner_frame->r1 = 6;
+  inner_frame->r2 = 0;
+  inner_frame->r3 = 0x32;
+  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj);
+  assert(thread.call_stack.depth == 2 && thread.call_stack.call_count == 2);
+  assert(ledger[1].via == K::LEDGER_CALL && ledger[1].object == 6);
+#if defined(SHIZUKU_LEAN_LEDGER)
+  assert(ledger[1].prev_call == 1);
+#else
+  assert(thread.call_stack.current_call_object == 6 && thread.call_stack.caller_object == 6);
+#endif
+  kobj.m_region_base[6] = 0;
+  kobj.m_region_limit[6] = 0;
+  inner_frame->r0 = 2;
+  inner_frame->r1 = 1;
+  inner_frame->r2 = 0xA6;
+  inner_frame->r3 = 0;
+  inner_frame->r12 = shizuku::RETURN_STUB_MARKER;
+  const auto revoked = shizuku::native::exit_in_place<K, mock_kobj, false>(kernel, kobj, thread, ctx);
+  assert(revoked == shizuku::native::status::DONE);
+  assert(thread.call_stack.depth == 1 && thread.call_stack.call_count == 1);
+  assert(ctx.sp == inner_frame && inner_frame->pc == 0x10006100u);
+  assert(ctx.region_base == 0 && ctx.region_limit == 0);
+  assert(inner_frame->r0 == 0 && inner_frame->r1 == 0xA6);
+  assert((ctx.control & 1u) == 1u);
+
+  // The descriptor route shares the same return-window rule and caller identity chain.
+  kobj.m_region_base[6] = 0x20006100u;
+  kobj.m_region_limit[6] = 0x20006200u;
+  kobj.m_object_versions[5] = 1;
+  auto &desc = kobj.m_descriptors[6][1];
+  desc.seq = 2;
+  desc.callee = 5;
+  desc.target_entry = 0x10005000u;
+  desc.owner_generation = 1;
+  desc.target_generation = 1;
+  desc.parent_handler_object = 1;
+  desc.parent_handler_entry = 0;
+  desc.kind = shizuku::object_kind::PLAIN;
+  desc.privileged = false;
+  inner_frame->pc = 0x10006200u;
+  inner_frame->r0 = 33;
+  inner_frame->r1 = 1;
+  inner_frame->r2 = 0x51;
+  inner_frame->r3 = 0;
+  shizuku::native::call_descriptor_in_place(kernel, thread, ctx, kobj);
+  assert(thread.call_stack.depth == 2 && thread.call_stack.call_count == 2);
+  assert(ledger[1].via == K::LEDGER_DESCRIPTOR_CALL);
+  inner_frame->r0 = 2;
+  inner_frame->r1 = 1;
+  inner_frame->r2 = 0xD5;
+  inner_frame->r3 = 0;
+  inner_frame->r12 = shizuku::RETURN_STUB_MARKER;
+  const auto descriptor_return = shizuku::native::exit_in_place<K, mock_kobj, false>(
+      kernel, kobj, thread, ctx);
+  assert(descriptor_return == shizuku::native::status::DONE);
+  assert(thread.call_stack.depth == 1 && thread.call_stack.call_count == 1);
+  assert(ctx.sp == inner_frame && inner_frame->pc == 0x10006200u);
+  assert(ctx.region_base == 0x20006100u && ctx.region_limit == 0x20006200u);
+  assert(inner_frame->r0 == 0 && inner_frame->r1 == 0xD5);
+  assert((ctx.control & 1u) == 1u);
+
+  // Case 2: a native nested call made while a dispatch activation is the immediate
+  // caller returns with 0/0, even though the unrelated base object's row is non-empty.
+  typename K::CONTEXT dispatch_ctx{};
+  dispatch_ctx.sp = outer_frame;
+  dispatch_ctx.control = Adapter::CONTROL_PRIV_PSP;
+  dispatch_ctx.region_base = 0;
+  dispatch_ctx.region_limit = 0;
+  typename K::THREAD dispatch_thread;
+  typename K::THREAD::call_ledger_entry dispatch_ledger[16]{};
+  dispatch_thread.ledger = dispatch_ledger;
+  dispatch_thread.ledger_capacity = 16;
+  dispatch_thread.base_object = 1;
+  assert(shizuku::header_push_of<Adapter>(dispatch_thread, dispatch_ctx, *outer_frame,
+                                          K::LEDGER_DISPATCH, 0));
+  dispatch_ledger[0].object = 7;
+  dispatch_ledger[0].kind = (uint8_t)shizuku::object_kind::HANDLER;
+  dispatch_ledger[0].via = K::LEDGER_DISPATCH;
+  dispatch_ledger[0].unwind_floor = 0;
+  dispatch_ctx.region_base = 0;
+  dispatch_ctx.region_limit = 0;
+  dispatch_ctx.sp = inner_frame;
+  inner_frame->pc = 0x10007100u;
+  inner_frame->r0 = 4;
+  inner_frame->r1 = 7;
+  inner_frame->r2 = 0;
+  inner_frame->r3 = 0x33;
+  shizuku::native::call_method_in_place(kernel, dispatch_thread, dispatch_ctx, kobj);
+  assert(dispatch_thread.call_stack.depth == 2 && dispatch_thread.call_stack.call_count == 1);
+  assert(dispatch_ledger[0].via == K::LEDGER_DISPATCH &&
+         dispatch_ledger[1].via == K::LEDGER_CALL);
+  inner_frame->r0 = 2;
+  inner_frame->r1 = 1;
+  inner_frame->r2 = 0xA7;
+  inner_frame->r3 = 0;
+  inner_frame->r12 = shizuku::RETURN_STUB_MARKER;
+  const auto from_dispatch = shizuku::native::exit_in_place<K, mock_kobj, false>(
+      kernel, kobj, dispatch_thread, dispatch_ctx);
+  assert(from_dispatch == shizuku::native::status::DONE);
+  assert(dispatch_thread.call_stack.depth == 1 && dispatch_thread.call_stack.call_count == 0);
+  assert(dispatch_ctx.sp == inner_frame && inner_frame->pc == 0x10007100u);
+  assert(dispatch_ctx.region_base == 0 && dispatch_ctx.region_limit == 0);
+  assert(inner_frame->r0 == 0 && inner_frame->r1 == 0xA7);
+  assert((dispatch_ctx.control & 1u) == 0u);
+
+  // Case 3: an ordinary depth-zero caller keeps its current object-row window on return.
+  typename K::CONTEXT base_ctx{};
+  base_ctx.sp = outer_frame;
+  base_ctx.control = Adapter::CONTROL_UNPRIV_PSP;
+  base_ctx.region_base = 0x20001000u;
+  base_ctx.region_limit = 0x20002000u;
+  typename K::THREAD base_thread;
+  typename K::THREAD::call_ledger_entry base_ledger[16]{};
+  base_thread.ledger = base_ledger;
+  base_thread.ledger_capacity = 16;
+  base_thread.base_object = 1;
+  outer_frame->pc = 0x10001100u;
+  outer_frame->r0 = 4;
+  outer_frame->r1 = 5;
+  outer_frame->r2 = 0;
+  outer_frame->r3 = 0x34;
+  shizuku::native::call_method_in_place(kernel, base_thread, base_ctx, kobj);
+  assert(base_thread.call_stack.depth == 1 && base_thread.call_stack.call_count == 1);
+  outer_frame->r0 = 2;
+  outer_frame->r1 = 0;
+  outer_frame->r2 = 0xA1;
+  outer_frame->r3 = 0;
+  outer_frame->r12 = shizuku::RETURN_STUB_MARKER;
+  const auto ordinary = shizuku::native::exit_in_place<K, mock_kobj, false>(
+      kernel, kobj, base_thread, base_ctx);
+  assert(ordinary == shizuku::native::status::DONE);
+  assert(base_thread.call_stack.depth == 0 && base_thread.call_stack.call_count == 0);
+  assert(base_ctx.sp == outer_frame && outer_frame->pc == 0x10001100u);
+  assert(base_ctx.region_base == 0x20001000u && base_ctx.region_limit == 0x20002000u);
+  assert(outer_frame->r0 == 0 && outer_frame->r1 == 0xA1);
+  assert((base_ctx.control & 1u) == 1u);
+
+  printf("  [%s] PASS: three_a_return_window_current_row\n", tag);
 }
 
 template <typename Adapter>
@@ -636,7 +841,9 @@ void run_inplace_exit_validation(const char *tag) {
   slots[1].frame.r2 = 42;
   slots[1].frame.r3 = (uint32_t)shizuku::object_error::OK;
 
-  auto st_rejected = shizuku::native::exit_in_place<mock_kernel<Adapter>, false>(kernel, thread, ctx);
+  mock_kobj kobj;
+  auto st_rejected = shizuku::native::exit_in_place<mock_kernel<Adapter>, mock_kobj, false>(
+      kernel, kobj, thread, ctx);
   assert(st_rejected == shizuku::native::status::DONE);
   assert(slots[1].frame.r0 == (uint32_t)shizuku::object_error::UNWIND_REJECTED);
   assert(slots[1].frame.r1 == (uint32_t)shizuku::kernel_error::DEPTH_MISMATCH);
@@ -649,7 +856,8 @@ void run_inplace_exit_validation(const char *tag) {
   slots[1].frame.r2 = 42; // value
   slots[1].frame.r3 = (uint32_t)shizuku::object_error::OK;
 
-  auto st1 = shizuku::native::exit_in_place<mock_kernel<Adapter>, false>(kernel, thread, ctx);
+  auto st1 = shizuku::native::exit_in_place<mock_kernel<Adapter>, mock_kobj, false>(
+      kernel, kobj, thread, ctx);
   assert(st1 == shizuku::native::status::DONE);
   assert(thread.call_stack.depth == 1);
   assert(thread.call_stack.call_count == 1);
@@ -662,7 +870,8 @@ void run_inplace_exit_validation(const char *tag) {
   ctx.sp->r2 = 84; // value
   ctx.sp->r3 = (uint32_t)shizuku::object_error::OK;
 
-  auto st0 = shizuku::native::exit_in_place<mock_kernel<Adapter>, false>(kernel, thread, ctx);
+  auto st0 = shizuku::native::exit_in_place<mock_kernel<Adapter>, mock_kobj, false>(
+      kernel, kobj, thread, ctx);
   assert(st0 == shizuku::native::status::DONE);
   assert(thread.call_stack.depth == 0);
   assert(thread.call_stack.call_count == 0);

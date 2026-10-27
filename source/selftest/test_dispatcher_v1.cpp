@@ -31,6 +31,7 @@
 
 #define SHIZUKU_C6_SKELETON_PERMITTED 1
 #include "shizuku/svc_attributes.hpp"
+#include "shizuku/native_call.hpp"
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -38,6 +39,9 @@
 
 namespace shizuku {
 KERNEL kernel_instance;
+#if defined(SHIZUKU_TEST_REAL_KERNEL_OBJECT)
+extern KERNEL_OBJECT kernel_object_instance;
+#else
 KERNEL_OBJECT kernel_object_instance;
 
 // 本物の callee_request (handler.cpp) は object_protection など kobj 全体に依存して
@@ -54,8 +58,11 @@ call_request KERNEL_OBJECT::callee_request(uintptr_t id, uintptr_t entry_pc) con
   request.protection = (m_objects[id].flags & OBJECT_UNPRIVILEGED)
                            ? PROTECTION_UNPRIVILEGED
                            : PROTECTION_PRIVILEGED;
+  request.region_base = m_objects[id].region_base;
+  request.region_limit = m_objects[id].region_limit;
   return request;
 }
+#endif
 
 namespace selftest {
 // kobj の表 (private) を試験が直接組み立てるための口。
@@ -104,6 +111,22 @@ struct dispatcher_test_access {
   static void set_region(uint32_t id, uint32_t base, uint32_t limit) {
     kernel_object_instance.m_objects[id].region_base = base;
     kernel_object_instance.m_objects[id].region_limit = limit;
+  }
+  static void set_created(uint32_t id, bool created) {
+    kernel_object_instance.m_objects[id].created = created;
+  }
+  static uint32_t region_base(uint32_t id) {
+    return kernel_object_instance.m_objects[id].region_base;
+  }
+  static uint32_t region_limit(uint32_t id) {
+    return kernel_object_instance.m_objects[id].region_limit;
+  }
+  static bool can_call(uint32_t caller, uint32_t target) {
+    return kernel_object_instance.can_call_method(caller, target);
+  }
+  static uintptr_t grant_region(uintptr_t target, uintptr_t base, uintptr_t limit,
+                                object_error &error) {
+    return kernel_object_instance.grant_region(target, base, limit, error);
   }
   static void declare(uint32_t id, uintptr_t method, KERNEL_OBJECT::method_t entry,
                       uint32_t flags, uint32_t parent_handler_object,
@@ -156,7 +179,32 @@ void esp32_c6::diag_printf(const char *fmt, ...) {
   va_end(args);
 }
 uintptr_t esp32_c6::unprivileged_floor() { return (uintptr_t)-1; }
+#if defined(SHIZUKU_TEST_REAL_KERNEL_OBJECT)
+int esp32_c6::dma_claim() { std::abort(); }
+void esp32_c6::dma_copy(int, const void *, void *, uint32_t) { std::abort(); }
+bool esp32_c6::dma_busy(int) { std::abort(); }
+void esp32_c6::dma_release(int) { std::abort(); }
+uint64_t esp32_c6::time_us() { std::abort(); }
+uint32_t esp32_c6::cycles_per_us() { std::abort(); }
+#endif
 }
+
+#if defined(SHIZUKU_TEST_REAL_KERNEL_OBJECT)
+namespace shizuku::archs {
+using real_kobj_test_int_mode = shizuku::chips::esp32_c6::plic_vector_mode;
+using real_kobj_test_arch = rv32<16, 4, real_kobj_test_int_mode>;
+template <>
+real_kobj_test_arch::syscall_result real_kobj_test_arch::syscall(
+    uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  std::abort(); // Fail closed if this host test unexpectedly crosses the user syscall stub.
+}
+template <>
+real_kobj_test_arch::syscall_result real_kobj_test_arch::syscall(
+    uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  std::abort();
+}
+}
+#endif
 
 namespace shizuku::chips::esp32_c6 {
 void plic_vector_mode::debug_step(bool) {}
@@ -228,8 +276,6 @@ static void fake_return_record(KERNEL::CONTEXT &c, KERNEL::THREAD &t, uint32_t i
   auto &e = t.ledger[index];
   e.ret_pc = pc;
   e.ret_sp = ARCH::call_return_sp(c);
-  e.ret_region_base = 0;
-  e.ret_region_limit = 0;
   e.ret_privileged = privileged ? 1 : 0;
 #else
   auto *header = ARCH::call_header_slot(c);
@@ -756,7 +802,7 @@ static void run_dispatcher_tests() {
     const auto &rec = thread.ledger[0];
     assert(rec.ret_sp == reinterpret_cast<uintptr_t>(frame) + sizeof(KERNEL::FRAME));
     assert(rec.prev_call == 0 && rec.ret_pc == A_PC && rec.ret_privileged == 1);
-    assert(rec.ret_region_base == 0 && rec.ret_region_limit == 0 && rec.generation == 0);
+    assert(rec.generation == 0);
     assert(thread.call_stack.call_top == 1 && thread.call_stack.call_count == 1);
     assert(thread.identity_object() == B_ID && thread.call_caller_object() == ROOT_APP_ID /* fresh() の base */);
 #else
@@ -1090,6 +1136,9 @@ static void run_dispatcher_tests() {
 
   // 8j. 非特権の呼び先 (記述子 4 = C): 特権が落ち、呼び先の窓が開く。戻りで caller の特権・窓に戻る。
   fresh(ROOT_APP_ID, true);
+  access::set_region(ROOT_APP_ID, 0x5000, 0x6000);
+  ctx->region_base = 0x5000;
+  ctx->region_limit = 0x6000;
   frame->a0 = (uintptr_t)object_api::CALL_METHOD_DESCRIPTOR;
   frame->a1 = 4;
   frame->a2 = 0x21;
@@ -1105,9 +1154,11 @@ static void run_dispatcher_tests() {
   ctx->sp->a4 = RETURN_STUB_MARKER;
   kernel_instance.svc_dispatch(ctx);
   assert(kernel_instance.current_depth() == 0 && ctx->privileged == true);
-  assert(ctx->region_base == 0 && ctx->region_limit == 0 && frame->a1 == 0x22);
+  assert(ctx->region_base == 0x5000 && ctx->region_limit == 0x6000 && frame->a1 == 0x22);
+  assert(ctx->sp == frame && frame->mepc == A_PC);
   access::set_region(C_ID, 0, 0);
-  printf("  8j. CALL_METHOD_DESCRIPTOR to an unprivileged target: privilege drops and the target window opens (0x1000..0x2000), return restores the caller's privilege and window: PASS\n");
+  access::set_region(ROOT_APP_ID, 0, 0);
+  printf("  8j. CALL_METHOD_DESCRIPTOR to an unprivileged target: target window opens, return resolves caller's current row and preserves PC/SP/privilege/value: PASS\n");
 
   // 8l. 記述子の項目は呼出しに要る値を作成時に前計算した写しを持つ (入口・親の入口・種別・親・特権・窓・
   //     instance 世代・持ち主と呼び先の世代)。呼出しは「index → 世代照合 → 写しで入る」だけで、行を引かない。
@@ -2477,6 +2528,170 @@ static void run_dispatcher_tests() {
         ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
     ctx->sp = frame;
   }
+
+#if defined(SHIZUKU_TEST_REAL_KERNEL_OBJECT)
+  // 20. 3A through the real dispatcher and KERNEL_OBJECT::grant_region. This
+  // target links handler.cpp; the ordinary dispatcher fixtures above retain their
+  // lighter test-only callee_request implementation.
+  {
+    constexpr uint32_t kBase = 1;
+    constexpr uintptr_t kBaseWindow = 0x5000;
+    constexpr uintptr_t kBaseLimit = 0x6000;
+    // Exercise the production accessor through the shared resolver, including
+    // a stale nonzero row and IDs beyond the object table.
+    access::set_region(kBase, kBaseWindow, kBaseLimit);
+    auto window = shizuku::native::resolve_return_region_window(kernel_object_instance, 1, 2, kBase);
+    assert(window.base == kBaseWindow && window.limit == kBaseLimit);
+    access::set_created(kBase, false);
+    window = shizuku::native::resolve_return_region_window(kernel_object_instance, 1, 2, kBase);
+    assert(window.base == 0 && window.limit == 0);
+    access::set_created(kBase, true);
+    window = shizuku::native::resolve_return_region_window(kernel_object_instance, 1, 2, KERNEL_OBJECT::OBJECT_COUNT);
+    assert(window.base == 0 && window.limit == 0);
+    window = shizuku::native::resolve_return_region_window(kernel_object_instance, 1, 2, UINT32_MAX);
+    assert(window.base == 0 && window.limit == 0);
+    window = shizuku::native::resolve_return_region_window(kernel_object_instance, 2, 2, kBase);
+    assert(window.base == 0 && window.limit == 0);
+    access::set_creator(C_ID, B_ID); // 8g above temporarily changed C's creator to A.
+    auto call_b = [&]() {
+      fresh(kBase, true);
+      access::set_region(kBase, kBaseWindow, kBaseLimit);
+      ctx->region_base = kBaseWindow;
+      ctx->region_limit = kBaseLimit;
+      frame->mepc = A_PC;
+      frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+      frame->a1 = B_ID;
+      frame->a2 = 0;
+      frame->a3 = 0x51;
+      kernel_instance.svc_dispatch(ctx);
+      assert(kernel_instance.current_depth() == 1 && thread.call_stack.call_count == 1);
+      assert(thread.ledger[0].via == KERNEL::LEDGER_CALL && thread.ledger[0].object == B_ID);
+    };
+
+    // Depth-zero caller: ordinary native method return restores the caller's current row.
+    call_b();
+    frame->a0 = (uintptr_t)primitive::RETURN;
+    frame->a1 = 1;
+    frame->a2 = 0x5201;
+    frame->a3 = 0;
+    frame->a4 = RETURN_STUB_MARKER;
+    kernel_instance.svc_dispatch(ctx);
+    assert(kernel_instance.current_depth() == 0 && thread.call_stack.call_count == 0);
+    assert(ctx->sp == frame && frame->mepc == A_PC && ctx->privileged);
+    assert(frame->a0 == (uintptr_t)object_error::OK && frame->a1 == 0x5201);
+    assert(ctx->region_base == kBaseWindow && ctx->region_limit == kBaseLimit);
+    assert(thread.identity_object() == kBase);
+
+    // Nonzero caller: B -> C native method return uses B's current row.
+    constexpr uintptr_t kBWindow = 0x22000;
+    constexpr uintptr_t kBLimit = 0x23000;
+    access::set_region(B_ID, kBWindow, kBLimit);
+    access::set_region(C_ID, 0x30000, 0x31000);
+    assert(access::can_call(B_ID, C_ID));
+    call_b();
+    frame->mepc = 0x42030100;
+    frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+    frame->a1 = C_ID;
+    frame->a2 = 0;
+    frame->a3 = 0x52;
+    kernel_instance.svc_dispatch(ctx);
+    if (kernel_instance.current_depth() != 2 || thread.call_stack.call_count != 2)
+      fprintf(stderr, "3A B->C method result: depth=%u calls=%u err=%lu value=%lu via=%u\n",
+              kernel_instance.current_depth(), thread.call_stack.call_count,
+              (unsigned long)frame->a0, (unsigned long)frame->a1,
+              kernel_instance.current_depth() > 0 ? thread.ledger[kernel_instance.current_depth() - 1].via : 0);
+    assert(kernel_instance.current_depth() == 2 && thread.call_stack.call_count == 2);
+    assert(thread.ledger[1].via == KERNEL::LEDGER_CALL && thread.ledger[0].via == KERNEL::LEDGER_CALL);
+    frame->a0 = (uintptr_t)primitive::RETURN;
+    frame->a1 = 1;
+    frame->a2 = 0x5202;
+    frame->a3 = 0;
+    frame->a4 = RETURN_STUB_MARKER;
+    kernel_instance.svc_dispatch(ctx);
+    assert(kernel_instance.current_depth() == 1 && thread.call_stack.call_count == 1);
+    assert(ctx->sp == frame && frame->mepc == 0x42030100 && ctx->privileged);
+    assert(frame->a0 == (uintptr_t)object_error::OK && frame->a1 == 0x5202);
+    assert(ctx->region_base == kBWindow && ctx->region_limit == kBLimit);
+    assert(thread.identity_object() == B_ID);
+
+    // Descriptor route also returns to the nonzero caller row.
+    access::set_instance_generation(B_ID, 3);
+    access::set_instance_generation(C_ID, 4);
+    access::set_version(C_ID, 1);
+    access::declare_descriptor(B_ID, 0, C_ID, ENTRY_C, 3, 1);
+    call_b();
+    // B is the active caller in the ledger; create the same descriptor call from B.
+    frame->mepc = 0x42030200;
+    frame->a0 = (uintptr_t)object_api::CALL_METHOD_DESCRIPTOR;
+    frame->a1 = 0;
+    frame->a2 = 0x53;
+    kernel_instance.svc_dispatch(ctx);
+    assert(kernel_instance.current_depth() == 2 && thread.call_stack.call_count == 2);
+    assert(thread.ledger[1].via == KERNEL::LEDGER_DESCRIPTOR_CALL);
+    frame->a0 = (uintptr_t)primitive::RETURN;
+    frame->a1 = 1;
+    frame->a2 = 0x5203;
+    frame->a3 = 0;
+    frame->a4 = RETURN_STUB_MARKER;
+    kernel_instance.svc_dispatch(ctx);
+    assert(kernel_instance.current_depth() == 1 && thread.call_stack.call_count == 1);
+    assert(ctx->sp == frame && frame->mepc == 0x42030200 && ctx->privileged);
+    assert(frame->a0 == (uintptr_t)object_error::OK && frame->a1 == 0x5203);
+    assert(ctx->region_base == kBWindow && ctx->region_limit == kBLimit);
+    assert(thread.identity_object() == B_ID);
+
+    // A real parent-handler dispatch occurs while B is active. Its nested native
+    // method return must leave the handler's window closed at 0/0.
+    call_b();
+    frame->mepc = 0x42030300;
+    frame->a0 = (uintptr_t)object_api::GRANT_REGION;
+    frame->a1 = B_ID;
+    frame->a2 = kBWindow;
+    frame->a3 = kBLimit;
+    kernel_instance.svc_dispatch(ctx);
+    assert(kernel_instance.current_depth() == 2);
+    assert(thread.ledger[1].via == KERNEL::LEDGER_DISPATCH);
+    assert(ctx->privileged && ctx->region_base == 0 && ctx->region_limit == 0);
+    frame->mepc = 0x42030340;
+    frame->a0 = (uintptr_t)object_api::CALL_METHOD;
+    frame->a1 = C_ID;
+    frame->a2 = 0;
+    frame->a3 = 0x54;
+    kernel_instance.svc_call_method(ctx); // actual native body, executing as the dispatched handler
+    assert(kernel_instance.current_depth() == 3 && thread.call_stack.call_count == 2);
+    frame->a0 = (uintptr_t)primitive::RETURN;
+    frame->a1 = 2;
+    frame->a2 = 0x5204;
+    frame->a3 = 0;
+    frame->a4 = RETURN_STUB_MARKER;
+    kernel_instance.svc_exit_method(ctx);
+    assert(kernel_instance.current_depth() == 2 && thread.call_stack.call_count == 1);
+    assert(thread.ledger[1].via == KERNEL::LEDGER_DISPATCH);
+    assert(ctx->sp == frame && frame->mepc == 0x42030340 && ctx->privileged);
+    assert(frame->a0 == (uintptr_t)object_error::OK && frame->a1 == 0x5204);
+    assert(ctx->region_base == 0 && ctx->region_limit == 0);
+
+    // The production grant_region body revokes A while A is suspended in privileged B;
+    // B then returns through the real native exit path and A must resume at 0/0.
+    call_b();
+    object_error grant_error = object_error::OK;
+    const uintptr_t revoked = access::grant_region(kBase, 0, 0, grant_error);
+    assert(grant_error == object_error::OK && revoked == 1);
+    assert(access::region_base(kBase) == 0 && access::region_limit(kBase) == 0);
+    frame->a0 = (uintptr_t)primitive::RETURN;
+    frame->a1 = 0;
+    frame->a2 = 0x5300;
+    frame->a3 = 0;
+    frame->a4 = RETURN_STUB_MARKER;
+    kernel_instance.svc_dispatch(ctx);
+    assert(kernel_instance.current_depth() == 0 && thread.call_stack.call_count == 0);
+    assert(ctx->sp == frame && frame->mepc == A_PC && ctx->privileged);
+    assert(frame->a0 == (uintptr_t)object_error::OK && frame->a1 == 0x5300);
+    assert(ctx->region_base == 0 && ctx->region_limit == 0);
+    assert(thread.identity_object() == kBase);
+    printf("  20. REAL KOBJ 3A: current caller row (depth 0/nonzero), method/descriptor returns, nested dispatch 0/0, production grant_region revoke 0/0: PASS\n");
+  }
+#endif
 
   // 後始末
   thread.call_stack.depth = 0;

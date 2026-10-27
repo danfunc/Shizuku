@@ -6,12 +6,10 @@
 namespace shizuku {
 
 // SHIZUKU_LEAN_LEDGER 未定義時でも、user stack 上の header を権威とせず、
-// 特権メモリで戻り先 (PC, SP, 特権, 窓) を保証するための特権退避域
+// 特権メモリで戻り先 (PC, SP, 特権) を保証するための特権退避域。窓は復帰時に現在行から得る。
 struct caller_return_record {
   uintptr_t ret_pc = 0;
   uintptr_t ret_sp = 0;
-  uintptr_t ret_region_base = 0;
-  uintptr_t ret_region_limit = 0;
   uint16_t prev_call = 0;
   uint8_t ret_privileged = 0;
   uint8_t reserved = 0;
@@ -19,7 +17,7 @@ struct caller_return_record {
 };
 
 // in-place 復帰で台帳に付く arch 固有の型付き payload の既定 (空)。実体は無いので
-// [[no_unique_address]] で台帳項目のサイズを増やさない (C6: 非 LEAN 16B / LEAN 40B のまま)。
+// [[no_unique_address]] で台帳項目のサイズを増やさない (C6: 非 LEAN 16B / LEAN 32B)。
 struct empty_ledger_payload {};
 
 namespace templates {
@@ -113,10 +111,8 @@ template <typename CONTEXT> struct thread {
 #if defined(SHIZUKU_LEAN_LEDGER)
     // ---- [SHIZUKU_LEAN_LEDGER] 戻りと識別の権威を 1 つの記録 (この特権メモリの台帳) に集める ----
     uint32_t generation;      // call 段: 入ったときの呼び先の instance 世代。dispatch 段: 0
-    uintptr_t ret_pc;         // この段から戻ったとき caller が再開する pc (ecall の次の命令)
-    uintptr_t ret_sp;         // caller の ecall 時点の SP (再開フレームはこの直下)
-    uintptr_t ret_region_base;  // caller の軸 B の窓
-    uintptr_t ret_region_limit;
+    uintptr_t ret_pc;         // この段から戻ったとき caller が再開する pc
+    uintptr_t ret_sp;         // caller の例外時 SP (再開フレームはこの直下)
     uint16_t prev_call;       // この段を積む前の call_stack.call_top
     uint8_t ret_privileged;   // caller の特権
     uint8_t reserved;
@@ -137,7 +133,6 @@ template <typename CONTEXT> struct thread {
         thread &t, uint32_t depth,
         uintptr_t ret_pc, uintptr_t ret_sp,
         uint8_t ret_privileged,
-        uintptr_t ret_region_base, uintptr_t ret_region_limit,
         uint16_t prev_call, uint32_t generation) {
 #if defined(SHIZUKU_LEAN_LEDGER)
       if (t.ledger == nullptr || depth >= t.ledger_capacity) return false;
@@ -145,8 +140,6 @@ template <typename CONTEXT> struct thread {
       entry.ret_pc = ret_pc;
       entry.ret_sp = ret_sp;
       entry.ret_privileged = ret_privileged;
-      entry.ret_region_base = ret_region_base;
-      entry.ret_region_limit = ret_region_limit;
       entry.prev_call = prev_call;
       entry.generation = generation;
       return true;
@@ -156,8 +149,6 @@ template <typename CONTEXT> struct thread {
       rec.ret_pc = ret_pc;
       rec.ret_sp = ret_sp;
       rec.ret_privileged = ret_privileged;
-      rec.ret_region_base = ret_region_base;
-      rec.ret_region_limit = ret_region_limit;
       rec.prev_call = prev_call;
       rec.generation = generation;
       return true;
@@ -182,16 +173,13 @@ template <typename CONTEXT> struct thread {
     static bool restore_caller_return_authority(
         const thread &t, uint32_t depth,
         uintptr_t &ret_pc, uintptr_t &ret_sp,
-        bool &ret_privileged,
-        uintptr_t &ret_region_base, uintptr_t &ret_region_limit) {
+        bool &ret_privileged) {
 #if defined(SHIZUKU_LEAN_LEDGER)
       if (t.ledger == nullptr || depth >= t.ledger_capacity) return false;
       const auto &entry = t.ledger[depth];
       ret_pc = entry.ret_pc;
       ret_sp = entry.ret_sp;
       ret_privileged = (entry.ret_privileged != 0);
-      ret_region_base = entry.ret_region_base;
-      ret_region_limit = entry.ret_region_limit;
       return true;
 #else
       if (t.return_records == nullptr || depth >= 34) return false;
@@ -199,8 +187,6 @@ template <typename CONTEXT> struct thread {
       ret_pc = rec.ret_pc;
       ret_sp = rec.ret_sp;
       ret_privileged = (rec.ret_privileged != 0);
-      ret_region_base = rec.ret_region_base;
-      ret_region_limit = rec.ret_region_limit;
       return true;
 #endif
     }

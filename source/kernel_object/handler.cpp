@@ -147,8 +147,8 @@ template <> uintptr_t KERNEL_OBJECT::handler_entry() {
 //   (= 特権のみ) なので非特権オブジェクトから届かない。用意するのはこちら
 //   (オブジェクトランド) で、置き場所の条件はカーネルが検査する。
 #if defined(SHIZUKU_LEAN_LEDGER)
-static_assert(sizeof(uintptr_t) != 4 || sizeof(KERNEL::call_ledger_entry) == 40,
-              "lean call ledger entry must be 40 bytes on 32-bit targets");
+static_assert(sizeof(uintptr_t) != 4 || sizeof(KERNEL::call_ledger_entry) == 32,
+              "lean call ledger entry must be 32 bytes on 32-bit targets");
 #else
 static_assert(sizeof(KERNEL::call_ledger_entry) == 16,
               "call ledger entry must be 16 bytes on supported targets");

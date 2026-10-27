@@ -386,6 +386,13 @@ public:
   // 方法記述子の直接 call が同じ引き方をするよう、ここでだけ作る。
   call_request callee_request(uintptr_t id, uintptr_t entry_pc) const;
 
+  struct region_window { uintptr_t base; uintptr_t limit; };
+  [[gnu::always_inline]] inline region_window return_region(uintptr_t id) const {
+    if (id >= OBJECT_COUNT_T || !m_objects[id].created)
+      return {0, 0};
+    return {m_objects[id].region_base, m_objects[id].region_limit};
+  }
+
   // ---- trap 内 (svc_dispatch) で直接処理する API の部品 ----------------------
   //  CALL_METHOD / SET_BUDGET は dispatch 段も kobj 再入も経由せず、カーネルの svc
   //  ハンドラがここを直接読み書きする (D1 廃止済み: カーネルと kobj の密結合は許容)。
