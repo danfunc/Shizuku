@@ -148,7 +148,7 @@ struct exception_windows {
     BOARD::diag_printf("[FAULTS] %s memmanage=%lu busfault=%lu usagefault=%lu "
                        "hardfault=%lu systick=%lu faults_total=%lu valid=%u\n",
                        name, mm, bf, uf, hf, st, fc, (unsigned)valid);
-    if constexpr (requires { BOARD::diag_drain(); }) BOARD::diag_drain();
+    []<class B = BOARD>() { if constexpr (requires { B::diag_drain(); }) B::diag_drain(); }();
   }
 };
 
