@@ -171,15 +171,19 @@ shizuku_rv32_restore:
   beq t0, t1, .Lrv32_exit_ecall
   li t1, RV32_TAG_ENTRY
   beq t0, t1, .Lrv32_exit_entry
-  li t1, RV32_TAG_ECALL_SCRUB
-  beq t0, t1, .Lrv32_exit_scrub
 #if defined(SHIZUKU_C6_UMODE)
+  // U の往復で通る U_ENTRY / U_ECALL を、まれな SCRUB 系より先に判定する (M の ECALL / ENTRY は先頭のまま)。
   li t1, RV32_TAG_U_ENTRY
   beq t0, t1, .Lrv32_umode_exit_entry
-  li t1, RV32_TAG_U_SCRUB
-  beq t0, t1, .Lrv32_umode_exit_scrub
   li t1, RV32_TAG_U_ECALL
   beq t0, t1, .Lrv32_umode_exit_ecall
+  li t1, RV32_TAG_ECALL_SCRUB
+  beq t0, t1, .Lrv32_exit_scrub
+  li t1, RV32_TAG_U_SCRUB
+  beq t0, t1, .Lrv32_umode_exit_scrub
+#else
+  li t1, RV32_TAG_ECALL_SCRUB
+  beq t0, t1, .Lrv32_exit_scrub
 #endif
 1:
   lw t0, RV32_F_MEPC(sp)

@@ -56,6 +56,13 @@ assert 'li t1, RV32_TAG_ECALL_SCRUB\n  beq t0, t1, .Lrv32_exit_scrub' in restore
 assert 'li t1, RV32_TAG_U_ENTRY\n  beq t0, t1, .Lrv32_umode_exit_entry' in restore
 assert 'li t1, RV32_TAG_U_SCRUB\n  beq t0, t1, .Lrv32_umode_exit_scrub' in restore
 assert 'li t1, RV32_TAG_U_ECALL\n  beq t0, t1, .Lrv32_umode_exit_ecall' in restore
+# 判定の順: M の ECALL / ENTRY が先頭 (M→M を悪化させない)、次に U の往復の U_ENTRY / U_ECALL、まれな SCRUB 系はその後。
+_tag_order = [restore.index(f'beq t0, t1, {label}') for label in (
+    '.Lrv32_exit_ecall', '.Lrv32_exit_entry', '.Lrv32_umode_exit_entry', '.Lrv32_umode_exit_ecall',
+    '.Lrv32_exit_scrub', '.Lrv32_umode_exit_scrub')]
+assert _tag_order == sorted(_tag_order), _tag_order
+# U-mode off の列にも SCRUB の判定が残る (#else 側)。
+assert restore.split('#else')[1].split('#endif')[0].count('beq t0, t1, .Lrv32_exit_scrub') == 1
 exit_ecall = asm.split('.Lrv32_exit_ecall:')[1].split('// ---- ECALL からの戻り (RV32_TAG_ECALL_SCRUB')[0]
 assert sorted(re.findall(r'lw (\w+), RV32_F_(\w+)\(sp\)', exit_ecall)) == sorted(
     [('t0', 'MEPC'), ('t0', 'MSTATUS'), ('a0', 'A0'), ('a1', 'A1')])
