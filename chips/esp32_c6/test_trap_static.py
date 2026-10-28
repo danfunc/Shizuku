@@ -27,11 +27,40 @@ assert 'csrw mepc, t0' in asm and 'csrw mstatus, t0' in asm and 'mret' in asm
 assert '.balign 256' in vectors and '.option norvc' in vectors and '.rept 32' in vectors
 assert '  j shizuku_rv32_trap_entry\n.endr' in vectors
 assert 'shizuku_rv32_trap_entry:' in asm and '.option norvc' in asm
-assert 'csrrw t0, mscratch, zero\n  beqz t0, 1f\n  mv sp, t0' in asm
-assert 'sw t0, 0(sp)' in asm and 'lw t0, 0(sp)\n' in asm
+# ハンドラ (jalr t1) の前後の stack / mscratch の手順は macro (RV32_ENTER/LEAVE_HANDLER_STACK) で、U-mode 無効の列は
+# 従来のまま (mscratch を読んで 0 でなければ sp を替え、戻りで書き戻す)。
+_umode_head, _plain_head = asm.split('shizuku_rv32_trap_entry:')[1].split('.Lrv32_is_ecall:')[0].split('#else')
+_enter = lambda blk: blk.split('.macro RV32_ENTER_HANDLER_STACK\n')[1].split('.endm')[0]
+_leave = lambda blk: blk.split('.macro RV32_LEAVE_HANDLER_STACK\n')[1].split('.endm')[0]
+assert 'csrrw t0, mscratch, zero\n  beqz t0, 1f\n  mv sp, t0' in _enter(_plain_head)
+assert 'sw t0, 0(sp)' in _enter(_plain_head) and 'lw t0, 0(sp)\n' in _leave(_plain_head)
+assert 'csrw mscratch, t0' in _leave(_plain_head)
 # 呼ぶ関数は t1 経由 (割込み・例外 = shizuku_rv32_trap_dispatch、ECALL = 番号の表の要素)。
 assert 'la t1, shizuku_rv32_trap_dispatch\n.Lrv32_save_done:' in asm
-assert asm.index('jalr t1') < asm.index('csrw mscratch, t0')
+# 呼出しは macro の間 (入る→jalr→戻す)。
+tail = asm.split('.Lrv32_save_done:')[1].split('mv sp, a0')[0]
+assert tail.index('RV32_ENTER_HANDLER_STACK') < tail.index('jalr t1') < tail.index('RV32_LEAVE_HANDLER_STACK')
+# U-mode 有効の列: ハンドラの前後に mscratch の操作は無い。それが成り立つ理由 (mscratch nesting の不変条件) を 3 つ縛る。
+#  (1) ハンドラへ入る時点で mscratch は 0: U からは .Lrv32_from_umode で csrrw t0, mscratch, zero、M からは
+#      先頭の csrrw sp, mscratch, sp が 0 を読み、同じ csrrw で 0 のまま元に戻した。
+#  (2) どの出口も復帰先に応じて自分で mscratch を書く (戻りの書き戻しに頼らない)。
+#  (3) 入れ子のトラップ (M から) は sp を替えず、元のスタック (カーネルスタック上) に枠を取る。
+assert 'mscratch' not in _enter(_umode_head) and 'mscratch' not in _leave(_umode_head)
+assert 'addi sp, sp, -16' in _enter(_umode_head) and 'sw a0, 4(sp)' in _enter(_umode_head)
+_u_entry = asm.split('shizuku_rv32_trap_entry:')[1].split('.Lrv32_from_umode:')[0]
+assert 'csrrw sp, mscratch, sp\n  bnez sp, .Lrv32_from_umode' in _u_entry
+assert _u_entry.split('bnez sp, .Lrv32_from_umode')[1].lstrip().startswith('// mscratch == 0') and \
+    'csrrw sp, mscratch, sp\n  addi sp, sp, -RV32_FRAME_BYTES' in _u_entry  # M: 0 のまま sp を元に戻す
+assert 'csrrw t0, mscratch, zero' in asm.split('.Lrv32_from_umode:')[1].split('.Lrv32_check_cause:')[0]
+_umode_asm = asm.replace(_plain_head, '')
+for _label in ('.Lrv32_exit_ecall:', '.Lrv32_exit_scrub:', '.Lrv32_exit_entry:'):
+    _blk = _umode_asm.split(_label)[1].split('mret')[0]
+    assert 'csrw mscratch, zero' in _blk, _label
+for _label in ('.Lrv32_umode_exit_entry:', '.Lrv32_umode_exit_ecall:', '.Lrv32_umode_exit_scrub:'):
+    _blk = asm.split(_label)[1].split('mret')[0]
+    assert 'lw t0, RV32_F_RESERVED1(sp)\n  csrw mscratch, t0' in _blk, _label
+_full = asm.split('shizuku_rv32_restore:')[1].split('.Lrv32_exit_ecall:')[0].split('1:\n  lw t0, RV32_F_MEPC(sp)')[1]
+assert 'lw t0, RV32_F_RESERVED1(sp)\n  csrw mscratch, t0' in _full
 # ECALL: mepc を asm で進め (route_trap の ecall 枝に頼らない)、a0 の番号で表を引き、範囲外は 0 番。
 ecall = asm.split('.Lrv32_full_save:')[0]
 assert 'addi t0, t0, 4\n  sw t0, RV32_F_MEPC(sp)' in ecall

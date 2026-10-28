@@ -65,6 +65,19 @@ shizuku_rv32_trap_entry:
   addi t0, t0, 3
   bnez t0, .Lrv32_full_save
   li t1, RV32_TAG_U_ECALL
+
+  // ハンドラ (jalr t1) を呼ぶ前後の stack / mscratch の手順 (tail の RV32_ENTER/LEAVE_HANDLER_STACK)。
+  // U-mode 有効の列では、ここへ来た時点で mscratch は必ず 0 になっている:
+  //   - U からのトラップは .Lrv32_from_umode の csrrw t0, mscratch, zero で 0 にした、
+  //   - M からのトラップは先頭の csrrw sp, mscratch, sp が 0 を読んだ (= 0 のまま戻した) ときだけ入る。
+  // したがって tail で mscratch を読み直して sp を替える必要は無く (sp は上で U なら trusted stack cursor、
+  // M なら元のスタックになっている)、戻りで mscratch を書く必要も無い (どの出口も復帰先に応じて自分で書く)。
+  .macro RV32_ENTER_HANDLER_STACK
+  addi sp, sp, -16
+  sw a0, 4(sp)
+  .endm
+  .macro RV32_LEAVE_HANDLER_STACK
+  .endm
 #else
   // U-mode off: M-mode 専用の高速直接退避 (cae459f と同一の旧命令列)
   addi sp, sp, -RV32_FRAME_BYTES
@@ -76,6 +89,24 @@ shizuku_rv32_trap_entry:
   addi t0, t0, -11
   bnez t0, .Lrv32_full_save
   li t1, RV32_TAG_ECALL
+
+  // mscratch != 0 outside traps: dedicated kernel stack top.
+  // mscratch == 0 inside traps: nested traps keep the interrupted kernel stack.
+  .macro RV32_ENTER_HANDLER_STACK
+  csrrw t0, mscratch, zero
+  beqz t0, 1f
+  mv sp, t0
+1:
+  // t0 is the original mscratch; save it separately from the movable V2 frame.
+  addi sp, sp, -16
+  sw t0, 0(sp)
+  sw a0, 4(sp)
+  .endm
+  .macro RV32_LEAVE_HANDLER_STACK
+  lw t0, 0(sp)
+  // Restore only after dispatch. Nested returns write zero, outer returns top.
+  csrw mscratch, t0
+  .endm
 #endif
 
 .Lrv32_is_ecall:
@@ -149,20 +180,9 @@ shizuku_rv32_trap_entry:
 .Lrv32_save_done:
   // t1 = 呼ぶ関数 (ECALL は番号の表の要素、それ以外は shizuku_rv32_trap_dispatch)。引数は frame。
   mv a0, sp
-  // mscratch != 0 outside traps: dedicated kernel stack top.
-  // mscratch == 0 inside traps: nested traps keep the interrupted kernel stack.
-  csrrw t0, mscratch, zero
-  beqz t0, 1f
-  mv sp, t0
-1:
-  // t0 is the original mscratch; save it separately from the movable V2 frame.
-  addi sp, sp, -16
-  sw t0, 0(sp)
-  sw a0, 4(sp)
+  RV32_ENTER_HANDLER_STACK
   jalr t1
-  lw t0, 0(sp)
-  // Restore only after dispatch. Nested returns write zero, outer returns top.
-  csrw mscratch, t0
+  RV32_LEAVE_HANDLER_STACK
   mv sp, a0
 .global shizuku_rv32_restore
 shizuku_rv32_restore:
