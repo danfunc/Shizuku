@@ -27,6 +27,8 @@
 #include "shizuku/freestanding_mem.hpp"
 #include "pico/error.h"
 
+extern "C" void shizuku_flash_extent_read_pc();
+
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
 #include "pico.h"
 extern "C" void shizuku_selftest_progress_mark(uint32_t, uint32_t, uint32_t);
@@ -162,9 +164,12 @@ uintptr_t unprivileged_sink(uintptr_t stream_id, uintptr_t, uintptr_t,
 //   読もうとしたら落ちること。触る先は extent の直後 (MPU 粒度を越えた XIP 範囲 —
 //   試す領域の隣にあり、この対象には開示していない場所)。
 //   (docs/selftest/unprivileged.cpp と同じ形: 別スレッドで走らせ、系は続ける)。
-uintptr_t flash_trespasser(uintptr_t address, uintptr_t, uintptr_t, uintptr_t) {
-  const volatile uint8_t *forbidden = (const volatile uint8_t *)address;
-  return *forbidden; // ここで落ちるのが正しい
+[[gnu::noinline]] uintptr_t flash_trespasser(uintptr_t address, uintptr_t, uintptr_t, uintptr_t) {
+  uintptr_t value;
+  asm volatile(".global shizuku_flash_extent_read_pc\n"
+               "shizuku_flash_extent_read_pc:\n"
+               "ldrb %0, [%1]" : "=l"(value) : "l"(address) : "memory");
+  return value;
 }
 
 void check(const char *name, bool ok, unsigned long got, unsigned long want) {
@@ -523,19 +528,28 @@ void flash_stream_ladder() {
     FSTREAM_EVENT(46, record.count);
     const bool new_fault = spawn_succeeded &&
                            record.count == faults_before + 1;
+    bool expected_fault = new_fault;
+    if constexpr (ARCH::IS_ARMV8M) {
+      expected_fault = expected_fault && (record.status & 0x82u) == 0x82u &&
+          record.address == trespass_address &&
+          (record.pc & ~uintptr_t(1)) ==
+              (reinterpret_cast<uintptr_t>(&shizuku_flash_extent_read_pc) & ~uintptr_t(1));
+    }
     check("deny: reading past the granted extent faults",
-          new_fault, (unsigned long)record.count,
-          (unsigned long)(faults_before + 1));
+          expected_fault,
+          (unsigned long)(ARCH::IS_ARMV8M ? record.address : record.count),
+          (unsigned long)(ARCH::IS_ARMV8M ? trespass_address : faults_before + 1));
     check("deny: the offending thread was stopped",
           new_fault && record.thread == spawned.value,
           (unsigned long)record.thread,
           (unsigned long)spawned.value);
     BOARD::diag_printf(
         "[SELFTEST] deny: flash extent [%08lx,%08lx) trespass at %08lx "
-        "stopped thread %lu cfsr=%08lx\n",
+        "stopped thread %lu cfsr=%08lx actual=%08lx pc=%08lx\n",
         (unsigned long)SCRATCH_ADDRESS, (unsigned long)extent_end,
         (unsigned long)trespass_address, (unsigned long)record.thread,
-        (unsigned long)record.status);
+        (unsigned long)record.status, (unsigned long)record.address,
+        (unsigned long)record.pc);
 
     // ---- 対照: 同じ extent の**中**なら読める (境界そのものを確かめる) ------
     const auto in_bounds_faults = kernel_instance.faults().count;
@@ -560,6 +574,17 @@ void flash_stream_ladder() {
       }
     }
     FSTREAM_EVENT(49, in_bounds_terminated ? in_bounds.value : 0);
+    // 判定は 3 つの AND (spawn・TERMINATED・fault 数不変) で、check の got/want は
+    // 最後の 1 つしか見せない。落ちたときに残りの 2 つを見えるようにする (判定は弱めない)。
+    if (!(in_bounds_spawned && in_bounds_terminated)) {
+      BOARD::diag_printf("[SELFTEST] deny: in-bounds thread %lu state=%lu spawned=%u "
+                         "terminated=%u faults=%lu->%lu\n",
+                         (unsigned long)in_bounds.value,
+                         (unsigned long)kernel_instance.thread_state((uint32_t)in_bounds.value),
+                         (unsigned)in_bounds_spawned, (unsigned)in_bounds_terminated,
+                         (unsigned long)in_bounds_faults,
+                         (unsigned long)kernel_instance.faults().count);
+    }
     check("deny: the last byte inside the extent completes without fault",
           in_bounds_spawned && in_bounds_terminated &&
               kernel_instance.faults().count == in_bounds_faults,

@@ -26,6 +26,7 @@
 #include "shizuku/object_ids.hpp"
 #include "shizuku/selftest.hpp"
 #include "shizuku/hot.hpp"
+#include "shizuku/xip_cost.hpp"
 #if !defined(__riscv)
 #include "shizuku/service_profile.hpp"
 #include "shizuku/kernel_services.hpp"
@@ -517,7 +518,9 @@ template <typename A> void bench() {
 
   const stat_t nothing = measure<A>(op_nothing, ROUNDS);
   const stat_t direct = measure<A>(op_direct, ROUNDS);
+  const auto svc_xip_before = xip_cost_start();
   const stat_t svc = measure<A>(op_svc, ROUNDS);
+  const auto svc_xip_after = xip_cost_snapshot();
   const stat_t call1 = measure<A>(op_call, ROUNDS);
   const stat_t call2 = measure<A>(op_call2, ROUNDS);
 
@@ -547,6 +550,7 @@ template <typename A> void bench() {
                      (unsigned long)nothing.min);
   report("direct call", direct, nothing, cycles_per_us);
   report("svc round trip", svc, nothing, cycles_per_us);
+  xip_cost_report<BOARD>("svc round trip", svc_xip_before, svc_xip_after);
   report("method call (1 hop)", call1, nothing, cycles_per_us);
   report("method call (parent->child)", call_pc, nothing, cycles_per_us);
   report("method call (2 hops)", call2, nothing, cycles_per_us);

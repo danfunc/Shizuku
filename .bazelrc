@@ -4,9 +4,15 @@ build --@pico-sdk//bazel/config:PICO_BOARD=pico2_w
 build:rp2350_pico2_w --platforms=@pico-sdk//bazel/platform:rp2350
 build:rp2350_pico2_w --@pico-sdk//bazel/config:PICO_BOARD=pico2_w
 build:rp2350_pico2_w --//configs:board=rp2350_pico2_w
+# カーネル (カーネル本体・カーネルオブジェクト・SVC 経路で窓を当てる arch_glue) だけ -O2。selftest・board・
+# オブジェクト側・pico-sdk は -Og のまま (--copt=-Og の後に付くので後勝ち)。--config=bench_opt_o2 と重ねても同じ -O2。
+# 戻すときは `--per_file_copt=^source/(kernel|kernel_object|cpu_manager)/,^modules/pico_sdk_support/rp2350/arch_glue\.cpp$@-Og` を足す。
+build:rp2350_pico2_w --per_file_copt=^source/(kernel|kernel_object|cpu_manager)/,^modules/pico_sdk_support/rp2350/arch_glue\.cpp$@-O2
 build:rp2350_pico2 --platforms=@pico-sdk//bazel/platform:rp2350
 build:rp2350_pico2 --@pico-sdk//bazel/config:PICO_BOARD=pico2
 build:rp2350_pico2 --//configs:board=rp2350_pico2
+# rp2350_pico2_w と同じ: カーネルだけ -O2 (理由と戻し方は上)。
+build:rp2350_pico2 --per_file_copt=^source/(kernel|kernel_object|cpu_manager)/,^modules/pico_sdk_support/rp2350/arch_glue\.cpp$@-O2
 build:rp2040_pico_w --platforms=@pico-sdk//bazel/platform:rp2040
 build:rp2040_pico_w --@pico-sdk//bazel/config:PICO_BOARD=pico_w
 build:rp2040_pico_w --//configs:board=rp2040_pico_w
@@ -40,6 +46,10 @@ build --@pico-sdk//bazel/config:PICO_CONFIG_EXTRA_HEADER=//configs:pico_extra_co
 
 # カーネルは C++23 (cxxopt は C++ 翻訳単位にのみ効く)
 build --cxxopt=-std=c++23
+build --copt=-DSHIZUKU_RP2350_SVC_BREAKDOWN=0
+build:svc_breakdown --copt=-USHIZUKU_RP2350_SVC_BREAKDOWN
+build:svc_breakdown --copt=-DSHIZUKU_RP2350_SVC_BREAKDOWN=1
+build:svc_in_ram --copt=-DSHIZUKU_SVC_IN_RAM=1
 
 # ★行番号を必ず入れる。DWARF は**焼くものには入らない** (uf2 に載るのは loadable な
 #   セクションだけ) ので、デバイス側の費用はゼロ。入れていなかったせいで、フォールトの

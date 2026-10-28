@@ -126,6 +126,7 @@ public:
   }
   static constexpr uint32_t FAULT_CONTEXT_BYTES = sizeof(context_t);
   static constexpr bool HAS_CYCLE_COUNTER = IntMode::HAS_CYCLE_COUNTER;
+  static constexpr bool IS_ARMV8M = false;
   static constexpr uint32_t TIMER_MAX_CYCLES = IntMode::TIMER_MAX_CYCLES;
   static constexpr uint32_t TIMER_MIN_CYCLES = IntMode::TIMER_MIN_CYCLES;
 

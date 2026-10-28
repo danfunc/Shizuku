@@ -1,157 +1,171 @@
-// ===========================================================================
-//  レジスタ漏洩防止試験 (Register Leakage Prevention Test)
-// ===========================================================================
-//  非特権の呼び手 (Caller) と呼び先 (Callee) の間で、不要なレジスタ値が漏洩しない
-//  こと、および呼び手の callee-saved レジスタが元通り復元されることを検証する。
-//  - 試験 A: 呼び手 -> 呼び先 (Caller の callee-saved が呼び先に見えないこと)
-//  - 試験 B1: 呼び先 -> 呼び手 (Callee の一時レジスタ値が呼び手に漏洩しないこと)
-//  - 試験 B2: 呼び手の callee-saved 復元 (呼び出し前の値に完全に復元されること)
-
-#include <cstdint>
+// Register isolation through the actual ARMv8-M caller converter.
 #include <cstddef>
+#include <cstdint>
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/selftest.hpp"
+#include "shizuku/armv8m_abi.hpp"
+#include "shizuku/method_entry.hpp"
 
 alignas(32) uint8_t leak_caller_data[256];
 alignas(32) uint8_t leak_callee_data[256];
 
 extern "C" {
-uintptr_t leak_caller_worker(uintptr_t arg0, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3);
-uintptr_t leak_callee_worker(uintptr_t arg0, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3);
+uintptr_t leak_caller_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+uintptr_t leak_callee_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 }
 
 #if defined(__ARM_ARCH_8M_MAIN__)
-__attribute__((naked)) uintptr_t leak_callee_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+[[gnu::always_inline]] static inline void leak_dirty_fp() {
   asm volatile(
-      ".syntax unified\n"
-      ".thumb\n"
-      // 入口直後に r4-r11, r12 の値を退避
-      "push {r0, r1}\n"
-      "ldr  r0, =leak_callee_data\n"
-      "str  r4, [r0, #0]\n"
-      "str  r5, [r0, #4]\n"
-      "str  r6, [r0, #8]\n"
-      "str  r7, [r0, #12]\n"
-      "str  r8, [r0, #16]\n"
-      "str  r9, [r0, #20]\n"
-      "str  r10, [r0, #24]\n"
-      "str  r11, [r0, #28]\n"
-      "str  r12, [r0, #32]\n"
-      // 到達フラグ (CALLEE_EXECUTED_MARKER = 0xCAFEBEEF) を記録
-      "movw r1, #0xBEEF\n"
-      "movt r1, #0xCAFE\n"
-      "str  r1, [r0, #36]\n"
-      "pop  {r0, r1}\n"
-
-      // 戻る前に全レジスタに 0xCAFE0000 | reg をセット (戻り値 r0 以外)
-      "movw r2, #0x0002\n"
-      "movt r2, #0xCAFE\n"
-      "movw r3, #0x0003\n"
-      "movt r3, #0xCAFE\n"
-      "movw r4, #0x0004\n"
-      "movt r4, #0xCAFE\n"
-      "movw r5, #0x0005\n"
-      "movt r5, #0xCAFE\n"
-      "movw r6, #0x0006\n"
-      "movt r6, #0xCAFE\n"
-      "movw r7, #0x0007\n"
-      "movt r7, #0xCAFE\n"
-      "movw r8, #0x0008\n"
-      "movt r8, #0xCAFE\n"
-      "movw r9, #0x0009\n"
-      "movt r9, #0xCAFE\n"
-      "movw r10, #0x000A\n"
-      "movt r10, #0xCAFE\n"
-      "movw r11, #0x000B\n"
-      "movt r11, #0xCAFE\n"
-      "movw r12, #0x000C\n"
-      "movt r12, #0xCAFE\n"
-
-      // 戻り値 r0 = 42
-      "movs r0, #42\n"
-      // lr (return stub) をスタックへ退避し、r1 と lr にカナリアを置いてから pop {pc} で復帰
-      "mov  r1, lr\n"
-      "push {r1}\n"
-      "movw r1, #0x0001\n"
-      "movt r1, #0xCAFE\n"
-      "movw lr, #0x000E\n"
-      "movt lr, #0xCAFE\n"
-      "pop  {pc}\n"
-      ".ltorg\n"
-  );
+      "movw r3, #0xbeef\n" "movt r3, #0xcafe\n"
+      "vmov s0, r3\n" "vmov s1, r3\n" "vmov s2, r3\n" "vmov s3, r3\n"
+      "vmov s4, r3\n" "vmov s5, r3\n" "vmov s6, r3\n" "vmov s7, r3\n"
+      "vmov s8, r3\n" "vmov s9, r3\n" "vmov s10, r3\n" "vmov s11, r3\n"
+      "vmov s12, r3\n" "vmov s13, r3\n" "vmov s14, r3\n" "vmov s15, r3\n"
+      "mov.w r3, #0x400000\n" "vmsr fpscr, r3\n"
+      : : : "r3", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7",
+              "s8", "s9", "s10", "s11", "s12", "s13", "s14", "s15", "vfpcc", "memory");
+}
+static float leak_float_result(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  leak_dirty_fp();
+  return 1.5f;
+}
+static double leak_double_result(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  leak_dirty_fp();
+  return 1.5;
+}
+// The test-only veneer records registers before any compiler prologue. It
+// changes no callee-saved registers and tail-branches to an ordinary function.
+extern "C" __attribute__((noinline, used)) uintptr_t leak_callee_body(
+    uintptr_t command, uintptr_t, uintptr_t, uintptr_t) {
+  if (command == 77) {
+    auto *data = reinterpret_cast<volatile uint32_t *>(leak_callee_data);
+    const auto f = shizuku::armv8m_abi::syscall(
+        3, 1, shizuku::method_entry<shizuku::KERNEL::ARCH, &leak_float_result>());
+    const auto d = shizuku::armv8m_abi::syscall(
+        3, 2, shizuku::method_entry<shizuku::KERNEL::ARCH, &leak_double_result>());
+    data[12] = f.error;
+    data[13] = d.error;
+    return f.error | d.error;
+  }
+  asm volatile(
+      "mrs r3, control\n"
+      "tst r3, #4\n"
+      "beq 1f\n"
+      "movw r3, #0xbeef\n"
+      "movt r3, #0xcafe\n"
+      "vmov s0, r3\n" "vmov s1, r3\n" "vmov s2, r3\n" "vmov s3, r3\n"
+      "vmov s4, r3\n" "vmov s5, r3\n" "vmov s6, r3\n" "vmov s7, r3\n"
+      "vmov s8, r3\n" "vmov s9, r3\n" "vmov s10, r3\n" "vmov s11, r3\n"
+      "vmov s12, r3\n" "vmov s13, r3\n" "vmov s14, r3\n" "vmov s15, r3\n"
+      "mov.w r3, #0x400000\n"
+      "vmsr fpscr, r3\n"
+      "1:\n"
+      "movw r1, #1\n" "movt r1, #0xcafe\n"
+      "movw r2, #2\n" "movt r2, #0xcafe\n"
+      "movw r3, #3\n" "movt r3, #0xcafe\n"
+      "movw r12, #12\n" "movt r12, #0xcafe\n"
+      : : : "r1", "r2", "r3", "r12", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7",
+              "s8", "s9", "s10", "s11", "s12", "s13", "s14", "s15", "vfpcc", "memory");
+  return 42;
 }
 
-__attribute__((naked)) uintptr_t leak_caller_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+__attribute__((naked)) uintptr_t leak_callee_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   asm volatile(
-      ".syntax unified\n"
-      ".thumb\n"
-      // Caller は呼び出し前に callee-saved (r4-r11) に 0xDEAD0000 | reg をセット
-      "push {r4-r7, lr}\n"
-      // 呼び先は呼び手の子でなければ呼べない (CALL_METHOD は親子だけ) ので、呼び手が自分で作る。
-      // leak_caller_data: [0] = callee_id, [16] = callee entry, [17] = CREATE_OBJECT の error (出力)
-      "ldr  r0, =leak_caller_data\n"
-      "ldr  r1, [r0, #0]\n"
-      "ldr  r2, [r0, #64]\n"
-      "movs r0, #1\n"                // CREATE_OBJECT = 1
-      "movs r3, #2\n"                // OBJECT_UNPRIVILEGED
-      "mov  r12, #0\n"
-      "svc  0\n"
-      "ldr  r2, =leak_caller_data\n"
-      "str  r0, [r2, #68]\n"
-      // leak_caller_data[0] から callee_id を取得
-      "ldr  r0, =leak_caller_data\n"
-      "ldr  r1, [r0, #0]\n"   // callee_id
+      "push {r0-r3}\n"
+      "ldr r0, =leak_callee_data\n"
+      "stmia r0, {r4-r11}\n"
+      "movw r1, #0xbeef\n"
+      "movt r1, #0xcafe\n"
+      "str r1, [r0, #36]\n"
+      "mrs r1, control\n"
+      "str r1, [r0, #40]\n"
+      "tst r1, #4\n"
+      "beq 1f\n"
+      "add r0, #64\n"
+      "vstmia r0, {s0-s31}\n"
+      "vmrs r1, fpscr\n"
+      "str r1, [r0, #-20]\n"
+      "1: pop {r0-r3}\n"
+      "b leak_callee_body\n");
+}
 
-      "movw r4, #0x0004\n"
-      "movt r4, #0xDEAD\n"
-      "movw r5, #0x0005\n"
-      "movt r5, #0xDEAD\n"
-      "movw r6, #0x0006\n"
-      "movt r6, #0xDEAD\n"
-      "movw r7, #0x0007\n"
-      "movt r7, #0xDEAD\n"
-      "movw r8, #0x0008\n"
-      "movt r8, #0xDEAD\n"
-      "movw r9, #0x0009\n"
-      "movt r9, #0xDEAD\n"
-      "movw r10, #0x000A\n"
-      "movt r10, #0xDEAD\n"
-      "movw r11, #0x000B\n"
-      "movt r11, #0xDEAD\n"
+// Compiler owns saving live values across the converter's r4-r11 clobbers.
+// Inspect final firmware disassembly as well as the selftest result.
+__attribute__((noinline)) static uintptr_t leak_active_call(uintptr_t child) {
+  auto *data = reinterpret_cast<volatile uint32_t *>(leak_caller_data);
+  for (unsigned i = 0; i < 32; ++i) data[20 + i] = 0x3f800100u + i;
+  const uint32_t *seed = reinterpret_cast<const uint32_t *>(leak_caller_data) + 20;
+  uint32_t old_fpscr;
+  asm volatile("vmrs %0, fpscr" : "=r"(old_fpscr));
+  const uint32_t fp_canary = 0x00400000u;
+  asm volatile("vmsr fpscr, %0" : : "r"(fp_canary) : "vfpcc");
+  asm volatile("vldmia %0, {s0-s31}" : : "r"(seed) :
+      "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7",
+      "s8", "s9", "s10", "s11", "s12", "s13", "s14", "s15",
+      "s16", "s17", "s18", "s19", "s20", "s21", "s22", "s23",
+      "s24", "s25", "s26", "s27", "s28", "s29", "s30", "s31", "memory");
+  uintptr_t v4 = 0xdead0004u, v5 = 0xdead0005u;
+  uintptr_t v6 = 0xdead0006u, v7 = 0xdead0007u;
+  uintptr_t v8 = 0xdead0008u, v9 = 0xdead0009u;
+  uintptr_t v10 = 0xdead000au, v11 = 0xdead000bu;
+  asm volatile("" : "+r"(v4), "+r"(v5), "+r"(v6), "+r"(v7),
+                    "+r"(v8), "+r"(v9), "+r"(v10), "+r"(v11));
+  const auto result = shizuku::armv8m_abi::syscall<false, true>(
+      4, child, 0, 99, reinterpret_cast<uintptr_t>(leak_caller_data + 216));
+  asm volatile("" : "+r"(v4), "+r"(v5), "+r"(v6), "+r"(v7),
+                    "+r"(v8), "+r"(v9), "+r"(v10), "+r"(v11));
+  uint32_t *out = reinterpret_cast<uint32_t *>(leak_caller_data) + 20;
+  asm volatile("vstmia %0, {s0-s31}" : : "r"(out) : "memory");
+  uint32_t result_fpscr;
+  asm volatile("vmrs %0, fpscr" : "=r"(result_fpscr));
+  asm volatile("vmsr fpscr, %0" : : "r"(old_fpscr) : "vfpcc");
+  data[1] = v4; data[2] = v5; data[3] = v6; data[4] = v7;
+  data[5] = v8; data[6] = v9; data[7] = v10; data[8] = v11;
+  data[9] = result.error; data[10] = result.value;
+  data[13] = result_fpscr;
+  return result.value;
+}
 
-      // CALL_METHOD(OBJECT_LEAK_CALLEE, 0, 99)
-      "movs r0, #4\n"                 // CALL_METHOD = 4
-      "movs r2, #0\n"                 // method 0
-      "movs r3, #99\n"                // arg 99
-      "mov  r12, #0\n"
-      "svc  0\n"
-
-      // 復帰直後: r0=err, r1=val
-      // レジスタ値を leak_caller_data (offset 4 以降) に回収
-      "push {r0, r1}\n"
-      "ldr  r0, =leak_caller_data\n"
-      "str  r4, [r0, #4]\n"   // restored_r4
-      "str  r5, [r0, #8]\n"   // restored_r5
-      "str  r6, [r0, #12]\n"  // restored_r6
-      "str  r7, [r0, #16]\n"  // restored_r7
-      "str  r8, [r0, #20]\n"  // restored_r8
-      "str  r9, [r0, #24]\n"  // restored_r9
-      "str  r10, [r0, #28]\n" // restored_r10
-      "str  r11, [r0, #32]\n" // restored_r11
-      "str  r2, [r0, #36]\n"  // restored_r2
-      "str  r3, [r0, #40]\n"  // restored_r3
-      "str  r12, [r0, #44]\n" // restored_r12
-      "str  lr, [r0, #56]\n"  // restored_lr
-      "pop  {r0, r1}\n"
-      "ldr  r2, =leak_caller_data\n"
-      "str  r0, [r2, #48]\n"  // err
-      "str  r1, [r2, #52]\n"  // val
-
-      "pop  {r4-r7, pc}\n"
-      ".ltorg\n"
-  );
+uintptr_t leak_caller_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
+  auto *data = reinterpret_cast<volatile uint32_t *>(leak_caller_data);
+  if (cmd == 0) {
+    auto r = shizuku::armv8m_abi::syscall(1, data[0], data[16], 2);
+    data[17] = r.error;
+    return r.error;
+  }
+  if (cmd == 3) {
+    const auto r = shizuku::armv8m_abi::syscall(4, data[0], 0, 77);
+    data[9] = r.error;
+    return r.value;
+  }
+  if (cmd == 4 || cmd == 5) {
+    uint32_t control_before, control_after;
+    asm volatile("mrs %0, control" : "=r"(control_before));
+    data[11] = control_before;
+    for (unsigned i = 20; i <= 36; ++i) data[i] = 0xffffffffu;
+    const auto r = shizuku::armv8m_abi::syscall<false, false, true>(
+        4, data[0], cmd - 3, 0, reinterpret_cast<uintptr_t>(leak_caller_data + 80));
+    data[9] = r.error;
+    data[10] = r.value;
+    asm volatile("mrs %0, control" : "=r"(control_after));
+    data[12] = control_after;
+    return r.value;
+  }
+  uint32_t before, after;
+  asm volatile("mrs %0, control" : "=r"(before));
+  data[11] = before;
+  if (cmd == 1) {
+    const auto r = shizuku::armv8m_abi::syscall(4, data[0], 0, 99);
+    data[9] = r.error; data[10] = r.value;
+  } else {
+    (void)leak_active_call(data[0]);
+  }
+  asm volatile("mrs %0, control" : "=r"(after));
+  data[12] = after;
+  return data[10];
 }
 #else
 extern "C" {
@@ -162,119 +176,89 @@ uintptr_t leak_callee_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) { retur
 
 namespace shizuku::selftest {
 namespace {
-
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
-
-constexpr uintptr_t OBJECT_LEAK_CALLER = object_id::leak_caller;
-constexpr uintptr_t OBJECT_LEAK_CALLEE = object_id::leak_callee;
-
 void record_check(const char *name, bool ok, unsigned long got, unsigned long want) {
-  if (ok) {
-    ++passed;
-    BOARD::diag_printf("[SELFTEST] PASS %s\n", name);
-  } else {
-    ++failed;
-    record_fail(name, got, want);
-    BOARD::diag_printf("[SELFTEST] FAIL %s: got %lu want %lu\n", name, got, want);
-  }
+  if (ok) { ++passed; BOARD::diag_printf("[SELFTEST] PASS %s\n", name); }
+  else { ++failed; record_fail(name, got, want);
+    BOARD::diag_printf("[SELFTEST] FAIL %s: got %lu want %lu\n", name, got, want); }
 }
-
-} // namespace
+}
 
 void register_leak_test() {
 #if defined(__ARM_ARCH_8M_MAIN__) || defined(SHIZUKU_RP2350)
-  // 1. 保護窓を登録
+  constexpr uintptr_t caller = object_id::leak_caller;
+  constexpr uintptr_t callee = object_id::leak_callee;
   if constexpr (requires { ARCH::set_object_bounds(0, 0, 0, 0, 0); }) {
-    ARCH::set_object_bounds(OBJECT_LEAK_CALLER,
-                            reinterpret_cast<uintptr_t>(leak_caller_data),
-                            reinterpret_cast<uintptr_t>(leak_caller_data) + sizeof(leak_caller_data),
-                            0, 0);
-    ARCH::set_object_bounds(OBJECT_LEAK_CALLEE,
-                            reinterpret_cast<uintptr_t>(leak_callee_data),
-                            reinterpret_cast<uintptr_t>(leak_callee_data) + sizeof(leak_callee_data),
-                            0, 0);
+    ARCH::set_object_bounds(caller, reinterpret_cast<uintptr_t>(leak_caller_data),
+                            reinterpret_cast<uintptr_t>(leak_caller_data) + sizeof(leak_caller_data), 0, 0);
+    ARCH::set_object_bounds(callee, reinterpret_cast<uintptr_t>(leak_callee_data),
+                            reinterpret_cast<uintptr_t>(leak_callee_data) + sizeof(leak_callee_data), 0, 0);
   }
+  auto *c = reinterpret_cast<volatile uint32_t *>(leak_caller_data);
+  auto *d = reinterpret_cast<volatile uint32_t *>(leak_callee_data);
+  for (unsigned i = 0; i < 64; ++i) { c[i] = 0; d[i] = 0; }
+  c[0] = callee;
+  c[16] = reinterpret_cast<uintptr_t>(&leak_callee_worker);
+  auto created = ARCH::syscall(static_cast<uintptr_t>(object_api::CREATE_OBJECT), caller,
+                               reinterpret_cast<uintptr_t>(&leak_caller_worker), OBJECT_UNPRIVILEGED);
+  if (created.error) BOARD::panic("register_leak_test: failed to create caller");
+  auto setup = ARCH::syscall(static_cast<uintptr_t>(object_api::CALL_METHOD), caller, 0, 0);
+  record_check("leak setup", setup.error == 0 && c[17] == 0, setup.error | c[17], 0);
 
-  // バッファの初期化
-  auto *callee_seen = reinterpret_cast<volatile uint32_t *>(leak_callee_data);
-  for (size_t i = 0; i < sizeof(leak_callee_data) / sizeof(uint32_t); ++i) {
-    callee_seen[i] = 0;
+  // Earlier selftests activate FP in the boot thread. A newly spawned context
+  // starts with a basic EXC_RETURN and provides a real FPCA=0 precondition.
+  const auto run_fresh = [=](uintptr_t command) -> ARCH::syscall_result {
+    const auto spawned = ARCH::syscall(static_cast<uintptr_t>(object_api::SPAWN),
+                                       caller, 0, command);
+    if (spawned.error != 0 || spawned.value == 0)
+      return {spawned.error != 0 ? spawned.error : UINTPTR_MAX, 0};
+    return ARCH::syscall(static_cast<uintptr_t>(object_api::RUN_FOR), spawned.value,
+                         5000u * BOARD::cycles_per_us());
+  };
+  auto inactive = run_fresh(1);
+  record_check("leak inactive FPCA preserved",
+               inactive.error == 0 && inactive.value == (uintptr_t)grant_end::YIELDED &&
+               c[9] == 0 && c[10] == 42 &&
+               d[9] == 0xcafebeefu && (c[11] & 4u) == 0 && (c[12] & 4u) == 0 && (d[10] & 4u) == 0,
+               (c[11] | c[12] | d[10]) & 4u, 0);
+
+  const auto exported = ARCH::syscall(static_cast<uintptr_t>(object_api::CALL_METHOD), caller, 0, 3);
+  record_check("FP return methods exported", exported.error == 0 && exported.value == 0 &&
+               c[9] == 0 && d[12] == 0 && d[13] == 0, exported.error, 0);
+  const auto float_call = run_fresh(4);
+  bool float_clean = c[20] == 0x3fc00000u && c[36] == 0;
+  for (unsigned i = 1; i < 16; ++i) float_clean &= c[20 + i] == 0;
+  record_check("FP float return", float_call.error == 0 && c[9] == 0 && c[10] == 0 &&
+               (c[11] & 4u) == 0 && (c[12] & 4u) != 0 && float_clean, c[20], 0x3fc00000u);
+  const auto double_call = ARCH::syscall(static_cast<uintptr_t>(object_api::CALL_METHOD), caller, 0, 5);
+  bool double_clean = c[20] == 0 && c[21] == 0x3ff80000u && c[36] == 0;
+  for (unsigned i = 2; i < 16; ++i) double_clean &= c[20 + i] == 0;
+  record_check("FP double return", double_call.error == 0 && c[9] == 0 && c[10] == 0 &&
+               double_clean, c[21], 0x3ff80000u);
+
+  for (unsigned i = 0; i < 64; ++i) d[i] = 0xffffffffu;
+  auto active = ARCH::syscall(static_cast<uintptr_t>(object_api::CALL_METHOD), caller, 0, 2);
+  bool gp_zero = true, gp_restored = true, fp_entry_zero = true;
+  bool fp_lower_zero = true, fp_upper_restored = true;
+  for (unsigned i = 0; i < 8; ++i) {
+    gp_zero &= d[i] == 0;
+    gp_restored &= c[i + 1] == 0xdead0004u + i;
   }
-  auto *caller_data = reinterpret_cast<volatile uint32_t *>(leak_caller_data);
-  for (size_t i = 0; i < sizeof(leak_caller_data) / sizeof(uint32_t); ++i) {
-    caller_data[i] = 0;
+  for (unsigned i = 0; i < 32; ++i) fp_entry_zero &= d[16 + i] == 0;
+  for (unsigned i = 0; i < 16; ++i) {
+    fp_lower_zero &= c[20 + i] == 0;
+    fp_upper_restored &= c[36 + i] == 0x3f800110u + i;
   }
-  caller_data[0] = OBJECT_LEAK_CALLEE;
-
-  // 2. Caller を CREATE_OBJECT (非特権 OBJECT_UNPRIVILEGED=2)。Callee は Caller が自分で作る
-  //    (兄弟どうしの CALL_METHOD は NOT_PRIVILEGED になるため)。
-  caller_data[16] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&leak_callee_worker));
-  caller_data[17] = 0xFFFFFFFFu;
-
-  const auto create_caller_res = ARCH::syscall(
-      static_cast<uintptr_t>(object_api::CREATE_OBJECT),
-      OBJECT_LEAK_CALLER,
-      reinterpret_cast<uintptr_t>(&leak_caller_worker),
-      OBJECT_UNPRIVILEGED);
-  if (create_caller_res.error != 0) {
-    BOARD::panic("register_leak_test: failed to create caller");
-  }
-
-  // 3. Caller を呼ぶ (Caller が内部で Callee を呼ぶ)
-  const auto call_res = ARCH::syscall(
-      static_cast<uintptr_t>(object_api::CALL_METHOD),
-      OBJECT_LEAK_CALLER,
-      0,
-      0);
-
-  // 4. アサーション検証
-  // 到達フラグ用の固有印 (callee が観測を書き終えたときに callee_seen[9] へ記録)
-  constexpr uint32_t CALLEE_EXECUTED_MARKER = 0xCAFEBEEFu;
-
-  // 試験 A: 呼び手から呼び先への漏洩防止 (Caller -> Callee)
-  // - call_res.error == 0 であること
-  // - Callee が実際に実行されたこと (callee_seen[9] == CALLEE_EXECUTED_MARKER)
-  // - Callee 入口で、Caller のカナリア 0xDEAD0004..0xDEAD000B が見えていないこと (消去されていること)
-  bool leak_to_callee = false;
-  for (int i = 0; i < 8; ++i) {
-    if (callee_seen[i] == (0xDEAD0004u + i)) {
-      leak_to_callee = true;
-    }
-  }
-  const bool callee_executed = (callee_seen[9] == CALLEE_EXECUTED_MARKER);
-  const bool ok_a = (call_res.error == 0) && callee_executed && !leak_to_callee;
-  // got は原因の切り分け用のビット: 1 = 外側の呼出し失敗, 2 = 子の CREATE_OBJECT 失敗,
-  // 4 = 呼び先が走っていない, 8 = 呼び手の r4-r11 が見えた
-  const unsigned long a_diag = (call_res.error != 0 ? 1ul : 0ul) |
-                               (caller_data[17] != 0 ? 2ul : 0ul) |
-                               (callee_executed ? 0ul : 4ul) | (leak_to_callee ? 8ul : 0ul);
-  record_check("leak_test: Caller -> Callee callee-saved registers scrubbed",
-               ok_a, a_diag, 0);
-
-  // 試験 B1: 呼び先から呼び手への漏洩防止 (Callee -> Caller)
-  // Caller 復帰直後、戻り値以外のスクラッチレジスタ (r2, r3, r12, lr) に Callee のカナリア 0xCAFE.... が残っていないこと
-  // caller_data[9] = r2, [10] = r3, [11] = r12, [14] = lr
-  // (注: r1 は Shizuku の ARMv8-M syscall ABI において戻り値 value の受け渡しスロットとして使用されるため除外)
-  bool leak_to_caller = (caller_data[9] == 0xCAFE0002u) ||
-                        (caller_data[10] == 0xCAFE0003u) ||
-                        (caller_data[11] == 0xCAFE000Cu) ||
-                        (caller_data[14] == 0xCAFE000Eu);
-  record_check("leak_test: Callee -> Caller scratch registers scrubbed",
-               !leak_to_caller, leak_to_caller ? 1 : 0, 0);
-
-  // 試験 B2: Caller 自身の callee-saved 復元 (Callee -> Caller)
-  // Caller 復帰後、Caller 自身の callee-saved レジスタ (r4-r11) が元のカナリア 0xDEAD.... に復元されていること
-  // caller_data[1..8] = r4..r11
-  bool restored_caller = true;
-  for (int i = 0; i < 8; ++i) {
-    if (caller_data[1 + i] != (0xDEAD0004u + i)) {
-      restored_caller = false;
-    }
-  }
-  record_check("leak_test: Caller callee-saved registers restored",
-               restored_caller, restored_caller ? 1 : 0, 1);
+  record_check("leak A callee entry", active.error == 0 && active.value == 42 &&
+               c[9] == 0 && c[10] == 42 && d[9] == 0xcafebeefu &&
+               (d[10] & 4u) && gp_zero && fp_entry_zero && d[11] == 0, d[9], 0xcafebeefu);
+  record_check("leak B caller registers restored", gp_restored && fp_upper_restored,
+               gp_restored | (fp_upper_restored << 1), 3);
+  record_check("leak B return scratch zero", c[54] == 0 && c[55] == 0 &&
+               c[56] == 0 && c[57] == 0, c[54] | c[55] | c[56] | c[57], 0);
+  record_check("leak B return lower FP zero", fp_lower_zero && c[13] == 0,
+               c[13], 0);
 #endif
 }
-
 } // namespace shizuku::selftest

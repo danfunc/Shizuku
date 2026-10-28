@@ -63,6 +63,24 @@ int main() {
     assert(!arch::has_object_bounds(6));
     assert(!arch::set_object_bounds(arch::kMaxObjectWindows, 0x20030000u, 0x20030100u, 0, 0));
     assert(!arch::has_object_bounds(arch::kMaxObjectWindows));
+
+    arch::object_protection_window copy{};
+    uint32_t version = 0;
+    assert(arch::snapshot_object_window(5, copy, version));
+    assert((version & 1u) == 0 && version != 0);
+    assert(copy.owner_id == 5 && (copy.data.rbar & ~31u) == 0x20030000u);
+    const uint32_t previous = version;
+    // Same owner, new bounds: both cores' cache keys must see a new version.
+    assert(arch::set_object_bounds(5, 0x20030200u, 0x20030300u, 0, 0));
+    assert(arch::snapshot_object_window(5, copy, version));
+    assert(version == previous + 2u);
+    assert((copy.data.rbar & ~31u) == 0x20030200u);
+    __atomic_store_n(&arch::s_object_window_seq[5], version + 1u, __ATOMIC_RELEASE);
+    assert(!arch::snapshot_object_window(5, copy, version));
+    assert(!arch::set_object_bounds(5, 0, 0, 0, 0));
+    __atomic_store_n(&arch::s_object_window_seq[5], previous + 2u, __ATOMIC_RELEASE);
+    assert(arch::snapshot_object_window(5, copy, version));
+    assert(!arch::snapshot_object_window(arch::kMaxObjectWindows, copy, version));
   }
 
   // ---- 戻り先の権威: 台帳に記録した値がそのまま復元され、範囲外は false ----

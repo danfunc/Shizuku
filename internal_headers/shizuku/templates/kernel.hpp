@@ -2,6 +2,7 @@
 #define SHIZUKU_TEMPLATES_KERNEL_HPP
 #include <cstdint>
 #include "shizuku/kernel_abi.hpp"
+#include "shizuku/hot.hpp"
 #include "shizuku/templates/thread.hpp"
 
 namespace shizuku {
@@ -438,8 +439,26 @@ public:
     uintptr_t pc;      // 最後に落ちた場所
     uint32_t status;   // 違反の種類 (CFSR)
     uint32_t thread;   // 止めたスレッド
+    uintptr_t address; // captured before clearing MMFAR/BFAR validity
+    // 入口別の飽和カウンタ (exception_counts を見よ)。
+    uint32_t memmanage, busfault, usagefault, hardfault, systick;
   };
   const fault_record &faults() const { return m_faults; }
+
+  // 例外の入口別の飽和カウンタ (診断専用)。★書くのは fault 入口と SysTick の
+  //   timer_expired だけ — SVC/PendSV の hot path には命令を足さない。
+  //   fault は落ちたスレッドを必ず止めるので、数が増えた区間は「余計な fault を
+  //   処理して再開した」のではなく「スレッドが死んだ」ことを意味する。
+  //   memmanage/busfault/usagefault は CFSR のどの帯が立ったか (1 回の fault で
+  //   複数立てば複数に数える)。CFSR が 0 の fault は hardfault に数える。
+  struct exception_counts {
+    uint32_t memmanage, busfault, usagefault, hardfault, systick, faults;
+  };
+  // m_faults は例外ハンドラが書くので、コンパイラに畳まれないよう volatile で読む。
+  exception_counts exception_snapshot() const {
+    const volatile fault_record &f = m_faults;
+    return {f.memmanage, f.busfault, f.usagefault, f.hardfault, f.systick, f.count};
+  }
 
   // 直近のデバッグ事象。★フォールトと別に持つ — 「落ちた」と「止めた」は
   //   別のことで、混ぜると数えられなくなる。

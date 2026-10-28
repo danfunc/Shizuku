@@ -5,6 +5,7 @@
 #  自己テストはそれぞれ別のライブラリで、「どれを繋いで何を走らせるか」を決めるのは
 #  合成 (firmware/main.cpp) の仕事。XNO 側は同じ 3 つを引いて**自分の合成**を書く。
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("//configs:kernel_lto.bzl", "RP2350_KERNEL_LTO_COPTS", "RP2350_KERNEL_LTO_LINKOPTS")
 
 # RISC-V のカーネルは gp / tp に依存しない (2026-10-22 決定、.handoff/v3-design-notes.md §4)。
 # method call の入口ではレジスタを callee のものへ入れ直さず、gp / tp は callee 側の入口 stub が
@@ -211,16 +212,49 @@ cc_test(
 # カーネル本体のソース。//:kernel と //:shizuku_kernel (ESP32-C6 の .a) で共有する。
 KERNEL_SRCS = [
     "source/cpu_manager/init.cpp",
-    "source/kernel/dispatch.cpp",
     "source/kernel/init.cpp",
     "source/kernel/thread.cpp",
-]
+] + select({
+    "//configs:rp2350": [],
+    "//conditions:default": ["source/kernel/dispatch.cpp"],
+})
+
+# RP2350 SVC entry and its kernel/object implementation share a translation
+# unit, allowing inlining without LTO. Do not depend on :kernel here: the
+# optional crash-record USB library itself depends on :kernel.
+cc_library(
+    name = "svc_dispatch",
+    srcs = ["source/kernel/svc_dispatch.cpp"],
+    textual_hdrs = [
+        "source/kernel/dispatch.cpp",
+        "source/kernel_object/handler.cpp",
+        "source/kernel_object/memory.cpp",
+    ],
+    copts = RV_KERNEL_COPTS + RP2350_KERNEL_LTO_COPTS,
+    local_defines = select({
+        "//configs:crash_record_enabled": [
+            "SHIZUKU_CRASH_RECORD=1",
+            "SHIZUKU_BOOT_LOG_WAIT=1",
+        ],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":internal_headers",
+        "//configs:config",
+    ] + select({
+        "//configs:crash_record_enabled": ["//modules/pico_sdk_support/objects:usb_cdc"],
+        "//conditions:default": [],
+    }),
+)
 
 # カーネル = 機構だけの層。★資源を持たない (スレッドの記憶も貸してもらう) ので、
 # 実体としてはライブラリ以外になりようがない。
 cc_library(
     name = "kernel",
-    copts = RV_KERNEL_COPTS,
+    copts = RV_KERNEL_COPTS + RP2350_KERNEL_LTO_COPTS,
+    # cc_library の linkopts は依存するバイナリのリンクへ伝わる (RP2350 の最終リンクで -flto)。
+    linkopts = RP2350_KERNEL_LTO_LINKOPTS,
     srcs = KERNEL_SRCS + [
         "source/kernel/services.cpp",
         "source/kernel/service_profile.cpp",
@@ -234,19 +268,25 @@ cc_library(
     ],
 )
 
-KERNEL_OBJECT_SRCS = [
-    "source/kernel_object/handler.cpp",
-    "source/kernel_object/memory.cpp",
-]
+KERNEL_OBJECT_SRCS = select({
+    "//configs:rp2350": [],
+    "//conditions:default": [
+        "source/kernel_object/handler.cpp",
+        "source/kernel_object/memory.cpp",
+    ],
+})
 
 # カーネルオブジェクト = 方針の層。★カーネルとは別のライブラリにする。分けること
 # 自体が D1 (カーネルはオブジェクトを知らない) の検算になる — 依存は一方向しかない。
 cc_library(
     name = "kernel_object",
-    copts = RV_KERNEL_COPTS,
+    copts = RV_KERNEL_COPTS + RP2350_KERNEL_LTO_COPTS,
     srcs = KERNEL_OBJECT_SRCS,
     visibility = ["//visibility:public"],
     deps = [":kernel"] + select({
+        "//configs:rp2350": [":svc_dispatch"],
+        "//conditions:default": [],
+    }) + select({
         "//configs:crash_record_enabled": [
             "//modules/pico_sdk_support/objects:usb_cdc",
         ],
@@ -313,6 +353,7 @@ cc_library(
         "source/selftest/thread_ladder.cpp",
         "source/selftest/unprivileged.cpp",
         "source/selftest/rp2350_u_cost.cpp",
+        "source/selftest/rp2350_svc_breakdown.cpp",
         "source/selftest/register_leak_test.cpp",
     ],
     visibility = ["//visibility:public"],

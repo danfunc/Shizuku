@@ -11,6 +11,8 @@
 #if __has_include("shizuku/config.hpp")
 #include "shizuku/kernel.hpp"
 #endif
+#include "shizuku/hot.hpp"
+#include "shizuku/cost_probe.hpp"
 
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
 extern "C" void shizuku_selftest_fault_phase(uint32_t, uint32_t);
@@ -25,17 +27,6 @@ namespace {
 static constexpr size_t kMaxReturnThreads = 32;
 static constexpr size_t kMaxReturnDepth = 34;
 alignas(8) caller_return_record s_thread_returns[kMaxReturnThreads][kMaxReturnDepth] = {};
-// 呼び手の r4-r11 の退避域。ARCH::SCRUB_CALLEE_SAVED_ON_CALL の ARCH だけが確保する (RP2040 は .bss を払わない)。
-template <class A> constexpr size_t callee_saved_threads() {
-  if constexpr (requires { A::SCRUB_CALLEE_SAVED_ON_CALL; }) {
-    return A::SCRUB_CALLEE_SAVED_ON_CALL ? kMaxReturnThreads : 0;
-  } else {
-    return 0;
-  }
-}
-constexpr size_t kCalleeSavedThreads =
-    callee_saved_threads<KERNEL::ARCH>() == 0 ? 1 : callee_saved_threads<KERNEL::ARCH>();
-alignas(8) uint32_t s_thread_callee_saved[kCalleeSavedThreads][kMaxReturnDepth][8] = {};
 #endif
 }
 
@@ -78,8 +69,6 @@ template <> void KERNEL::set_thread_storage(void *memory, uintptr_t bytes) {
     if constexpr (requires { ARCH::HAS_OBJECT_PROTECTION; } && ARCH::HAS_OBJECT_PROTECTION) {
       if (index < kMaxReturnThreads) {
         m_threads[index].thread.return_records = s_thread_returns[index];
-        if constexpr (callee_saved_threads<ARCH>() != 0)
-          m_threads[index].thread.callee_saved_records = s_thread_callee_saved[index];
       }
     }
 #endif
@@ -102,8 +91,6 @@ template <> void KERNEL::set_thread_ledger(
   if constexpr (requires { ARCH::HAS_OBJECT_PROTECTION; } && ARCH::HAS_OBJECT_PROTECTION) {
     if (id < kMaxReturnThreads) {
       thread.return_records = s_thread_returns[id];
-      if constexpr (callee_saved_threads<ARCH>() != 0)
-        thread.callee_saved_records = s_thread_callee_saved[id];
     }
   }
 #endif
@@ -244,7 +231,7 @@ template <> void KERNEL::release(uint32_t thread) {
 
 // ---- 実行権の受け渡し -------------------------------------------------------
 // READY → RUNNING を CAS で取る。これが「2 コアが同じ文脈を走らせない」根。
-template <> bool KERNEL::claim(uint32_t thread, kernel_error &error) {
+template <> SHIZUKU_SVC_RAM bool KERNEL::claim(uint32_t thread, kernel_error &error) {
   if (thread >= m_thread_count) {
     error = kernel_error::NOT_READY;
     return false;
@@ -268,12 +255,12 @@ template <> bool KERNEL::claim(uint32_t thread, kernel_error &error) {
 // ★以前の「借り手が撃つと対象を無視して貸し手へ返す」「起点が撃つと READY に戻るだけの
 //   バトン渡し」は無くなった。借り手の SWITCH(C) は C への又貸し (A→B→C) になる。
 //   貸し手へ返したいときは SWITCH(貸し手) か YIELD。
-template <> kernel_error KERNEL::do_switch(uint32_t target) {
+template <> SHIZUKU_SVC_RAM kernel_error KERNEL::do_switch(uint32_t target) {
   return do_grant(target, GRANT_UNLIMITED);
 }
 
 template <>
-kernel_error KERNEL::do_grant(uint32_t target, uint64_t cycles) {
+SHIZUKU_SVC_RAM kernel_error KERNEL::do_grant(uint32_t target, uint64_t cycles) {
   const uint32_t core = BOARD::core_num();
   const uint32_t current = m_current[core];
   if (target == current)
@@ -319,7 +306,7 @@ kernel_error KERNEL::do_grant(uint32_t target, uint64_t cycles) {
 }
 
 // 貸した実行権を 1 段巻き取る。期限切れ (EXPIRED) と早期復帰 (YIELDED) の共通経路。
-template <> void KERNEL::grant_unwind(grant_end reason) {
+template <> SHIZUKU_SVC_RAM void KERNEL::grant_unwind(grant_end reason) {
   const uint32_t core = BOARD::core_num();
   grant_stack &grants = m_grants[core];
   if (grants.depth == 0)
@@ -357,7 +344,7 @@ template <> void KERNEL::grant_unwind(grant_end reason) {
 // 減っている (だから又貸しで延長できない) ので、一番内側だけ引くのでは足りない。
 // ★何度呼んでも壊れない: 引いたあと m_armed を「まだ引いていない残り」に
 //   更新するので、続けて呼べば 2 回目は 0 を引く。
-template <> void KERNEL::grant_charge() {
+template <> SHIZUKU_SVC_RAM void KERNEL::grant_charge() {
   const uint32_t core = BOARD::core_num();
   grant_stack &grants = m_grants[core];
   if (grants.depth == 0 || m_armed[core] == 0) {
@@ -382,7 +369,7 @@ template <> void KERNEL::grant_charge() {
 // 一番内側の残量をタイマへ装填する。★換算が要らない — 残量もタイマもクロックで
 // 数えているので、そのまま載る。µs で持っていたときは装填のたびに clk_sys で
 // 割り戻していて、その clk_sys が変わらない保証は無かった。
-template <> void KERNEL::arm_timer() {
+template <> SHIZUKU_SVC_RAM void KERNEL::arm_timer() {
   const uint32_t core = BOARD::core_num();
   grant_stack &grants = m_grants[core];
   if (grants.depth == 0) {
@@ -413,6 +400,7 @@ template <> void KERNEL::arm_timer() {
 // 与える規約 (DESIGN §14.5.1)。
 template <> void KERNEL::timer_expired() {
   const uint32_t core = BOARD::core_num();
+  m_faults.systick = cost_probe::saturating_increment(m_faults.systick); // 診断: SysTick の回数 (全コア合算)
   grant_stack &grants = m_grants[core];
   if (grants.depth == 0) {
     ARCH::timer_cancel(); // 早期復帰と競合した後の遅れて来た発火
@@ -520,7 +508,7 @@ template <> void KERNEL::arm_step(uint32_t thread) {
 // 立てる — こうすると「次の 1 命令」が確実に対象自身の命令になる。
 // ★CAS で消費する: 2 コアが同時に別の文脈を復帰させても、この予約を
 //   誤って 2 回消費したり、無関係な文脈へ誤爆したりしない。
-template <> void KERNEL::consume_pending_step() {
+template <> SHIZUKU_SVC_RAM void KERNEL::consume_pending_step() {
   const uint32_t thread = m_current[BOARD::core_num()];
   if (ARCH::cas32(&m_step_target, thread, NO_STEP_TARGET))
     ARCH::debug_step(true);
@@ -542,6 +530,14 @@ template <> void KERNEL::fault_dispatch(KERNEL::CONTEXT *context) {
   m_faults.pc = pc;
   m_faults.status = status;
   m_faults.thread = thread;
+  m_faults.address = address;
+  if constexpr (ARCH::IS_ARMV8M) {
+    const auto klass = cost_probe::classify_cfsr(status);
+    if (klass.memmanage) m_faults.memmanage = cost_probe::saturating_increment(m_faults.memmanage);
+    if (klass.busfault) m_faults.busfault = cost_probe::saturating_increment(m_faults.busfault);
+    if (klass.usagefault) m_faults.usagefault = cost_probe::saturating_increment(m_faults.usagefault);
+    if (klass.hardfault) m_faults.hardfault = cost_probe::saturating_increment(m_faults.hardfault);
+  }
   ARCH::fault_status_clear();
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
   shizuku_selftest_fault_phase(11, m_grants[core].depth);

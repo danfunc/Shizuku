@@ -1,10 +1,11 @@
 # config.hpp の生成 (CMake の configure_file と同じ内容になるよう保つ)。
 # TODO(Phase1 以降): 置換値を bazel/config の build setting に外出しする。
 load("@bazel_skylib//rules:expand_template.bzl", "expand_template")
-load("@bazel_skylib//rules:common_settings.bzl", "int_flag", "string_flag")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "int_flag", "string_flag")
 load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@rules_cc//cc:defs.bzl", "cc_library")
 load("//configs:kit.bzl", "config_substitutions")
+load("//configs:cost_probe_config.bzl", "cost_probe_config")
 load(
     "//configs:cyw43_clock.bzl",
     "CYW43_PIO_DIV",
@@ -186,6 +187,32 @@ selects.config_setting_group(
     match_any = [":rp2350_pico2", ":rp2350_pico2_w"],
     visibility = ["//visibility:public"],
 )
+# RP2350 のカーネルだけにかける LTO (flag の中身は kernel_lto.bzl)。既定は有効。
+bool_flag(
+    name = "rp2350_kernel_lto",
+    build_setting_default = True,
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "rp2350_kernel_lto_flag_on",
+    flag_values = {":rp2350_kernel_lto": "True"},
+)
+selects.config_setting_group(
+    name = "rp2350_kernel_lto_enabled",
+    match_all = [":rp2350", ":rp2350_kernel_lto_flag_on"],
+    visibility = ["//visibility:public"],
+)
+# Diagnostic probes are independently opt-in, and only apply to RP2350.
+bool_flag(
+    name = "rp2350_xip_cost_probe",
+    build_setting_default = False,
+    visibility = ["//visibility:public"],
+)
+bool_flag(
+    name = "rp2350_route_cost_probe",
+    build_setting_default = False,
+    visibility = ["//visibility:public"],
+)
 selects.config_setting_group(
     name = "cyw43",
     match_any = [":rp2040_pico_w", ":rp2350_pico2_w"],
@@ -215,9 +242,12 @@ cc_library(
 
 # ★型は SHIZUKU_RP2040 の #if ではなく構成 (select) で決める。どの arch/board を
 #   入れたかが config.hpp を開けばそのまま読めるようにするため。
-expand_template(
+cost_probe_config(
     name = "config_hpp",
     out = "internal_headers/shizuku/config.hpp",
+    is_rp2350 = select({":rp2350": True, "//conditions:default": False}),
+    xip_probe = ":rp2350_xip_cost_probe",
+    route_probe = ":rp2350_route_cost_probe",
     substitutions = select({
         # 型名は歴史的経緯で rp2040_pico_w だが、Pico / Pico W / XIAO 共通の
         # バックエンド (LED の選び方は peripherals.cpp と SDK のボードマクロ側)。
@@ -239,6 +269,10 @@ cc_library(
     name = "config",
     hdrs = [":config_hpp"],
     includes = ["internal_headers"],
+    defines = select({
+        ":rp2350": ["SHIZUKU_LEAN_LEDGER=1"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
     deps = [
         "//:internal_headers",

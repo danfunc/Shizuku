@@ -21,6 +21,11 @@ namespace shizuku{
     using MEMORY_MANAGER = ${SHIZUKU_MEMORY_MANAGER};
     using KERNEL = shizuku::templates::kernel<CPU_MANAGER,MEMORY_MANAGER>;
     using KERNEL_OBJECT = shizuku::templates::kernel_object<KERNEL,${SHIZUKU_OBJECT_COUNT},${SHIZUKU_METHOD_COUNT},${SHIZUKU_CALL_DEPTH},${SHIZUKU_THREAD_COUNT}>;
+    // An unset configure_file variable yields 0; Bazel substitutes 0 or 1.
+    inline constexpr bool xip_cost_probe_enabled = 0${SHIZUKU_XIP_COST_PROBE} != 0;
+    inline constexpr bool route_cost_probe_enabled = 0${SHIZUKU_ROUTE_COST_PROBE} != 0;
 };
+
+#include "shizuku/svc_ram_instances.hpp"
 
 #endif // SHIZUKU_CONFIG_TEMPLATE_HPP

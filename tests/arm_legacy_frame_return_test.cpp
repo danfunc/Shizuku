@@ -44,6 +44,8 @@ call_request KERNEL_OBJECT::callee_request(uintptr_t id, uintptr_t entry_pc) con
 }
 }  // namespace shizuku
 
+// Link placeholders only: the ARM assembly veneers are not executed on host.
+extern "C" void shizuku_armv8m_call_entry() {}
 extern "C" void shizuku_armv8m_return_stub() {}
 
 using namespace shizuku;
@@ -87,7 +89,9 @@ int main() {
     assert(kernel_instance.current_depth() == 1);
     assert(kernel_instance.current_call_count() == 1);
     assert(context->sp != caller && ARCH::frame_pc(*context->sp) == 0x42002000u);
-    assert(context->r4 == 0);
+    // S2 removes kernel-managed callee-saved scrubbing even on this legacy
+    // frame adapter; the compiler caller converter now owns that contract.
+    assert(context->r4 == 0x54u);
   };
 
   // Old ARM frame path, depth-zero caller: preserve the live row on return.

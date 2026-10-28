@@ -114,6 +114,27 @@ template <class A, class Thread, class Context, class Frame>
 
 namespace native {
 
+template <class A>
+[[gnu::always_inline]] inline bool defer_thread_switch() {
+  if constexpr (requires { A::defer_svc_switch(); })
+    return A::defer_svc_switch();
+  return false;
+}
+
+template <class Objects, class Method>
+[[gnu::always_inline]] inline auto resolve_method_view(
+    Objects &objects, uintptr_t id, uintptr_t method, uint32_t caller,
+    object_error &error, Method &entry) {
+  if constexpr (requires { objects.resolve_method_view(id, method, caller, error, entry); }) {
+    return objects.resolve_method_view(id, method, caller, error, entry);
+  } else {
+    const auto *row = objects.find_method_row(id, method, caller, error, entry);
+    using View = decltype(objects.view_of_row((uint32_t)id, *row));
+    struct resolution { bool found; View view; };
+    return resolution{row != nullptr, row != nullptr ? objects.view_of_row((uint32_t)id, *row) : View{}};
+  }
+}
+
 // 本体の結果。DONE = 処理した (応答を書いた)。FORWARD = kobj へ回す (呼び出し側が svc_forward)。
 // CORRUPT = 台帳の不変条件が破れている (呼び出し側が panic。本体は関数呼出しを持たないので、
 // 呼び出し側が tail call で停止できる)。
@@ -316,13 +337,41 @@ template <class K, class KObj>
                                                         KObj &kobj) {
   using A = typename K::ARCH;
   if constexpr (arch_call_in_place<A>()) {
+    if constexpr (K::CORE_COUNT == 1) {
+      // Keep the single-core C6 instruction path and its validation order.
+      typename K::FRAME &frame = *context.sp;
+      const uintptr_t id = A::arg(frame, 1);
+      const uint32_t caller_id = thread.identity_object();
+      object_error error;
+      typename KObj::method_t entry;
+      const auto *row = kobj.find_method_row(id, A::arg(frame, 2), caller_id, error, entry);
+      if (row == nullptr) {
+        A::set_result(frame, (uintptr_t)error, 0);
+        return;
+      }
+      if (thread.call_stack.call_count >= KObj::MAX_DEPTH) {
+        A::set_result(frame, (uintptr_t)object_error::NO_STACK, 0);
+        return;
+      }
+      const uintptr_t argument = A::arg(frame, 3);
+      const kernel_error entered = enter_in_place<K, KObj>(
+          kernel, thread, context, kobj.view_of_row((uint32_t)id, *row), (uintptr_t)entry,
+          K::LEDGER_CALL);
+      if (entered != kernel_error::OK) {
+        A::set_result(frame, (uintptr_t)(entered == kernel_error::NO_STACK
+                                             ? object_error::NO_STACK
+                                             : object_error::BAD_OBJECT), 0);
+        return;
+      }
+      A::set_method_argument(frame, argument);
+    } else {
     typename K::FRAME &frame = *context.sp;
     const uintptr_t id = A::arg(frame, 1);
     const uint32_t caller_id = thread.identity_object();
     object_error error;
     typename KObj::method_t entry;
-    const auto *row = kobj.find_method_row(id, A::arg(frame, 2), caller_id, error, entry);
-    if (row == nullptr) {
+    const auto resolved = resolve_method_view(kobj, id, A::arg(frame, 2), caller_id, error, entry);
+    if (!resolved.found) {
       A::set_result(frame, (uintptr_t)error, 0);
       return;
     }
@@ -333,7 +382,7 @@ template <class K, class KObj>
     }
     const uintptr_t argument = A::arg(frame, 3);
     const kernel_error entered = enter_in_place<K, KObj>(
-        kernel, thread, context, kobj.view_of_row((uint32_t)id, *row), (uintptr_t)entry,
+        kernel, thread, context, resolved.view, (uintptr_t)entry,
         K::LEDGER_CALL);
     if (entered != kernel_error::OK) {
       A::set_result(frame, (uintptr_t)(entered == kernel_error::NO_STACK
@@ -345,6 +394,7 @@ template <class K, class KObj>
     // 呼び先の引数は a0 (ARM では r0) = argument だけ。a1 以降は書かない (caller の入力のまま素通し。
     // 呼び先は宣言した引数以外を信用しない)。
     A::set_method_argument(frame, argument);
+    }
   }
 }
 

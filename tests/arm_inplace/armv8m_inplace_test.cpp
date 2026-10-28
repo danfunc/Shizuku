@@ -5,6 +5,11 @@
 
 #include "arch/armv8m/armv8m.hpp"
 #include "arch/riscv/rv32.hpp"
+#include "shizuku/method_entry.hpp"
+
+static uintptr_t registered_word(uintptr_t a, uintptr_t, uintptr_t, uintptr_t) {
+  return a + 1;
+}
 
 // ---------------------------------------------------------------------------
 // 1. Payload trait size & offset static checks (ARMv8-M and RV32)
@@ -15,6 +20,7 @@ using armv8m_raw = shizuku::archs::armv8m<8, 4>;
 struct context_with_arm_payload : armv8m_raw::context_t {
   // S2 で本番 context_t が宣言する形を、arch 自身の inplace_payload_t で先取りして試す。
   using ledger_payload_t = armv8m_raw::inplace_payload_t;
+  static constexpr bool COMPACT_LEDGER = false;
 };
 
 static_assert(sizeof(armv8m_raw::inplace_payload_t) == 32, "r4-r11 = 8 words");
@@ -36,8 +42,8 @@ using thread_rv32_empty = shizuku::templates::thread<rv32_raw::context_t>;
 
 #if defined(SHIZUKU_LEAN_LEDGER)
 // ARMv8-M empty payload size check
-static_assert(sizeof(thread_armv8m_empty::call_ledger_entry) == (sizeof(uintptr_t) == 4 ? 32 : 48),
-              "LEAN ARMv8-M call_ledger_entry with empty payload must not increase in size");
+static_assert(sizeof(thread_armv8m_empty::call_ledger_entry) == (sizeof(uintptr_t) == 4 ? 20 : 32),
+              "LEAN ARMv8-M compact ledger size");
 // Real RV32 empty payload size check
 static_assert(sizeof(thread_rv32_empty::call_ledger_entry) == (sizeof(uintptr_t) == 4 ? 32 : 48),
               "LEAN RV32 call_ledger_entry with empty payload must not increase in size");
@@ -65,8 +71,10 @@ void test_armv8m_production_invariants() {
   using armv8m_raw = shizuku::archs::armv8m<8, 4>;
   using test_rv32_raw = shizuku::archs::rv32<16, 4, test_armv8m_payload::mock_int_mode>;
 
-  // Production ARMv8-M must NOT have CALL_IN_PLACE == true
-  assert(!shizuku::arch_call_in_place<armv8m_raw>());
+  assert(shizuku::arch_call_in_place<armv8m_raw>());
+  const auto address = shizuku::method_entry<armv8m_raw, &registered_word>();
+  using entry = uintptr_t (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+  assert(reinterpret_cast<entry>(address)(41, 0, 0, 0, 0) == 42);
 
   // RISC-V in-place call is enabled in production
   assert(shizuku::arch_call_in_place<test_rv32_raw>());

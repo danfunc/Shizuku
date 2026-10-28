@@ -7,6 +7,19 @@
 .fpu fpv5-sp-d16   // .cpu 指定は FPU を含まないため、vstmia/vldmia 用に明示する
 #endif
 .thumb
+#ifndef SHIZUKU_RP2350_SVC_BREAKDOWN
+#define SHIZUKU_RP2350_SVC_BREAKDOWN 0
+#endif
+.macro BREAKDOWN_PROBE point
+#if SHIZUKU_RP2350_SVC_BREAKDOWN
+    push {r0-r3, r12, lr}
+    mov  r1, lr
+    mov  r2, r0
+    movs r0, \point
+    bl   shizuku_svc_breakdown_probe
+    pop  {r0-r3, r12, lr}
+#endif
+.endm
 .macro SERVICE_PROFILE hook
 #if SHIZUKU_KERNEL_SERVICE_PROFILE
     push {r0-r3,r12,lr}
@@ -30,7 +43,7 @@
 // を退避する。入口条件: lr = EXC_RETURN (例外入口直後)。出口: r0 = context 先頭。
 // ---------------------------------------------------------------------------
 .macro CTX_SAVE
-    push {lr}                     // EXC_RETURN を退避 (直後の bl で lr が壊れる)
+    push {r1, lr}                 // Keep MSP 8-byte aligned across the C++ call
     bl   shizuku_current_context  // r0 = 現在スレッドの context 先頭
 
     // 整数 callee-saved と PSP を退避
@@ -43,7 +56,8 @@
     stmia r0!,{r1-r5}             // ctx[4..8] = r8,r9,r10,r11,PSP ; r0 = base+36
     add  r0, #-36                 // r0 を context 先頭へ巻き戻す
 
-    pop  {r1}                     // r1 = 退避しておいた EXC_RETURN
+    pop  {r1, r2}
+    mov  r1, r2                   // r1 = saved EXC_RETURN (first word is scratch)
     str  r1,[r0, #CTX_EXC_RETURN] // ctx->exc_return = EXC_RETURN
 
 #if defined(__ARM_FP)
@@ -66,10 +80,17 @@
     // ★GDB stub の 1 命令実行はここで立てる。「次の 1 命令」はこの直後に
     //   復帰する文脈のものと確定しているので、対象を取り違えない
     //   (立てる場所を間違えると「呼び出し側自身が刻まれる」— 実測で踏んだ)。
-    bl   shizuku_arm_pending_step
+    bl   shizuku_arm_prepare_restore
+    .if \svc
+    BREAKDOWN_PROBE 3
+    .endif
     // ★Q8 (DESIGN §11.3)。同じ理由で「次に復帰する文脈が確定した今」書く。
-    bl   shizuku_restore_region_window
-    bl   shizuku_current_context  // r0 = 復帰対象 context (別スレッドかもしれない)
+    .if \svc
+    BREAKDOWN_PROBE 4
+    .endif
+    .if \svc
+    BREAKDOWN_PROBE 5
+    .endif
 
     // 整数 callee-saved と PSP を復元
     ldmia r0!,{r4-r7}             // r4-r7 ; r0 += 16
@@ -110,6 +131,7 @@
 #endif
 
     .if \svc
+    BREAKDOWN_PROBE 6
     SERVICE_PROFILE shizuku_service_handler_end
     .endif
     mov  lr, r3                   // LR = 復帰対象の EXC_RETURN
@@ -117,17 +139,18 @@
 .endm
 
 // ---------------------------------------------------------------------------
-// SVC 入口。CTX_SAVE → shizuku_svc_dispatch(context) → CTX_RESTORE。
+// Compatibility symbol only. The vector points directly at the C++ handler.
 // ---------------------------------------------------------------------------
+#if defined(SHIZUKU_SVC_IN_RAM) && SHIZUKU_SVC_IN_RAM
+.section .time_critical.shizuku_svc_entry, "ax", %progbits
+#endif
 .thumb_func
 .global shizuku_armv8m_svc_entry
 .align 8
 .type shizuku_armv8m_svc_entry, %function
 shizuku_armv8m_svc_entry:
-    SERVICE_PROFILE shizuku_service_handler_begin
-    CTX_SAVE
-    bl   shizuku_svc_dispatch     // shizuku_svc_dispatch(context = r0)
-    CTX_RESTORE 1
+    b    shizuku_armv8m_svc_handler
+.size shizuku_armv8m_svc_entry, .-shizuku_armv8m_svc_entry
 
 // ---------------------------------------------------------------------------
 // PendSV 入口 (時限実行権の期限回収 = 最低優先度の遅延切替例外)。退避/復元は
@@ -142,6 +165,9 @@ shizuku_armv8m_pendsv_entry:
     bl   shizuku_pendsv_dispatch  // shizuku_pendsv_dispatch(context = r0)
     CTX_RESTORE
 
+#if defined(SHIZUKU_SVC_IN_RAM) && SHIZUKU_SVC_IN_RAM
+.text
+#endif
 // ---------------------------------------------------------------------------
 // 戻り口 — ハンドラが普通に return するとここへ落ちる (カーネルが lr に載せる)。
 // 自分の枠を 1 枚ぶん巻き戻す。
@@ -150,11 +176,49 @@ shizuku_armv8m_pendsv_entry:
 //   dispatch が ledger の unwind floor へ置き換える。
 // ---------------------------------------------------------------------------
 .thumb_func
+.global shizuku_armv8m_call_entry
+.align 2
+.type shizuku_armv8m_call_entry, %function
+shizuku_armv8m_call_entry:
+    sub   sp, sp, #8      // AAPCS fifth argument; keep SP 8-byte aligned
+    str   r12, [sp]
+    mov   r12, lr         // kernel supplied the actual entry in LR
+    ldr   lr, =shizuku_armv8m_return_stub
+    bx    r12
+.size shizuku_armv8m_call_entry, .-shizuku_armv8m_call_entry
+
+.thumb_func
 .global shizuku_armv8m_return_stub
 .align 2
 .type shizuku_armv8m_return_stub, %function
 shizuku_armv8m_return_stub:
     mov   r2, r0        // a2 = 戻り値
+    mrs   r3, control
+    tst   r3, #4
+    beq   .Lreturn_no_fp
+    movs  r3, #0
+    vmov  s0, r3
+    vmov  s1, r3
+    vmov  s2, r3
+    vmov  s3, r3
+    vmov  s4, r3
+    vmov  s5, r3
+    vmov  s6, r3
+    vmov  s7, r3
+    vmov  s8, r3
+    vmov  s9, r3
+    vmov  s10, r3
+    vmov  s11, r3
+    vmov  s12, r3
+    vmov  s13, r3
+    vmov  s14, r3
+    vmov  s15, r3
+    vmsr  fpscr, r3
+.Lreturn_no_fp:
+.Lreturn_exit:
+    mov   r3, sp
+    bic   r3, r3, #31
+    mov   sp, r3          // EXIT does not return to this stack
     movs  r1, #1        // legacy one-pop notification
     movs  r3, #0        // a3 = エラーコード 0 (成功)
     movs  r3, #0xA5
@@ -165,6 +229,49 @@ shizuku_armv8m_return_stub:
     movs  r0, #2        // a0 = RETURN (kernel_abi.hpp と static_assert で両縛り)
     svc   0
     b     shizuku_return_stub_failed // 戻ってきた = 巻き戻しが弾かれた
+
+// FP results occupy s0 or s0/s1. All other lower registers and FPSCR are
+// cleared after the ordinary C++ body's AAPCS epilogue has completed.
+.thumb_func
+.global shizuku_armv8m_return_float_stub
+.type shizuku_armv8m_return_float_stub, %function
+shizuku_armv8m_return_float_stub:
+    mrs   r3, control
+    tst   r3, #4
+    beq   .Lreturn_fp_exit
+    movs  r3, #0
+    vmov  s1, r3
+    b     .Lreturn_fp_scrub_s2
+.size shizuku_armv8m_return_float_stub, .-shizuku_armv8m_return_float_stub
+
+.thumb_func
+.global shizuku_armv8m_return_double_stub
+.type shizuku_armv8m_return_double_stub, %function
+shizuku_armv8m_return_double_stub:
+    mrs   r3, control
+    tst   r3, #4
+    beq   .Lreturn_fp_exit
+    movs  r3, #0
+.Lreturn_fp_scrub_s2:
+    vmov  s2, r3
+    vmov  s3, r3
+    vmov  s4, r3
+    vmov  s5, r3
+    vmov  s6, r3
+    vmov  s7, r3
+    vmov  s8, r3
+    vmov  s9, r3
+    vmov  s10, r3
+    vmov  s11, r3
+    vmov  s12, r3
+    vmov  s13, r3
+    vmov  s14, r3
+    vmov  s15, r3
+    vmsr  fpscr, r3
+.Lreturn_fp_exit:
+    movs  r2, #0
+    b     .Lreturn_exit
+.size shizuku_armv8m_return_double_stub, .-shizuku_armv8m_return_double_stub
 
 // ---------------------------------------------------------------------------
 // DebugMonitor の入口。フォールトとまったく同じ形にしてある —

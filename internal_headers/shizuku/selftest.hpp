@@ -34,6 +34,8 @@ void kernel_services_isr_result();
 void call_cost();
 // RP2350 (ARMv8-M): 非特権 (U-mode) 同士の IPC コスト実測 (CALL_METHOD / CALL_METHOD_DESCRIPTOR)
 void rp2350_u_cost();
+// RP2350 (ARMv8-M): S0 SVC 往復の内訳実測 (CTX_SAVE, dispatch, restore, residual)
+void rp2350_svc_breakdown();
 // レジスタ漏洩防止試験 (Register Leakage Prevention Test)
 void register_leak_test();
 

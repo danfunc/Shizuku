@@ -4,6 +4,7 @@
 #include "shizuku/service_profile.hpp"
 
 #if defined(__arm__)
+#include "shizuku/armv8m_abi.hpp"
 namespace shizuku::kernel_services {
 using ARCH = KERNEL::ARCH;
 using BOARD = KERNEL::BOARD;
@@ -18,18 +19,28 @@ bool in_isr() {
 }
 // One protected resume PC identifies the internal V2 scheduling gate. Public
 // raw SVC numbers, including those of a custom parent, remain uninterpreted.
+template <class A> [[gnu::always_inline]] inline result invoke_svc(object_api api,
+                                                                   uintptr_t a1,
+                                                                   uintptr_t a2) {
+  if constexpr (A::IS_ARMV8M) {
+    const auto r = armv8m_abi::syscall<true>(static_cast<uintptr_t>(api), a1, a2);
+    return {r.error == 0 ? status::ok : status::operation_failed, r.value, r.error};
+  } else {
+    register uintptr_t r0 asm("r0") = static_cast<uintptr_t>(api);
+    register uintptr_t r1 asm("r1") = a1;
+    register uintptr_t r2 asm("r2") = a2;
+    register uintptr_t r3 asm("r3") = 0;
+    register uintptr_t r12 asm("r12") = 0;
+    __asm__ volatile("svc 0\n.global shizuku_v2_service_resume\nshizuku_v2_service_resume:"
+                     : "+r"(r0), "+r"(r1) : "r"(r2), "r"(r3), "r"(r12) : "memory");
+    return {r0 == 0 ? status::ok : status::operation_failed, r1, r0};
+  }
+}
 [[gnu::noinline, gnu::noclone]] static result invoke(object_api api, uintptr_t a1 = 0,
                                                     uintptr_t a2 = 0) {
   if (in_isr()) return {status::bad_context, 0, 0};
   if (!ARCH::current_priv()) return {status::not_privileged, 0, 0};
-  register uintptr_t r0 asm("r0") = static_cast<uintptr_t>(api);
-  register uintptr_t r1 asm("r1") = a1;
-  register uintptr_t r2 asm("r2") = a2;
-  register uintptr_t r3 asm("r3") = 0;
-  register uintptr_t r12 asm("r12") = 0;
-  __asm__ volatile("svc 0\n.global shizuku_v2_service_resume\nshizuku_v2_service_resume:"
-                   : "+r"(r0), "+r"(r1) : "r"(r2), "r"(r3), "r"(r12) : "memory");
-  return {r0 == 0 ? status::ok : status::operation_failed, r1, r0};
+  return invoke_svc<ARCH>(api, a1, a2);
 }
 result yield() { return invoke(object_api::YIELD); }
 result grant(uint32_t target, uint32_t cycles) { return invoke(object_api::RUN_FOR, target, cycles); }
@@ -41,19 +52,16 @@ bool cas(volatile uint32_t *p, uint32_t expected, uint32_t desired) {
 }
 irq_state irq_save() {
   uint32_t started = 0;
-#if SHIZUKU_KERNEL_SERVICE_PROFILE
-  started = shizuku_service_profile_now();
-#endif
+  if constexpr (service_profile::enabled) started = shizuku_service_profile_now();
   uint32_t mask;
   __asm__ volatile("mrs %0, primask\ncpsid i" : "=r"(mask) :: "memory");
   return {mask, started};
 }
 void irq_restore(irq_state state) {
   __asm__ volatile("msr primask, %0" :: "r"(state.primask) : "memory");
-#if SHIZUKU_KERNEL_SERVICE_PROFILE
   // Clock reads bracket the full interval; an IRQ after unmask can inflate it.
-  if ((state.primask & 1u) == 0) shizuku_service_mask_span(state.started);
-#endif
+  if constexpr (service_profile::enabled)
+    if ((state.primask & 1u) == 0) shizuku_service_mask_span(state.started);
 }
 } // namespace shizuku::kernel_services
 
