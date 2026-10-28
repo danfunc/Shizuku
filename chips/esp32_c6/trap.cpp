@@ -153,6 +153,12 @@ volatile uint32_t stop_capture_busy;
 volatile uint32_t pend_flag;
 uint64_t armed_target;
 uint32_t trap_probe_interval_count;
+// 固定 PMP エントリ (0-3: 共有コード・共有窓) に今入っている値。M へ戻るときの pmp_controller::disable() が
+// 消すので、そこと起動時に 0 へ戻し、U へ入るときに窓が変わっていれば張り直す。
+uintptr_t s_current_fixed_pmp_code_base = 0;
+uintptr_t s_current_fixed_pmp_code_limit = 0;
+uintptr_t s_current_fixed_pmp_region_base = 0;
+uintptr_t s_current_fixed_pmp_region_limit = 0;
 namespace c6 = shizuku::ports::c6;
 constexpr stop_capture::ram_range kC6Dram{0x40800000u, 0x40860000u};
 constexpr uint32_t kBootMarkerMagic = 0x424D3643u; // "C6MB"
@@ -521,12 +527,17 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
       }
     }
 
-    // 固定エントリの初期化 (起動時に1回)
-    static bool fixed_pmp_initialized = false;
-    if (__builtin_expect(!fixed_pmp_initialized, 0)) {
+    // 固定エントリの初期化・更新 (M-mode 経由で PMP disable された後や、コード/共有窓切替時に再設定)
+    if (__builtin_expect(s_current_fixed_pmp_code_base != code_base ||
+                         s_current_fixed_pmp_code_limit != code_limit ||
+                         s_current_fixed_pmp_region_base != c.region_base ||
+                         s_current_fixed_pmp_region_limit != c.region_limit, 0)) {
       shizuku::chips::esp32_c6::pmp_controller::init_fixed_entries(
           code_base, code_limit, c.region_base, c.region_limit);
-      fixed_pmp_initialized = true;
+      s_current_fixed_pmp_code_base = code_base;
+      s_current_fixed_pmp_code_limit = code_limit;
+      s_current_fixed_pmp_region_base = c.region_base;
+      s_current_fixed_pmp_region_limit = c.region_limit;
     }
 
     // オブジェクト固有エントリへの切替え (前計算済み 8 本の CSR のみ書込み、固定エントリは触らない)
@@ -542,6 +553,11 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
       active_stop_phase = 0xE004u;
       stop(0xE004);
     }
+    // disable() が固定エントリも消したので、次に U へ入るとき張り直させる。
+    s_current_fixed_pmp_code_base = 0;
+    s_current_fixed_pmp_code_limit = 0;
+    s_current_fixed_pmp_region_base = 0;
+    s_current_fixed_pmp_region_limit = 0;
     const uintptr_t current_sp = f.reserved0 != 0
         ? static_cast<uintptr_t>(f.reserved0)
         : reinterpret_cast<uintptr_t>(c.sp) + RV32_FRAME_BYTES;
@@ -575,6 +591,10 @@ extern "C" void shizuku_c6_mark_boot_phase(uint32_t phase) {
     active_stop_phase = 0u;
     stack_diag_init();
     trap_probe_interval_count = 0u;
+    s_current_fixed_pmp_code_base = 0;
+    s_current_fixed_pmp_code_limit = 0;
+    s_current_fixed_pmp_region_base = 0;
+    s_current_fixed_pmp_region_limit = 0;
     shizuku_c6_boot_marker_magic = kBootMarkerMagic;
     return;
   }
@@ -879,6 +899,11 @@ bool shizuku_c6_handle_fault(arch::exception_frame_t *frame) {
     if (g_c6_probe_pmp_fault_pc != 0 && frame->mepc == g_c6_probe_pmp_fault_pc) {
       shizuku_c6_u_mode_diag[3] = shizuku_c6_u_mode_diag[3] + 1;
       frame->a0 = 0xDEADBEEFu;
+      frame->mepc += 4;
+      return true;
+    }
+    if (g_c6_probe_combo_pmp_pc != 0 && frame->mepc == g_c6_probe_combo_pmp_pc) {
+      shizuku_c6_u_mode_diag[3] = shizuku_c6_u_mode_diag[3] + 1;
       frame->mepc += 4;
       return true;
     }

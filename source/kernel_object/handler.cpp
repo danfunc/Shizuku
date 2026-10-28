@@ -416,7 +416,7 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
   const bool is_handler = (flags & INTERNAL_FLAG_HANDLER) != 0;
   if (!svc_permission_allows((uintptr_t)object_api::CREATE_OBJECT, is_privileged,
           creator == ROOT_OBJECT || creator == KERNEL_OBJECT_ID, false, flags,
-          INTERNAL_FLAG_HANDLER)) {
+          INTERNAL_FLAG_HANDLER) || !create_privilege_policy_allows<ARCH>(is_privileged, flags)) {
     error = object_error::NOT_PRIVILEGED;
     note_create_failure(id, creator, error);
     return 0;

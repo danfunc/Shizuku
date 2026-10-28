@@ -28,6 +28,7 @@ namespace shizuku::chips::esp32_c6 {
 // rv32<...>::IntMode としてだけ使う。定義は trap.cpp (本体) と modules/esp_idf_support/c6/link_stubs.cpp (未実装部)。
 // 将来 C5 (CLIC 直接エントリ + mtvt 関数ポインタ表) を載せるなら、別の IntMode 型を同じ形で作る。
 struct plic_vector_mode {
+  static constexpr bool RESTRICT_UNPRIVILEGED_CREATE = true;
   // M-only pilot の policy 値 (従来値のまま。generic arch からは IntMode 経由で参照)。
   static constexpr uint32_t CALL_HEADROOM = 256;
   // M-only パイロット向けサイクルカウンタ (CSR 0x7E0/0x7E1/0x7E2)。U-mode は未検証。
