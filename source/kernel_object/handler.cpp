@@ -147,8 +147,12 @@ template <> uintptr_t KERNEL_OBJECT::handler_entry() {
 //   (= 特権のみ) なので非特権オブジェクトから届かない。用意するのはこちら
 //   (オブジェクトランド) で、置き場所の条件はカーネルが検査する。
 #if defined(SHIZUKU_LEAN_LEDGER)
-static_assert(sizeof(uintptr_t) != 4 || sizeof(KERNEL::call_ledger_entry) == 32,
-              "lean call ledger entry must be 32 bytes on 32-bit targets");
+static_assert(sizeof(uintptr_t) != 4 || sizeof(KERNEL::call_ledger_entry) ==
+              (templates::compact_ledger_enabled<KERNEL::CONTEXT>() ? 20 : 32),
+              "lean call ledger entry size must match its architecture");
+static_assert(!templates::compact_ledger_enabled<KERNEL::CONTEXT>() ||
+              (KERNEL_OBJECT::OBJECT_COUNT < 128 && KERNEL_OBJECT::LEDGER_CAPACITY <= 63),
+              "compact ledger metadata capacity exceeded");
 #else
 static_assert(sizeof(KERNEL::call_ledger_entry) == 16,
               "call ledger entry must be 16 bytes on supported targets");
@@ -170,6 +174,7 @@ static_assert(KERNEL::thread_record_bytes() * KERNEL_OBJECT::THREAD_COUNT +
 
 template <> void KERNEL_OBJECT::init() {
   for (uintptr_t id = 0; id < OBJECT_COUNT; ++id) {
+    m_objects[id].seq = 0;
     m_objects[id].created = false;
     m_objects[id].flags = 0;
     m_objects[id].creator_object = (uint32_t)NO_OBJECT;
@@ -411,7 +416,7 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
   const bool is_handler = (flags & INTERNAL_FLAG_HANDLER) != 0;
   if (!svc_permission_allows((uintptr_t)object_api::CREATE_OBJECT, is_privileged,
           creator == ROOT_OBJECT || creator == KERNEL_OBJECT_ID, false, flags,
-          INTERNAL_FLAG_HANDLER)) {
+          INTERNAL_FLAG_HANDLER) || !create_privilege_policy_allows<ARCH>(is_privileged, flags)) {
     error = object_error::NOT_PRIVILEGED;
     note_create_failure(id, creator, error);
     return 0;
@@ -421,7 +426,7 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
   //   一般オブジェクトが立てようとしたら、枠も表も触らずに NOT_PRIVILEGED で拒否する。
   const bool is_kernel_role = (flags & INTERNAL_FLAG_KERNEL_ROLE) != 0;
   if (is_kernel_role && creator != ROOT_OBJECT &&
-      !m_objects[creator].kernel_role) {
+      !row_load(m_objects[creator].kernel_role)) {
     error = object_error::NOT_PRIVILEGED;
     note_create_failure(id, creator, error);
     return 0;
@@ -458,13 +463,17 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
     const bool kept_kernel_role =
         m_objects[id].created && m_objects[id].kernel_role;
     if (!m_objects[id].created || replace) {
-      m_objects[id].created = true;
+      if (!row_write_begin(m_objects[id])) {
+        error = object_error::BAD_OBJECT;
+        return 0;
+      }
+      row_store(m_objects[id].created, true);
       // 生成者は差し替えのたびに記録し直す (旧 creator の権限を新しい中身へ残さない)。
-      m_objects[id].creator_object = (uint32_t)creator;
-      m_objects[id].kernel_role = kept_kernel_role || is_kernel_role;
-      m_objects[id].flags =
+      row_store(m_objects[id].creator_object, (uint32_t)creator);
+      row_store(m_objects[id].kernel_role, kept_kernel_role || is_kernel_role);
+      row_store(m_objects[id].flags,
           (uint32_t)(flags & ~(OBJECT_REPLACE | INTERNAL_FLAG_HANDLER |
-                               INTERNAL_FLAG_KERNEL_ROLE));
+                               INTERNAL_FLAG_KERNEL_ROLE)));
       if (current_generation == 0 || replace) {
         ARCH::store_release32(&m_objects[id].generation,
                              current_generation + 1u);
@@ -480,35 +489,36 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
           invalidate_descriptor(d);
       }
       for (uintptr_t method = 1; method < METHOD_COUNT; ++method)
-        m_objects[id].methods[method] = nullptr;
+        row_store(m_objects[id].methods[method], method_t{});
       // 最初のメソッドは生成側が与える (オブジェクト自身はまだ走っていないので
       // 自分では登録できない)。以後は EXPORT_METHOD で自分が増やす。
-      m_objects[id].methods[0] = (method_t)entry;
+      row_store(m_objects[id].methods[0], (method_t)entry);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
       shizuku_boot_trace_phase(423);
 #endif
 
       if (is_handler) {
         // ★特権オブジェクトによって専用ハンドラ (HANDLER) として宣言された
-        m_objects[id].kind = object_kind::HANDLER;
+        row_store(m_objects[id].kind, object_kind::HANDLER);
         // 専用ハンドラ自身の親ハンドラは root kernel object
-        m_objects[id].parent_handler_object = (uint32_t)KERNEL_OBJECT_ID;
-        m_objects[id].parent_handler_entry = handler_entry();
+        row_store(m_objects[id].parent_handler_object, (uint32_t)KERNEL_OBJECT_ID);
+        row_store(m_objects[id].parent_handler_entry, handler_entry());
       } else {
-        m_objects[id].kind = object_kind::PLAIN;
+        row_store(m_objects[id].kind, object_kind::PLAIN);
         // ★親ハンドラの自動導出 (指摘 1, 5, 7):
         // 作成者が専用ハンドラなら、その専用ハンドラが親になる。
         // 作成者が Root 等なら、root kernel object が親になる。
         if (creator != KERNEL_OBJECT_ID && creator != ROOT_OBJECT &&
             m_objects[creator].kind == object_kind::HANDLER) {
-          m_objects[id].parent_handler_object = creator;
-          m_objects[id].parent_handler_entry =
-              (uintptr_t)m_objects[creator].methods[0];
+          row_store(m_objects[id].parent_handler_object, creator);
+          row_store(m_objects[id].parent_handler_entry,
+              (uintptr_t)m_objects[creator].methods[0]);
         } else {
-          m_objects[id].parent_handler_object = (uint32_t)KERNEL_OBJECT_ID;
-          m_objects[id].parent_handler_entry = handler_entry();
+          row_store(m_objects[id].parent_handler_object, (uint32_t)KERNEL_OBJECT_ID);
+          row_store(m_objects[id].parent_handler_entry, handler_entry());
         }
       }
+      row_write_end(m_objects[id]);
       return id;
     }
     taken_by = m_object_name[id];
@@ -536,15 +546,15 @@ uintptr_t KERNEL_OBJECT::create_object(uintptr_t id, uintptr_t entry,
 //   直に呼ばない」オブジェクトだけで (静的データもペリフェラルも region の外 =
 //   特権のみになるため。DESIGN §11.2.2)、今それを満たすのは宣言した相手だけ。
 //   arena が入って既定を反転できるようになるまでは、opt-in にしておく。
-template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::object_protection(uintptr_t id) const {
-  return (m_objects[id].flags & OBJECT_UNPRIVILEGED) ? PROTECTION_UNPRIVILEGED
+template <> SHIZUKU_HOT SHIZUKU_SVC_RAM uint32_t KERNEL_OBJECT::object_protection(uintptr_t id) const {
+  return (row_load(m_objects[id].flags) & OBJECT_UNPRIVILEGED) ? PROTECTION_UNPRIVILEGED
                                                      : PROTECTION_PRIVILEGED;
 }
 
 // ★どこでも走れるのが既定。固定されているのは「機械の都合でそうなっている」
 //   相手だけで、それは宣言してもらう (気をつけて置く、では守れない)。
 template <> uint32_t KERNEL_OBJECT::object_affinity(uintptr_t id) const {
-  return (uint32_t)((m_objects[id].flags & OBJECT_AFFINITY_MASK) >>
+  return (uint32_t)((row_load(m_objects[id].flags) & OBJECT_AFFINITY_MASK) >>
                     OBJECT_AFFINITY_SHIFT);
 }
 
@@ -554,22 +564,26 @@ template <> uint32_t KERNEL_OBJECT::object_affinity(uintptr_t id) const {
 template <>
 uintptr_t KERNEL_OBJECT::set_object_affinity(uintptr_t id, uintptr_t cores,
                                              object_error &error) {
-  if (id >= OBJECT_COUNT || !m_objects[id].created) {
+  if (id >= OBJECT_COUNT || !row_load(m_objects[id].created)) {
     error = object_error::BAD_OBJECT;
     return 0;
   }
   table_guard guard;
-  m_objects[id].flags = (m_objects[id].flags & ~(uint32_t)OBJECT_AFFINITY_MASK) |
-                        (uint32_t)((cores << OBJECT_AFFINITY_SHIFT) &
-                                   OBJECT_AFFINITY_MASK);
+  if (!m_objects[id].created || !row_write_begin(m_objects[id])) {
+    error = object_error::BAD_OBJECT;
+    return 0;
+  }
+  row_store(m_objects[id].flags, (m_objects[id].flags & ~(uint32_t)OBJECT_AFFINITY_MASK) |
+                        (uint32_t)((cores << OBJECT_AFFINITY_SHIFT) & OBJECT_AFFINITY_MASK));
+  row_write_end(m_objects[id]);
   return 1;
 }
 
-template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::object_region_base(uintptr_t id) const {
-  return m_objects[id].region_base;
+template <> SHIZUKU_HOT SHIZUKU_SVC_RAM uint32_t KERNEL_OBJECT::object_region_base(uintptr_t id) const {
+  return row_load(m_objects[id].region_base);
 }
-template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::object_region_limit(uintptr_t id) const {
-  return m_objects[id].region_limit;
+template <> SHIZUKU_HOT SHIZUKU_SVC_RAM uint32_t KERNEL_OBJECT::object_region_limit(uintptr_t id) const {
+  return row_load(m_objects[id].region_limit);
 }
 
 // ★誰が誰に何を見せるかを決める権限そのものが特権行為。呼び出し元
@@ -585,7 +599,7 @@ uintptr_t KERNEL_OBJECT::grant_region(uintptr_t target, uintptr_t base,
     error = object_error::NOT_PRIVILEGED;
     return 0;
   }
-  if (target >= OBJECT_COUNT || !m_objects[target].created) {
+  if (target >= OBJECT_COUNT || !row_load(m_objects[target].created)) {
     error = object_error::BAD_OBJECT;
     return 0;
   }
@@ -607,9 +621,14 @@ uintptr_t KERNEL_OBJECT::grant_region(uintptr_t target, uintptr_t base,
     error = object_error::BAD_OBJECT;
     return 0;
   }
-  m_objects[target].region_base = (uint32_t)base;
-  m_objects[target].region_limit = (uint32_t)limit;
+  if (!row_write_begin(m_objects[target])) {
+    error = object_error::BAD_OBJECT;
+    return 0;
+  }
+  row_store(m_objects[target].region_base, (uint32_t)base);
+  row_store(m_objects[target].region_limit, (uint32_t)limit);
   ARCH::store_release32(&m_objects[target].generation, generation + 1u);
+  row_write_end(m_objects[target]);
   return 1;
 }
 
@@ -635,8 +654,13 @@ uintptr_t KERNEL_OBJECT::export_method(uintptr_t method, uintptr_t entry,
     error = object_error::BAD_OBJECT;
     return 0;
   }
-  m_objects[self].methods[method] = (method_t)entry;
+  if (!row_write_begin(m_objects[self])) {
+    error = object_error::BAD_OBJECT;
+    return 0;
+  }
+  row_store(m_objects[self].methods[method], (method_t)entry);
   ARCH::store_release32(&m_objects[self].generation, generation + 1u);
+  row_write_end(m_objects[self]);
   return self;
 }
 
@@ -711,14 +735,14 @@ uintptr_t KERNEL_OBJECT::create_method_descriptor(uintptr_t target_id,
   return (uintptr_t)free_slot;
 }
 
-template <> SHIZUKU_HOT call_request KERNEL_OBJECT::callee_request(uintptr_t id, uintptr_t entry_pc) const {
+template <> SHIZUKU_HOT SHIZUKU_SVC_RAM call_request KERNEL_OBJECT::callee_request(uintptr_t id, uintptr_t entry_pc) const {
   call_request request{};
   request.entry_pc = entry_pc;
   request.callee_object = (uint32_t)id;                    // ★呼び先オブジェクトID
   request.callee_kind = (uint32_t)object_kind_of(id);      // ★呼び先の種別
   request.callee_generation = object_generation(id);
-  request.parent_handler_object = m_objects[id].parent_handler_object;
-  request.parent_handler_entry = m_objects[id].parent_handler_entry;
+  request.parent_handler_object = row_load(m_objects[id].parent_handler_object);
+  request.parent_handler_entry = row_load(m_objects[id].parent_handler_entry);
   request.protection = object_protection(id);
   request.region_base = object_region_base(id);
   request.region_limit = object_region_limit(id);
@@ -760,7 +784,7 @@ void KERNEL_OBJECT::forward_child_exit(uintptr_t target_depth,
 template <>
 uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
                                       uintptr_t argument, object_error &error) {
-  if (id >= OBJECT_COUNT || !m_objects[id].created) {
+  if (id >= OBJECT_COUNT || !row_load(m_objects[id].created)) {
     error = object_error::BAD_OBJECT;
     return 0;
   }
@@ -768,7 +792,7 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
     error = object_error::BAD_METHOD;
     return 0;
   }
-  const method_t entry = m_objects[id].methods[method];
+  const method_t entry = row_load(m_objects[id].methods[method]);
   if (entry == nullptr) {
     error = object_error::UNDECLARED_METHOD;
     return 0;
@@ -805,8 +829,8 @@ uintptr_t KERNEL_OBJECT::spawn_method(uintptr_t id, uintptr_t method,
   request.object_id = (uint32_t)id; // ★所属オブジェクトIDをカーネルに渡す
   request.object_generation = object_generation(id);
   request.kind = (uint32_t)object_kind_of(id); // ★種別も同じく渡す
-  request.parent_handler_object = m_objects[id].parent_handler_object;
-  request.parent_handler_entry = m_objects[id].parent_handler_entry;
+  request.parent_handler_object = row_load(m_objects[id].parent_handler_object);
+  request.parent_handler_entry = row_load(m_objects[id].parent_handler_entry);
   request.ledger = (KERNEL::call_ledger_entry *)ledger;
   request.ledger_capacity = LEDGER_CAPACITY;
   const auto spawned = kernel_instance.spawn(request);
@@ -1133,7 +1157,7 @@ uintptr_t KERNEL_OBJECT::declare_name(uintptr_t name, object_error &error) {
 
 template <>
 uintptr_t KERNEL_OBJECT::object_name(uintptr_t id, object_error &error) {
-  if (id >= OBJECT_COUNT || !m_objects[id].created) {
+  if (id >= OBJECT_COUNT || !row_load(m_objects[id].created)) {
     error = object_error::BAD_OBJECT;
     return 0;
   }

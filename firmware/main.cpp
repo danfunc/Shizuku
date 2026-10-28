@@ -186,6 +186,7 @@ void shizuku::app_entry() {
 #endif
   shizuku::selftest::unprivileged_probe();
   shizuku::selftest::rp2350_u_cost();
+  shizuku::selftest::rp2350_svc_breakdown();
   shizuku::selftest::register_leak_test();
 
 

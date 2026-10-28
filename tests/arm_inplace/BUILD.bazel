@@ -1,6 +1,73 @@
-load("@rules_cc//cc:defs.bzl", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
+
+cc_test(
+    name = "cost_probe_test",
+    srcs = ["cost_probe_test.cpp"],
+    copts = ["-std=c++20"],
+    deps = ["//:internal_headers"],
+)
+
+cc_test(
+    name = "svc_direct_table_test",
+    srcs = ["svc_direct_table_test.cpp"],
+    copts = ["-std=c++20"],
+    deps = ["//:internal_headers"],
+)
+
+cc_test(
+    name = "armv8m_prepare_thread_entry_test",
+    srcs = ["armv8m_prepare_thread_entry_test.cpp"],
+    copts = ["-std=c++20"],
+    defines = ["SHIZUKU_RP2350_SVC_BREAKDOWN=0"],
+    deps = ["//:internal_headers", "//arch/armv8m:headers"],
+)
+
+[
+    cc_library(
+        name = "r7_frame_probe_" + opt,
+        srcs = ["r7_frame_probe.cpp"],
+        copts = ["-std=c++20", "-fno-omit-frame-pointer", "-" + opt],
+        tags = ["manual"],
+        target_compatible_with = select({
+            "//configs:rp2350": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+        deps = ["//:internal_headers"],
+    )
+    for opt in ["Og", "O2"]
+]
+
+cc_test(
+    name = "armv8m_native_geometry_test",
+    srcs = ["armv8m_native_geometry_test.cpp"],
+    copts = ["-std=c++20"],
+    defines = ["SHIZUKU_RP2350_SVC_BREAKDOWN=0"],
+    deps = ["//:internal_headers", "//arch/armv8m:headers"],
+)
+
+cc_test(
+    name = "object_row_snapshot_test",
+    srcs = ["object_row_snapshot_test.cpp"],
+    copts = ["-std=c++20"],
+    deps = ["//:internal_headers"],
+)
+
+cc_test(
+    name = "compact_ledger_test",
+    srcs = ["compact_ledger_test.cpp"],
+    copts = ["-std=c++20"],
+    defines = ["SHIZUKU_LEAN_LEDGER=1"],
+    deps = ["//:internal_headers"],
+)
+
+cc_test(
+    name = "armv8m_abi_layout_test",
+    srcs = ["armv8m_abi_layout_test.cpp"],
+    copts = ["-std=c++20"],
+    deps = ["//:internal_headers"],
+)
 
 # ARMv8-M in-place native templates & payload trait host test (non-LEAN)
 cc_test(

@@ -233,6 +233,10 @@ static const name_id_entry kMapping[] = {
     {"stage1: U callee fault exact mcause is 5 (Load Access Fault)", 0x6053},
     {"stage1: U callee fault exact mtval matches caller data pool address", 0x6054},
     {"stage1: caller restored its own data window successfully", 0x6055},
+    {"stage1: U creator cannot create privileged child", 0x6056},
+    {"stage1: U-to-U cost: counter enabled", 0x6057},
+    {"stage1: U-to-U cost: method valid", 0x6058},
+    {"stage1: U-to-U cost: descriptor valid", 0x6059},
 };
 
 static const size_t kMappingCount = sizeof(kMapping) / sizeof(kMapping[0]);

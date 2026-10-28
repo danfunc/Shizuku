@@ -1,6 +1,8 @@
+#include <cstdint>
 #if SHIZUKU_KERNEL_SERVICE_PROFILE
 extern "C" void shizuku_service_isr_probe() __attribute__((weak));
 #define SERVICE_ISR_PROBE() do { if(shizuku_service_isr_probe) shizuku_service_isr_probe(); } while(0)
+extern "C" __attribute__((weak)) void shizuku_svc_breakdown_probe(uint32_t, uint32_t, uint32_t) {}
 #else
 #define SERVICE_ISR_PROBE() ((void)0)
 #endif
@@ -9,7 +11,12 @@ extern "C" void shizuku_service_isr_probe() __attribute__((weak));
 // フックの名前が ISA 固有だから (カーネル本体は ISA 非依存に保つ)。
 #include "arch/armv8m/armv8m.hpp"
 #include "chips/rp2350/chip.hpp"
+#define SHIZUKU_SVC_RAM_DEFINE_INSTANCES
 #include "shizuku/kernel.hpp"
+#undef SHIZUKU_SVC_RAM_DEFINE_INSTANCES
+#include "shizuku/hot.hpp"
+#include "shizuku/armv8m_resume.hpp"
+#include "shizuku/cost_probe.hpp"
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
 #include "hardware/structs/watchdog.h"
 #include "hardware/watchdog.h"
@@ -17,17 +24,23 @@ extern "C" void shizuku_service_isr_probe() __attribute__((weak));
 #include "pico/time.h"
 #endif
 
-extern "C" shizuku_armv8m_context *shizuku_current_context() {
+extern "C" SHIZUKU_SVC_RAM shizuku_armv8m_context *shizuku_current_context() {
   return reinterpret_cast<shizuku_armv8m_context *>(
       shizuku::kernel_instance.current_context());
 }
 
-extern "C" void shizuku_svc_dispatch(shizuku_armv8m_context *context) {
+extern "C" SHIZUKU_SVC_RAM shizuku_armv8m_context *shizuku_arm_prepare_restore() {
+  return reinterpret_cast<shizuku_armv8m_context *>(shizuku::armv8m_prepare_resume());
+}
+
+extern "C" SHIZUKU_SVC_RAM void shizuku_svc_dispatch(shizuku_armv8m_context *context) {
   shizuku::kernel_instance.svc_dispatch(
       reinterpret_cast<shizuku::KERNEL::CONTEXT *>(context));
 }
 
-extern "C" void shizuku_pendsv_dispatch(shizuku_armv8m_context *context) {
+extern "C" SHIZUKU_SVC_RAM void shizuku_pendsv_dispatch(shizuku_armv8m_context *context) {
+  if constexpr (shizuku::route_cost_probe_enabled)
+    shizuku::cost_probe::routes<true>::pendsv(shizuku::ARCH::core_slot());
   shizuku::kernel_instance.pendsv_dispatch(
       reinterpret_cast<shizuku::KERNEL::CONTEXT *>(context));
 }
@@ -45,7 +58,7 @@ extern "C" void shizuku_fault_dispatch(shizuku_armv8m_context *context) {
 // ★CTX_RESTORE の先頭から**あらゆる例外復帰**で呼ばれる (削除済みの docs/05_handoff.md (ce5b304)
 //   の「2 回目以降の continue/stepi が固まる」の直し方)。復帰しようとしている
 //   文脈が GDB stub の予約した相手なら、ここで初めて MON_STEP を立てる。
-extern "C" void shizuku_arm_pending_step() {
+extern "C" SHIZUKU_SVC_RAM void shizuku_arm_pending_step() {
   shizuku::kernel_instance.consume_pending_step();
 }
 
@@ -54,21 +67,11 @@ extern "C" void shizuku_arm_pending_step() {
 //   書く。set_priv と同じ理由: 値を持たせるだけの側 (do_call/spawn) と
 //   実際にハードウェアへ効かせる側 (ここ) を分けておかないと、対象がまだ
 //   走っていない段階の「呼び出し元の次の命令」に効いてしまう。
-extern "C" void shizuku_restore_region_window() {
+extern "C" SHIZUKU_SVC_RAM void shizuku_restore_region_window() {
   using ARCH = shizuku::archs::armv8m<shizuku::chips::rp2350::chip::kMpuRegionCount,shizuku::chips::rp2350::chip::kNvicPriorityBits>;
   const auto *context = shizuku::kernel_instance.current_context();
-  if (context->region_limit != 0) {
-    // ★PMSAv8 は 32B 粒度。RLAR.LIMIT は**含む側の最後の 32B ブロック**なので、排他的な終端から
-    //   1 を引いたバイトを含むブロックを指す (grant_window_limit)。終端をそのまま入れると
-    //   隣の 32B ブロックまで開いてしまう。粒度の限界として、要求範囲の前後は最大 31B だけ
-    //   同じブロックの道連れで読めてしまい得る — 隣接ファイルとの間に 32B 以上の余白を置くのは
-    //   呼び出し側 (flash_fs のセクタ境界配置) の仕事。
-    const uint32_t limit = ARCH::grant_window_limit(context->region_limit);
-    ARCH::region_set(ARCH::GRANT_REGION_INDEX, context->region_base, limit,
-                     ARCH::ACCESS_RO_ALL, false, 0);
-  } else {
-    ARCH::region_disable(ARCH::GRANT_REGION_INDEX);
-  }
+  // ★PMSAv8 は 32B 粒度。RLAR.LIMIT の取り方は grant_window_entry の注釈を見よ。
+  ARCH::apply_grant_window(context->region_base, context->region_limit);
   const auto &thread = shizuku::kernel_instance.current_thread();
   ARCH::apply_stack_window(thread.stack_rbar, thread.stack_rlar);
 
@@ -76,6 +79,7 @@ extern "C" void shizuku_restore_region_window() {
   // 特権へ戻るときは窓を触らない: 特権は窓に制限されず、次に非特権へ入るときに張り直す。
   if (ARCH::context_unprivileged(*context))
     ARCH::switch_caller_protection(thread.identity_object());
+  ARCH::mpu_sync();
 }
 
 // タイマ例外。文脈を触らないので普通の C 関数でよい — ここは期限を見て

@@ -153,6 +153,24 @@ volatile uint32_t stop_capture_busy;
 volatile uint32_t pend_flag;
 uint64_t armed_target;
 uint32_t trap_probe_interval_count;
+// 固定 PMP エントリ (0-3: 共有コード・共有窓) に今入っている値。M へ戻るときの pmp_controller::disable() が
+// 消すので、そこと起動時に 0 へ戻し、U へ入るときに窓が変わっていれば張り直す。
+// fixed_*: 固定 PMP エントリ (0-3: 共有コード・共有窓) に今入っている値。M へ戻るときの
+// pmp_controller::disable() が消すので、そこと起動時に 0 へ戻し、U へ入るときに窓が変わっていれば張り直す。
+// bounds / epoch: 固有 PMP エントリ (4-9) に今入っている object の bounds。固定エントリと同じく、disable() の後と起動時に
+// nullptr へ戻す。同じ object で U へ戻るとき (切替えの無い ECALL など) は 8 本と fence を書かない。
+// bounds の precomputed が作り直されたとき (pmp_epoch が進む) も不一致になって書き直す。
+// 6 欄は U へ入るたびに全部読むので、1 つの構造体に置いて 1 つの基底レジスタで引く
+// (別々の変数だと欄ごとに lui を作り直す)。
+struct c6_pmp_shadow {
+  uintptr_t fixed_code_base;
+  uintptr_t fixed_code_limit;
+  uintptr_t fixed_region_base;
+  uintptr_t fixed_region_limit;
+  const void *bounds;
+  uint32_t epoch;
+};
+c6_pmp_shadow s_pmp_shadow = {};
 namespace c6 = shizuku::ports::c6;
 constexpr stop_capture::ram_range kC6Dram{0x40800000u, 0x40860000u};
 constexpr uint32_t kBootMarkerMagic = 0x424D3643u; // "C6MB"
@@ -412,6 +430,60 @@ SHIZUKU_HOT void frame_to_context(arch::exception_frame_t &f, arch::context_t &c
   c.sp = &f;
   arch::set_context_privilege_from_frame(c, f);
 }
+#if defined(SHIZUKU_C6_UMODE)
+// bounds だけで決まる U 復帰前の検査 (fail-closed)。context_to_frame が版ごとに 1 回呼ぶ。
+__attribute__((noinline)) static bool bounds_static_ok(const c6_stage1_object_bounds &b) {
+  namespace pmp = shizuku::chips::esp32_c6;
+  // App オブジェクトは MMIO 窓を持つことができない
+  if (b.role == pmp::c6_stage1_role::App && b.mmio_limit != 0) return false;
+  if (b.code_base == 0 || b.code_limit <= b.code_base) return false;
+  // U return trampoline がオブジェクト所有 code 範囲内にあること
+  if (b.u_return_trampoline < b.code_base || b.u_return_trampoline >= b.code_limit) return false;
+  // スタック境界
+  if (b.stack_base == 0 || b.stack_limit <= b.stack_base) return false;
+  const uintptr_t mk_lo = reinterpret_cast<uintptr_t>(&shizuku_c6_stage1_pma_ready);
+  const uintptr_t mk_hi = mk_lo + sizeof(shizuku_c6_stage1_pma_ready);
+  if (pmp::pmp_controller::ranges_overlap(b.code_base, b.code_limit, mk_lo, mk_hi) ||
+      pmp::pmp_controller::ranges_overlap(b.stack_base, b.stack_limit, mk_lo, mk_hi) ||
+      (b.data_limit != 0 && pmp::pmp_controller::ranges_overlap(b.data_base, b.data_limit, mk_lo, mk_hi)) ||
+      (b.mmio_limit != 0 && pmp::pmp_controller::ranges_overlap(b.mmio_base, b.mmio_limit, mk_lo, mk_hi))) {
+    return false;
+  }
+  return true;
+}
+#endif
+
+// M-mode への復帰。PMP の全読出し (disable) が大きな枠を要るので、U へ入る側 (U→U の往復で
+// 2 回通る) の枠・退避を太らせないよう別関数にしてある。
+__attribute__((noinline)) static void context_to_frame_to_m(arch::context_t &c, arch::exception_frame_t &f) {
+  f.reserved1 = 0;
+#if defined(SHIZUKU_C6_UMODE)
+  if (!shizuku::chips::esp32_c6::pmp_controller::disable()) {
+    active_context = &c;
+    active_frame = c.sp;
+    active_stop_phase = 0xE004u;
+    stop(0xE004);
+  }
+  // disable() が固定エントリも消したので、次に U へ入るとき張り直させる。
+  s_pmp_shadow = {};
+  const uintptr_t current_sp = f.reserved0 != 0
+      ? static_cast<uintptr_t>(f.reserved0)
+      : reinterpret_cast<uintptr_t>(c.sp) + RV32_FRAME_BYTES;
+  const uintptr_t new_sp = shizuku_c6_get_m_handler_stack(current_sp, reinterpret_cast<uintptr_t>(c.sp));
+  if (new_sp == 0) {
+    active_context = &c;
+    active_frame = c.sp;
+    active_stop_phase = 0xE004u;
+    stop(0xE004);
+  }
+  f.reserved0 = new_sp;
+#else
+  if (f.reserved0 == 0) {
+    f.reserved0 = reinterpret_cast<uintptr_t>(c.sp) + RV32_FRAME_BYTES;
+  }
+#endif
+}
+
 SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
   auto &f = *c.sp;
   // Threads always resume with interrupts enabled; only the kernel runs with MIE=0.
@@ -433,7 +505,7 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
       stop(0xE004); // PMA ready marker 欠落 → fail-closed
     }
     const uint32_t cur_obj = kernel.current_thread().current_object();
-    const c6_stage1_object_bounds *bounds = nullptr;
+    c6_stage1_object_bounds *bounds = nullptr;
     if (g_c6_stage1_u_bounds.owner_id != 0 && cur_obj == g_c6_stage1_u_bounds.owner_id) {
       bounds = &g_c6_stage1_u_bounds;
     } else if (g_c6_stage1_driver_bounds.owner_id != 0 && cur_obj == g_c6_stage1_driver_bounds.owner_id) {
@@ -447,14 +519,16 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
       stop(0xE004); // 未認可または未知の U object
     }
 
-    // Role 検査: App オブジェクトは MMIO 窓を持つことができない (fail-closed)
-    if (bounds->role == shizuku::chips::esp32_c6::c6_stage1_role::App) {
-      if (bounds->mmio_limit != 0) {
+    // bounds だけで決まる検査 (role・code/trampoline/stack の形・PMA marker との非重複) は
+    // bounds の版 (pmp_epoch) ごとに 1 回だけ行う。bounds の中身は update_precomputed() で版が進む。
+    if (__builtin_expect(bounds->static_ok_epoch != bounds->pmp_epoch, 0)) {
+      if (!bounds_static_ok(*bounds)) {
         active_context = &c;
         active_frame = c.sp;
         active_stop_phase = 0xE004u;
         stop(0xE004);
       }
+      bounds->static_ok_epoch = bounds->pmp_epoch;
     }
 
     const uintptr_t code_base = bounds->code_base;
@@ -468,15 +542,8 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
     const uintptr_t mmio_limit = bounds->mmio_limit;
 
     // mepc がオブジェクト所有 code 範囲内にあることを厳格検査
-    if (code_base == 0 || code_limit <= code_base || f.mepc < code_base || f.mepc >= code_limit) {
-      active_context = &c;
-      active_frame = c.sp;
-      active_stop_phase = 0xE004u;
-      stop(0xE004);
-    }
-
-    // U return trampoline がオブジェクト所有 code 範囲内にあることを厳格検査
-    if (trampoline < code_base || trampoline >= code_limit) {
+    // (code_base != 0 && code_limit > code_base は bounds_static_ok で検査済み)
+    if (f.mepc < code_base || f.mepc >= code_limit) {
       active_context = &c;
       active_frame = c.sp;
       active_stop_phase = 0xE004u;
@@ -488,14 +555,6 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
       f.ra = trampoline;
     }
 
-    // スタック境界の厳格検査
-    if (stack_base == 0 || stack_limit <= stack_base) {
-      active_context = &c;
-      active_frame = c.sp;
-      active_stop_phase = 0xE004u;
-      stop(0xE004);
-    }
-
     // active SP (f.reserved0) の設定および検証:
     if (f.reserved0 < stack_base || f.reserved0 > stack_limit) {
       f.reserved0 = stack_limit;
@@ -505,15 +564,12 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
     const uintptr_t kstack_top = reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack + sizeof(shizuku_c6_kernel_stack));
     f.reserved1 = kstack_top;
 
-    // PMA ready marker は U が読書きできない範囲になければならない
-    {
+    // PMA ready marker は U が読書きできない範囲になければならない。
+    // code/stack/data/mmio は bounds_static_ok で検査済み。共有窓は context ごとなので毎回見る。
+    if (c.region_limit != 0) {
       const uintptr_t mk_lo = reinterpret_cast<uintptr_t>(&shizuku_c6_stage1_pma_ready);
       const uintptr_t mk_hi = mk_lo + sizeof(shizuku_c6_stage1_pma_ready);
-      if (shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(code_base, code_limit, mk_lo, mk_hi) ||
-          shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(stack_base, stack_limit, mk_lo, mk_hi) ||
-          (data_limit != 0 && shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(data_base, data_limit, mk_lo, mk_hi)) ||
-          (c.region_limit != 0 && shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(c.region_base, c.region_limit, mk_lo, mk_hi)) ||
-          (mmio_limit != 0 && shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(mmio_base, mmio_limit, mk_lo, mk_hi))) {
+      if (shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(c.region_base, c.region_limit, mk_lo, mk_hi)) {
         active_context = &c;
         active_frame = c.sp;
         active_stop_phase = 0xE004u;
@@ -521,43 +577,31 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
       }
     }
 
-    // 固定エントリの初期化 (起動時に1回)
-    static bool fixed_pmp_initialized = false;
-    if (__builtin_expect(!fixed_pmp_initialized, 0)) {
+    // 固定エントリの初期化・更新 (M-mode 経由で PMP disable された後や、コード/共有窓切替時に再設定)
+    auto &shadow = s_pmp_shadow;
+    if (__builtin_expect(shadow.fixed_code_base != code_base ||
+                         shadow.fixed_code_limit != code_limit ||
+                         shadow.fixed_region_base != c.region_base ||
+                         shadow.fixed_region_limit != c.region_limit, 0)) {
       shizuku::chips::esp32_c6::pmp_controller::init_fixed_entries(
           code_base, code_limit, c.region_base, c.region_limit);
-      fixed_pmp_initialized = true;
+      shadow.fixed_code_base = code_base;
+      shadow.fixed_code_limit = code_limit;
+      shadow.fixed_region_base = c.region_base;
+      shadow.fixed_region_limit = c.region_limit;
     }
 
-    // オブジェクト固有エントリへの切替え (前計算済み 8 本の CSR のみ書込み、固定エントリは触らない)
-    shizuku::chips::esp32_c6::pmp_controller::switch_to_precomputed(bounds->precomputed);
+    // オブジェクト固有エントリへの切替え (前計算済み 8 本の CSR のみ書込み、固定エントリは触らない)。
+    // CALL / RETURN の切替え (enter_u_object / switch_object_pmp) はここで書くので、U へ戻る書込みは
+    // 1 往復につきここ 1 回だけ。今の bounds が入っているなら書かない。
+    if (__builtin_expect(shadow.bounds != bounds || shadow.epoch != bounds->pmp_epoch, 1)) {
+      shizuku::chips::esp32_c6::pmp_controller::switch_to_precomputed(bounds->precomputed);
+      shadow.bounds = bounds;
+      shadow.epoch = bounds->pmp_epoch;
+    }
 #endif
   } else {
-    // M-mode への復帰:
-    f.reserved1 = 0;
-#if defined(SHIZUKU_C6_UMODE)
-    if (!shizuku::chips::esp32_c6::pmp_controller::disable()) {
-      active_context = &c;
-      active_frame = c.sp;
-      active_stop_phase = 0xE004u;
-      stop(0xE004);
-    }
-    const uintptr_t current_sp = f.reserved0 != 0
-        ? static_cast<uintptr_t>(f.reserved0)
-        : reinterpret_cast<uintptr_t>(c.sp) + RV32_FRAME_BYTES;
-    const uintptr_t new_sp = shizuku_c6_get_m_handler_stack(current_sp, reinterpret_cast<uintptr_t>(c.sp));
-    if (new_sp == 0) {
-      active_context = &c;
-      active_frame = c.sp;
-      active_stop_phase = 0xE004u;
-      stop(0xE004);
-    }
-    f.reserved0 = new_sp;
-#else
-    if (f.reserved0 == 0) {
-      f.reserved0 = reinterpret_cast<uintptr_t>(c.sp) + RV32_FRAME_BYTES;
-    }
-#endif
+    context_to_frame_to_m(c, f);
   }
 }
 }
@@ -575,6 +619,7 @@ extern "C" void shizuku_c6_mark_boot_phase(uint32_t phase) {
     active_stop_phase = 0u;
     stack_diag_init();
     trap_probe_interval_count = 0u;
+    s_pmp_shadow = {};
     shizuku_c6_boot_marker_magic = kBootMarkerMagic;
     return;
   }
@@ -632,6 +677,11 @@ using ecall_fn = arch::exception_frame_t *(*)(arch::exception_frame_t *);
 static uintptr_t s_u_ecall_frame_latch = 0;
 [[gnu::always_inline]] inline void record_u_mode_ecall_diag(const arch::exception_frame_t *frame) {
   arch::record_u_mode_ecall_diag(*frame, shizuku_c6_u_ecall_diag, shizuku_c6_u_mode_diag, &s_u_ecall_frame_latch);
+}
+// ecall_direct は 1 つの trap でこの記録を 1 回しか行わない (記録の後に別の記録点へ回らない) ので、
+// 同じ frame の二重記録を防ぐ latch (読み・書き・戻りでの消去) は要らない。
+[[gnu::always_inline]] inline void record_u_mode_ecall_diag_once(const arch::exception_frame_t *frame) {
+  arch::record_u_mode_ecall_diag(*frame, shizuku_c6_u_ecall_diag, shizuku_c6_u_mode_diag);
 }
 #endif
 template <class Body>
@@ -727,9 +777,6 @@ __attribute__((noinline, noipa)) arch::exception_frame_t *ecall_fault_unprivileg
     result->mstatus = (result->mstatus & ~RV32_MSTATUS_MPP) | RV32_MSTATUS_MPIE;
     context_to_frame(*context);
   }
-#if defined(SHIZUKU_C6_UMODE)
-  s_u_ecall_frame_latch = 0;
-#endif
   return result;
 }
 // 本体が kobj へ回した (スレッドの最外のメソッドが戻る・起点スレッドの YIELD): dispatch 段を積んで
@@ -763,7 +810,7 @@ SHIZUKU_HOT [[gnu::always_inline]] inline arch::exception_frame_t *ecall_direct(
   auto &thread = kernel.current_thread();
   if (__builtin_expect(!kernel.svc_native_route_of(thread), 0)) return ecall_other(frame);
 #if defined(SHIZUKU_C6_UMODE)
-  record_u_mode_ecall_diag(frame);
+  record_u_mode_ecall_diag_once(frame);
 #endif
   arch::context_t *context = thread.context;
   context->sp = frame;
@@ -879,6 +926,11 @@ bool shizuku_c6_handle_fault(arch::exception_frame_t *frame) {
     if (g_c6_probe_pmp_fault_pc != 0 && frame->mepc == g_c6_probe_pmp_fault_pc) {
       shizuku_c6_u_mode_diag[3] = shizuku_c6_u_mode_diag[3] + 1;
       frame->a0 = 0xDEADBEEFu;
+      frame->mepc += 4;
+      return true;
+    }
+    if (g_c6_probe_combo_pmp_pc != 0 && frame->mepc == g_c6_probe_combo_pmp_pc) {
+      shizuku_c6_u_mode_diag[3] = shizuku_c6_u_mode_diag[3] + 1;
       frame->mepc += 4;
       return true;
     }
@@ -1216,7 +1268,8 @@ void plic_vector_mode::switch_object_pmp(uint32_t object_id) {
     bounds = &g_c6_stage1_driver_bounds;
   }
   if (bounds == nullptr) stop(0xE004); // unknown caller window must never retain stale PMP state
-  shizuku::chips::esp32_c6::pmp_controller::switch_to_precomputed(bounds->precomputed);
+  // 固有エントリは U へ戻る直前の context_to_frame が current_object() の bounds で書く (同じ object)。
+  // ここでは書かない: 1 回の RETURN で同じ 8 本と fence を 2 回書いていた。
 #else
   (void)object_id;
 #endif
@@ -1233,7 +1286,7 @@ void plic_vector_mode::enter_u_object(Context &context, Frame &frame, uint32_t c
     bounds = &g_c6_stage1_driver_bounds;
   }
   if (bounds != nullptr) {
-    shizuku::chips::esp32_c6::pmp_controller::switch_to_precomputed(bounds->precomputed);
+    // 固有 PMP は書かない: U へ戻る直前の context_to_frame が current_object() (= callee) の bounds で書く。
     frame.ra = bounds->u_return_trampoline;
     frame.reserved0 = bounds->stack_limit;
     frame.reserved1 = reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack + sizeof(shizuku_c6_kernel_stack));

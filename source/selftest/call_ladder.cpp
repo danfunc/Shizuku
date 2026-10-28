@@ -334,7 +334,7 @@ uint32_t g_desc_calls = 0;
 uint32_t g_desc_v2_calls = 0;
 uintptr_t g_desc_self = 0;
 uintptr_t g_desc_caller = 0;
-uintptr_t g_desc_a0 = 0; // 呼び先が受け取った第 1 引数 (ARM は a0..a3 以外がスタック上のゴミなので和は見ない)
+uintptr_t g_desc_a0 = 0; // ARM descriptor は第1引数を検査し、6引数の和は RISC-V で検査する。
 bool g_desc_export_v2 = false;
 bool g_owner_probe_old_index = false;
 uintptr_t g_owner_old_index_error = (uintptr_t)object_error::UNKNOWN_API;
@@ -355,6 +355,25 @@ uintptr_t desc_target_fn_v2(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d,
   return a + b + c + d + e + f + 1000;
 }
 
+// ARM's descriptor contract carries one argument. The six-word probe remains
+// the RISC-V test; do not read nonexistent ARM stack arguments through it.
+uintptr_t desc_target_arm(uintptr_t a, uintptr_t, uintptr_t, uintptr_t) {
+  return desc_target_fn(a, 0, 0, 0, 0, 0);
+}
+uintptr_t desc_target_arm_v2(uintptr_t a, uintptr_t, uintptr_t, uintptr_t) {
+  return desc_target_fn_v2(a, 0, 0, 0, 0, 0);
+}
+template <class A = ARCH, bool V2 = false>
+uintptr_t descriptor_target_entry() {
+  if constexpr (A::IS_ARMV8M) {
+    if constexpr (V2) return method_entry<A, &desc_target_arm_v2>();
+    else return method_entry<A, &desc_target_arm>();
+  } else {
+    if constexpr (V2) return method_entry<A, &desc_target_fn_v2>();
+    else return method_entry<A, &desc_target_fn>();
+  }
+}
+
 // riscv の naked 版は上 (外部リンケージ) にある。ここは riscv 以外の代用だけ。
 #if !defined(__riscv)
 uintptr_t desc_legacy_probe(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
@@ -367,8 +386,8 @@ uintptr_t desc_legacy_probe(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 //   撃つとルート自身の表に入るので、対象オブジェクトの中から撃たせる。
 uintptr_t desc_export_fn(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   const uintptr_t entry = g_desc_export_v2
-                              ? method_entry<ARCH, &desc_target_fn_v2>()
-                              : method_entry<ARCH, &desc_target_fn>();
+                              ? descriptor_target_entry<ARCH, true>()
+                              : descriptor_target_entry<>();
   const api_result exported = api(object_api::EXPORT_METHOD, 1, entry);
   const api_result legacy = api(object_api::EXPORT_METHOD, 2,
                                 method_entry<ARCH, &desc_legacy_probe>());
@@ -390,7 +409,7 @@ uintptr_t desc_sibling_probe() {
       api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 1).error;
   // 自分自身の表に 1 番を export してから、自分自身への記述子を作る (自分自身は常に許可)。
   const api_result exported =
-      api(object_api::EXPORT_METHOD, 1, method_entry<ARCH, &desc_target_fn>());
+      api(object_api::EXPORT_METHOD, 1, descriptor_target_entry<>());
   const api_result self =
       api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_OWNER, 1);
   g_sibling_probe_index = self.error == (uintptr_t)object_error::OK
@@ -464,7 +483,7 @@ uintptr_t desc_make_index(uintptr_t mode, uintptr_t, uintptr_t, uintptr_t) {
 #endif
   // 自分の 1 番を自分の表に export してから、自分自身への記述子を作る (自己は常に許可)。
   // 兄弟 (DESC_TEST) への作成は作成権限の規則で拒否されるため、ここでは使わない。
-  const api_result exported = api(object_api::EXPORT_METHOD, 1, method_entry<ARCH, &desc_target_fn>());
+  const api_result exported = api(object_api::EXPORT_METHOD, 1, descriptor_target_entry<>());
   if (exported.error != (uintptr_t)object_error::OK)
     return 0xDEAD0000u | (uint32_t)exported.error;
   const api_result made = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_OWNER, 1);
@@ -489,7 +508,7 @@ uintptr_t g_relay_desc_error = (uintptr_t)object_error::UNKNOWN_API;
 // B がこれを一度走らせてから、C への記述子を B の表に作る。
 uintptr_t desc_relay_target_fn(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   const api_result exported =
-      api(object_api::EXPORT_METHOD, 1, method_entry<ARCH, &desc_target_fn>());
+      api(object_api::EXPORT_METHOD, 1, descriptor_target_entry<>());
   return exported.error == (uintptr_t)object_error::OK
              ? exported.value
              : 0xDEAD0000u | (uint32_t)exported.error;

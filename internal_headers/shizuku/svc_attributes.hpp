@@ -62,6 +62,31 @@ constexpr bool svc_permission_allows(uintptr_t id, bool privileged,
   }
   return true;
 }
+// Architectures opt in without changing the common CREATE_OBJECT policy.
+template<class A>
+constexpr bool create_privilege_policy_allows(bool privileged, uintptr_t flags) {
+  if constexpr (requires { typename A::interrupt_mode; }) {
+    using mode = typename A::interrupt_mode;
+    if constexpr (requires { mode::RESTRICT_UNPRIVILEGED_CREATE; }) {
+      if constexpr (mode::RESTRICT_UNPRIVILEGED_CREATE)
+        return privileged || (flags & OBJECT_UNPRIVILEGED) != 0;
+    }
+  }
+  return true;
+}
+namespace create_policy_checks {
+struct default_arch {};
+struct default_mode_arch { struct interrupt_mode {}; };
+struct disabled_arch { struct interrupt_mode { static constexpr bool RESTRICT_UNPRIVILEGED_CREATE = false; }; };
+struct restricted_arch { struct interrupt_mode { static constexpr bool RESTRICT_UNPRIVILEGED_CREATE = true; }; };
+static_assert(create_privilege_policy_allows<default_arch>(false, 0));
+static_assert(create_privilege_policy_allows<default_mode_arch>(false, 0));
+static_assert(create_privilege_policy_allows<disabled_arch>(false, 0));
+static_assert(!create_privilege_policy_allows<restricted_arch>(false, 0));
+static_assert(!create_privilege_policy_allows<restricted_arch>(false, OBJECT_PRIVILEGED));
+static_assert(create_privilege_policy_allows<restricted_arch>(false, OBJECT_UNPRIVILEGED));
+static_assert(create_privilege_policy_allows<restricted_arch>(true, 0));
+}
 template<object_api Api> inline constexpr auto svc_traits =
     svc_attributes[static_cast<uintptr_t>(Api)];
 static_assert(svc_traits<object_api::GRANT_REGION>.permission == svc_permission::privileged_only);

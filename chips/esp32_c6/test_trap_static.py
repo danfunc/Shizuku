@@ -27,11 +27,40 @@ assert 'csrw mepc, t0' in asm and 'csrw mstatus, t0' in asm and 'mret' in asm
 assert '.balign 256' in vectors and '.option norvc' in vectors and '.rept 32' in vectors
 assert '  j shizuku_rv32_trap_entry\n.endr' in vectors
 assert 'shizuku_rv32_trap_entry:' in asm and '.option norvc' in asm
-assert 'csrrw t0, mscratch, zero\n  beqz t0, 1f\n  mv sp, t0' in asm
-assert 'sw t0, 0(sp)' in asm and 'lw t0, 0(sp)\n' in asm
+# ハンドラ (jalr t1) の前後の stack / mscratch の手順は macro (RV32_ENTER/LEAVE_HANDLER_STACK) で、U-mode 無効の列は
+# 従来のまま (mscratch を読んで 0 でなければ sp を替え、戻りで書き戻す)。
+_umode_head, _plain_head = asm.split('shizuku_rv32_trap_entry:')[1].split('.Lrv32_is_ecall:')[0].split('#else')
+_enter = lambda blk: blk.split('.macro RV32_ENTER_HANDLER_STACK\n')[1].split('.endm')[0]
+_leave = lambda blk: blk.split('.macro RV32_LEAVE_HANDLER_STACK\n')[1].split('.endm')[0]
+assert 'csrrw t0, mscratch, zero\n  beqz t0, 1f\n  mv sp, t0' in _enter(_plain_head)
+assert 'sw t0, 0(sp)' in _enter(_plain_head) and 'lw t0, 0(sp)\n' in _leave(_plain_head)
+assert 'csrw mscratch, t0' in _leave(_plain_head)
 # 呼ぶ関数は t1 経由 (割込み・例外 = shizuku_rv32_trap_dispatch、ECALL = 番号の表の要素)。
 assert 'la t1, shizuku_rv32_trap_dispatch\n.Lrv32_save_done:' in asm
-assert asm.index('jalr t1') < asm.index('csrw mscratch, t0')
+# 呼出しは macro の間 (入る→jalr→戻す)。
+tail = asm.split('.Lrv32_save_done:')[1].split('mv sp, a0')[0]
+assert tail.index('RV32_ENTER_HANDLER_STACK') < tail.index('jalr t1') < tail.index('RV32_LEAVE_HANDLER_STACK')
+# U-mode 有効の列: ハンドラの前後に mscratch の操作は無い。それが成り立つ理由 (mscratch nesting の不変条件) を 3 つ縛る。
+#  (1) ハンドラへ入る時点で mscratch は 0: U からは .Lrv32_from_umode で csrrw t0, mscratch, zero、M からは
+#      先頭の csrrw sp, mscratch, sp が 0 を読み、同じ csrrw で 0 のまま元に戻した。
+#  (2) どの出口も復帰先に応じて自分で mscratch を書く (戻りの書き戻しに頼らない)。
+#  (3) 入れ子のトラップ (M から) は sp を替えず、元のスタック (カーネルスタック上) に枠を取る。
+assert 'mscratch' not in _enter(_umode_head) and 'mscratch' not in _leave(_umode_head)
+assert 'addi sp, sp, -16' in _enter(_umode_head) and 'sw a0, 4(sp)' in _enter(_umode_head)
+_u_entry = asm.split('shizuku_rv32_trap_entry:')[1].split('.Lrv32_from_umode:')[0]
+assert 'csrrw sp, mscratch, sp\n  bnez sp, .Lrv32_from_umode' in _u_entry
+assert _u_entry.split('bnez sp, .Lrv32_from_umode')[1].lstrip().startswith('// mscratch == 0') and \
+    'csrrw sp, mscratch, sp\n  addi sp, sp, -RV32_FRAME_BYTES' in _u_entry  # M: 0 のまま sp を元に戻す
+assert 'csrrw t0, mscratch, zero' in asm.split('.Lrv32_from_umode:')[1].split('.Lrv32_check_cause:')[0]
+_umode_asm = asm.replace(_plain_head, '')
+for _label in ('.Lrv32_exit_ecall:', '.Lrv32_exit_scrub:', '.Lrv32_exit_entry:'):
+    _blk = _umode_asm.split(_label)[1].split('mret')[0]
+    assert 'csrw mscratch, zero' in _blk, _label
+for _label in ('.Lrv32_umode_exit_entry:', '.Lrv32_umode_exit_ecall:', '.Lrv32_umode_exit_scrub:'):
+    _blk = asm.split(_label)[1].split('mret')[0]
+    assert 'lw t0, RV32_F_RESERVED1(sp)\n  csrw mscratch, t0' in _blk, _label
+_full = asm.split('shizuku_rv32_restore:')[1].split('.Lrv32_exit_ecall:')[0].split('1:\n  lw t0, RV32_F_MEPC(sp)')[1]
+assert 'lw t0, RV32_F_RESERVED1(sp)\n  csrw mscratch, t0' in _full
 # ECALL: mepc を asm で進め (route_trap の ecall 枝に頼らない)、a0 の番号で表を引き、範囲外は 0 番。
 ecall = asm.split('.Lrv32_full_save:')[0]
 assert 'addi t0, t0, 4\n  sw t0, RV32_F_MEPC(sp)' in ecall
@@ -56,6 +85,13 @@ assert 'li t1, RV32_TAG_ECALL_SCRUB\n  beq t0, t1, .Lrv32_exit_scrub' in restore
 assert 'li t1, RV32_TAG_U_ENTRY\n  beq t0, t1, .Lrv32_umode_exit_entry' in restore
 assert 'li t1, RV32_TAG_U_SCRUB\n  beq t0, t1, .Lrv32_umode_exit_scrub' in restore
 assert 'li t1, RV32_TAG_U_ECALL\n  beq t0, t1, .Lrv32_umode_exit_ecall' in restore
+# 判定の順: M の ECALL / ENTRY が先頭 (M→M を悪化させない)、次に U の往復の U_ENTRY / U_ECALL、まれな SCRUB 系はその後。
+_tag_order = [restore.index(f'beq t0, t1, {label}') for label in (
+    '.Lrv32_exit_ecall', '.Lrv32_exit_entry', '.Lrv32_umode_exit_entry', '.Lrv32_umode_exit_ecall',
+    '.Lrv32_exit_scrub', '.Lrv32_umode_exit_scrub')]
+assert _tag_order == sorted(_tag_order), _tag_order
+# U-mode off の列にも SCRUB の判定が残る (#else 側)。
+assert restore.split('#else')[1].split('#endif')[0].count('beq t0, t1, .Lrv32_exit_scrub') == 1
 exit_ecall = asm.split('.Lrv32_exit_ecall:')[1].split('// ---- ECALL からの戻り (RV32_TAG_ECALL_SCRUB')[0]
 assert sorted(re.findall(r'lw (\w+), RV32_F_(\w+)\(sp\)', exit_ecall)) == sorted(
     [('t0', 'MEPC'), ('t0', 'MSTATUS'), ('a0', 'A0'), ('a1', 'A1')])
@@ -98,6 +134,32 @@ assert 'shizuku_c6_early_diag_log.magic = SHIZUKU_C6_EARLY_DIAG_ENTRY_MAGIC' not
 assert begin.index('shizuku_c6_early_diag_progress = SHIZUKU_C6_EARLY_DIAG_ENTRY_MAGIC') < begin.index('esp_rom_get_reset_reason')
 
 trap_src = (root / 'chips/esp32_c6/trap.cpp').read_text()
+# U 境界の固有 PMP (4-9) は U へ戻る直前の context_to_frame が 1 回だけ書く。CALL (enter_u_object) と
+# RETURN (switch_object_pmp) は同じ 8 本と fence を重ねて書かない。書かれる bounds は変わらない。
+assert trap_src.count('switch_to_precomputed(') == 1
+c2f = trap_src.split('SHIZUKU_HOT void context_to_frame(arch::context_t &c) {')[1].split('\nextern "C" void shizuku_c6_mark_boot_phase')[0]
+assert ('if (__builtin_expect(shadow.bounds != bounds || shadow.epoch != bounds->pmp_epoch, 1)) {\n'
+        '      shizuku::chips::esp32_c6::pmp_controller::switch_to_precomputed(bounds->precomputed);\n'
+        '      shadow.bounds = bounds;\n      shadow.epoch = bounds->pmp_epoch;') in c2f
+# precomputed を書き換える経路は update_precomputed() だけで、そこが pmp_epoch を進める (cache が古い窓を残さない)。
+pmp_hpp = (root / 'chips/esp32_c6/pmp_c6.hpp').read_text()
+upd = pmp_hpp.split('constexpr void update_precomputed() noexcept {')[1].split('\n  }\n')[0]
+assert 'precomputed = precompute_object_pmp(' in upd and 'pmp_epoch = pmp_epoch + 1u;' in upd
+assert len(re.findall(r'(?<![\w.])precomputed\s*=[^=]', pmp_hpp)) == 1
+for rel in ('chips/esp32_c6/trap.cpp', 'source/selftest/c6_stage1_safety.cpp'):
+    assert not re.search(r'\.precomputed\s*=[^=]|\.pmp_epoch\s*=[^=]', (root / rel).read_text()), rel
+# M へ戻る側は context_to_frame_to_m に分けてある (U へ入る側の枠を太らせない)。固有・固定の shadow は
+# disable() の後と起動時にだけ 0 / nullptr へ戻り、U へ入る側 (c2f) では消さない。
+to_m = trap_src.split('context_to_frame_to_m(arch::context_t &c, arch::exception_frame_t &f) {')[1].split('SHIZUKU_HOT void context_to_frame(')[0]
+assert 'pmp_controller::disable()' in to_m and to_m.count('s_pmp_shadow = {};') == 1
+assert 'pmp_controller::disable()' not in c2f and 's_pmp_shadow = {}' not in c2f
+assert 'context_to_frame_to_m(c, f);' in c2f
+assert trap_src.count('s_pmp_shadow = {};') == 3  # 宣言 + disable() の後 + 起動時
+sw_obj = trap_src.split('void plic_vector_mode::switch_object_pmp(uint32_t object_id) {')[1].split('template <class Context, class Frame>')[0]
+assert 'switch_to_precomputed' not in sw_obj and 'stop(0xE004)' in sw_obj  # 未知の caller は止まる
+enter_obj = trap_src.split('void plic_vector_mode::enter_u_object(')[1].split('template void plic_vector_mode::enter_u_object')[0]
+assert 'switch_to_precomputed' not in enter_obj and 'frame.ra = bounds->u_return_trampoline;' in enter_obj
+
 assert '__attribute__((weak))' not in trap_src
 assert 'shizuku_esp_ble_' not in trap_src
 assert 'shizuku_freertos_' not in trap_src
@@ -155,7 +217,8 @@ assert 'stop(0xE003)' in trap_src.split('ecall_fault_nested(')[1].split('}')[0]
 # 遅い経路はどれも tail call (成功経路に関数呼出しを持たない): 本体の中で呼ぶのは return 付きだけ。
 import re as _re
 assert not _re.search(r'(?<!return )\b(ecall_other|ecall_fault_\w+|ecall_to_kobj|stop)\(', ecall_direct)
-for name, call in (('exit_method', 'exit_in_place<K, false>'), ('forward_child_exit', 'exit_in_place<K, true>'),
+for name, call in (('exit_method', 'exit_in_place<K, shizuku::KERNEL_OBJECT, false>'),
+                   ('forward_child_exit', 'exit_in_place<K, shizuku::KERNEL_OBJECT, true>'),
                    ('call_method', 'call_method_in_place'), ('call_descriptor', 'call_descriptor_in_place')):
     body = trap_src.split(f'ecall_{name}(arch::exception_frame_t *frame) {{')[1].split('\n}\n')[0]
     assert 'ecall_direct(frame' in body and call in body, name
@@ -210,7 +273,7 @@ assert pub.rindex('__atomic_store_n') > pub.index('desc.callee')
 nc = (root / 'internal_headers/shizuku/native_call.hpp').read_text()
 call_desc = nc.split('inline void call_descriptor_in_place(')[1].split('// EXIT_METHOD (2, Forward')[0]
 assert 'row' not in call_desc and 'kobj.row_id' not in call_desc and 'callee_row' not in call_desc
-assert 'enter_in_place<K, KObj>(' in call_desc and 'kobj.view_of_descriptor(local_desc)' in call_desc
+assert 'enter_in_place<K, KObj>(' in call_desc and 'kobj.view_of_descriptor(desc)' in call_desc
 # trap 内の desc call 経路に表の錠 (table_lock) や LR/SC (cas32)、後方分岐の再試行ループが無いこと
 assert 'table_lock' not in call_desc and 'table_unlock' not in call_desc
 assert 'cas32' not in call_desc and 'lr.w' not in call_desc and 'sc.w' not in call_desc
@@ -229,7 +292,7 @@ assert 'm_objects[self].generation, generation + 1u' in hd  # EXPORT_METHOD
 assert 'm_objects[id].generation,\n                             current_generation + 1u' in hd or \
        'current_generation + 1u' in hd  # 生成・差し替え
 aff = hd.split('uintptr_t KERNEL_OBJECT::set_object_affinity(uintptr_t id, uintptr_t cores,')[1].split(
-    'template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::object_region_base')[0]
+    'template <> SHIZUKU_HOT SHIZUKU_SVC_RAM uint32_t KERNEL_OBJECT::object_region_base')[0]
 assert 'generation' not in aff  # アフィニティの書き換えは版を上げない
 
 boot_src = (root / 'modules/esp_idf_support/c6/early_boot.cpp').read_text()

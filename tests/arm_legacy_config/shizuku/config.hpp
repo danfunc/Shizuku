@@ -38,7 +38,14 @@ class arm_legacy_host_board {
 namespace shizuku::archs {
 struct armv8m_legacy_host : armv8m<8, 4> {
   static constexpr bool LEGACY_FRAME_HOST_TEST = true;
+  static constexpr bool CALL_IN_PLACE = false;
   static inline uintptr_t host_stack_limit = 0;
+
+  static void set_entry(exception_frame_t &frame, uintptr_t pc, uintptr_t lr) {
+    frame.pc = static_cast<uint32_t>(pc);
+    frame.lr = static_cast<uint32_t>(lr);
+  }
+  static void pend_context_switch() {}
 
   static bool debug_enabled() { return false; }
   static void debug_step(bool) {}

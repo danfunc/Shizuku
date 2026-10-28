@@ -119,6 +119,13 @@ asm(
     ".global u_mode_probe_worker\n"
     ".type u_mode_probe_worker, @function\n"
     "u_mode_probe_worker:\n"
+    // cmd 20..24 は U→U のサイクル計測用。一致するまで比較を重ねる並びだと cmd 番号で費用が変わるので、
+    // 先頭で範囲を見て 8 バイト刻みの表で飛ぶ (どの cmd も同じ命令数で本体に着く)。
+    "  addi t0, a0, -20\n"
+    "  li t1, 5\n"
+    "  bltu t0, t1, .Lprobe_cost_dispatch\n"
+    "  li t0, 25\n"
+    "  beq a0, t0, .Lprobe_reject_priv_child\n"
     "  li t0, 1\n"
     "  beq a0, t0, .Lprobe_0x802\n"
     "  li t0, 2\n"
@@ -448,7 +455,7 @@ asm(
     "  li a0, 1\n"
     "  mv a1, s1\n"
     "  la a2, u_mode_driver_worker\n"
-    "  li a3, 1\n"
+    "  li a3, 2\n"
     "  li a4, 0\n"
     "  ecall\n"
     "  lw ra, 28(sp)\n"
@@ -503,6 +510,140 @@ asm(
     "  addi sp, sp, 32\n"
     "  ret\n"
     "\n"
+    ".Lprobe_cost_dispatch:\n"
+    "  slli t0, t0, 3\n"
+    "  la t1, .Lprobe_cost_table\n"
+    "  add t1, t1, t0\n"
+    "  jr t1\n"
+    ".balign 4\n"
+    ".Lprobe_cost_table:\n"
+    "  j .Lprobe_cost_method_hop\n"
+    "  nop\n"
+    "  j .Lprobe_cost_create_desc\n"
+    "  nop\n"
+    "  j .Lprobe_cost_desc_hop\n"
+    "  nop\n"
+    "  j .Lprobe_cost_method_base\n"
+    "  nop\n"
+    "  j .Lprobe_cost_desc_base\n"
+    "  nop\n"
+    "\n"
+    // Use the existing child ID: rejection must precede ALREADY_EXISTS.
+    ".Lprobe_reject_priv_child:\n"
+    "  addi sp, sp, -48\n"
+    "  sw ra, 44(sp)\n"
+    "  la t1, u_mode_stage1_data_pool\n"
+    "  lw a1, 20(t1)\n"
+    "  la a2, u_mode_driver_worker\n"
+    "  li a0, 1\n"
+    "  li a3, 0\n"
+    "  li a4, 0\n"
+    "  ecall\n"
+    "  lw ra, 44(sp)\n"
+    "  addi sp, sp, 48\n"
+    "  ret\n"
+    "\n"
+    // cmd 20: U→U method call 1 段 (PROBE → DRIVER)。s レジスタは使わず t で組む。
+    ".Lprobe_cost_method_hop:\n"
+    "  addi sp, sp, -48\n"
+    "  sw ra, 44(sp)\n"
+    "  la t1, u_mode_stage1_data_pool\n"
+    "  lw a1, 20(t1)\n"
+    "  lw a2, 24(t1)\n"
+    "  li a0, 4\n"
+    "  li a3, 3\n"
+    "  li a4, 0\n"
+    "  ecall\n"
+    "  bnez a0, .Lprobe_cost_fail\n"
+    "  mv a0, a1\n"
+    "  lw ra, 44(sp)\n"
+    "  addi sp, sp, 48\n"
+    "  ret\n"
+    "\n"
+    // cmd 21: DRIVER への記述子を PROBE の表に作り、index をデータ窓 +28 に残す。
+    ".Lprobe_cost_create_desc:\n"
+    "  addi sp, sp, -48\n"
+    "  sw ra, 44(sp)\n"
+    "  la t1, u_mode_stage1_data_pool\n"
+    "  lw a1, 20(t1)\n"
+    "  li a0, 32\n"
+    "  li a2, 0\n"
+    "  li a3, 0\n"
+    "  li a4, 0\n"
+    "  ecall\n"
+    "  bnez a0, .Lprobe_cost_fail\n"
+    "  la t1, u_mode_stage1_data_pool\n"
+    "  sw a1, 28(t1)\n"
+    "  li a0, 0x42\n"
+    "  lw ra, 44(sp)\n"
+    "  addi sp, sp, 48\n"
+    "  ret\n"
+    "\n"
+    // cmd 22: U→U descriptor call 1 段。a2..a7 が呼び先の a0..a5 になる (a2 = 3 で DRIVER は 0x42 を返す)。
+    ".Lprobe_cost_desc_hop:\n"
+    "  addi sp, sp, -48\n"
+    "  sw ra, 44(sp)\n"
+    "  la t1, u_mode_stage1_data_pool\n"
+    "  lw a1, 28(t1)\n"
+    "  li a0, 33\n"
+    "  li a2, 3\n"
+    "  li a3, 0\n"
+    "  li a4, 0\n"
+    "  li a5, 0\n"
+    "  li a6, 0\n"
+    "  li a7, 0\n"
+    "  ecall\n"
+    "  bnez a0, .Lprobe_cost_fail\n"
+    "  mv a0, a1\n"
+    "  lw ra, 44(sp)\n"
+    "  addi sp, sp, 48\n"
+    "  ret\n"
+    "\n"
+    // cmd 23 / 24: 上の hop から ecall だけを抜いた土台 (M→U の往復と枠の費用)。差が U→U の 1 段。
+    ".Lprobe_cost_method_base:\n"
+    "  addi sp, sp, -48\n"
+    "  sw ra, 44(sp)\n"
+    "  la t1, u_mode_stage1_data_pool\n"
+    "  lw a1, 20(t1)\n"
+    "  lw a2, 24(t1)\n"
+    "  li a0, 4\n"
+    "  li a3, 3\n"
+    "  li a4, 0\n"
+    "  li a0, 0\n"
+    "  li a1, 0x42\n"
+    "  bnez a0, .Lprobe_cost_fail\n"
+    "  mv a0, a1\n"
+    "  lw ra, 44(sp)\n"
+    "  addi sp, sp, 48\n"
+    "  ret\n"
+    "\n"
+    ".Lprobe_cost_desc_base:\n"
+    "  addi sp, sp, -48\n"
+    "  sw ra, 44(sp)\n"
+    "  la t1, u_mode_stage1_data_pool\n"
+    "  lw a1, 28(t1)\n"
+    "  li a0, 33\n"
+    "  li a2, 3\n"
+    "  li a3, 0\n"
+    "  li a4, 0\n"
+    "  li a5, 0\n"
+    "  li a6, 0\n"
+    "  li a7, 0\n"
+    "  li a0, 0\n"
+    "  li a1, 0x42\n"
+    "  bnez a0, .Lprobe_cost_fail\n"
+    "  mv a0, a1\n"
+    "  lw ra, 44(sp)\n"
+    "  addi sp, sp, 48\n"
+    "  ret\n"
+    "\n"
+    ".Lprobe_cost_fail:\n"
+    "  li t0, 0xDEAD0100\n"
+    "  or a0, a0, t0\n"
+    "  lw ra, 44(sp)\n"
+    "  addi sp, sp, 48\n"
+    "  ret\n"
+    "\n"
     ".size u_mode_probe_worker, .-u_mode_probe_worker\n"
     "\n"
     ".balign 4\n"
@@ -519,6 +660,10 @@ asm(
     "  ret\n"
     "\n"
     ".Ldriver_probe_echo:\n"
+    "  la t1, u_mode_driver_data_pool\n"
+    "  lw t0, 8(t1)\n"
+    "  addi t0, t0, 1\n"
+    "  sw t0, 8(t1)\n"
     "  li a0, 0x42\n"
     "  ret\n"
     "\n"
@@ -623,6 +768,60 @@ uintptr_t shizuku_c6_m_store_probe(uintptr_t, uint32_t) { return 0; }
 uintptr_t shizuku_c6_m_fetch_probe(uintptr_t) { return 0; }
 #endif
 
+// ---- U→U の往復サイクル記録 (OpenOCD の sysbus で読む) ---------------------------------------
+// U-mode からは cycle CSR (0x7e2) を読めないので、特権側 (M) が PROBE を呼んで往復を測る。
+// Both measurements call PROBE. The base synthesizes the inner result; the hop
+// actually calls DRIVER. Their difference also includes echo instrumentation and
+// the instruction differences between the two paths.
+// 値の単位は CPU サイクル。raw は M→PROBE→(DRIVER) の往復、net は raw の差 (min は min の差、mean は mean の差)。
+extern "C" {
+struct shizuku_c6_u_cost_record_t {
+  uint32_t magic;               // 0x55435354 ("UCST")
+  uint32_t version;             // 2
+  uint32_t rounds;              // 2048 (warm-up 32 回は含めない)
+  uint32_t method_base_raw_min; // cmd 23: M→PROBE (ecall 無し)
+  uint32_t method_base_raw_mean;
+  uint32_t method_hop_raw_min;  // cmd 20: M→PROBE→DRIVER (CALL_METHOD)
+  uint32_t method_hop_raw_mean;
+  uint32_t method_net_min;      // U→U method 1 段
+  uint32_t method_net_mean;
+  uint32_t desc_base_raw_min;   // cmd 24: M→PROBE (ecall 無し)
+  uint32_t desc_base_raw_mean;
+  uint32_t desc_hop_raw_min;    // cmd 22: M→PROBE→DRIVER (CALL_METHOD_DESCRIPTOR)
+  uint32_t desc_hop_raw_mean;
+  uint32_t desc_net_min;        // U→U descriptor 1 段
+  uint32_t desc_net_mean;
+  uint32_t method_checked_ok;   // 1 if every method sample returned 0x42
+  uint32_t desc_checked_ok;     // 1 if descriptor creation and every descriptor sample returned 0x42
+  uint32_t desc_create_error;   // 0 if the descriptor was created
+  uint32_t done;                // 1 when the bench finished
+  uint32_t counter_enabled;
+  uint32_t method_base_warmup, method_base_samples;
+  uint32_t method_hop_warmup, method_hop_samples;
+  uint32_t desc_base_warmup, desc_base_samples;
+  uint32_t desc_hop_warmup, desc_hop_samples;
+  uint32_t method_hop_entries, desc_hop_entries;
+  uint32_t progress_ok;
+};
+static_assert(sizeof(shizuku_c6_u_cost_record_t) == 124, "u_cost record size");
+static_assert(__builtin_offsetof(shizuku_c6_u_cost_record_t, method_base_raw_min) == 12, "method_base_raw_min");
+static_assert(__builtin_offsetof(shizuku_c6_u_cost_record_t, method_hop_raw_min) == 20, "method_hop_raw_min");
+static_assert(__builtin_offsetof(shizuku_c6_u_cost_record_t, method_net_min) == 28, "method_net_min");
+static_assert(__builtin_offsetof(shizuku_c6_u_cost_record_t, method_net_mean) == 32, "method_net_mean");
+static_assert(__builtin_offsetof(shizuku_c6_u_cost_record_t, desc_base_raw_min) == 36, "desc_base_raw_min");
+static_assert(__builtin_offsetof(shizuku_c6_u_cost_record_t, desc_hop_raw_min) == 44, "desc_hop_raw_min");
+static_assert(__builtin_offsetof(shizuku_c6_u_cost_record_t, desc_net_min) == 52, "desc_net_min");
+static_assert(__builtin_offsetof(shizuku_c6_u_cost_record_t, desc_net_mean) == 56, "desc_net_mean");
+static_assert(__builtin_offsetof(shizuku_c6_u_cost_record_t, method_checked_ok) == 60, "method_checked_ok");
+static_assert(__builtin_offsetof(shizuku_c6_u_cost_record_t, done) == 72, "done");
+static_assert(__builtin_offsetof(shizuku_c6_u_cost_record_t, counter_enabled) == 76);
+static_assert(__builtin_offsetof(shizuku_c6_u_cost_record_t, method_base_warmup) == 80);
+static_assert(__builtin_offsetof(shizuku_c6_u_cost_record_t, desc_hop_samples) == 108);
+static_assert(__builtin_offsetof(shizuku_c6_u_cost_record_t, method_hop_entries) == 112);
+static_assert(__builtin_offsetof(shizuku_c6_u_cost_record_t, progress_ok) == 120);
+volatile shizuku_c6_u_cost_record_t shizuku_c6_u_cost_record = {};
+}
+
 namespace shizuku::selftest {
 
 namespace {
@@ -634,6 +833,18 @@ constexpr uintptr_t OBJECT_STAGE1_PROBE = object_id::c6_stage1_probe;
 constexpr uintptr_t OBJECT_STAGE1_DRIVER = object_id::c6_stage1_driver;
 constexpr uintptr_t METHOD_STAGE1_PROBE = 0;
 
+// In the controlled cmd 1..6 interval, cmd 3/4/6 save only ra at limit-4.
+constexpr bool stage1_stack_word_matches(size_t index, size_t count, uint32_t word,
+                                         uint32_t canary, uint32_t trampoline) {
+  return count != 0 && index < count &&
+      word == (index == count - 1 ? trampoline : canary);
+}
+static_assert(stage1_stack_word_matches(0, 2, 0x55, 0x55, 0x42));
+static_assert(stage1_stack_word_matches(1, 2, 0x42, 0x55, 0x42));
+static_assert(!stage1_stack_word_matches(0, 2, 0x99, 0x55, 0x42));
+static_assert(!stage1_stack_word_matches(1, 2, 0x99, 0x55, 0x42));
+static_assert(!stage1_stack_word_matches(1, 2, 0x55, 0x55, 0x42));
+
 void record_check(const char *name, bool ok, unsigned long got, unsigned long want) {
   if (ok) {
     ++passed;
@@ -642,6 +853,179 @@ void record_check(const char *name, bool ok, unsigned long got, unsigned long wa
     ++failed;
     record_fail(name, got, want);
     BOARD::diag_printf("[C6_STAGE1] FAIL %s: got %lu want %lu\n", name, got, want);
+  }
+}
+
+// ---- U→U の往復サイクル計測 ------------------------------------------------------------
+constexpr uint32_t U_COST_ROUNDS = 2048;
+constexpr uint32_t U_COST_WARMUP = 32;
+constexpr uintptr_t U_COST_CMD_METHOD_HOP = 20;
+constexpr uintptr_t U_COST_CMD_CREATE_DESC = 21;
+constexpr uintptr_t U_COST_CMD_DESC_HOP = 22;
+constexpr uintptr_t U_COST_CMD_METHOD_BASE = 23;
+constexpr uintptr_t U_COST_CMD_DESC_BASE = 24;
+constexpr uintptr_t U_COST_ECHO = 0x42;
+
+struct u_cost_stat {
+  uint32_t min;
+  uint32_t mean;
+  uint32_t warmup;
+  uint32_t samples;
+  uint32_t entries;
+  bool ok;
+  bool progress;
+};
+
+// M から PROBE を cmd で呼び、往復を測る。M→PROBE の入退出は土台にも hop にも同じだけ乗る。
+u_cost_stat u_cost_measure(uintptr_t cmd) {
+  u_cost_stat stat{0xFFFFFFFFu, 0, 0, 0, 0, true, true};
+  uint64_t total = 0;
+  auto *entries = reinterpret_cast<volatile uint32_t *>(u_mode_driver_data_pool) + 2;
+  const uint32_t before_entries = *entries;
+  for (uint32_t i = 0; i < U_COST_WARMUP + U_COST_ROUNDS; ++i) {
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    const uint32_t started = ARCH::cycle_counter_read();
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    const auto result = ARCH::syscall(static_cast<uintptr_t>(object_api::CALL_METHOD),
+                                      OBJECT_STAGE1_PROBE, METHOD_STAGE1_PROBE, cmd);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    const uint32_t ended = ARCH::cycle_counter_read();
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (result.error != 0 || result.value != U_COST_ECHO)
+      stat.ok = false;
+    const uint32_t elapsed = ended - started;
+    if (elapsed == 0) stat.progress = false;
+    if (i < U_COST_WARMUP) {
+      ++stat.warmup;
+      continue;
+    }
+    ++stat.samples;
+    if (elapsed < stat.min)
+      stat.min = elapsed;
+    total += elapsed;
+  }
+  stat.mean = static_cast<uint32_t>(total / U_COST_ROUNDS);
+  stat.entries = *entries - before_entries;
+  return stat;
+}
+
+constexpr bool u_cost_valid(const u_cost_stat &base, const u_cost_stat &hop) {
+  return base.ok && hop.ok && base.progress && hop.progress &&
+      base.warmup == U_COST_WARMUP && hop.warmup == U_COST_WARMUP &&
+      base.samples == U_COST_ROUNDS && hop.samples == U_COST_ROUNDS &&
+      base.entries == 0 && hop.entries == U_COST_WARMUP + U_COST_ROUNDS &&
+      hop.min > base.min && hop.mean > base.mean;
+}
+constexpr u_cost_stat kCostBase{100, 110, U_COST_WARMUP, U_COST_ROUNDS, 0, true, true};
+constexpr u_cost_stat kCostHop{200, 220, U_COST_WARMUP, U_COST_ROUNDS,
+                               U_COST_WARMUP + U_COST_ROUNDS, true, true};
+static_assert(u_cost_valid(kCostBase, kCostHop));
+static_assert(!u_cost_valid(kCostBase, {200, 220, U_COST_WARMUP, U_COST_ROUNDS, 2080, false, true}));
+static_assert(!u_cost_valid(kCostBase, {200, 220, U_COST_WARMUP, U_COST_ROUNDS, 2080, true, false}));
+static_assert(!u_cost_valid(kCostBase, {200, 220, 31, U_COST_ROUNDS, 2080, true, true}));
+static_assert(!u_cost_valid(kCostBase, {200, 220, U_COST_WARMUP, 2047, 2080, true, true}));
+static_assert(!u_cost_valid(kCostBase, {200, 220, U_COST_WARMUP, U_COST_ROUNDS, 2079, true, true}));
+static_assert(!u_cost_valid(kCostBase, {100, 220, U_COST_WARMUP, U_COST_ROUNDS, 2080, true, true}));
+static_assert(!u_cost_valid(kCostBase, {200, 110, U_COST_WARMUP, U_COST_ROUNDS, 2080, true, true}));
+
+void u_cost_bench() {
+  if constexpr (!ARCH::HAS_CYCLE_COUNTER) {
+    return;
+  } else {
+    auto &rec = shizuku_c6_u_cost_record;
+    rec.magic = 0x55435354u;
+    rec.version = 2;
+    rec.rounds = U_COST_ROUNDS;
+    rec.done = 0;
+    rec.method_checked_ok = 0; rec.desc_checked_ok = 0;
+    rec.method_net_min = 0; rec.method_net_mean = 0;
+    rec.desc_net_min = 0; rec.desc_net_mean = 0;
+    rec.method_base_raw_min = 0; rec.method_base_raw_mean = 0;
+    rec.method_hop_raw_min = 0; rec.method_hop_raw_mean = 0;
+    rec.desc_base_raw_min = 0; rec.desc_base_raw_mean = 0;
+    rec.desc_hop_raw_min = 0; rec.desc_hop_raw_mean = 0;
+    rec.desc_create_error = 0;
+    rec.method_base_warmup = 0; rec.method_base_samples = 0;
+    rec.method_hop_warmup = 0; rec.method_hop_samples = 0;
+    rec.desc_base_warmup = 0; rec.desc_base_samples = 0;
+    rec.desc_hop_warmup = 0; rec.desc_hop_samples = 0;
+    rec.method_hop_entries = 0; rec.desc_hop_entries = 0;
+    rec.progress_ok = 0;
+    rec.counter_enabled = ARCH::cycle_counter_enable() ? 1u : 0u;
+    record_check("stage1: U-to-U cost: counter enabled", rec.counter_enabled == 1, rec.counter_enabled, 1);
+    if (!rec.counter_enabled) {
+      BOARD::diag_printf("[UCOST] INVALID counter\n");
+      rec.done = 1;
+      return;
+    }
+    // PROBE の表に DRIVER への記述子を 1 本作る (index は PROBE の data 窓 +28 に残る)。
+    const auto made = ARCH::syscall(static_cast<uintptr_t>(object_api::CALL_METHOD),
+                                    OBJECT_STAGE1_PROBE, METHOD_STAGE1_PROBE, U_COST_CMD_CREATE_DESC);
+    const bool desc_created = made.error == 0 && made.value == U_COST_ECHO;
+    rec.desc_create_error = desc_created ? 0u : static_cast<uint32_t>(made.error != 0 ? made.error : made.value);
+
+    const u_cost_stat method_base = u_cost_measure(U_COST_CMD_METHOD_BASE);
+    const u_cost_stat method_hop = u_cost_measure(U_COST_CMD_METHOD_HOP);
+    rec.method_base_raw_min = method_base.min;
+    rec.method_base_raw_mean = method_base.mean;
+    rec.method_hop_raw_min = method_hop.min;
+    rec.method_hop_raw_mean = method_hop.mean;
+    rec.method_base_warmup = method_base.warmup;
+    rec.method_base_samples = method_base.samples;
+    rec.method_hop_warmup = method_hop.warmup;
+    rec.method_hop_samples = method_hop.samples;
+    rec.method_hop_entries = method_hop.entries;
+    const bool method_ok = u_cost_valid(method_base, method_hop);
+    rec.method_checked_ok = method_ok ? 1u : 0u;
+    if (method_ok) {
+      rec.method_net_min = method_hop.min - method_base.min;
+      rec.method_net_mean = method_hop.mean - method_base.mean;
+    }
+
+    bool desc_ok = desc_created;
+    u_cost_stat desc_base{};
+    u_cost_stat desc_hop{};
+    if (desc_created) {
+      desc_base = u_cost_measure(U_COST_CMD_DESC_BASE);
+      desc_hop = u_cost_measure(U_COST_CMD_DESC_HOP);
+      rec.desc_base_raw_min = desc_base.min;
+      rec.desc_base_raw_mean = desc_base.mean;
+      rec.desc_hop_raw_min = desc_hop.min;
+      rec.desc_hop_raw_mean = desc_hop.mean;
+      rec.desc_base_warmup = desc_base.warmup;
+      rec.desc_base_samples = desc_base.samples;
+      rec.desc_hop_warmup = desc_hop.warmup;
+      rec.desc_hop_samples = desc_hop.samples;
+      rec.desc_hop_entries = desc_hop.entries;
+      desc_ok = u_cost_valid(desc_base, desc_hop);
+      if (desc_ok) {
+        rec.desc_net_min = desc_hop.min - desc_base.min;
+        rec.desc_net_mean = desc_hop.mean - desc_base.mean;
+      }
+    }
+    rec.desc_checked_ok = desc_ok ? 1u : 0u;
+    rec.progress_ok = method_base.progress && method_hop.progress && desc_created &&
+                      desc_base.progress && desc_hop.progress ? 1u : 0u;
+    rec.done = 1;
+
+    if (method_ok) BOARD::diag_printf(
+        "[UCOST] U->U method 1 hop net min %lu mean %lu cyc [base raw min %lu mean %lu, hop raw min %lu mean %lu]\n",
+        (unsigned long)rec.method_net_min, (unsigned long)rec.method_net_mean,
+        (unsigned long)rec.method_base_raw_min, (unsigned long)rec.method_base_raw_mean,
+        (unsigned long)rec.method_hop_raw_min, (unsigned long)rec.method_hop_raw_mean);
+    else BOARD::diag_printf("[UCOST] method INVALID\n");
+    if (desc_ok) BOARD::diag_printf(
+        "[UCOST] U->U desc   1 hop net min %lu mean %lu cyc [base raw min %lu mean %lu, hop raw min %lu mean %lu] create_err %lu\n",
+        (unsigned long)rec.desc_net_min, (unsigned long)rec.desc_net_mean,
+        (unsigned long)rec.desc_base_raw_min, (unsigned long)rec.desc_base_raw_mean,
+        (unsigned long)rec.desc_hop_raw_min, (unsigned long)rec.desc_hop_raw_mean,
+        (unsigned long)rec.desc_create_error);
+    else BOARD::diag_printf("[UCOST] descriptor INVALID\n");
+
+    record_check("stage1: U-to-U cost: method valid", method_ok,
+                 method_ok ? 1u : 0u, 1u);
+    record_check("stage1: U-to-U cost: descriptor valid",
+                 desc_ok, desc_ok ? 1u : 0u, 1u);
   }
 }
 
@@ -683,7 +1067,7 @@ void c6_stage1_safety() {
 
   // U worker スタックのカナリア初期化
   constexpr uint32_t U_STACK_CANARY = 0x5A5A5A5Au;
-  auto *u_stack_words = reinterpret_cast<uint32_t *>(u_mode_stage1_stack);
+  auto *u_stack_words = reinterpret_cast<volatile uint32_t *>(u_mode_stage1_stack);
   for (size_t i = 0; i < sizeof(u_mode_stage1_stack) / sizeof(uint32_t); ++i) {
     u_stack_words[i] = U_STACK_CANARY;
   }
@@ -732,10 +1116,23 @@ void c6_stage1_safety() {
                create_drv_res.error == 0 && create_drv_res.value == 0,
                create_drv_res.error == 0 ? create_drv_res.value : create_drv_res.error, 0);
 
-  if (create_res.error != 0 || create_drv_res.error != 0) {
+  if (create_res.error != 0 || create_drv_res.error != 0 || create_drv_res.value != 0) {
     BOARD::diag_printf("[C6_STAGE1] ABORT: probe object creation failed; dependent tests aborted\n");
     return;
   }
+
+  const auto denied_create = ARCH::syscall(static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE, METHOD_STAGE1_PROBE, 25);
+  record_check("stage1: U creator cannot create privileged child",
+      denied_create.error == 0 && denied_create.value == (uintptr_t)object_error::NOT_PRIVILEGED,
+      denied_create.error != 0 ? denied_create.error : denied_create.value,
+      (uintptr_t)object_error::NOT_PRIVILEGED);
+
+  // Exclude earlier legitimate CREATE/permission-probe stack use by starting a
+  // fresh full-stack observation window before commands 1..6. Only their ra
+  // save at stack_limit - 4 is expected to change.
+  for (size_t i = 0; i < sizeof(u_mode_stage1_stack) / sizeof(uint32_t); ++i)
+    u_stack_words[i] = U_STACK_CANARY;
 
   // 2. 0x802 U-mode 読み取り診断
   g_c6_probe_0x802_pc = reinterpret_cast<uintptr_t>(&c6_stage1_probe_0x802_insn_addr);
@@ -774,7 +1171,7 @@ void c6_stage1_safety() {
       2 /* cmd=2 */);
 
   record_check("stage1: PMP denied U-mode reading kernel stack (fault trapped)",
-               pmp_res.value == 0xDEADBEEFu && shizuku_c6_u_mode_diag[3] > 0,
+               pmp_res.error == 0 && pmp_res.value == 0xDEADBEEFu && shizuku_c6_u_mode_diag[3] > 0,
                shizuku_c6_u_mode_diag[3], 1);
   record_check("stage1: PMP fault exact mcause is 5 (Load Access Fault)",
                shizuku_c6_u_mode_diag[4] == 5u, shizuku_c6_u_mode_diag[4], 5u);
@@ -793,7 +1190,7 @@ void c6_stage1_safety() {
       5 /* cmd=5 */);
 
   record_check("stage1: PMP denied U-mode reading caller stack sentinel (fault trapped)",
-               caller_stack_res.value == 0xCAFEBABEu && shizuku_c6_u_mode_diag[7] > 0,
+               caller_stack_res.error == 0 && caller_stack_res.value == 0xCAFEBABEu && shizuku_c6_u_mode_diag[7] > 0,
                shizuku_c6_u_mode_diag[7], 1);
   record_check("stage1: caller stack fault exact mcause is 5 (Load Access Fault)",
                shizuku_c6_u_mode_diag[4] == 5u, shizuku_c6_u_mode_diag[4], 5u);
@@ -876,12 +1273,14 @@ void c6_stage1_safety() {
   record_check("stage1: multi-trap combo exact fault mtval is kstack address",
                shizuku_c6_u_mode_diag[6] == kstack_addr, shizuku_c6_u_mode_diag[6], kstack_addr);
 
-  // 8. M-mode native handler スタック非露出検証
+  // 8. 全域を検査: 最終語は U worker 自身が保存した trampoline と厳密一致。
+  // この区間だけの検査で、CREATE_OBJECT 実行中の stack は対象外。
   bool canary_intact = true;
+  const uint32_t expected_ra = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&c6_stage1_u_return_trampoline));
   for (size_t i = 0; i < sizeof(u_mode_stage1_stack) / sizeof(uint32_t); ++i) {
-    if (u_stack_words[i] != U_STACK_CANARY) {
+    if (!stage1_stack_word_matches(i, sizeof(u_mode_stage1_stack) / sizeof(uint32_t),
+                                   u_stack_words[i], U_STACK_CANARY, expected_ra)) {
       canary_intact = false;
-      break;
     }
   }
   record_check("stage1: privileged M handler stack did not spill into U stack canary (full stack)",
@@ -935,7 +1334,7 @@ void c6_stage1_safety() {
       7 /* cmd=7 */);
   g_c6_probe_ustore_kstack_pc = 0;
   record_check("stage1: U store to kernel stack denied (fault trapped)",
-               ustore_kstack_res.value == 0x0BADF00Du && shizuku_c6_u_mode_diag[8] == 1u,
+               ustore_kstack_res.error == 0 && ustore_kstack_res.value == 0xE008u && shizuku_c6_u_mode_diag[8] == 1u,
                shizuku_c6_u_mode_diag[8], 1);
   record_check("stage1: U kernel stack store exact mcause is 7 (Store/AMO Access Fault)",
                shizuku_c6_u_mode_diag[4] == 7u, shizuku_c6_u_mode_diag[4], 7u);
@@ -956,7 +1355,7 @@ void c6_stage1_safety() {
       8 /* cmd=8 */);
   g_c6_probe_ustore_caller_pc = 0;
   record_check("stage1: U store to caller stack denied (fault trapped)",
-               ustore_caller_res.value == 0x0BADF00Du && shizuku_c6_u_mode_diag[9] == 1u,
+               ustore_caller_res.error == 0 && ustore_caller_res.value == 0xE009u && shizuku_c6_u_mode_diag[9] == 1u,
                shizuku_c6_u_mode_diag[9], 1);
   record_check("stage1: U caller stack store exact mcause is 7 (Store/AMO Access Fault)",
                shizuku_c6_u_mode_diag[4] == 7u, shizuku_c6_u_mode_diag[4], 7u);
@@ -981,7 +1380,7 @@ void c6_stage1_safety() {
   g_c6_probe_ustore_code_pc = 0;
   const uint32_t code_word_after = *code_word;
   record_check("stage1: U store into own code region denied (fault trapped)",
-               ustore_code_res.value == 0 && shizuku_c6_u_mode_diag[10] == 1u,
+               ustore_code_res.error == 0 && ustore_code_res.value == 0xE00Au && shizuku_c6_u_mode_diag[10] == 1u,
                shizuku_c6_u_mode_diag[10], 1);
   record_check("stage1: U code store exact mcause is 7 (Store/AMO Access Fault)",
                shizuku_c6_u_mode_diag[4] == 7u, shizuku_c6_u_mode_diag[4], 7u);
@@ -1003,7 +1402,7 @@ void c6_stage1_safety() {
       10 /* cmd=10 */);
   g_c6_probe_ufetch_target = 0;
   record_check("stage1: U instruction fetch from U stack denied (fault trapped)",
-               ufetch_res.value == 0 && shizuku_c6_u_mode_diag[11] == 1u,
+               ufetch_res.error == 0 && ufetch_res.value == 0xE00Bu && shizuku_c6_u_mode_diag[11] == 1u,
                shizuku_c6_u_mode_diag[11], 1);
   record_check("stage1: U fetch exact mcause is 1 (Instruction Access Fault)",
                shizuku_c6_u_mode_diag[4] == 1u, shizuku_c6_u_mode_diag[4], 1u);
@@ -1021,7 +1420,7 @@ void c6_stage1_safety() {
       11 /* cmd=11 */);
   g_c6_probe_upmpcfg_pc = 0;
   record_check("stage1: U csrr pmpcfg0 denied as illegal instruction (trapped)",
-               upmpcfg_res.value == 0xE00Eu && shizuku_c6_u_mode_diag[12] == 1u,
+               upmpcfg_res.error == 0 && upmpcfg_res.value == 0xE00Eu && shizuku_c6_u_mode_diag[12] == 1u,
                shizuku_c6_u_mode_diag[12], 1);
   record_check("stage1: U pmpcfg0 illegal exact mcause is 2",
                shizuku_c6_u_mode_diag[4] == 2u, shizuku_c6_u_mode_diag[4], 2u);
@@ -1049,7 +1448,7 @@ void c6_stage1_safety() {
       12 /* cmd=12: app read mmio */);
   g_c6_probe_app_mmio_fault_pc = 0;
   record_check("stage1: app access to MMIO denied by PMP (fault trapped)",
-               app_mmio_res.value == 0xE010u && shizuku_c6_u_mode_diag[13] == 1u,
+               app_mmio_res.error == 0 && app_mmio_res.value == 0xE010u && shizuku_c6_u_mode_diag[13] == 1u,
                shizuku_c6_u_mode_diag[13], 1);
   record_check("stage1: app MMIO fault exact mcause is 5 (Load Access Fault)",
                shizuku_c6_u_mode_diag[4] == 5u, shizuku_c6_u_mode_diag[4], 5u);
@@ -1068,7 +1467,7 @@ void c6_stage1_safety() {
       13 /* cmd=13: app read driver data */);
   g_c6_probe_app_driver_data_fault_pc = 0;
   record_check("stage1: app access to driver private data denied by PMP (fault trapped)",
-               app_drv_data_res.value == 0xE011u && shizuku_c6_u_mode_diag[14] == 1u,
+               app_drv_data_res.error == 0 && app_drv_data_res.value == 0xE011u && shizuku_c6_u_mode_diag[14] == 1u,
                shizuku_c6_u_mode_diag[14], 1);
   record_check("stage1: app driver data fault exact mcause is 5",
                shizuku_c6_u_mode_diag[4] == 5u, shizuku_c6_u_mode_diag[4], 5u);
@@ -1082,7 +1481,7 @@ void c6_stage1_safety() {
       19 /* cmd=19: probe call driver read app data */);
   g_c6_probe_driver_app_data_fault_pc = 0;
   record_check("stage1: driver access to app private data denied by PMP (fault trapped)",
-               drv_app_data_res.value == 0xE012u && shizuku_c6_u_mode_diag[15] == 1u,
+               drv_app_data_res.error == 0 && drv_app_data_res.value == 0xE012u && shizuku_c6_u_mode_diag[15] == 1u,
                shizuku_c6_u_mode_diag[15], 1);
   record_check("stage1: driver app data fault exact mcause is 5",
                shizuku_c6_u_mode_diag[4] == 5u, shizuku_c6_u_mode_diag[4], 5u);
@@ -1100,7 +1499,7 @@ void c6_stage1_safety() {
   const uintptr_t mstore_res = shizuku_c6_m_store_probe(iram_stub_addr, iram_word_read);
   g_c6_probe_mstore_iram_pc = 0;
   record_check("stage1: M-mode store to IRAM text denied by PMA (fault trapped)",
-               mstore_res == 0 && shizuku_c6_m_pma_diag[0] == 1u,
+               mstore_res == 0xE00Cu && shizuku_c6_m_pma_diag[0] == 1u,
                shizuku_c6_m_pma_diag[0], 1);
   record_check("stage1: M-mode IRAM text store exact mcause is 7 (Store/AMO Access Fault)",
                shizuku_c6_u_mode_diag[4] == 7u, shizuku_c6_u_mode_diag[4], 7u);
@@ -1124,7 +1523,7 @@ void c6_stage1_safety() {
   const uintptr_t mfetch_res = shizuku_c6_m_fetch_probe(mfetch_target);
   g_c6_probe_mfetch_target = 0;
   record_check("stage1: M-mode instruction fetch from DRAM denied by PMA (fault trapped)",
-               mfetch_res == 0 && shizuku_c6_m_pma_diag[1] == 1u,
+               mfetch_res == 0xE00Du && shizuku_c6_m_pma_diag[1] == 1u,
                shizuku_c6_m_pma_diag[1], 1);
   record_check("stage1: M-mode DRAM fetch exact mcause is 1 (Instruction Access Fault)",
                shizuku_c6_u_mode_diag[4] == 1u, shizuku_c6_u_mode_diag[4], 1u);
@@ -1151,6 +1550,8 @@ void c6_stage1_safety() {
   record_check("stage1: U-to-U call 2nd iteration returned 0x42",
                u2u_res2.error == 0 && u2u_res2.value == 0x42u,
                u2u_res2.value, 0x42u);
+
+  u_cost_bench();
 
   // 15. 2回目の後の mscratch 健全性確認、および U callee 窓アクセス fault、caller 自窓復帰の検証
   // 実行前に diag[15] (および fault diag 4, 6) を 0 に初期化

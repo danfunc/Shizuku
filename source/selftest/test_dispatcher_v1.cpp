@@ -207,7 +207,9 @@ real_kobj_test_arch::syscall_result real_kobj_test_arch::syscall(
 #endif
 
 namespace shizuku::chips::esp32_c6 {
-void plic_vector_mode::debug_step(bool) {}
+// debug_step(true) が掛かった回数 (consume_pending_step の fast path 試験が数える)。
+volatile uint32_t g_debug_step_on = 0;
+void plic_vector_mode::debug_step(bool on) { if (on) g_debug_step_on = g_debug_step_on + 1; }
 uint32_t plic_vector_mode::debug_reason_take() { return 0; }
 uint32_t plic_vector_mode::fault_status() { return 0; }
 void plic_vector_mode::fault_status_clear() {}
@@ -2692,6 +2694,34 @@ static void run_dispatcher_tests() {
     printf("  20. REAL KOBJ 3A: current caller row (depth 0/nonzero), method/descriptor returns, nested dispatch 0/0, production grant_region revoke 0/0: PASS\n");
   }
 #endif
+
+  // 21. consume_pending_step の fast path。予約が無ければ素通り (debug_step を掛けない)、
+  //   別スレッド宛ての予約は消費せず、自分宛ての予約はちょうど 1 回だけ MON_STEP を掛ける。
+  {
+    auto &steps = chips::esp32_c6::g_debug_step_on;
+    const uint32_t self = kernel_instance.current_thread_id();
+    const uint32_t other = self + 1;
+    // この試験は init() を通らない (旗が 0 のまま) ので、まず「予約なし」へ明示的に戻す。
+    kernel_instance.arm_step(KERNEL::NO_STEP_TARGET);
+    const uint32_t before = steps;
+    kernel_instance.consume_pending_step();
+    assert(steps == before); // 予約なし: 何も起きない
+    kernel_instance.arm_step(other);
+    kernel_instance.consume_pending_step();
+    assert(steps == before); // 他スレッド宛て: 掛けない
+    kernel_instance.consume_pending_step();
+    assert(steps == before); // 予約は残っている (消費されていない)
+    kernel_instance.arm_step(self);
+    kernel_instance.consume_pending_step();
+    assert(steps == before + 1); // 自分宛て: 次の復帰で必ず 1 回
+    kernel_instance.consume_pending_step();
+    assert(steps == before + 1); // 消費済み: 2 回目は掛けない
+    kernel_instance.arm_step(other);
+    kernel_instance.arm_step(self); // 上書き予約 (予約は 1 件)
+    kernel_instance.consume_pending_step();
+    assert(steps == before + 2);
+    printf("  21. consume_pending_step fast path: no-pending passes through, foreign arm kept, own arm fires exactly once: PASS\n");
+  }
 
   // 後始末
   thread.call_stack.depth = 0;

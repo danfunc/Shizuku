@@ -167,9 +167,9 @@ public:
   static constexpr uintptr_t INTERNAL_FLAG_KERNEL_ROLE = 1u << 3;
 
   uint32_t object_parent_handler(uint32_t object_id) const {
-    if (object_id >= OBJECT_COUNT_T || !m_objects[object_id].created)
+    if (object_id >= OBJECT_COUNT_T || !row_load(m_objects[object_id].created))
       return NO_OBJECT;
-    return m_objects[object_id].parent_handler_object;
+    return row_load(m_objects[object_id].parent_handler_object);
   }
 
   // オブジェクト表の 1 行の整列 (バイト)。行の大きさを 2 の冪に揃えて、id から行を引くのを
@@ -208,10 +208,76 @@ private:
     uint32_t region_limit;
     volatile uint32_t generation;
     volatile uint32_t instance_generation;
+    uint32_t seq;
   };
   static_assert(sizeof(uintptr_t) != 4 || sizeof(object_t) == OBJECT_ROW_ALIGN,
                 "an object row must be exactly OBJECT_ROW_ALIGN bytes on 32-bit targets");
 public:
+  template <class T> static T row_load(const T &value) {
+    if constexpr (KERNEL::CORE_COUNT == 1) return value;
+    else {
+      T copy;
+      __atomic_load(&value, &copy, __ATOMIC_SEQ_CST);
+      return copy;
+    }
+  }
+  // 世代の acquire 読み。単一コアでは書き手は同じコアの割込みだけで、ハードの並べ替えは見えない
+  // (native_call の seq と同じ) ので、ハードの fence (RV32 では fence r,rw) を出さず、コンパイラの順序だけ保つ。
+  static uint32_t generation_load_acquire(volatile uint32_t *address) {
+    if constexpr (KERNEL::CORE_COUNT == 1) {
+      const uint32_t value = __atomic_load_n(address, __ATOMIC_RELAXED);
+      __atomic_signal_fence(__ATOMIC_ACQUIRE);
+      return value;
+    } else {
+      return ARCH::load_acquire32(address);
+    }
+  }
+  template <class T> static void row_store(T &value, T next) {
+    if constexpr (KERNEL::CORE_COUNT == 1) value = next;
+    else __atomic_store(&value, &next, __ATOMIC_SEQ_CST);
+  }
+
+  // Writers are serialized by table_guard. Saturation leaves the sequence odd,
+  // so that a wrapped sequence can never validate an obsolete reader snapshot.
+  static bool row_write_begin(object_t &row) {
+    if constexpr (KERNEL::CORE_COUNT == 1) return true;
+    const uint32_t seq = __atomic_load_n(&row.seq, __ATOMIC_SEQ_CST);
+    if ((seq & 1u) != 0) return false;
+    if (seq >= UINT32_MAX - 1u) {
+      __atomic_store_n(&row.seq, UINT32_MAX, __ATOMIC_SEQ_CST);
+      return false;
+    }
+    __atomic_store_n(&row.seq, seq + 1u, __ATOMIC_SEQ_CST);
+    return true;
+  }
+  static void row_write_end(object_t &row) {
+    if constexpr (KERNEL::CORE_COUNT != 1) {
+      const uint32_t seq = __atomic_load_n(&row.seq, __ATOMIC_SEQ_CST);
+      __atomic_store_n(&row.seq, seq + 1u, __ATOMIC_SEQ_CST);
+    }
+  }
+  bool snapshot_row(uintptr_t id, object_t &copy) const {
+    if (id >= OBJECT_COUNT_T) return false;
+    const object_t &row = m_objects[id];
+    const uint32_t before = row_load(row.seq);
+    if (before & 1u) return false;
+    copy.created = row_load(row.created);
+    copy.flags = row_load(row.flags);
+    copy.kind = row_load(row.kind);
+    copy.creator_object = row_load(row.creator_object);
+    copy.kernel_role = row_load(row.kernel_role);
+    copy.parent_handler_object = row_load(row.parent_handler_object);
+    copy.parent_handler_entry = row_load(row.parent_handler_entry);
+    for (uintptr_t i = 0; i < METHOD_COUNT_T; ++i)
+      copy.methods[i] = row_load(row.methods[i]);
+    copy.region_base = row_load(row.region_base);
+    copy.region_limit = row_load(row.region_limit);
+    copy.generation = ARCH::load_acquire32(const_cast<volatile uint32_t *>(&row.generation));
+    copy.instance_generation = ARCH::load_acquire32(const_cast<volatile uint32_t *>(&row.instance_generation));
+    const uint32_t after = row_load(row.seq);
+    copy.seq = after;
+    return before == after && !(after & 1u);
+  }
   // 呼び先 1 件ぶんの入場に要る値 (台帳段と入口フレームへの書き出しが読む)。CALL_METHOD は行から
   //   (view_of_row)、方法記述子の直接 call は項目の前計算から (view_of_descriptor) 作る。形が同じなので
   //   入場の処理は 1 本で済む。
@@ -372,13 +438,13 @@ public:
   uint32_t object_protection(uintptr_t id) const;
   uint32_t object_generation(uintptr_t id) const {
     return id < OBJECT_COUNT_T
-               ? ARCH::load_acquire32(const_cast<volatile uint32_t *>(
+               ? generation_load_acquire(const_cast<volatile uint32_t *>(
                      &m_objects[id].instance_generation))
                : 0;
   }
   uint32_t object_version(uintptr_t id) const {
     return id < OBJECT_COUNT_T
-               ? ARCH::load_acquire32(const_cast<volatile uint32_t *>(
+               ? generation_load_acquire(const_cast<volatile uint32_t *>(
                      &m_objects[id].generation))
                : 0;
   }
@@ -388,9 +454,26 @@ public:
 
   struct region_window { uintptr_t base; uintptr_t limit; };
   [[gnu::always_inline]] inline region_window return_region(uintptr_t id) const {
-    if (id >= OBJECT_COUNT_T || !m_objects[id].created)
+    if constexpr (KERNEL::CORE_COUNT == 1) {
+      if (id >= OBJECT_COUNT_T || !m_objects[id].created) return {0, 0};
+      return {m_objects[id].region_base, m_objects[id].region_limit};
+    } else {
+      // 要るのは created と窓の 3 欄だけ。snapshot_row のように行ごと (methods[] と世代を含む) 写さず、
+      //   同じ seq の組 (奇数なら書き手が途中、前後で違えば差し替えを跨いだ) でこの 3 欄だけを守る。
+      //   判定は snapshot_row と同じ: 3 回試して揃わなければ閉じた窓 (0/0) に倒す。
+      if (id >= OBJECT_COUNT_T) return {0, 0};
+      const object_t &row = m_objects[id];
+      for (unsigned attempt = 0; attempt < 3; ++attempt) {
+        const uint32_t before = row_load(row.seq);
+        if (before & 1u) continue;
+        const bool created = row_load(row.created);
+        const uint32_t base = row_load(row.region_base);
+        const uint32_t limit = row_load(row.region_limit);
+        if (row_load(row.seq) != before) continue;
+        return created ? region_window{base, limit} : region_window{0, 0};
+      }
       return {0, 0};
-    return {m_objects[id].region_base, m_objects[id].region_limit};
+    }
   }
 
   // ---- trap 内 (svc_dispatch) で直接処理する API の部品 ----------------------
@@ -407,14 +490,24 @@ public:
   // - 直接の子 (m_objects[target_id].creator_object == caller_id)
   // は可。兄弟・孫・無関係は不可 (NOT_PRIVILEGED)。
   SHIZUKU_HOT bool can_call_method(uintptr_t caller_id, uintptr_t target_id) const {
-    if (caller_id >= OBJECT_COUNT_T || !m_objects[caller_id].created)
+    if constexpr (KERNEL::CORE_COUNT == 1) {
+      if (caller_id >= OBJECT_COUNT_T || !m_objects[caller_id].created)
+        return false;
+      if (target_id >= OBJECT_COUNT_T || !m_objects[target_id].created)
+        return false;
+      const bool caller_is_kernel_role = m_objects[caller_id].kernel_role;
+      return caller_is_kernel_role || target_id == caller_id ||
+             m_objects[caller_id].creator_object == target_id ||
+             m_objects[target_id].creator_object == caller_id;
+    }
+    if (caller_id >= OBJECT_COUNT_T || !row_load(m_objects[caller_id].created))
       return false;
-    if (target_id >= OBJECT_COUNT_T || !m_objects[target_id].created)
+    if (target_id >= OBJECT_COUNT_T || !row_load(m_objects[target_id].created))
       return false;
-    const bool caller_is_kernel_role = m_objects[caller_id].kernel_role;
+    const bool caller_is_kernel_role = row_load(m_objects[caller_id].kernel_role);
     return caller_is_kernel_role || target_id == caller_id ||
-           m_objects[caller_id].creator_object == target_id ||
-           m_objects[target_id].creator_object == caller_id;
+           row_load(m_objects[caller_id].creator_object) == target_id ||
+           row_load(m_objects[target_id].creator_object) == caller_id;
   }
 
   // (id, method) から呼び先の CALL 要求を O(1) で引く。OK 以外のとき request は触らない。
@@ -422,13 +515,13 @@ public:
   SHIZUKU_HOT object_error method_call_request(uintptr_t id, uintptr_t method,
                                                uintptr_t caller_id,
                                                call_request &request) const {
-    if (id >= OBJECT_COUNT_T || !m_objects[id].created)
+    if (id >= OBJECT_COUNT_T || !row_load(m_objects[id].created))
       return object_error::BAD_OBJECT;
     if (!can_call_method(caller_id, id))
       return object_error::NOT_PRIVILEGED;
     if (method >= METHOD_COUNT_T)
       return object_error::BAD_METHOD;
-    const method_t entry = m_objects[id].methods[method];
+    const method_t entry = row_load(m_objects[id].methods[method]);
     if (entry == nullptr)
       return object_error::UNDECLARED_METHOD; // 未 export は panic ではなくエラー
     request = callee_request(id, (uintptr_t)entry);
@@ -438,7 +531,7 @@ public:
   // OK のとき入口を返し、そうでなければ nullptr と error。
   SHIZUKU_HOT method_t find_method(uintptr_t id, uintptr_t method, uintptr_t caller_id,
                                    object_error &error) const {
-    if (id >= OBJECT_COUNT_T || !m_objects[id].created) {
+    if (id >= OBJECT_COUNT_T || !row_load(m_objects[id].created)) {
       error = object_error::BAD_OBJECT;
       return nullptr;
     }
@@ -450,7 +543,7 @@ public:
       error = object_error::BAD_METHOD;
       return nullptr;
     }
-    const method_t entry = m_objects[id].methods[method];
+    const method_t entry = row_load(m_objects[id].methods[method]);
     if (entry == nullptr) {
       error = object_error::UNDECLARED_METHOD; // 未 export は panic ではなくエラー
       return nullptr;
@@ -464,8 +557,30 @@ public:
   // OK のとき行を返して entry に入口を入れ、そうでなければ nullptr と error。
   SHIZUKU_HOT const auto *find_method_row(uintptr_t id, uintptr_t method, uintptr_t caller_id,
                                           object_error &error, method_t &entry) const {
+    if constexpr (KERNEL::CORE_COUNT == 1) {
+      const auto *row = id < OBJECT_COUNT_T ? &m_objects[id] : nullptr;
+      if (row == nullptr || !row->created) {
+        error = object_error::BAD_OBJECT;
+        return decltype(row)(nullptr);
+      }
+      if (!can_call_method(caller_id, id)) {
+        error = object_error::NOT_PRIVILEGED;
+        return decltype(row)(nullptr);
+      }
+      if (method >= METHOD_COUNT_T) {
+        error = object_error::BAD_METHOD;
+        return decltype(row)(nullptr);
+      }
+      entry = row->methods[method];
+      if (entry == nullptr) {
+        error = object_error::UNDECLARED_METHOD;
+        return decltype(row)(nullptr);
+      }
+      error = object_error::OK;
+      return row;
+    }
     const auto *row = id < OBJECT_COUNT_T ? &m_objects[id] : nullptr;
-    if (row == nullptr || !row->created) {
+    if (row == nullptr || !row_load(row->created)) {
       error = object_error::BAD_OBJECT;
       return decltype(row)(nullptr);
     }
@@ -477,7 +592,7 @@ public:
       error = object_error::BAD_METHOD;
       return decltype(row)(nullptr);
     }
-    entry = row->methods[method];
+    entry = row_load(row->methods[method]);
     if (entry == nullptr) {
       error = object_error::UNDECLARED_METHOD; // 未 export は panic ではなくエラー
       return decltype(row)(nullptr);
@@ -485,9 +600,80 @@ public:
     error = object_error::OK;
     return row;
   }
+  struct method_resolution { bool found; callee_view view; };
+  [[gnu::always_inline]] inline method_resolution resolve_method_view(
+      uintptr_t id, uintptr_t method, uintptr_t caller_id,
+      object_error &error, method_t &entry) const {
+    if constexpr (KERNEL::CORE_COUNT == 1) {
+      const auto *row = find_method_row(id, method, caller_id, error, entry);
+      return row ? method_resolution{true, view_of_row((uint32_t)id, *row)}
+                 : method_resolution{false, {}};
+    } else {
+      // 行ごと写さず、判定と入場の形に要る欄だけを seq の間で読む (methods は選んだ 1 本だけ)。
+      //   呼び手の行も権限の 3 欄 (created / kernel_role / creator_object) を揃った組で読む必要があるので、
+      //   seq で守る (書き手が行を差し替える途中の欄を混ぜて権限を誤判定しないため)。
+      if (id >= OBJECT_COUNT_T) {
+        error = object_error::BAD_OBJECT;
+        return {false, {}};
+      }
+      const object_t &trow = m_objects[id];
+      const uint32_t tseq = row_load(trow.seq);
+      if (tseq & 1u) {
+        error = object_error::BAD_OBJECT;
+        return {false, {}};
+      }
+      const bool tcreated = row_load(trow.created);
+      const uint32_t tcreator = row_load(trow.creator_object);
+      const method_t selected = method < METHOD_COUNT_T ? row_load(trow.methods[method]) : nullptr;
+      object_t view_row{};
+      view_row.flags = row_load(trow.flags);
+      view_row.kind = row_load(trow.kind);
+      view_row.parent_handler_object = row_load(trow.parent_handler_object);
+      view_row.parent_handler_entry = row_load(trow.parent_handler_entry);
+      view_row.region_base = row_load(trow.region_base);
+      view_row.region_limit = row_load(trow.region_limit);
+      view_row.instance_generation = instance_generation_of(trow);
+      if (row_load(trow.seq) != tseq || !tcreated) {
+        error = object_error::BAD_OBJECT;
+        return {false, {}};
+      }
+      if (caller_id >= OBJECT_COUNT_T) {
+        error = object_error::NOT_PRIVILEGED;
+        return {false, {}};
+      }
+      const object_t &crow = m_objects[caller_id];
+      const uint32_t cseq = row_load(crow.seq);
+      if (cseq & 1u) {
+        error = object_error::BAD_OBJECT;
+        return {false, {}};
+      }
+      const bool ccreated = row_load(crow.created);
+      const bool ckernel = row_load(crow.kernel_role);
+      const uint32_t ccreator = row_load(crow.creator_object);
+      if (row_load(crow.seq) != cseq || row_load(trow.seq) != tseq) {
+        error = object_error::BAD_OBJECT;
+        return {false, {}};
+      }
+      if (!ccreated || !(ckernel || caller_id == id || ccreator == id || tcreator == caller_id)) {
+        error = object_error::NOT_PRIVILEGED;
+        return {false, {}};
+      }
+      if (method >= METHOD_COUNT_T) {
+        error = object_error::BAD_METHOD;
+        return {false, {}};
+      }
+      if (!selected) {
+        error = object_error::UNDECLARED_METHOD;
+        return {false, {}};
+      }
+      entry = selected;
+      error = object_error::OK;
+      return {true, view_of_row((uint32_t)id, view_row)};
+    }
+  }
   // 行から世代を読む (object_generation(id) と同じ読み方。id の範囲検査は行を引いた側が済ませている)。
   template <class Row> uint32_t instance_generation_of(const Row &row) const {
-    return ARCH::load_acquire32(const_cast<volatile uint32_t *>(&row.instance_generation));
+    return generation_load_acquire(const_cast<volatile uint32_t *>(&row.instance_generation));
   }
   // 表の錠の inline 版 (table_lock / table_unlock と同じ CAS。区間は短く syscall を含まない)。
   // trap 内の直接 call が関数呼出しなしで取る。診断用の breadcrumb は付けない。
@@ -613,7 +799,7 @@ private:
   // そのオブジェクトの**種別**。カーネルは台帳を持たないので、CALL / SPAWN の
   // たびにここから引いて申告する (どの ID が何の役かを知っているのはこちらだけ)。
   object_kind object_kind_of(uintptr_t id) const {
-    return id < OBJECT_COUNT ? m_objects[id].kind : object_kind::PLAIN;
+    return id < OBJECT_COUNT ? row_load(m_objects[id].kind) : object_kind::PLAIN;
   }
   // target へ [base, limit) の読み専用窓を開示する。呼び出し元 (現在オブジェクト)
   // が特権でなければ拒否する — 「誰が誰に何を見せるか」を決める権限そのものが

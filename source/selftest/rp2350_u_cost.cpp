@@ -14,6 +14,8 @@
 #include "shizuku/object_ids.hpp"
 #include "shizuku/selftest.hpp"
 #include "shizuku/u_cost_invariants.hpp"
+#include "shizuku/xip_cost.hpp"
+#include "shizuku/armv8m_abi.hpp"
 
 // 親 P 用データ領域・スタック (32B 整列: ARMv8-M の MPU 境界 32B)
 alignas(32) uint8_t u_cost_p_data_pool[256];
@@ -39,352 +41,69 @@ __attribute__((naked)) uintptr_t u_cost_child_worker(uintptr_t arg0, uintptr_t, 
   );
 }
 
-__attribute__((naked)) uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
-  asm volatile(
-      ".syntax unified\n"
-      ".thumb\n"
-      "push {r4-r8, lr}\n"
-      "ldr  r4, =u_cost_p_data_pool\n"
-      "cmp  r0, #1\n"
-      "beq  .Lp_cmd_create_child\n"
-      "cmp  r0, #2\n"
-      "beq  .Lp_cmd_baseline_method\n"
-      "cmp  r0, #3\n"
-      "beq  .Lp_cmd_measure_method\n"
-      "cmp  r0, #4\n"
-      "beq  .Lp_cmd_create_desc\n"
-      "cmp  r0, #5\n"
-      "beq  .Lp_cmd_baseline_desc\n"
-      "cmp  r0, #6\n"
-      "beq  .Lp_cmd_measure_desc\n"
-      // 6A Corrected series commands
-      "cmp  r0, #10\n"
-      "beq  .Lp_cmd_warmup_method\n"
-      "cmp  r0, #11\n"
-      "beq  .Lp_cmd_warmup_desc\n"
-      "cmp  r0, #12\n"
-      "beq  .Lp_cmd_baseline_method_corr\n"
-      "cmp  r0, #13\n"
-      "beq  .Lp_cmd_measure_method_corr\n"
-      "cmp  r0, #14\n"
-      "beq  .Lp_cmd_verify_method\n"
-      "cmp  r0, #15\n"
-      "beq  .Lp_cmd_baseline_desc_corr\n"
-      "cmp  r0, #16\n"
-      "beq  .Lp_cmd_measure_desc_corr\n"
-      "cmp  r0, #17\n"
-      "beq  .Lp_cmd_verify_desc\n"
-      "movs r0, #0\n"
-      "pop  {r4-r8, pc}\n"
-
-      // cmd=1: 子 C (OBJECT_U_COST_C) を CREATE_OBJECT
-      ".Lp_cmd_create_child:\n"
-      "ldr  r1, [r4, #0]\n"   // child_id
-      "ldr  r2, [r4, #4]\n"   // callee_entry
-      "movs r0, #1\n"         // CREATE_OBJECT = 1
-      "movs r3, #2\n"         // OBJECT_UNPRIVILEGED = 2 (1u << 1)
-      "mov  r12, #0\n"
-      "svc  0\n"
-      "pop  {r4-r8, pc}\n"
-
-      // cmd=2: method baseline 測定 (2048 回、svc なし空ループ)
-      ".Lp_cmd_baseline_method:\n"
-      "ldr  r7, [r4, #12]\n"  // rounds (2048)
-      "ldr  r6, [r4, #0]\n"   // child_id
-      // warm-up 32 回
-      "movs r5, #32\n"
-      ".Lbase_meth_warm:\n"
-      "movs r0, #4\n"         // CALL_METHOD = 4
-      "mov  r1, r6\n"
-      "movs r2, #0\n"
-      "movs r3, #0\n"
-      "mov  r12, #0\n"
-      "subs r5, r5, #1\n"
-      "bne  .Lbase_meth_warm\n"
-      // 本番 2048 回 (空ループ)
-      "mov  r5, r7\n"
-      ".Lbase_meth_loop:\n"
-      "movs r0, #4\n"
-      "mov  r1, r6\n"
-      "movs r2, #0\n"
-      "movs r3, #0\n"
-      "mov  r12, #0\n"
-      "subs r5, r5, #1\n"
-      "bne  .Lbase_meth_loop\n"
-      "str  r7, [r4, #16]\n"  // baseline_meth_rounds_executed
-      "mov  r0, r7\n"         // return rounds (2048)
-      "pop  {r4-r8, pc}\n"
-
-      // cmd=3: method call 測定 (2048 回、svc あり、時間計測なし)
-      ".Lp_cmd_measure_method:\n"
-      "ldr  r7, [r4, #12]\n"  // rounds (2048)
-      "ldr  r6, [r4, #0]\n"   // child_id
-      // warm-up 32 回
-      "movs r5, #32\n"
-      ".Lmeth_warm:\n"
-      "movs r0, #4\n"
-      "mov  r1, r6\n"
-      "movs r2, #0\n"
-      "movs r3, #0\n"
-      "mov  r12, #0\n"
-      "svc  0\n"
-      "subs r5, r5, #1\n"
-      "bne  .Lmeth_warm\n"
-      // 本番 2048 回 (svc あり)
-      "mov  r5, r7\n"
-      ".Lmeth_loop:\n"
-      "movs r0, #4\n"
-      "mov  r1, r6\n"
-      "movs r2, #0\n"
-      "movs r3, #0\n"
-      "mov  r12, #0\n"
-      "svc  0\n"
-      "subs r5, r5, #1\n"
-      "bne  .Lmeth_loop\n"
-      "str  r7, [r4, #20]\n"  // meth_rounds_executed
-      // 検算: arg=41 で呼んで 42 が返ることを確認
-      "movs r0, #4\n"
-      "mov  r1, r6\n"
-      "movs r2, #0\n"
-      "movs r3, #41\n"
-      "mov  r12, #0\n"
-      "svc  0\n"
-      "str  r1, [r4, #40]\n"  // meth_check_val
-      "str  r0, [r4, #44]\n"  // meth_check_err
-      "mov  r0, r7\n"         // return rounds (2048)
-      "pop  {r4-r8, pc}\n"
-
-      // cmd=4: descriptor 作成 (CREATE_METHOD_DESCRIPTOR = 32)
-      ".Lp_cmd_create_desc:\n"
-      "ldr  r1, [r4, #0]\n"   // child_id
-      "movs r0, #32\n"        // CREATE_METHOD_DESCRIPTOR = 32
-      "movs r2, #0\n"
-      "movs r3, #0\n"
-      "mov  r12, #0\n"
-      "svc  0\n"
-      "str  r1, [r4, #8]\n"   // desc_index
-      "pop  {r4-r8, pc}\n"
-
-      // cmd=5: descriptor baseline 測定 (2048 回、svc なし空ループ)
-      ".Lp_cmd_baseline_desc:\n"
-      "ldr  r7, [r4, #12]\n"  // rounds (2048)
-      "ldr  r6, [r4, #8]\n"   // desc_index
-      "movs r5, #32\n"
-      ".Lbase_desc_warm:\n"
-      "movs r0, #33\n"        // CALL_METHOD_DESCRIPTOR = 33
-      "mov  r1, r6\n"
-      "movs r2, #0\n"
-      "movs r3, #0\n"
-      "mov  r12, #0\n"
-      "subs r5, r5, #1\n"
-      "bne  .Lbase_desc_warm\n"
-      // 本番 2048 回
-      "mov  r5, r7\n"
-      ".Lbase_desc_loop:\n"
-      "movs r0, #33\n"
-      "mov  r1, r6\n"
-      "movs r2, #0\n"
-      "movs r3, #0\n"
-      "mov  r12, #0\n"
-      "subs r5, r5, #1\n"
-      "bne  .Lbase_desc_loop\n"
-      "str  r7, [r4, #24]\n"  // baseline_desc_rounds_executed
-      "mov  r0, r7\n"
-      "pop  {r4-r8, pc}\n"
-
-      // cmd=6: descriptor call 測定 (2048 回、svc あり、時間計測なし)
-      ".Lp_cmd_measure_desc:\n"
-      "ldr  r7, [r4, #12]\n"  // rounds (2048)
-      "ldr  r6, [r4, #8]\n"   // desc_index
-      // warm-up 32 回
-      "movs r5, #32\n"
-      ".Ldesc_warm:\n"
-      "movs r0, #33\n"
-      "mov  r1, r6\n"
-      "movs r2, #0\n"
-      "movs r3, #0\n"
-      "mov  r12, #0\n"
-      "svc  0\n"
-      "subs r5, r5, #1\n"
-      "bne  .Ldesc_warm\n"
-      // 本番 2048 回
-      "mov  r5, r7\n"
-      ".Ldesc_loop:\n"
-      "movs r0, #33\n"
-      "mov  r1, r6\n"
-      "movs r2, #0\n"
-      "movs r3, #0\n"
-      "mov  r12, #0\n"
-      "svc  0\n"
-      "subs r5, r5, #1\n"
-      "bne  .Ldesc_loop\n"
-      "str  r7, [r4, #28]\n"  // desc_rounds_executed
-      // 検算: arg=41 で呼んで 42 が返ることを確認
-      "movs r0, #33\n"
-      "mov  r1, r6\n"
-      "movs r2, #41\n"
-      "movs r3, #0\n"
-      "mov  r12, #0\n"
-      "svc  0\n"
-      "str  r1, [r4, #60]\n"  // desc_check_val
-      "str  r0, [r4, #64]\n"  // desc_check_err
-      "mov  r0, r7\n"
-      "pop  {r4-r8, pc}\n"
-
-      // =====================================================================
-      // 6A Corrected series:
-      // =====================================================================
-
-      // cmd=10: method warm-up (32 回、計測区間外)
-      ".Lp_cmd_warmup_method:\n"
-      "ldr  r6, [r4, #0]\n"   // child_id
-      "movs r5, #32\n"
-      ".Lmeth_warm_corr:\n"
-      "movs r0, #4\n"
-      "mov  r1, r6\n"
-      "movs r2, #0\n"
-      "movs r3, #0\n"
-      "mov  r12, #0\n"
-      "svc  0\n"
-      "subs r5, r5, #1\n"
-      "bne  .Lmeth_warm_corr\n"
-      "movs r0, #32\n"
-      "pop  {r4-r8, pc}\n"
-
-      // cmd=11: desc warm-up (32 回、計測区間外)
-      ".Lp_cmd_warmup_desc:\n"
-      "ldr  r6, [r4, #8]\n"   // desc_index
-      "movs r5, #32\n"
-      ".Ldesc_warm_corr:\n"
-      "movs r0, #33\n"
-      "mov  r1, r6\n"
-      "movs r2, #0\n"
-      "movs r3, #0\n"
-      "mov  r12, #0\n"
-      "svc  0\n"
-      "subs r5, r5, #1\n"
-      "bne  .Ldesc_warm_corr\n"
-      "movs r0, #32\n"
-      "pop  {r4-r8, pc}\n"
-
-      // cmd=12: method baseline corrected (2048 回、連鎖と orr 累積を含む空ループ)
-      ".Lp_cmd_baseline_method_corr:\n"
-      "ldr  r7, [r4, #12]\n"  // rounds (2048)
-      "ldr  r6, [r4, #0]\n"   // child_id
-      "mov  r5, r7\n"
-      "movs r3, #0\n"         // 初期連鎖値 0
-      "movs r8, #0\n"         // 累積エラー 0
-      ".Lbase_meth_corr_loop:\n"
-      "movs r0, #0\n"         // 模擬エラー 0
-      "adds r1, r3, #1\n"     // 模擬子加算 (0->1, 1->2, ... -> 2048)
-      "mov  r3, r1\n"         // 次周回への値連鎖
-      "orr  r8, r8, r0\n"     // エラー論理和累積
-      "subs r5, r5, #1\n"
-      "bne  .Lbase_meth_corr_loop\n"
-      "str  r1, [r4, #72]\n"  // offset 72: base_meth_final_val
-      "str  r8, [r4, #76]\n"  // offset 76: base_meth_accum_err
-      "str  r7, [r4, #80]\n"  // offset 80: base_meth_rounds
-      "mov  r0, r7\n"
-      "pop  {r4-r8, pc}\n"
-
-      // cmd=13: method measure corrected (2048 回、値連鎖 r3<-r1、orr r8, r8, r0 累積)
-      ".Lp_cmd_measure_method_corr:\n"
-      "ldr  r7, [r4, #12]\n"  // rounds (2048)
-      "ldr  r6, [r4, #0]\n"   // child_id
-      "mov  r5, r7\n"
-      "movs r3, #0\n"         // 初期連鎖値 0
-      "movs r8, #0\n"         // 累積エラー 0
-      ".Lmeth_corr_loop:\n"
-      "movs r0, #4\n"         // CALL_METHOD = 4
-      "mov  r1, r6\n"
-      "movs r2, #0\n"
-      "// r3 に前周回の戻り値 r1 が入っている\n"
-      "mov  r12, #0\n"
-      "svc  0\n"
-      "orr  r8, r8, r0\n"     // 全周回のエラー論理和累積
-      "mov  r3, r1\n"         // 戻り値 r1 を次周回の引数 r3 へ連鎖
-      "subs r5, r5, #1\n"
-      "bne  .Lmeth_corr_loop\n"
-      "str  r1, [r4, #84]\n"  // offset 84: meth_corr_final_val
-      "str  r8, [r4, #88]\n"  // offset 88: meth_corr_accum_err
-      "str  r7, [r4, #92]\n"  // offset 92: meth_corr_rounds
-      "mov  r0, r7\n"
-      "pop  {r4-r8, pc}\n"
-
-      // cmd=14: method verify check (41->42、計測区間外)
-      ".Lp_cmd_verify_method:\n"
-      "ldr  r6, [r4, #0]\n"
-      "movs r0, #4\n"
-      "mov  r1, r6\n"
-      "movs r2, #0\n"
-      "movs r3, #41\n"
-      "mov  r12, #0\n"
-      "svc  0\n"
-      "str  r1, [r4, #40]\n"  // meth_check_val (want 42)
-      "str  r0, [r4, #44]\n"  // meth_check_err (want 0)
-      "mov  r0, #1\n"
-      "pop  {r4-r8, pc}\n"
-
-      // cmd=15: desc baseline corrected (2048 回、連鎖と orr 累積を含む空ループ)
-      ".Lp_cmd_baseline_desc_corr:\n"
-      "ldr  r7, [r4, #12]\n"  // rounds (2048)
-      "ldr  r6, [r4, #8]\n"   // desc_index
-      "mov  r5, r7\n"
-      "movs r2, #0\n"         // 初期連鎖値 0
-      "movs r8, #0\n"         // 累積エラー 0
-      ".Lbase_desc_corr_loop:\n"
-      "movs r0, #0\n"         // 模擬エラー 0
-      "adds r1, r2, #1\n"     // 模擬子加算
-      "mov  r2, r1\n"         // 次周回への値連鎖
-      "orr  r8, r8, r0\n"     // エラー論理和累積
-      "subs r5, r5, #1\n"
-      "bne  .Lbase_desc_corr_loop\n"
-      "str  r1, [r4, #96]\n"  // offset 96: base_desc_final_val
-      "str  r8, [r4, #100]\n" // offset 100: base_desc_accum_err
-      "str  r7, [r4, #104]\n" // offset 104: base_desc_rounds
-      "mov  r0, r7\n"
-      "pop  {r4-r8, pc}\n"
-
-      // cmd=16: desc measure corrected (2048 回、値連鎖 r2<-r1、orr r8, r8, r0 累積)
-      ".Lp_cmd_measure_desc_corr:\n"
-      "ldr  r7, [r4, #12]\n"  // rounds (2048)
-      "ldr  r6, [r4, #8]\n"   // desc_index
-      "mov  r5, r7\n"
-      "movs r2, #0\n"         // 初期連鎖値 0
-      "movs r8, #0\n"         // 累積エラー 0
-      ".Ldesc_corr_loop:\n"
-      "movs r0, #33\n"        // CALL_METHOD_DESCRIPTOR = 33
-      "mov  r1, r6\n"
-      "// r2 に前周回の戻り値 r1 が入っている\n"
-      "movs r3, #0\n"
-      "mov  r12, #0\n"
-      "svc  0\n"
-      "orr  r8, r8, r0\n"     // 全周回のエラー論理和累積
-      "mov  r2, r1\n"         // 戻り値 r1 を次周回の引数 r2 へ連鎖
-      "subs r5, r5, #1\n"
-      "bne  .Ldesc_corr_loop\n"
-      "str  r1, [r4, #108]\n" // offset 108: desc_corr_final_val
-      "str  r8, [r4, #112]\n" // offset 112: desc_corr_accum_err
-      "str  r7, [r4, #116]\n" // offset 116: desc_corr_rounds
-      "mov  r0, r7\n"
-      "pop  {r4-r8, pc}\n"
-
-      // cmd=17: desc verify check (41->42、計測区間外)
-      ".Lp_cmd_verify_desc:\n"
-      "ldr  r6, [r4, #8]\n"
-      "movs r0, #33\n"
-      "mov  r1, r6\n"
-      "movs r2, #41\n"
-      "movs r3, #0\n"
-      "mov  r12, #0\n"
-      "svc  0\n"
-      "str  r1, [r4, #60]\n"  // desc_check_val (want 42)
-      "str  r0, [r4, #64]\n"  // desc_check_err (want 0)
-      "mov  r0, #1\n"
-      "pop  {r4-r8, pc}\n"
-      ".ltorg\n"
-  );
+uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
+  using shizuku::armv8m_abi::syscall;
+  auto *const data = reinterpret_cast<volatile uint32_t *>(u_cost_p_data_pool);
+  const uintptr_t child = data[0];
+  const uintptr_t rounds = data[3];
+  if (cmd == 1) return syscall(1, child, data[1], 2).error;
+  if (cmd == 4) {
+    const auto result = syscall(32, child);
+    data[2] = result.value;
+    return result.error;
+  }
+  const bool descriptor = cmd == 5 || cmd == 6 || cmd == 11 || cmd >= 15;
+  const uintptr_t target = descriptor ? data[2] : child;
+  const uintptr_t number = descriptor ? 33 : 4;
+  auto call = [&](uintptr_t value) __attribute__((always_inline)) {
+    return descriptor ? syscall(number, target, value) : syscall(number, target, 0, value);
+  };
+  if (cmd == 14 || cmd == 17) {
+    const auto result = call(41);
+    data[descriptor ? 15 : 10] = result.value;
+    data[descriptor ? 16 : 11] = result.error;
+    return 1;
+  }
+  if (cmd == 10 || cmd == 11) {
+    for (uintptr_t i = 0; i < 32; ++i) (void)call(0);
+    return 32;
+  }
+  if (cmd < 2 || cmd > 16 || cmd == 7 || cmd == 8 || cmd == 9) return 0;
+  const bool baseline = cmd == 2 || cmd == 5 || cmd == 12 || cmd == 15;
+  const bool corrected = cmd >= 12;
+  if (!corrected) {
+    for (uintptr_t i = 0; i < 32; ++i) {
+      if (!baseline) (void)call(0);
+      else asm volatile("" : : "r"(number), "r"(target) : "memory");
+    }
+  }
+  uintptr_t value = 0, error = 0;
+  for (uintptr_t i = 0; i < rounds; ++i) {
+    if (baseline) {
+      if (corrected) ++value;
+      asm volatile("" : "+r"(value), "+r"(error) : "r"(number), "r"(target) : "memory");
+    } else {
+      const auto result = call(corrected ? value : 0);
+      value = result.value;
+      error |= result.error;
+    }
+  }
+  if (corrected) {
+    const unsigned index = descriptor ? (baseline ? 24 : 27) : (baseline ? 18 : 21);
+    data[index] = value;
+    data[index + 1] = error;
+    data[index + 2] = rounds;
+  } else {
+    data[descriptor ? (baseline ? 6 : 7) : (baseline ? 4 : 5)] = rounds;
+    if (!baseline) {
+      const auto result = call(41);
+      data[descriptor ? 15 : 10] = result.value;
+      data[descriptor ? 16 : 11] = result.error;
+    }
+  }
+  return rounds;
 }
+
 #else
 // ホスト環境用スタブ
 extern "C" {
@@ -402,6 +121,88 @@ using BOARD = KERNEL::BOARD;
 constexpr uintptr_t OBJECT_U_COST_P = object_id::cost_u_parent;
 constexpr uintptr_t OBJECT_U_COST_C = object_id::cost_u_child;
 constexpr uint32_t ROUNDS = 2048;
+
+// 例外の入口別カウンタ (fault 各種と SysTick) の前後差。DWT 窓の外で読むだけで、
+// SVC/PendSV には何も足さない。常時有効 (配置を動かす probe 切替えにしない)。
+struct exception_window {
+  KERNEL::exception_counts before, after;
+};
+struct exception_windows {
+  static inline exception_window windows[8] = {};
+  static void begin(unsigned i) { windows[i].before = kernel_instance.exception_snapshot(); }
+  static void end(unsigned i) { windows[i].after = kernel_instance.exception_snapshot(); }
+  // 飽和 (UINT32_MAX) や巻き戻りは差を信用しない。
+  static void report(unsigned i, const char *name) {
+    const auto &w = windows[i];
+    auto delta = [](uint32_t b, uint32_t a, bool &valid) -> unsigned long {
+      if (b == UINT32_MAX || a == UINT32_MAX || a < b) { valid = false; return 0; }
+      return a - b;
+    };
+    bool valid = true;
+    const unsigned long mm = delta(w.before.memmanage, w.after.memmanage, valid);
+    const unsigned long bf = delta(w.before.busfault, w.after.busfault, valid);
+    const unsigned long uf = delta(w.before.usagefault, w.after.usagefault, valid);
+    const unsigned long hf = delta(w.before.hardfault, w.after.hardfault, valid);
+    const unsigned long st = delta(w.before.systick, w.after.systick, valid);
+    const unsigned long fc = delta(w.before.faults, w.after.faults, valid);
+    BOARD::diag_printf("[FAULTS] %s memmanage=%lu busfault=%lu usagefault=%lu "
+                       "hardfault=%lu systick=%lu faults_total=%lu valid=%u\n",
+                       name, mm, bf, uf, hf, st, fc, (unsigned)valid);
+    []<class B = BOARD>() { if constexpr (requires { B::diag_drain(); }) B::diag_drain(); }();
+  }
+};
+
+
+// Snapshots sit outside the DWT interval. Storage is only referenced when the
+// opt-in route probe is enabled; individual bucket reads can be interrupted.
+struct route_window {
+  cost_probe::route_snapshot before, after;
+  unsigned before_core, after_core;
+};
+template<bool Enabled> struct route_windows {
+  static inline route_window windows[8] = {};
+  template<class A> static void begin(unsigned i) {
+    exception_windows::begin(i); // 例外カウンタは probe 設定と無関係に常時
+    if constexpr (Enabled) {
+      auto &w = windows[i];
+      w.before_core = A::core_slot();
+      w.before = cost_probe::routes<true>::snapshot(w.before_core);
+    }
+  }
+  template<class A> static void end(unsigned i) {
+    exception_windows::end(i);
+    if constexpr (Enabled) {
+      auto &w = windows[i];
+      w.after_core = A::core_slot();
+      w.after = cost_probe::routes<true>::snapshot(w.after_core);
+    }
+  }
+  template<class B> static void report(unsigned i, const char *name) {
+    exception_windows::report(i, name);
+    if constexpr (Enabled) {
+      const auto &w = windows[i];
+      const bool same_core = w.before_core == w.after_core;
+      B::diag_printf("[ROUTE] %s core_before=%u core_after=%u same_core=%u\n",
+                     name, w.before_core, w.after_core, (unsigned)same_core);
+      if constexpr (requires { B::diag_drain(); }) B::diag_drain();
+      for (unsigned api = 0; api < cost_probe::bucket_count; ++api) {
+        const auto d = cost_probe::difference(w.before.direct[api], w.after.direct[api]);
+        const auto g = cost_probe::difference(w.before.generic[api], w.after.generic[api]);
+        if (d.value || g.value || !d.valid || !g.valid || !same_core) {
+          B::diag_printf("[ROUTE] %s api=%u direct=%lu dvalid=%u generic=%lu gvalid=%u\n",
+                         name, api, (unsigned long)d.value, (unsigned)(same_core && d.valid),
+                         (unsigned long)g.value, (unsigned)(same_core && g.valid));
+          if constexpr (requires { B::diag_drain(); }) B::diag_drain();
+        }
+      }
+      const auto p = cost_probe::difference(w.before.pendsv_unknown, w.after.pendsv_unknown);
+      B::diag_printf("[ROUTE] %s pendsv_unknown=%lu valid=%u\n", name,
+                     (unsigned long)p.value, (unsigned)(same_core && p.valid));
+      if constexpr (requires { B::diag_drain(); }) B::diag_drain();
+    }
+  }
+};
+using route_measure = route_windows<route_cost_probe_enabled>;
 
 template <typename A> inline uint32_t cycles_now() {
 #if defined(__arm__) || defined(__thumb__)
@@ -526,6 +327,8 @@ void rp2350_u_cost() {
 
     // 6. 親 P に cmd=2 (baseline method) を実行させる
     shizuku_rp2350_u_cost_stage = 0xC05030u;
+    route_measure::begin<ARCH>(0);
+    const auto base_meth_xip_before = xip_cost_start();
     const uint32_t t_base_meth_start = cycles_now<ARCH>();
     const auto base_meth_res = ARCH::syscall(
         static_cast<uintptr_t>(object_api::CALL_METHOD),
@@ -533,10 +336,14 @@ void rp2350_u_cost() {
         0,
         2 /* cmd=2: baseline method */);
     const uint32_t t_base_meth_end = cycles_now<ARCH>();
+    const auto base_meth_xip_after = xip_cost_snapshot();
+    route_measure::end<ARCH>(0);
     const uint32_t base_meth_cycles = t_base_meth_end - t_base_meth_start;
 
     // 7. 親 P に cmd=3 (measure method) を実行させる
     shizuku_rp2350_u_cost_stage = 0xC05040u;
+    route_measure::begin<ARCH>(1);
+    const auto meth_xip_before = xip_cost_start();
     const uint32_t t_meth_start = cycles_now<ARCH>();
     const auto meth_res = ARCH::syscall(
         static_cast<uintptr_t>(object_api::CALL_METHOD),
@@ -544,6 +351,8 @@ void rp2350_u_cost() {
         0,
         3 /* cmd=3: measure method */);
     const uint32_t t_meth_end = cycles_now<ARCH>();
+    const auto meth_xip_after = xip_cost_snapshot();
+    route_measure::end<ARCH>(1);
     const uint32_t meth_cycles = t_meth_end - t_meth_start;
 
     // 8. 親 P に cmd=4 (create desc) を実行させる
@@ -556,6 +365,8 @@ void rp2350_u_cost() {
 
     // 9. 親 P に cmd=5 (baseline desc) を実行させる
     shizuku_rp2350_u_cost_stage = 0xC05060u;
+    route_measure::begin<ARCH>(2);
+    const auto base_desc_xip_before = xip_cost_start();
     const uint32_t t_base_desc_start = cycles_now<ARCH>();
     const auto base_desc_res = ARCH::syscall(
         static_cast<uintptr_t>(object_api::CALL_METHOD),
@@ -563,10 +374,14 @@ void rp2350_u_cost() {
         0,
         5 /* cmd=5: baseline desc */);
     const uint32_t t_base_desc_end = cycles_now<ARCH>();
+    const auto base_desc_xip_after = xip_cost_snapshot();
+    route_measure::end<ARCH>(2);
     const uint32_t base_desc_cycles = t_base_desc_end - t_base_desc_start;
 
     // 10. 親 P に cmd=6 (measure desc) を実行させる
     shizuku_rp2350_u_cost_stage = 0xC05070u;
+    route_measure::begin<ARCH>(3);
+    const auto desc_xip_before = xip_cost_start();
     const uint32_t t_desc_start = cycles_now<ARCH>();
     const auto desc_res = ARCH::syscall(
         static_cast<uintptr_t>(object_api::CALL_METHOD),
@@ -574,7 +389,17 @@ void rp2350_u_cost() {
         0,
         6 /* cmd=6: measure desc */);
     const uint32_t t_desc_end = cycles_now<ARCH>();
+    const auto desc_xip_after = xip_cost_snapshot();
+    route_measure::end<ARCH>(3);
     const uint32_t desc_cycles = t_desc_end - t_desc_start;
+    xip_cost_report<BOARD>("U-U method baseline", base_meth_xip_before, base_meth_xip_after);
+    xip_cost_report<BOARD>("U-U desc baseline", base_desc_xip_before, base_desc_xip_after);
+    xip_cost_report<BOARD>("U-U method legacy", meth_xip_before, meth_xip_after);
+    xip_cost_report<BOARD>("U-U desc legacy", desc_xip_before, desc_xip_after);
+    route_measure::report<BOARD>(0, "U-U method baseline legacy");
+    route_measure::report<BOARD>(1, "U-U method legacy");
+    route_measure::report<BOARD>(2, "U-U desc baseline legacy");
+    route_measure::report<BOARD>(3, "U-U desc legacy");
 
     // ループ完走の検証
     if (base_meth_res.error != 0 || base_meth_res.value != ROUNDS || shared[4] != ROUNDS) {
@@ -650,20 +475,28 @@ void rp2350_u_cost() {
 
     // 12. 親 P に cmd=12 (baseline method corrected) を実行させる
     shizuku_rp2350_u_cost_stage = 0xC05110u;
+    route_measure::begin<ARCH>(4);
+    const auto corr_base_meth_xip_before = xip_cost_start();
     const uint32_t t_corr_base_meth_start = cycles_now<ARCH>();
     const auto corr_base_meth_res = ARCH::syscall(
         static_cast<uintptr_t>(object_api::CALL_METHOD),
         OBJECT_U_COST_P, 0, 12 /* cmd=12 */);
     const uint32_t t_corr_base_meth_end = cycles_now<ARCH>();
+    const auto corr_base_meth_xip_after = xip_cost_snapshot();
+    route_measure::end<ARCH>(4);
     const uint32_t corr_base_meth_cycles = t_corr_base_meth_end - t_corr_base_meth_start;
 
     // 13. 親 P に cmd=13 (measure method corrected) を実行させる
     shizuku_rp2350_u_cost_stage = 0xC05120u;
+    route_measure::begin<ARCH>(5);
+    const auto corr_meth_xip_before = xip_cost_start();
     const uint32_t t_corr_meth_start = cycles_now<ARCH>();
     const auto corr_meth_res = ARCH::syscall(
         static_cast<uintptr_t>(object_api::CALL_METHOD),
         OBJECT_U_COST_P, 0, 13 /* cmd=13 */);
     const uint32_t t_corr_meth_end = cycles_now<ARCH>();
+    const auto corr_meth_xip_after = xip_cost_snapshot();
+    route_measure::end<ARCH>(5);
     const uint32_t corr_meth_cycles = t_corr_meth_end - t_corr_meth_start;
 
     // 14. 親 P に cmd=14 (verify method check 41->42: 計測区間外) を実行させる
@@ -678,21 +511,37 @@ void rp2350_u_cost() {
 
     // 16. 親 P に cmd=15 (baseline desc corrected) を実行させる
     shizuku_rp2350_u_cost_stage = 0xC05140u;
+    route_measure::begin<ARCH>(6);
+    const auto corr_base_desc_xip_before = xip_cost_start();
     const uint32_t t_corr_base_desc_start = cycles_now<ARCH>();
     const auto corr_base_desc_res = ARCH::syscall(
         static_cast<uintptr_t>(object_api::CALL_METHOD),
         OBJECT_U_COST_P, 0, 15 /* cmd=15 */);
     const uint32_t t_corr_base_desc_end = cycles_now<ARCH>();
+    const auto corr_base_desc_xip_after = xip_cost_snapshot();
+    route_measure::end<ARCH>(6);
     const uint32_t corr_base_desc_cycles = t_corr_base_desc_end - t_corr_base_desc_start;
 
     // 17. 親 P に cmd=16 (measure desc corrected) を実行させる
     shizuku_rp2350_u_cost_stage = 0xC05150u;
+    route_measure::begin<ARCH>(7);
+    const auto corr_desc_xip_before = xip_cost_start();
     const uint32_t t_corr_desc_start = cycles_now<ARCH>();
     const auto corr_desc_res = ARCH::syscall(
         static_cast<uintptr_t>(object_api::CALL_METHOD),
         OBJECT_U_COST_P, 0, 16 /* cmd=16 */);
     const uint32_t t_corr_desc_end = cycles_now<ARCH>();
+    const auto corr_desc_xip_after = xip_cost_snapshot();
+    route_measure::end<ARCH>(7);
     const uint32_t corr_desc_cycles = t_corr_desc_end - t_corr_desc_start;
+    xip_cost_report<BOARD>("U-U method baseline corrected", corr_base_meth_xip_before, corr_base_meth_xip_after);
+    xip_cost_report<BOARD>("U-U desc baseline corrected", corr_base_desc_xip_before, corr_base_desc_xip_after);
+    xip_cost_report<BOARD>("U-U method corrected", corr_meth_xip_before, corr_meth_xip_after);
+    xip_cost_report<BOARD>("U-U desc corrected", corr_desc_xip_before, corr_desc_xip_after);
+    route_measure::report<BOARD>(4, "U-U method baseline corrected");
+    route_measure::report<BOARD>(5, "U-U method corrected");
+    route_measure::report<BOARD>(6, "U-U desc baseline corrected");
+    route_measure::report<BOARD>(7, "U-U desc corrected");
 
     // 18. 親 P に cmd=17 (verify desc check 41->42: 計測区間外) を実行させる
     shizuku_rp2350_u_cost_stage = 0xC05160u;

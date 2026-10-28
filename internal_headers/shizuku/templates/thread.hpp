@@ -19,6 +19,7 @@ struct caller_return_record {
 // in-place 復帰で台帳に付く arch 固有の型付き payload の既定 (空)。実体は無いので
 // [[no_unique_address]] で台帳項目のサイズを増やさない (C6: 非 LEAN 16B / LEAN 32B)。
 struct empty_ledger_payload {};
+struct legacy_thread_layout_word { uintptr_t reserved = 0; };
 
 namespace templates {
 
@@ -55,6 +56,11 @@ struct ledger_payload_trait<CONTEXT, std::void_t<typename CONTEXT::ledger_payloa
 
 template <typename CONTEXT>
 using ledger_payload_of = typename ledger_payload_trait<CONTEXT>::type;
+
+template <typename CONTEXT> constexpr bool compact_ledger_enabled() {
+  if constexpr (requires { CONTEXT::COMPACT_LEDGER; }) return CONTEXT::COMPACT_LEDGER;
+  return false;
+}
 
 template <typename CONTEXT> struct thread {
   static constexpr uint32_t CALL_IDENTITY_CAPACITY = 32;
@@ -101,7 +107,7 @@ template <typename CONTEXT> struct thread {
   uint32_t state = (uint32_t)state_t::UNINITIALIZED;
   CONTEXT *context = nullptr;
   call_stack_t call_stack;
-  struct call_ledger_entry {
+  struct standard_call_ledger_entry {
     uint32_t object;
     uint32_t handler_object;
     uintptr_t handler_entry;
@@ -109,6 +115,7 @@ template <typename CONTEXT> struct thread {
     uint8_t via;
     uint16_t unwind_floor; // earliest depth this activation may return to
 #if defined(SHIZUKU_LEAN_LEDGER)
+    static constexpr bool compact_allowed = true;
     // ---- [SHIZUKU_LEAN_LEDGER] 戻りと識別の権威を 1 つの記録 (この特権メモリの台帳) に集める ----
     uint32_t generation;      // call 段: 入ったときの呼び先の instance 世代。dispatch 段: 0
     uintptr_t ret_pc;         // この段から戻ったとき caller が再開する pc
@@ -116,15 +123,42 @@ template <typename CONTEXT> struct thread {
     uint16_t prev_call;       // この段を積む前の call_stack.call_top
     uint8_t ret_privileged;   // caller の特権
     uint8_t reserved;
+#else
+    static constexpr bool compact_allowed = false;
 #endif
     [[no_unique_address]] ledger_payload_of<CONTEXT> payload{};
   };
 
+  struct compact_call_ledger_entry {
+    uint32_t object : 7;
+    uint32_t handler_object : 7;
+    uint32_t kind : 2;
+    uint32_t via : 2;
+    uint32_t unwind_floor : 6;
+    uint32_t prev_call : 6;
+    uint32_t ret_privileged : 2;
+    uint32_t generation;
+    uintptr_t handler_entry;
+    uintptr_t ret_pc;
+    uintptr_t ret_sp;
+
+    constexpr compact_call_ledger_entry() = default;
+    constexpr compact_call_ledger_entry(uint32_t obj, uint32_t handler,
+                                        uintptr_t entry, uint8_t kind_value,
+                                        uint8_t via_value, uint16_t floor)
+        : object(obj), handler_object(handler), kind(kind_value), via(via_value),
+          unwind_floor(floor), prev_call(0), ret_privileged(0),
+          generation(0), handler_entry(entry), ret_pc(0), ret_sp(0) {}
+  };
+  using call_ledger_entry = std::conditional_t<compact_ledger_enabled<CONTEXT>() && standard_call_ledger_entry::compact_allowed,
+                                                compact_call_ledger_entry,
+                                                standard_call_ledger_entry>;
+
   caller_return_record *return_records = nullptr;
-  // 呼び手の r4-r11 の退避域 (深さごとに 8 語)。戻り記録と別にしてあるのは、使わない ARCH
-  // (RP2040 など) が .bss を払わないため。
-  static constexpr uint32_t callee_saved_depth = 34;
-  uint32_t (*callee_saved_records)[8] = nullptr;
+  // Preserve the C6/RP2040 record ABI while ARMv8-M drops the obsolete register
+  // sidecar pointer. This word has no storage/restore semantics and no array.
+  [[no_unique_address]] std::conditional_t<compact_ledger_enabled<CONTEXT>(),
+      empty_ledger_payload, legacy_thread_layout_word> legacy_layout_word{};
 
   // 台帳への読み書きを 1 か所に閉じ込めるアクセサ
   struct ledger_accessor {
@@ -155,18 +189,6 @@ template <typename CONTEXT> struct thread {
 #endif
     }
 
-    // 呼び手の callee-saved (r4-r11) を特権の退避域 (callee_saved_records) へ退避/復元する
-    // (ARCH::SCRUB_CALLEE_SAVED_ON_CALL の ARCH だけが使う)。記録先が無いとき false = fail closed。
-    static bool save_callee_saved(thread &t, uint32_t depth, const uint32_t (&regs)[8]) {
-      if (t.callee_saved_records == nullptr || depth >= callee_saved_depth) return false;
-      for (unsigned i = 0; i < 8; ++i) t.callee_saved_records[depth][i] = regs[i];
-      return true;
-    }
-    static bool restore_callee_saved(const thread &t, uint32_t depth, uint32_t (&regs)[8]) {
-      if (t.callee_saved_records == nullptr || depth >= callee_saved_depth) return false;
-      for (unsigned i = 0; i < 8; ++i) regs[i] = t.callee_saved_records[depth][i];
-      return true;
-    }
 
     // 記録が無い (台帳/退避域が未設定、depth が範囲外) とき false。呼び元は false のとき
     // 出力を使わず、従来の復帰経路をそのまま使う。

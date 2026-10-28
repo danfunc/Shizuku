@@ -1,18 +1,22 @@
 # RP2350 のポート: ARMv8-M の arch (arch/armv8m) + RP2350 の board (boards/rp2350_pico2)。
 # SDK 依存の arch glue (SysTick の診断・watchdog・フォールト) はここに置く。
 load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//configs:kernel_lto.bzl", "RP2350_KERNEL_LTO_COPTS")
 
 package(default_visibility = ["//modules/pico_sdk_support:__subpackages__"])
 
 cc_library(
     name = "arch_glue",
     srcs = ["arch_glue.cpp"],
+    # カーネルの .o と一緒に LTO する (SVC 経路の ensure_object_window を inline するため)。
+    copts = RP2350_KERNEL_LTO_COPTS,
     alwayslink = True,
     target_compatible_with = ["@pico-sdk//bazel/constraint:rp2350"],
     deps = [
         "//arch/armv8m:headers",
         "//chips/rp2350:headers",
         "//:kernel",
+        "//:svc_dispatch",
         "//configs:config",
         "@pico-sdk//src/rp2_common/hardware_watchdog",
         "@pico-sdk//src/rp2_common/pico_stdlib",

@@ -63,6 +63,56 @@ int main() {
     assert(!arch::has_object_bounds(6));
     assert(!arch::set_object_bounds(arch::kMaxObjectWindows, 0x20030000u, 0x20030100u, 0, 0));
     assert(!arch::has_object_bounds(arch::kMaxObjectWindows));
+
+    arch::object_protection_window copy{};
+    uint32_t version = 0;
+    assert(arch::snapshot_object_window(5, copy, version));
+    assert((version & 1u) == 0 && version != 0);
+    assert(copy.owner_id == 5 && (copy.data.rbar & ~31u) == 0x20030000u);
+    const uint32_t previous = version;
+    // Same owner, new bounds: both cores' cache keys must see a new version.
+    assert(arch::set_object_bounds(5, 0x20030200u, 0x20030300u, 0, 0));
+    assert(arch::snapshot_object_window(5, copy, version));
+    assert(version == previous + 2u);
+    assert((copy.data.rbar & ~31u) == 0x20030200u);
+    __atomic_store_n(&arch::s_object_window_seq[5], version + 1u, __ATOMIC_RELEASE);
+    assert(!arch::snapshot_object_window(5, copy, version));
+    assert(!arch::set_object_bounds(5, 0, 0, 0, 0));
+    __atomic_store_n(&arch::s_object_window_seq[5], previous + 2u, __ATOMIC_RELEASE);
+    assert(arch::snapshot_object_window(5, copy, version));
+    assert(!arch::snapshot_object_window(arch::kMaxObjectWindows, copy, version));
+  }
+
+  // ---- 貸与窓の値: region_set(GRANT, RO_ALL, XN なし, Attr0) が作っていた RBAR/RLAR と同じ ----
+  {
+    const auto g = arch::grant_window_entry(0x10100010u, 0x10100100u);
+    assert(g.rbar == (0x10100000u | (arch::ACCESS_RO_ALL << 1)));  // base は 32B に切り下げ、XN=0
+    assert(g.rlar == (arch::grant_window_limit(0x10100100u) | 1u));  // Attr0, Enable=1
+    assert((g.rlar & ~0x1Fu) == 0x101000E0u);  // 排他的な終端 0x...100 の手前のブロック
+    // end==0 は窓なし: 無効 {0, 0}。
+    const auto none = arch::grant_window_entry(0x10100000u, 0);
+    assert(none.rbar == 0 && none.rlar == 0);
+  }
+
+  // ---- 張ってある値の覚え: 同じなら書かない / 違えば書く / 無効は rbar を問わず同じ ----
+  {
+    // 初期値は「未知」: どの実値 (無効 {0,0} を含む) とも一致しない = 最初の 1 回は必ず書く。
+    const arch::region_shadow unknown{};
+    assert(!arch::region_matches(unknown, 0, 0));
+    assert(!arch::region_matches(unknown, 0x20010000u, 0x20010041u));
+    const arch::region_shadow programmed{0x20010000u | 2u, 0x20010040u | 1u};
+    assert(arch::region_matches(programmed, 0x20010000u | 2u, 0x20010040u | 1u));
+    // rbar か rlar のどちらか一方が違っても書き直す (取り違えると前の窓が残る)。
+    assert(!arch::region_matches(programmed, 0x20020000u | 2u, 0x20010040u | 1u));
+    assert(!arch::region_matches(programmed, 0x20010000u | 2u, 0x20010080u | 1u));
+    // 無効 (rlar==0) 同士は rbar が違っても同じ。無効 → 有効、有効 → 無効は違う。
+    const arch::region_shadow off{0, 0};
+    assert(arch::region_matches(off, 0, 0));
+    assert(arch::region_matches(off, 0x20010000u, 0));
+    assert(!arch::region_matches(off, 0x20010000u, 0x20010041u));
+    assert(!arch::region_matches(programmed, 0x20010000u | 2u, 0));
+    const auto canon = arch::canonical_region(0x20010000u, 0);
+    assert(canon.rbar == 0 && canon.rlar == 0);
   }
 
   // ---- 戻り先の権威: 台帳に記録した値がそのまま復元され、範囲外は false ----

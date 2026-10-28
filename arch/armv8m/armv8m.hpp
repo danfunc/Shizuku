@@ -5,6 +5,8 @@
 #include "arch/ppb.hpp"
 #include "shizuku/concepts/arch.hpp"
 #include "shizuku/kernel_abi.hpp"
+#include "shizuku/hot.hpp"
+#include "shizuku/armv8m_abi.hpp"
 
 // ARMv8-M mainline (Cortex-M33 / RP2350) の arch バックエンド。
 // 文脈退避・復帰・戻り口・スレッドモード移行の実体は armv8m_ctx.S。
@@ -14,6 +16,8 @@
 extern "C" {
 // armv8m_ctx.S の例外入口。board 層がベクタへ登録する。
 void shizuku_armv8m_svc_entry();
+void shizuku_armv8m_svc_handler();
+void shizuku_armv8m_call_entry();
 void shizuku_armv8m_pendsv_entry();
 // タイマ例外の入口。文脈は触らないので普通の C 関数でよい (切替を起票するだけ)。
 void shizuku_armv8m_systick_entry();
@@ -65,9 +69,13 @@ public:
   //   数えるべきものが増えたら、数字ではなく**式**を直すこと。
   static constexpr uint32_t CALL_HEADROOM = 512;
   static constexpr bool HAS_CYCLE_COUNTER = true;
+  static constexpr bool IS_ARMV8M = true;
+  static constexpr bool CALL_IN_PLACE = true;
+  static constexpr bool SVC_BREAKDOWN_ENABLED = SHIZUKU_RP2350_SVC_BREAKDOWN != 0;
 
   // armv8m_ctx.S の .equ (CTX_*) と一致させること。下の static_assert が両縛りする。
   struct context_t {
+    static constexpr bool COMPACT_LEDGER = true;
     uint32_t r4 = 0, r5 = 0, r6 = 0, r7 = 0;   // offset 0..12
     uint32_t r8 = 0, r9 = 0, r10 = 0, r11 = 0; // offset 16..28
     exception_frame_t *sp = nullptr;           // offset 32
@@ -82,6 +90,7 @@ public:
     //   asm から触らないので .equ は要らない)。0/0 = 窓なし。
     uint32_t region_base = 0;  // offset 112
     uint32_t region_limit = 0; // offset 116
+    uint32_t stack_ceiling = 0; // trusted activation limit; not supplied by PSP
   };
   // 余白の算術に使う、実際に積まれる量。
   // 例外 1 回でハードウェアが積む最大 (FPU 活性時の拡張フレーム 104B)。
@@ -135,9 +144,9 @@ public:
   }
   static void set_handler_args(exception_frame_t &frame, const uintptr_t *args,
                                uintptr_t stack_arg_address) {
+    (void)stack_arg_address;
     set_args(frame, args);
-    *reinterpret_cast<uint32_t *>(stack_arg_address) =
-        static_cast<uint32_t>(args[4]);
+    frame.r12 = static_cast<uint32_t>(args[4]);
   }
   static void set_result(exception_frame_t &frame, uintptr_t error,
                          uintptr_t value) {
@@ -145,14 +154,23 @@ public:
     frame.r1 = (uint32_t)value;
   }
   static void set_entry(exception_frame_t &frame, uintptr_t pc, uintptr_t lr) {
-    frame.pc = (uint32_t)pc;
-    frame.lr = (uint32_t)lr;
+    if (lr == return_stub()) {
+      // The thread-mode veneer translates r12 to AAPCS's fifth stack argument.
+      frame.pc = (uint32_t)(uintptr_t)&shizuku_armv8m_call_entry;
+      frame.lr = (uint32_t)pc;
+    } else {
+      frame.pc = (uint32_t)pc;
+      frame.lr = (uint32_t)lr;
+    }
   }
   // 戻り口 (1 本だけ)。呼び先が普通に return するとここへ落ち、RETURN を撃つ。
   // ハンドラから出ればプリミティブとして巻き戻し、オブジェクトから出れば経路判定で
   // オブジェクトランドのハンドラへ「戻った」という知らせとして届く。
   static uintptr_t return_stub() {
     return (uintptr_t)&shizuku_armv8m_return_stub;
+  }
+  template <auto F> static void (*method_stub())() {
+    return reinterpret_cast<void (*)()>(shizuku::armv8m_abi::entry_address<F>());
   }
   // ---- スレッドの最初の 1 回 -----------------------------------------------
   // 「例外から復帰してきた」ように見せかけた文脈を組み立てる。これで最初の実行も
@@ -165,8 +183,9 @@ public:
                               ~(uintptr_t)7);
     frame->r0 = (uint32_t)argument;
     frame->r1 = frame->r2 = frame->r3 = frame->r12 = 0;
-    frame->lr = (uint32_t)return_pc;
-    frame->pc = (uint32_t)entry_pc;
+    // Spawned methods use the same r12 -> AAPCS stack-argument veneer as
+    // in-place calls. A direct five-word wrapper would read at stack_top.
+    set_entry(*frame, entry_pc, return_pc);
     frame->xPSR = (1u << 24); // Thumb ビット。整列パディングは無し
     context.sp = frame;
     // 基本フレーム (FP 無し) の Thread/PSP へ復帰する。0 のままだと初回復帰で
@@ -305,7 +324,9 @@ public:
   //   これにより「syscall ハンドラの中にいる = そのコアでは切り替わらない」が
   //   取得コストゼロで手に入る。
   static void pend_context_switch() {
+    asm volatile("dmb" ::: "memory");
     *ppb::scb_icsr = 1u << 28; // PENDSVSET
+    asm volatile("dsb\nisb" ::: "memory");
   }
 
   // ---- メモリ保護 (機構だけ。どこに何を張るかは board の知識) ----------------
@@ -383,10 +404,9 @@ public:
   [[gnu::always_inline]] static inline void move_descriptor_arguments(exception_frame_t &frame) {
     frame.r0 = frame.r2;
   }
-  // S1: 将来の ARM in-place 復帰用型付き payload (r4-r11)。製品 ARM ではまだ未有効化。
-  struct inplace_payload_t {
-    uint32_t r4_r11[8] = {};
-  };
+  // Kept as a source-compatibility type for S1 fixture instantiations only.
+  // No context/ledger payload is connected in the caller-clobber ABI.
+  struct inplace_payload_t { uint32_t r4_r11[8] = {}; };
   // ★set_priv と同じ形 (Q8 / DESIGN §11.3)。ここでは値を持たせるだけで、
   //   実際に MPU region へ書くのは復帰の直前 (shizuku_restore_region_window)。
   //   limit==0 は「窓なし」。
@@ -396,8 +416,70 @@ public:
     context.region_limit = (uint32_t)limit;
   }
   static constexpr bool HAS_OBJECT_PROTECTION = true;
-  // 呼出しで呼び手の r4-r11 を特権の退避域へ移し、呼び先へは 0 で渡す (戻りで戻す)。
-  static constexpr bool SCRUB_CALLEE_SAVED_ON_CALL = true;
+  // The converter owns normal register preservation; only exception paths scrub.
+  static constexpr bool SCRUB_CALLEE_SAVED_ON_CALL = false;
+
+  static uintptr_t call_return_sp(const context_t &context) {
+    return psp_after_return(context);
+  }
+  static constexpr bool call_stack_has_room(uintptr_t sp, uintptr_t limit,
+                                             uintptr_t ceiling) {
+    const uintptr_t reserve = EXC_FRAME_MAX_BYTES + FAULT_CONTEXT_BYTES +
+                              CALL_HEADROOM + armv8m_abi::max_reservation_bytes +
+                              HANDLER_STACK_ARG_BYTES;
+    return (sp & 31u) == 0 && sp >= reserve &&
+           (ceiling == 0 || sp <= ceiling) && (limit == 0 || sp - reserve >= limit);
+  }
+  static bool call_header_has_room(const context_t &context, uint32_t) {
+    return call_stack_has_room(call_return_sp(context), context.psplim, context.stack_ceiling);
+  }
+  struct lazy_fp_state {
+    static void materialize() {
+      uint32_t fpscr;
+      asm volatile("vmrs %0, fpscr" : "=r"(fpscr) :: "memory");
+      (void)fpscr;
+    }
+  };
+  template <class FloatingPointState = lazy_fp_state>
+  static exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
+      uintptr_t sp, bool privileged, uintptr_t base, uintptr_t limit, bool scrub) {
+    const uint32_t bytes = exc_frame_bytes(context);
+    auto *next = reinterpret_cast<exception_frame_t *>(sp - bytes);
+    if (bytes != sizeof(exception_frame_t)) {
+      // Materialize any lazy FP frame before relocating its return-value slots.
+      FloatingPointState::materialize();
+      __builtin_memmove(reinterpret_cast<uint8_t *>(next) + sizeof(exception_frame_t),
+                        reinterpret_cast<uint8_t *>(context.sp) + sizeof(exception_frame_t),
+                        bytes - sizeof(exception_frame_t));
+    }
+    *next = exception_frame_t{};
+    next->pc = (uint32_t)pc;
+    next->xPSR = 1u << 24;
+    context.sp = next;
+    set_priv(context, privileged);
+    set_region_window(context, base, limit);
+    if (scrub) s_resume_scrub[core_slot()] = true;
+    return next;
+  }
+
+  static inline bool s_in_svc[2] = {};
+  static inline bool s_deferred_svc[2] = {};
+  static inline bool s_resume_scrub[2] = {};
+  static bool defer_svc_switch() {
+    const auto core = core_slot();
+    if (!s_in_svc[core]) return false;
+    s_deferred_svc[core] = true;
+    return true;
+  }
+  static bool take_deferred_svc() {
+    const auto core = core_slot();
+    const bool pending = s_deferred_svc[core];
+    s_deferred_svc[core] = false;
+    return pending;
+  }
+  static constexpr uint32_t shrink_stack_limit(uint32_t original, uintptr_t ceiling) {
+    return (uint32_t)((ceiling - 1) & ~uintptr_t(31)) | (original & 31u);
+  }
   // 貸与窓の RLAR.LIMIT: 排他的な終端 end を含む最後の 32B ブロックの先頭 (end-1 を 32B に切り下げ)。
   static constexpr uint32_t grant_window_limit(uintptr_t end) {
     return (uint32_t)((end - 1u) & ~(uintptr_t)0x1Fu);
@@ -467,78 +549,153 @@ public:
 
   static constexpr size_t kMaxObjectWindows = 72;  // OBJECT_COUNT (configs/kit.bzl) 以上にする
   static inline object_protection_window s_object_windows[kMaxObjectWindows] = {};
+  static inline uint32_t s_object_window_seq[kMaxObjectWindows] = {};
   // MPU は core ごとに持つので、「今 region 3/4 に張ってある窓の持ち主」も core ごとに覚える。
   static uint32_t core_slot() { return *(volatile const uint32_t *)0xD0000000u & 1u; }
   static inline uint32_t s_programmed_object[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
-  static inline uint32_t s_programmed_stack[2][2] = {};
+  static inline uint32_t s_programmed_object_seq[2] = {};
+
+  // region 2..5 (stack / data / MMIO / 貸与窓) にいま張ってある (RBAR, RLAR) も core ごとに覚え、
+  // 同じ値なら MPU へ書かない。無効な region は {0, 0} に正規化する (RLAR=0 のとき RBAR は意味を
+  // 持たない)。初期値は「未知」(どの実値とも一致しない) で、最初の 1 回は必ず書く。
+  // ★この 4 つの region への書込みは region_program だけを通すこと。直書きすると覚えた値と実機が
+  //   ずれ、以後の「同じだから書かない」が誤る。
+  struct region_shadow {
+    uint32_t rbar = 0xFFFFFFFFu;
+    uint32_t rlar = 0xFFFFFFFFu;
+  };
+  static inline region_shadow s_programmed_region[2][MpuRegionCount] = {};
+  // 書いたが DSB をまだ打っていない MPU 書込みがあるか (core ごと)。
+  static inline bool s_mpu_dirty[2] = {};
+
+  static constexpr mpu_window_entry canonical_region(uint32_t rbar, uint32_t rlar) {
+    return rlar == 0 ? mpu_window_entry{0, 0} : mpu_window_entry{rbar, rlar};
+  }
+  static constexpr bool region_matches(const region_shadow &shadow, uint32_t rbar, uint32_t rlar) {
+    const auto want = canonical_region(rbar, rlar);
+    return shadow.rbar == want.rbar && shadow.rlar == want.rlar;
+  }
+  // 貸与窓 (GRANT_REGION_INDEX) の値。end==0 は窓なし。RLAR.LIMIT は排他的な終端 end を含む
+  // 最後の 32B ブロック (grant_window_limit)。粒度の限界として、要求範囲の前後は最大 31B だけ
+  // 同じブロックの道連れで読めてしまい得る — 隣接ファイルとの間に 32B 以上の余白を置くのは
+  // 呼び出し側 (flash_fs のセクタ境界配置) の仕事。
+  static constexpr mpu_window_entry grant_window_entry(uintptr_t base, uintptr_t end) {
+    if (end == 0) return {0, 0};
+    return {((uint32_t)base & ~0x1Fu) | (ACCESS_RO_ALL << 1),
+            (grant_window_limit(end) & ~0x1Fu) | 1u};
+  }
+  // region index を (rbar, rlar) にする。覚えた値と同じなら何も書かず false。書いたら true
+  // (書込みの完了待ち DSB は mpu_sync が 1 度にまとめて打つ)。
+  [[gnu::always_inline]] static inline bool region_program(uint32_t core, uint32_t index,
+                                                           uint32_t rbar, uint32_t rlar) {
+    auto &shadow = s_programmed_region[core][index];
+    if (region_matches(shadow, rbar, rlar)) return false;
+    ppb::mpu->rnr = index;
+    if (rlar != 0) {
+      ppb::mpu->rbar = rbar;
+      ppb::mpu->rlar = rlar;
+    } else {
+      ppb::mpu->rlar = 0;
+    }
+    const auto want = canonical_region(rbar, rlar);
+    shadow.rbar = want.rbar;
+    shadow.rlar = want.rlar;
+    s_mpu_dirty[core] = true;
+    return true;
+  }
+  // 例外復帰の直前に 1 度だけ呼ぶ。この呼び出しまでの MPU 書込み (入場・復帰の窓、貸与窓、stack 窓)
+  // の完了を DSB で待つ。ISB は要らない (例外復帰が文脈同期イベント)。書込みが無ければ打たない。
+  // 書込みが DSB なしで残るのは、同じ core の次の mpu_sync までに限られる: 窓を動かす経路
+  // (SVC の入場・復帰、PendSV、スレッド復帰) はどれも armv8m_prepare_resume で終わる。
+  [[gnu::always_inline]] static inline void mpu_sync() {
+    const auto core = core_slot();
+    if (!s_mpu_dirty[core]) return;
+    s_mpu_dirty[core] = false;
+    asm volatile("dsb" ::: "memory");
+  }
+  [[gnu::always_inline]] static inline bool apply_grant_window(uintptr_t base, uintptr_t end) {
+    const auto entry = grant_window_entry(base, end);
+    return region_program(core_slot(), GRANT_REGION_INDEX, entry.rbar, entry.rlar);
+  }
 
   static void invalidate_active_object() {
     s_programmed_object[core_slot()] = 0xFFFFFFFFu;
   }
 
   static bool has_object_bounds(uint32_t object_id) {
-    if (object_id >= kMaxObjectWindows) return false;
-    return s_object_windows[object_id].owner_id != 0;
+    object_protection_window copy{};
+    uint32_t version;
+    return snapshot_object_window(object_id, copy, version) && copy.owner_id != 0;
   }
 
   static bool set_object_bounds(uint32_t object_id, uintptr_t data_base, uintptr_t data_limit,
                                 uintptr_t mmio_base, uintptr_t mmio_limit) {
     if (object_id >= kMaxObjectWindows) return false;
-    s_object_windows[object_id].owner_id = object_id;
-    s_object_windows[object_id].data = encode_data_window(data_base, data_limit);
-    s_object_windows[object_id].mmio = encode_mmio_window(mmio_base, mmio_limit);
+    auto &seq = s_object_window_seq[object_id];
+    uint32_t version = __atomic_load_n(&seq, __ATOMIC_ACQUIRE);
+    if ((version & 1u) || version >= UINT32_MAX - 1u ||
+        !__atomic_compare_exchange_n(&seq, &version, version + 1u, false,
+                                     __ATOMIC_SEQ_CST, __ATOMIC_RELAXED))
+      return false;
+    auto &window = s_object_windows[object_id];
+    const auto data = encode_data_window(data_base, data_limit);
+    const auto mmio = encode_mmio_window(mmio_base, mmio_limit);
+    __atomic_store_n(&window.owner_id, object_id, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&window.data.rbar, data.rbar, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&window.data.rlar, data.rlar, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&window.mmio.rbar, mmio.rbar, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&window.mmio.rlar, mmio.rlar, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&seq, version + 2u, __ATOMIC_RELEASE);
     return true;
   }
 
+  static bool snapshot_object_window(uint32_t id, object_protection_window &copy,
+                                     uint32_t &version) {
+    if (id >= kMaxObjectWindows) return false;
+    const uint32_t before = __atomic_load_n(&s_object_window_seq[id], __ATOMIC_SEQ_CST);
+    if (before & 1u) return false;
+    const auto &window = s_object_windows[id];
+    copy.owner_id = __atomic_load_n(&window.owner_id, __ATOMIC_SEQ_CST);
+    copy.data.rbar = __atomic_load_n(&window.data.rbar, __ATOMIC_SEQ_CST);
+    copy.data.rlar = __atomic_load_n(&window.data.rlar, __ATOMIC_SEQ_CST);
+    copy.mmio.rbar = __atomic_load_n(&window.mmio.rbar, __ATOMIC_SEQ_CST);
+    copy.mmio.rlar = __atomic_load_n(&window.mmio.rlar, __ATOMIC_SEQ_CST);
+    version = __atomic_load_n(&s_object_window_seq[id], __ATOMIC_SEQ_CST);
+    return before == version && !(version & 1u);
+  }
+
   // 窓の書込みは例外復帰の前にしか呼ばれない。例外復帰は文脈同期イベントなので ISB は要らず、
-  // 書込みの完了待ち (DSB) だけ置く。
+  // 書込みの完了待ち (DSB) は例外復帰の直前に mpu_sync が 1 度だけ打つ。
   static void apply_object_window(const object_protection_window &win) {
-    if (win.data.rlar != 0) {
-      ppb::mpu->rnr = REGION_DATA;
-      ppb::mpu->rbar = win.data.rbar;
-      ppb::mpu->rlar = win.data.rlar;
-    } else {
-      region_disable(REGION_DATA);
-    }
-    if (win.mmio.rlar != 0) {
-      ppb::mpu->rnr = REGION_MMIO;
-      ppb::mpu->rbar = win.mmio.rbar;
-      ppb::mpu->rlar = win.mmio.rlar;
-    } else {
-      region_disable(REGION_MMIO);
-    }
-    asm volatile("dsb" ::: "memory");
+    const auto core = core_slot();
+    region_program(core, REGION_DATA, win.data.rbar, win.data.rlar);
+    region_program(core, REGION_MMIO, win.mmio.rbar, win.mmio.rlar);
   }
 
   // 前回張った値と同じなら書かない (同じ thread へ戻る例外復帰は毎回ここを通る)。
   static void apply_stack_window(uint32_t rbar, uint32_t rlar) {
-    auto &cache = s_programmed_stack[core_slot()];
-    if (cache[0] == rbar && cache[1] == rlar) return;
-    if (rlar != 0) {
-      ppb::mpu->rnr = REGION_STACK;
-      ppb::mpu->rbar = rbar;
-      ppb::mpu->rlar = rlar;
-      asm volatile("dsb" ::: "memory");
-    } else {
-      region_disable(REGION_STACK);
-    }
-    cache[0] = rbar;
-    cache[1] = rlar;
+    region_program(core_slot(), REGION_STACK, rbar, rlar);
   }
 
   // 非特権の窓 (region 3/4) を id のものにする。すでにそうなら何も書かない。特権は PRIVDEFENA で
   // 全域に触れ、窓に制限されないので、特権の呼び先/呼び元のときは窓を触らない (呼ばない)。
   static void ensure_object_window(uint32_t id) {
-    uint32_t &programmed = s_programmed_object[core_slot()];
-    if (programmed == id) return;  // 同じ窓の組は書換えを省く
-    if (id >= kMaxObjectWindows) {
-      region_disable(REGION_DATA);
-      region_disable(REGION_MMIO);
+    const auto core = core_slot();
+    uint32_t &programmed = s_programmed_object[core];
+    uint32_t version = id < kMaxObjectWindows
+        ? __atomic_load_n(&s_object_window_seq[id], __ATOMIC_ACQUIRE) : 1u;
+    if (programmed == id && !(version & 1u) && s_programmed_object_seq[core] == version)
+      return;
+    object_protection_window copy{};
+    if (!snapshot_object_window(id, copy, version)) {
+      region_program(core, REGION_DATA, 0, 0);
+      region_program(core, REGION_MMIO, 0, 0);
       programmed = 0xFFFFFFFFu;
       return;
     }
-    apply_object_window(s_object_windows[id]);
+    apply_object_window(copy);
     programmed = id;
+    s_programmed_object_seq[core] = version;
   }
 
   template <class Frame>
@@ -596,23 +753,11 @@ public:
   // ---- syscall の発行口 ---------------------------------------------------
   // a0 = 番号 (Q1: 即値でなくレジスタ渡し。RISC-V の ecall に即値が無いため)。
   // レジスタを明示束縛するので、最適化レベルによらずオペランド割付が壊れない。
-  struct syscall_result {
-    uintptr_t error;
-    uintptr_t value;
-  };
-  static inline syscall_result syscall(uintptr_t number, uintptr_t a1 = 0,
+  using syscall_result = shizuku::armv8m_abi::result;
+  [[gnu::always_inline]] static inline syscall_result syscall(uintptr_t number, uintptr_t a1 = 0,
                                        uintptr_t a2 = 0, uintptr_t a3 = 0,
                                        uintptr_t a4 = 0) {
-    register uintptr_t r0 asm("r0") = number;
-    register uintptr_t r1 asm("r1") = a1;
-    register uintptr_t r2 asm("r2") = a2;
-    register uintptr_t r3 asm("r3") = a3;
-    register uintptr_t r12 asm("r12") = a4;
-    asm volatile("svc 0"
-                 : "+r"(r0), "+r"(r1)
-                 : "r"(r2), "r"(r3), "r"(r12)
-                 : "memory");
-    return {r0, r1};
+    return shizuku::armv8m_abi::syscall<>(number, a1, a2, a3, a4);
   }
 
   [[noreturn]] static void enter_thread_mode(uintptr_t stack_top,

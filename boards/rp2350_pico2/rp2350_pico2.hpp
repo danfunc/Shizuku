@@ -50,6 +50,7 @@ public:
   // 診断出力。現状は pico-sdk の printf 直行 (USB CDC)。
   // TODO(PORT §7): 「固まっても出る経路」(リング + タイマからの同期排出) へ置き換える。
   static void diag_printf(const char *format, ...) __attribute__((format(printf, 1, 2)));
+  static void diag_drain();
   [[noreturn]] static void panic(const char *message);
 };
 

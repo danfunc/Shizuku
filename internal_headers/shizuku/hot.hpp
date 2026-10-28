@@ -12,4 +12,10 @@
 #define SHIZUKU_HOT
 #endif
 
+#if defined(SHIZUKU_SVC_IN_RAM) && SHIZUKU_SVC_IN_RAM && defined(__ARM_ARCH_8M_MAIN__)
+#define SHIZUKU_SVC_RAM __attribute__((section(".time_critical.shizuku_svc")))
+#else
+#define SHIZUKU_SVC_RAM
+#endif
+
 #endif // SHIZUKU_HOT_HPP

@@ -48,7 +48,7 @@ void rp2350_pico2::init(uint32_t core) {
   if (core == 0) {
     // RAM ベクタテーブルは両コア共有: 登録は core0 の 1 回だけ
     // (exclusive 登録は二重登録で panic するため、core1 で再登録しない)。
-    exception_set_exclusive_handler(SVCALL_EXCEPTION, shizuku_armv8m_svc_entry);
+    exception_set_exclusive_handler(SVCALL_EXCEPTION, shizuku_armv8m_svc_handler);
     exception_set_exclusive_handler(PENDSV_EXCEPTION,
                                     shizuku_armv8m_pendsv_entry);
     exception_set_exclusive_handler(SYSTICK_EXCEPTION,
@@ -170,6 +170,11 @@ void rp2350_pico2::diag_printf(const char *format, ...) {
   if (length > 0)
     objects::usb_cdc_diag_write_line(line, (uint32_t)length);
   shizuku::kernel_services::irq_restore(state);
+}
+
+void rp2350_pico2::diag_drain() {
+  objects::usb_cdc_flush(0);
+  ::sleep_ms(2);
 }
 
 void rp2350_pico2::panic(const char *message) {

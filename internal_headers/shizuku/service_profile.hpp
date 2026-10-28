@@ -2,6 +2,11 @@
 #define SHIZUKU_SERVICE_PROFILE_HPP
 #include <cstdint>
 namespace shizuku::service_profile {
+#if SHIZUKU_KERNEL_SERVICE_PROFILE
+inline constexpr bool enabled = true;
+#else
+inline constexpr bool enabled = false;
+#endif
 struct maxima {
   uint32_t handler_max = 0, handler_samples = 0;
   uint32_t mask_max = 0, mask_samples = 0;
