@@ -25,6 +25,8 @@ namespace shizuku {
   ARCH::apply_stack_window(thread.stack_rbar, stack_limit);
   if (ARCH::context_unprivileged(*context))
     ARCH::switch_caller_protection(thread.identity_object());
+  // 入場・復帰で張った窓と、ここまでの貸与窓・stack 窓の書込みを、例外復帰の前に 1 度で待つ。
+  ARCH::mpu_sync();
   return context;
 }
 

@@ -79,6 +79,7 @@ extern "C" SHIZUKU_SVC_RAM void shizuku_restore_region_window() {
   // 特権へ戻るときは窓を触らない: 特権は窓に制限されず、次に非特権へ入るときに張り直す。
   if (ARCH::context_unprivileged(*context))
     ARCH::switch_caller_protection(thread.identity_object());
+  ARCH::mpu_sync();
 }
 
 // タイマ例外。文脈を触らないので普通の C 関数でよい — ここは期限を見て

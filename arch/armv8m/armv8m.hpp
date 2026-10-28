@@ -565,6 +565,8 @@ public:
     uint32_t rlar = 0xFFFFFFFFu;
   };
   static inline region_shadow s_programmed_region[2][MpuRegionCount] = {};
+  // 書いたが DSB をまだ打っていない MPU 書込みがあるか (core ごと)。
+  static inline bool s_mpu_dirty[2] = {};
 
   static constexpr mpu_window_entry canonical_region(uint32_t rbar, uint32_t rlar) {
     return rlar == 0 ? mpu_window_entry{0, 0} : mpu_window_entry{rbar, rlar};
@@ -583,7 +585,7 @@ public:
             (grant_window_limit(end) & ~0x1Fu) | 1u};
   }
   // region index を (rbar, rlar) にする。覚えた値と同じなら何も書かず false。書いたら true
-  // (書込みの完了待ち DSB は呼び手の責任)。
+  // (書込みの完了待ち DSB は mpu_sync が 1 度にまとめて打つ)。
   [[gnu::always_inline]] static inline bool region_program(uint32_t core, uint32_t index,
                                                            uint32_t rbar, uint32_t rlar) {
     auto &shadow = s_programmed_region[core][index];
@@ -598,7 +600,18 @@ public:
     const auto want = canonical_region(rbar, rlar);
     shadow.rbar = want.rbar;
     shadow.rlar = want.rlar;
+    s_mpu_dirty[core] = true;
     return true;
+  }
+  // 例外復帰の直前に 1 度だけ呼ぶ。この呼び出しまでの MPU 書込み (入場・復帰の窓、貸与窓、stack 窓)
+  // の完了を DSB で待つ。ISB は要らない (例外復帰が文脈同期イベント)。書込みが無ければ打たない。
+  // 書込みが DSB なしで残るのは、同じ core の次の mpu_sync までに限られる: 窓を動かす経路
+  // (SVC の入場・復帰、PendSV、スレッド復帰) はどれも armv8m_prepare_resume で終わる。
+  [[gnu::always_inline]] static inline void mpu_sync() {
+    const auto core = core_slot();
+    if (!s_mpu_dirty[core]) return;
+    s_mpu_dirty[core] = false;
+    asm volatile("dsb" ::: "memory");
   }
   [[gnu::always_inline]] static inline bool apply_grant_window(uintptr_t base, uintptr_t end) {
     const auto entry = grant_window_entry(base, end);
@@ -652,18 +665,16 @@ public:
   }
 
   // 窓の書込みは例外復帰の前にしか呼ばれない。例外復帰は文脈同期イベントなので ISB は要らず、
-  // 書込みの完了待ち (DSB) だけ置く。
+  // 書込みの完了待ち (DSB) は例外復帰の直前に mpu_sync が 1 度だけ打つ。
   static void apply_object_window(const object_protection_window &win) {
     const auto core = core_slot();
     region_program(core, REGION_DATA, win.data.rbar, win.data.rlar);
     region_program(core, REGION_MMIO, win.mmio.rbar, win.mmio.rlar);
-    asm volatile("dsb" ::: "memory");
   }
 
   // 前回張った値と同じなら書かない (同じ thread へ戻る例外復帰は毎回ここを通る)。
   static void apply_stack_window(uint32_t rbar, uint32_t rlar) {
-    if (region_program(core_slot(), REGION_STACK, rbar, rlar))
-      asm volatile("dsb" ::: "memory");
+    region_program(core_slot(), REGION_STACK, rbar, rlar);
   }
 
   // 非特権の窓 (region 3/4) を id のものにする。すでにそうなら何も書かない。特権は PRIVDEFENA で
