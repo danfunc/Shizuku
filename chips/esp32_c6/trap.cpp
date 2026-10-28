@@ -678,6 +678,11 @@ static uintptr_t s_u_ecall_frame_latch = 0;
 [[gnu::always_inline]] inline void record_u_mode_ecall_diag(const arch::exception_frame_t *frame) {
   arch::record_u_mode_ecall_diag(*frame, shizuku_c6_u_ecall_diag, shizuku_c6_u_mode_diag, &s_u_ecall_frame_latch);
 }
+// ecall_direct は 1 つの trap でこの記録を 1 回しか行わない (記録の後に別の記録点へ回らない) ので、
+// 同じ frame の二重記録を防ぐ latch (読み・書き・戻りでの消去) は要らない。
+[[gnu::always_inline]] inline void record_u_mode_ecall_diag_once(const arch::exception_frame_t *frame) {
+  arch::record_u_mode_ecall_diag(*frame, shizuku_c6_u_ecall_diag, shizuku_c6_u_mode_diag);
+}
 #endif
 template <class Body>
 SHIZUKU_HOT inline arch::exception_frame_t *ecall_run(arch::exception_frame_t *frame, Body body) {
@@ -772,9 +777,6 @@ __attribute__((noinline, noipa)) arch::exception_frame_t *ecall_fault_unprivileg
     result->mstatus = (result->mstatus & ~RV32_MSTATUS_MPP) | RV32_MSTATUS_MPIE;
     context_to_frame(*context);
   }
-#if defined(SHIZUKU_C6_UMODE)
-  s_u_ecall_frame_latch = 0;
-#endif
   return result;
 }
 // 本体が kobj へ回した (スレッドの最外のメソッドが戻る・起点スレッドの YIELD): dispatch 段を積んで
@@ -808,7 +810,7 @@ SHIZUKU_HOT [[gnu::always_inline]] inline arch::exception_frame_t *ecall_direct(
   auto &thread = kernel.current_thread();
   if (__builtin_expect(!kernel.svc_native_route_of(thread), 0)) return ecall_other(frame);
 #if defined(SHIZUKU_C6_UMODE)
-  record_u_mode_ecall_diag(frame);
+  record_u_mode_ecall_diag_once(frame);
 #endif
   arch::context_t *context = thread.context;
   context->sp = frame;

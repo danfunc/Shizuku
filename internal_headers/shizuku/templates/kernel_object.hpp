@@ -221,6 +221,17 @@ public:
       return copy;
     }
   }
+  // 世代の acquire 読み。単一コアでは書き手は同じコアの割込みだけで、ハードの並べ替えは見えない
+  // (native_call の seq と同じ) ので、ハードの fence (RV32 では fence r,rw) を出さず、コンパイラの順序だけ保つ。
+  static uint32_t generation_load_acquire(volatile uint32_t *address) {
+    if constexpr (KERNEL::CORE_COUNT == 1) {
+      const uint32_t value = __atomic_load_n(address, __ATOMIC_RELAXED);
+      __atomic_signal_fence(__ATOMIC_ACQUIRE);
+      return value;
+    } else {
+      return ARCH::load_acquire32(address);
+    }
+  }
   template <class T> static void row_store(T &value, T next) {
     if constexpr (KERNEL::CORE_COUNT == 1) value = next;
     else __atomic_store(&value, &next, __ATOMIC_SEQ_CST);
@@ -427,13 +438,13 @@ public:
   uint32_t object_protection(uintptr_t id) const;
   uint32_t object_generation(uintptr_t id) const {
     return id < OBJECT_COUNT_T
-               ? ARCH::load_acquire32(const_cast<volatile uint32_t *>(
+               ? generation_load_acquire(const_cast<volatile uint32_t *>(
                      &m_objects[id].instance_generation))
                : 0;
   }
   uint32_t object_version(uintptr_t id) const {
     return id < OBJECT_COUNT_T
-               ? ARCH::load_acquire32(const_cast<volatile uint32_t *>(
+               ? generation_load_acquire(const_cast<volatile uint32_t *>(
                      &m_objects[id].generation))
                : 0;
   }
@@ -662,7 +673,7 @@ public:
   }
   // 行から世代を読む (object_generation(id) と同じ読み方。id の範囲検査は行を引いた側が済ませている)。
   template <class Row> uint32_t instance_generation_of(const Row &row) const {
-    return ARCH::load_acquire32(const_cast<volatile uint32_t *>(&row.instance_generation));
+    return generation_load_acquire(const_cast<volatile uint32_t *>(&row.instance_generation));
   }
   // 表の錠の inline 版 (table_lock / table_unlock と同じ CAS。区間は短く syscall を含まない)。
   // trap 内の直接 call が関数呼出しなしで取る。診断用の breadcrumb は付けない。
