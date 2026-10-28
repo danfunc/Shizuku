@@ -57,7 +57,9 @@ template <class Thread>
   asm volatile("mrs %0, control" : "=r"(next_control));
   next_control = (next_control & ~1u) | (context->control & 1u);
   probe(5, exc_return, api);
-  asm volatile("msr psp, %0\nmsr psplim, %1\nmsr control, %2\nisb"
+  // No ISB: the exception return that follows is a context synchronization event, and
+  // CONTROL.nPRIV only matters to Thread mode (the handler stays privileged).
+  asm volatile("msr psp, %0\nmsr psplim, %1\nmsr control, %2"
       :: "r"(context->sp), "r"(context->psplim), "r"(next_control) : "memory");
   probe(6, exc_return, api);
 }

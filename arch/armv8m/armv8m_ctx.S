@@ -119,7 +119,8 @@
     and  r1, r1, #1
     orr  r2, r2, r1
     msr  CONTROL, r2
-    isb
+    // ISB は置かない: この後の例外復帰が文脈同期イベントで、nPRIV はスレッドモードにだけ効く
+    // (ハンドラモードは常に特権)。FPCA は上の read-modify-write で保たれる。
 
 #if defined(__ARM_FP)
     // 復帰対象が拡張(FP)フレームなら S16-S31 を復元する。
