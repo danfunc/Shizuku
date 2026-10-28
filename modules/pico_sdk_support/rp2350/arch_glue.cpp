@@ -70,18 +70,8 @@ extern "C" SHIZUKU_SVC_RAM void shizuku_arm_pending_step() {
 extern "C" SHIZUKU_SVC_RAM void shizuku_restore_region_window() {
   using ARCH = shizuku::archs::armv8m<shizuku::chips::rp2350::chip::kMpuRegionCount,shizuku::chips::rp2350::chip::kNvicPriorityBits>;
   const auto *context = shizuku::kernel_instance.current_context();
-  if (context->region_limit != 0) {
-    // ★PMSAv8 は 32B 粒度。RLAR.LIMIT は**含む側の最後の 32B ブロック**なので、排他的な終端から
-    //   1 を引いたバイトを含むブロックを指す (grant_window_limit)。終端をそのまま入れると
-    //   隣の 32B ブロックまで開いてしまう。粒度の限界として、要求範囲の前後は最大 31B だけ
-    //   同じブロックの道連れで読めてしまい得る — 隣接ファイルとの間に 32B 以上の余白を置くのは
-    //   呼び出し側 (flash_fs のセクタ境界配置) の仕事。
-    const uint32_t limit = ARCH::grant_window_limit(context->region_limit);
-    ARCH::region_set(ARCH::GRANT_REGION_INDEX, context->region_base, limit,
-                     ARCH::ACCESS_RO_ALL, false, 0);
-  } else {
-    ARCH::region_disable(ARCH::GRANT_REGION_INDEX);
-  }
+  // ★PMSAv8 は 32B 粒度。RLAR.LIMIT の取り方は grant_window_entry の注釈を見よ。
+  ARCH::apply_grant_window(context->region_base, context->region_limit);
   const auto &thread = shizuku::kernel_instance.current_thread();
   ARCH::apply_stack_window(thread.stack_rbar, thread.stack_rlar);
 

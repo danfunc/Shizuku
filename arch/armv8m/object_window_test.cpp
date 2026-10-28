@@ -83,6 +83,38 @@ int main() {
     assert(!arch::snapshot_object_window(arch::kMaxObjectWindows, copy, version));
   }
 
+  // ---- 貸与窓の値: region_set(GRANT, RO_ALL, XN なし, Attr0) が作っていた RBAR/RLAR と同じ ----
+  {
+    const auto g = arch::grant_window_entry(0x10100010u, 0x10100100u);
+    assert(g.rbar == (0x10100000u | (arch::ACCESS_RO_ALL << 1)));  // base は 32B に切り下げ、XN=0
+    assert(g.rlar == (arch::grant_window_limit(0x10100100u) | 1u));  // Attr0, Enable=1
+    assert((g.rlar & ~0x1Fu) == 0x101000E0u);  // 排他的な終端 0x...100 の手前のブロック
+    // end==0 は窓なし: 無効 {0, 0}。
+    const auto none = arch::grant_window_entry(0x10100000u, 0);
+    assert(none.rbar == 0 && none.rlar == 0);
+  }
+
+  // ---- 張ってある値の覚え: 同じなら書かない / 違えば書く / 無効は rbar を問わず同じ ----
+  {
+    // 初期値は「未知」: どの実値 (無効 {0,0} を含む) とも一致しない = 最初の 1 回は必ず書く。
+    const arch::region_shadow unknown{};
+    assert(!arch::region_matches(unknown, 0, 0));
+    assert(!arch::region_matches(unknown, 0x20010000u, 0x20010041u));
+    const arch::region_shadow programmed{0x20010000u | 2u, 0x20010040u | 1u};
+    assert(arch::region_matches(programmed, 0x20010000u | 2u, 0x20010040u | 1u));
+    // rbar か rlar のどちらか一方が違っても書き直す (取り違えると前の窓が残る)。
+    assert(!arch::region_matches(programmed, 0x20020000u | 2u, 0x20010040u | 1u));
+    assert(!arch::region_matches(programmed, 0x20010000u | 2u, 0x20010080u | 1u));
+    // 無効 (rlar==0) 同士は rbar が違っても同じ。無効 → 有効、有効 → 無効は違う。
+    const arch::region_shadow off{0, 0};
+    assert(arch::region_matches(off, 0, 0));
+    assert(arch::region_matches(off, 0x20010000u, 0));
+    assert(!arch::region_matches(off, 0x20010000u, 0x20010041u));
+    assert(!arch::region_matches(programmed, 0x20010000u | 2u, 0));
+    const auto canon = arch::canonical_region(0x20010000u, 0);
+    assert(canon.rbar == 0 && canon.rlar == 0);
+  }
+
   // ---- 戻り先の権威: 台帳に記録した値がそのまま復元され、範囲外は false ----
   {
     static shizuku::caller_return_record records[34];

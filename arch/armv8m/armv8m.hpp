@@ -554,7 +554,56 @@ public:
   static uint32_t core_slot() { return *(volatile const uint32_t *)0xD0000000u & 1u; }
   static inline uint32_t s_programmed_object[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
   static inline uint32_t s_programmed_object_seq[2] = {};
-  static inline uint32_t s_programmed_stack[2][2] = {};
+
+  // region 2..5 (stack / data / MMIO / 貸与窓) にいま張ってある (RBAR, RLAR) も core ごとに覚え、
+  // 同じ値なら MPU へ書かない。無効な region は {0, 0} に正規化する (RLAR=0 のとき RBAR は意味を
+  // 持たない)。初期値は「未知」(どの実値とも一致しない) で、最初の 1 回は必ず書く。
+  // ★この 4 つの region への書込みは region_program だけを通すこと。直書きすると覚えた値と実機が
+  //   ずれ、以後の「同じだから書かない」が誤る。
+  struct region_shadow {
+    uint32_t rbar = 0xFFFFFFFFu;
+    uint32_t rlar = 0xFFFFFFFFu;
+  };
+  static inline region_shadow s_programmed_region[2][MpuRegionCount] = {};
+
+  static constexpr mpu_window_entry canonical_region(uint32_t rbar, uint32_t rlar) {
+    return rlar == 0 ? mpu_window_entry{0, 0} : mpu_window_entry{rbar, rlar};
+  }
+  static constexpr bool region_matches(const region_shadow &shadow, uint32_t rbar, uint32_t rlar) {
+    const auto want = canonical_region(rbar, rlar);
+    return shadow.rbar == want.rbar && shadow.rlar == want.rlar;
+  }
+  // 貸与窓 (GRANT_REGION_INDEX) の値。end==0 は窓なし。RLAR.LIMIT は排他的な終端 end を含む
+  // 最後の 32B ブロック (grant_window_limit)。粒度の限界として、要求範囲の前後は最大 31B だけ
+  // 同じブロックの道連れで読めてしまい得る — 隣接ファイルとの間に 32B 以上の余白を置くのは
+  // 呼び出し側 (flash_fs のセクタ境界配置) の仕事。
+  static constexpr mpu_window_entry grant_window_entry(uintptr_t base, uintptr_t end) {
+    if (end == 0) return {0, 0};
+    return {((uint32_t)base & ~0x1Fu) | (ACCESS_RO_ALL << 1),
+            (grant_window_limit(end) & ~0x1Fu) | 1u};
+  }
+  // region index を (rbar, rlar) にする。覚えた値と同じなら何も書かず false。書いたら true
+  // (書込みの完了待ち DSB は呼び手の責任)。
+  [[gnu::always_inline]] static inline bool region_program(uint32_t core, uint32_t index,
+                                                           uint32_t rbar, uint32_t rlar) {
+    auto &shadow = s_programmed_region[core][index];
+    if (region_matches(shadow, rbar, rlar)) return false;
+    ppb::mpu->rnr = index;
+    if (rlar != 0) {
+      ppb::mpu->rbar = rbar;
+      ppb::mpu->rlar = rlar;
+    } else {
+      ppb::mpu->rlar = 0;
+    }
+    const auto want = canonical_region(rbar, rlar);
+    shadow.rbar = want.rbar;
+    shadow.rlar = want.rlar;
+    return true;
+  }
+  [[gnu::always_inline]] static inline bool apply_grant_window(uintptr_t base, uintptr_t end) {
+    const auto entry = grant_window_entry(base, end);
+    return region_program(core_slot(), GRANT_REGION_INDEX, entry.rbar, entry.rlar);
+  }
 
   static void invalidate_active_object() {
     s_programmed_object[core_slot()] = 0xFFFFFFFFu;
@@ -605,37 +654,16 @@ public:
   // 窓の書込みは例外復帰の前にしか呼ばれない。例外復帰は文脈同期イベントなので ISB は要らず、
   // 書込みの完了待ち (DSB) だけ置く。
   static void apply_object_window(const object_protection_window &win) {
-    if (win.data.rlar != 0) {
-      ppb::mpu->rnr = REGION_DATA;
-      ppb::mpu->rbar = win.data.rbar;
-      ppb::mpu->rlar = win.data.rlar;
-    } else {
-      region_disable(REGION_DATA);
-    }
-    if (win.mmio.rlar != 0) {
-      ppb::mpu->rnr = REGION_MMIO;
-      ppb::mpu->rbar = win.mmio.rbar;
-      ppb::mpu->rlar = win.mmio.rlar;
-    } else {
-      region_disable(REGION_MMIO);
-    }
+    const auto core = core_slot();
+    region_program(core, REGION_DATA, win.data.rbar, win.data.rlar);
+    region_program(core, REGION_MMIO, win.mmio.rbar, win.mmio.rlar);
     asm volatile("dsb" ::: "memory");
   }
 
   // 前回張った値と同じなら書かない (同じ thread へ戻る例外復帰は毎回ここを通る)。
   static void apply_stack_window(uint32_t rbar, uint32_t rlar) {
-    auto &cache = s_programmed_stack[core_slot()];
-    if (cache[0] == rbar && cache[1] == rlar) return;
-    if (rlar != 0) {
-      ppb::mpu->rnr = REGION_STACK;
-      ppb::mpu->rbar = rbar;
-      ppb::mpu->rlar = rlar;
+    if (region_program(core_slot(), REGION_STACK, rbar, rlar))
       asm volatile("dsb" ::: "memory");
-    } else {
-      region_disable(REGION_STACK);
-    }
-    cache[0] = rbar;
-    cache[1] = rlar;
   }
 
   // 非特権の窓 (region 3/4) を id のものにする。すでにそうなら何も書かない。特権は PRIVDEFENA で
@@ -649,8 +677,8 @@ public:
       return;
     object_protection_window copy{};
     if (!snapshot_object_window(id, copy, version)) {
-      region_disable(REGION_DATA);
-      region_disable(REGION_MMIO);
+      region_program(core, REGION_DATA, 0, 0);
+      region_program(core, REGION_MMIO, 0, 0);
       programmed = 0xFFFFFFFFu;
       return;
     }

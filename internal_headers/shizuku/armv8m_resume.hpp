@@ -12,12 +12,7 @@ namespace shizuku {
   auto &thread = kernel.current_thread();
   auto *context = thread.context;
   kernel.consume_pending_step();
-  if (context->region_limit != 0) {
-    ARCH::region_set(ARCH::GRANT_REGION_INDEX, context->region_base,
-        ARCH::grant_window_limit(context->region_limit), ARCH::ACCESS_RO_ALL, false, 0);
-  } else {
-    ARCH::region_disable(ARCH::GRANT_REGION_INDEX);
-  }
+  ARCH::apply_grant_window(context->region_base, context->region_limit);
   uint32_t stack_limit = thread.stack_rlar;
   if (thread.call_stack.depth != 0) {
     const uintptr_t ceiling = thread.ledger[thread.call_stack.depth - 1].ret_sp;
