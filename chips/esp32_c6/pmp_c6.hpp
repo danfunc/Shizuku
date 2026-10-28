@@ -84,6 +84,9 @@ struct c6_stage1_object_bounds {
   // precomputed を作り直すたびに進める版。trap 側の「今入っている固有 PMP」cache は
   // (bounds, pmp_epoch) の組で照合するので、同じ bounds の中身を書き換えても古い窓が残らない。
   uint32_t pmp_epoch = 0;
+  // bounds だけで決まる U 復帰前の検査が通った版。pmp_epoch と一致していれば検査を省く。
+  // 初期値は到達しえない値にして、update_precomputed() 前の bounds を通さない。
+  uint32_t static_ok_epoch = 0xFFFFFFFFu;
 
   constexpr void update_precomputed() noexcept {
     precomputed = precompute_object_pmp(

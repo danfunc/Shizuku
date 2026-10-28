@@ -423,6 +423,29 @@ SHIZUKU_HOT void frame_to_context(arch::exception_frame_t &f, arch::context_t &c
   c.sp = &f;
   arch::set_context_privilege_from_frame(c, f);
 }
+#if defined(SHIZUKU_C6_UMODE)
+// bounds だけで決まる U 復帰前の検査 (fail-closed)。context_to_frame が版ごとに 1 回呼ぶ。
+__attribute__((noinline)) static bool bounds_static_ok(const c6_stage1_object_bounds &b) {
+  namespace pmp = shizuku::chips::esp32_c6;
+  // App オブジェクトは MMIO 窓を持つことができない
+  if (b.role == pmp::c6_stage1_role::App && b.mmio_limit != 0) return false;
+  if (b.code_base == 0 || b.code_limit <= b.code_base) return false;
+  // U return trampoline がオブジェクト所有 code 範囲内にあること
+  if (b.u_return_trampoline < b.code_base || b.u_return_trampoline >= b.code_limit) return false;
+  // スタック境界
+  if (b.stack_base == 0 || b.stack_limit <= b.stack_base) return false;
+  const uintptr_t mk_lo = reinterpret_cast<uintptr_t>(&shizuku_c6_stage1_pma_ready);
+  const uintptr_t mk_hi = mk_lo + sizeof(shizuku_c6_stage1_pma_ready);
+  if (pmp::pmp_controller::ranges_overlap(b.code_base, b.code_limit, mk_lo, mk_hi) ||
+      pmp::pmp_controller::ranges_overlap(b.stack_base, b.stack_limit, mk_lo, mk_hi) ||
+      (b.data_limit != 0 && pmp::pmp_controller::ranges_overlap(b.data_base, b.data_limit, mk_lo, mk_hi)) ||
+      (b.mmio_limit != 0 && pmp::pmp_controller::ranges_overlap(b.mmio_base, b.mmio_limit, mk_lo, mk_hi))) {
+    return false;
+  }
+  return true;
+}
+#endif
+
 SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
   auto &f = *c.sp;
   // Threads always resume with interrupts enabled; only the kernel runs with MIE=0.
@@ -444,7 +467,7 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
       stop(0xE004); // PMA ready marker 欠落 → fail-closed
     }
     const uint32_t cur_obj = kernel.current_thread().current_object();
-    const c6_stage1_object_bounds *bounds = nullptr;
+    c6_stage1_object_bounds *bounds = nullptr;
     if (g_c6_stage1_u_bounds.owner_id != 0 && cur_obj == g_c6_stage1_u_bounds.owner_id) {
       bounds = &g_c6_stage1_u_bounds;
     } else if (g_c6_stage1_driver_bounds.owner_id != 0 && cur_obj == g_c6_stage1_driver_bounds.owner_id) {
@@ -458,14 +481,16 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
       stop(0xE004); // 未認可または未知の U object
     }
 
-    // Role 検査: App オブジェクトは MMIO 窓を持つことができない (fail-closed)
-    if (bounds->role == shizuku::chips::esp32_c6::c6_stage1_role::App) {
-      if (bounds->mmio_limit != 0) {
+    // bounds だけで決まる検査 (role・code/trampoline/stack の形・PMA marker との非重複) は
+    // bounds の版 (pmp_epoch) ごとに 1 回だけ行う。bounds の中身は update_precomputed() で版が進む。
+    if (__builtin_expect(bounds->static_ok_epoch != bounds->pmp_epoch, 0)) {
+      if (!bounds_static_ok(*bounds)) {
         active_context = &c;
         active_frame = c.sp;
         active_stop_phase = 0xE004u;
         stop(0xE004);
       }
+      bounds->static_ok_epoch = bounds->pmp_epoch;
     }
 
     const uintptr_t code_base = bounds->code_base;
@@ -479,15 +504,8 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
     const uintptr_t mmio_limit = bounds->mmio_limit;
 
     // mepc がオブジェクト所有 code 範囲内にあることを厳格検査
-    if (code_base == 0 || code_limit <= code_base || f.mepc < code_base || f.mepc >= code_limit) {
-      active_context = &c;
-      active_frame = c.sp;
-      active_stop_phase = 0xE004u;
-      stop(0xE004);
-    }
-
-    // U return trampoline がオブジェクト所有 code 範囲内にあることを厳格検査
-    if (trampoline < code_base || trampoline >= code_limit) {
+    // (code_base != 0 && code_limit > code_base は bounds_static_ok で検査済み)
+    if (f.mepc < code_base || f.mepc >= code_limit) {
       active_context = &c;
       active_frame = c.sp;
       active_stop_phase = 0xE004u;
@@ -499,14 +517,6 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
       f.ra = trampoline;
     }
 
-    // スタック境界の厳格検査
-    if (stack_base == 0 || stack_limit <= stack_base) {
-      active_context = &c;
-      active_frame = c.sp;
-      active_stop_phase = 0xE004u;
-      stop(0xE004);
-    }
-
     // active SP (f.reserved0) の設定および検証:
     if (f.reserved0 < stack_base || f.reserved0 > stack_limit) {
       f.reserved0 = stack_limit;
@@ -516,15 +526,12 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
     const uintptr_t kstack_top = reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack + sizeof(shizuku_c6_kernel_stack));
     f.reserved1 = kstack_top;
 
-    // PMA ready marker は U が読書きできない範囲になければならない
-    {
+    // PMA ready marker は U が読書きできない範囲になければならない。
+    // code/stack/data/mmio は bounds_static_ok で検査済み。共有窓は context ごとなので毎回見る。
+    if (c.region_limit != 0) {
       const uintptr_t mk_lo = reinterpret_cast<uintptr_t>(&shizuku_c6_stage1_pma_ready);
       const uintptr_t mk_hi = mk_lo + sizeof(shizuku_c6_stage1_pma_ready);
-      if (shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(code_base, code_limit, mk_lo, mk_hi) ||
-          shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(stack_base, stack_limit, mk_lo, mk_hi) ||
-          (data_limit != 0 && shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(data_base, data_limit, mk_lo, mk_hi)) ||
-          (c.region_limit != 0 && shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(c.region_base, c.region_limit, mk_lo, mk_hi)) ||
-          (mmio_limit != 0 && shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(mmio_base, mmio_limit, mk_lo, mk_hi))) {
+      if (shizuku::chips::esp32_c6::pmp_controller::ranges_overlap(c.region_base, c.region_limit, mk_lo, mk_hi)) {
         active_context = &c;
         active_frame = c.sp;
         active_stop_phase = 0xE004u;
