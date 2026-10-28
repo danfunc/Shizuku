@@ -155,15 +155,22 @@ uint64_t armed_target;
 uint32_t trap_probe_interval_count;
 // 固定 PMP エントリ (0-3: 共有コード・共有窓) に今入っている値。M へ戻るときの pmp_controller::disable() が
 // 消すので、そこと起動時に 0 へ戻し、U へ入るときに窓が変わっていれば張り直す。
-uintptr_t s_current_fixed_pmp_code_base = 0;
-uintptr_t s_current_fixed_pmp_code_limit = 0;
-uintptr_t s_current_fixed_pmp_region_base = 0;
-uintptr_t s_current_fixed_pmp_region_limit = 0;
-// 固有 PMP エントリ (4-9) に今入っている object の bounds。固定エントリと同じく、disable() の後と起動時に
+// fixed_*: 固定 PMP エントリ (0-3: 共有コード・共有窓) に今入っている値。M へ戻るときの
+// pmp_controller::disable() が消すので、そこと起動時に 0 へ戻し、U へ入るときに窓が変わっていれば張り直す。
+// bounds / epoch: 固有 PMP エントリ (4-9) に今入っている object の bounds。固定エントリと同じく、disable() の後と起動時に
 // nullptr へ戻す。同じ object で U へ戻るとき (切替えの無い ECALL など) は 8 本と fence を書かない。
 // bounds の precomputed が作り直されたとき (pmp_epoch が進む) も不一致になって書き直す。
-const void *s_current_pmp_bounds = nullptr;
-uint32_t s_current_pmp_epoch = 0;
+// 6 欄は U へ入るたびに全部読むので、1 つの構造体に置いて 1 つの基底レジスタで引く
+// (別々の変数だと欄ごとに lui を作り直す)。
+struct c6_pmp_shadow {
+  uintptr_t fixed_code_base;
+  uintptr_t fixed_code_limit;
+  uintptr_t fixed_region_base;
+  uintptr_t fixed_region_limit;
+  const void *bounds;
+  uint32_t epoch;
+};
+c6_pmp_shadow s_pmp_shadow = {};
 namespace c6 = shizuku::ports::c6;
 constexpr stop_capture::ram_range kC6Dram{0x40800000u, 0x40860000u};
 constexpr uint32_t kBootMarkerMagic = 0x424D3643u; // "C6MB"
@@ -446,6 +453,37 @@ __attribute__((noinline)) static bool bounds_static_ok(const c6_stage1_object_bo
 }
 #endif
 
+// M-mode への復帰。PMP の全読出し (disable) が大きな枠を要るので、U へ入る側 (U→U の往復で
+// 2 回通る) の枠・退避を太らせないよう別関数にしてある。
+__attribute__((noinline)) static void context_to_frame_to_m(arch::context_t &c, arch::exception_frame_t &f) {
+  f.reserved1 = 0;
+#if defined(SHIZUKU_C6_UMODE)
+  if (!shizuku::chips::esp32_c6::pmp_controller::disable()) {
+    active_context = &c;
+    active_frame = c.sp;
+    active_stop_phase = 0xE004u;
+    stop(0xE004);
+  }
+  // disable() が固定エントリも消したので、次に U へ入るとき張り直させる。
+  s_pmp_shadow = {};
+  const uintptr_t current_sp = f.reserved0 != 0
+      ? static_cast<uintptr_t>(f.reserved0)
+      : reinterpret_cast<uintptr_t>(c.sp) + RV32_FRAME_BYTES;
+  const uintptr_t new_sp = shizuku_c6_get_m_handler_stack(current_sp, reinterpret_cast<uintptr_t>(c.sp));
+  if (new_sp == 0) {
+    active_context = &c;
+    active_frame = c.sp;
+    active_stop_phase = 0xE004u;
+    stop(0xE004);
+  }
+  f.reserved0 = new_sp;
+#else
+  if (f.reserved0 == 0) {
+    f.reserved0 = reinterpret_cast<uintptr_t>(c.sp) + RV32_FRAME_BYTES;
+  }
+#endif
+}
+
 SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
   auto &f = *c.sp;
   // Threads always resume with interrupts enabled; only the kernel runs with MIE=0.
@@ -540,59 +578,30 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
     }
 
     // 固定エントリの初期化・更新 (M-mode 経由で PMP disable された後や、コード/共有窓切替時に再設定)
-    if (__builtin_expect(s_current_fixed_pmp_code_base != code_base ||
-                         s_current_fixed_pmp_code_limit != code_limit ||
-                         s_current_fixed_pmp_region_base != c.region_base ||
-                         s_current_fixed_pmp_region_limit != c.region_limit, 0)) {
+    auto &shadow = s_pmp_shadow;
+    if (__builtin_expect(shadow.fixed_code_base != code_base ||
+                         shadow.fixed_code_limit != code_limit ||
+                         shadow.fixed_region_base != c.region_base ||
+                         shadow.fixed_region_limit != c.region_limit, 0)) {
       shizuku::chips::esp32_c6::pmp_controller::init_fixed_entries(
           code_base, code_limit, c.region_base, c.region_limit);
-      s_current_fixed_pmp_code_base = code_base;
-      s_current_fixed_pmp_code_limit = code_limit;
-      s_current_fixed_pmp_region_base = c.region_base;
-      s_current_fixed_pmp_region_limit = c.region_limit;
+      shadow.fixed_code_base = code_base;
+      shadow.fixed_code_limit = code_limit;
+      shadow.fixed_region_base = c.region_base;
+      shadow.fixed_region_limit = c.region_limit;
     }
 
     // オブジェクト固有エントリへの切替え (前計算済み 8 本の CSR のみ書込み、固定エントリは触らない)。
     // CALL / RETURN の切替え (enter_u_object / switch_object_pmp) はここで書くので、U へ戻る書込みは
     // 1 往復につきここ 1 回だけ。今の bounds が入っているなら書かない。
-    if (__builtin_expect(s_current_pmp_bounds != bounds || s_current_pmp_epoch != bounds->pmp_epoch, 1)) {
+    if (__builtin_expect(shadow.bounds != bounds || shadow.epoch != bounds->pmp_epoch, 1)) {
       shizuku::chips::esp32_c6::pmp_controller::switch_to_precomputed(bounds->precomputed);
-      s_current_pmp_bounds = bounds;
-      s_current_pmp_epoch = bounds->pmp_epoch;
+      shadow.bounds = bounds;
+      shadow.epoch = bounds->pmp_epoch;
     }
 #endif
   } else {
-    // M-mode への復帰:
-    f.reserved1 = 0;
-#if defined(SHIZUKU_C6_UMODE)
-    if (!shizuku::chips::esp32_c6::pmp_controller::disable()) {
-      active_context = &c;
-      active_frame = c.sp;
-      active_stop_phase = 0xE004u;
-      stop(0xE004);
-    }
-    // disable() が固定エントリも消したので、次に U へ入るとき張り直させる。
-    s_current_fixed_pmp_code_base = 0;
-    s_current_fixed_pmp_code_limit = 0;
-    s_current_fixed_pmp_region_base = 0;
-    s_current_fixed_pmp_region_limit = 0;
-    s_current_pmp_bounds = nullptr;
-    const uintptr_t current_sp = f.reserved0 != 0
-        ? static_cast<uintptr_t>(f.reserved0)
-        : reinterpret_cast<uintptr_t>(c.sp) + RV32_FRAME_BYTES;
-    const uintptr_t new_sp = shizuku_c6_get_m_handler_stack(current_sp, reinterpret_cast<uintptr_t>(c.sp));
-    if (new_sp == 0) {
-      active_context = &c;
-      active_frame = c.sp;
-      active_stop_phase = 0xE004u;
-      stop(0xE004);
-    }
-    f.reserved0 = new_sp;
-#else
-    if (f.reserved0 == 0) {
-      f.reserved0 = reinterpret_cast<uintptr_t>(c.sp) + RV32_FRAME_BYTES;
-    }
-#endif
+    context_to_frame_to_m(c, f);
   }
 }
 }
@@ -610,11 +619,7 @@ extern "C" void shizuku_c6_mark_boot_phase(uint32_t phase) {
     active_stop_phase = 0u;
     stack_diag_init();
     trap_probe_interval_count = 0u;
-    s_current_fixed_pmp_code_base = 0;
-    s_current_fixed_pmp_code_limit = 0;
-    s_current_fixed_pmp_region_base = 0;
-    s_current_fixed_pmp_region_limit = 0;
-    s_current_pmp_bounds = nullptr;
+    s_pmp_shadow = {};
     shizuku_c6_boot_marker_magic = kBootMarkerMagic;
     return;
   }

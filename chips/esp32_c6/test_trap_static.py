@@ -102,9 +102,9 @@ trap_src = (root / 'chips/esp32_c6/trap.cpp').read_text()
 # RETURN (switch_object_pmp) は同じ 8 本と fence を重ねて書かない。書かれる bounds は変わらない。
 assert trap_src.count('switch_to_precomputed(') == 1
 c2f = trap_src.split('SHIZUKU_HOT void context_to_frame(arch::context_t &c) {')[1].split('\nextern "C" void shizuku_c6_mark_boot_phase')[0]
-assert ('if (__builtin_expect(s_current_pmp_bounds != bounds || s_current_pmp_epoch != bounds->pmp_epoch, 1)) {\n'
+assert ('if (__builtin_expect(shadow.bounds != bounds || shadow.epoch != bounds->pmp_epoch, 1)) {\n'
         '      shizuku::chips::esp32_c6::pmp_controller::switch_to_precomputed(bounds->precomputed);\n'
-        '      s_current_pmp_bounds = bounds;\n      s_current_pmp_epoch = bounds->pmp_epoch;') in c2f
+        '      shadow.bounds = bounds;\n      shadow.epoch = bounds->pmp_epoch;') in c2f
 # precomputed を書き換える経路は update_precomputed() だけで、そこが pmp_epoch を進める (cache が古い窓を残さない)。
 pmp_hpp = (root / 'chips/esp32_c6/pmp_c6.hpp').read_text()
 upd = pmp_hpp.split('constexpr void update_precomputed() noexcept {')[1].split('\n  }\n')[0]
@@ -112,8 +112,13 @@ assert 'precomputed = precompute_object_pmp(' in upd and 'pmp_epoch = pmp_epoch 
 assert len(re.findall(r'(?<![\w.])precomputed\s*=[^=]', pmp_hpp)) == 1
 for rel in ('chips/esp32_c6/trap.cpp', 'source/selftest/c6_stage1_safety.cpp'):
     assert not re.search(r'\.precomputed\s*=[^=]|\.pmp_epoch\s*=[^=]', (root / rel).read_text()), rel
-assert c2f.count('s_current_pmp_bounds = nullptr;') == 1  # M へ戻る disable() の後
-assert trap_src.count('s_current_pmp_bounds = nullptr;') == 3  # 宣言 + disable() の後 + 起動時
+# M へ戻る側は context_to_frame_to_m に分けてある (U へ入る側の枠を太らせない)。固有・固定の shadow は
+# disable() の後と起動時にだけ 0 / nullptr へ戻り、U へ入る側 (c2f) では消さない。
+to_m = trap_src.split('context_to_frame_to_m(arch::context_t &c, arch::exception_frame_t &f) {')[1].split('SHIZUKU_HOT void context_to_frame(')[0]
+assert 'pmp_controller::disable()' in to_m and to_m.count('s_pmp_shadow = {};') == 1
+assert 'pmp_controller::disable()' not in c2f and 's_pmp_shadow = {}' not in c2f
+assert 'context_to_frame_to_m(c, f);' in c2f
+assert trap_src.count('s_pmp_shadow = {};') == 3  # 宣言 + disable() の後 + 起動時
 sw_obj = trap_src.split('void plic_vector_mode::switch_object_pmp(uint32_t object_id) {')[1].split('template <class Context, class Frame>')[0]
 assert 'switch_to_precomputed' not in sw_obj and 'stop(0xE004)' in sw_obj  # 未知の caller は止まる
 enter_obj = trap_src.split('void plic_vector_mode::enter_u_object(')[1].split('template void plic_vector_mode::enter_u_object')[0]
