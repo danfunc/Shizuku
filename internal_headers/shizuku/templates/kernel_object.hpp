@@ -447,11 +447,20 @@ public:
       if (id >= OBJECT_COUNT_T || !m_objects[id].created) return {0, 0};
       return {m_objects[id].region_base, m_objects[id].region_limit};
     } else {
-      object_t copy{};
-      for (unsigned attempt = 0; attempt < 3; ++attempt)
-        if (snapshot_row(id, copy))
-          return copy.created ? region_window{copy.region_base, copy.region_limit}
-                              : region_window{0, 0};
+      // 要るのは created と窓の 3 欄だけ。snapshot_row のように行ごと (methods[] と世代を含む) 写さず、
+      //   同じ seq の組 (奇数なら書き手が途中、前後で違えば差し替えを跨いだ) でこの 3 欄だけを守る。
+      //   判定は snapshot_row と同じ: 3 回試して揃わなければ閉じた窓 (0/0) に倒す。
+      if (id >= OBJECT_COUNT_T) return {0, 0};
+      const object_t &row = m_objects[id];
+      for (unsigned attempt = 0; attempt < 3; ++attempt) {
+        const uint32_t before = row_load(row.seq);
+        if (before & 1u) continue;
+        const bool created = row_load(row.created);
+        const uint32_t base = row_load(row.region_base);
+        const uint32_t limit = row_load(row.region_limit);
+        if (row_load(row.seq) != before) continue;
+        return created ? region_window{base, limit} : region_window{0, 0};
+      }
       return {0, 0};
     }
   }

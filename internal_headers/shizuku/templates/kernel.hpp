@@ -277,7 +277,17 @@ public:
   // 復帰しようとしている文脈がちょうど予約した相手なら、ここで初めて
   // MON_STEP を立てる。ISA 層の例外復帰 (SVC/PendSV/DebugMon/Fault の
   // どれでも) から毎回呼ばれるので、対象でなければ何もしない。
-  void consume_pending_step();
+  //   ★通常経路は予約が無い。予約旗を 1 回読んで抜ける (別 TU への bl を張らない)。
+  //   予約が立っていたときだけ consume_pending_step_slow (CAS で消費) へ進む。
+  //   旗の読みは relaxed で足りる: 予約は arm_step が release で書き、消費は slow 側の
+  //   CAS (acquire) が決めるので、ここで古い値を読んでも「予約と競った復帰が 1 回 MON_STEP を
+  //   逃す」だけで、以前の CAS 直叩きでも同じ競りは起きた。
+  [[gnu::always_inline]] inline void consume_pending_step() {
+    if (*static_cast<volatile uint32_t *>(&m_step_target) == NO_STEP_TARGET)
+      return;
+    consume_pending_step_slow();
+  }
+  void consume_pending_step_slow();
   static constexpr uint32_t NO_STEP_TARGET = 0xFFFFFFFFu;
   // 止まっているスレッドの文脈。デバッガがレジスタを読み書きするための口。
   CONTEXT *thread_context(uint32_t thread) {

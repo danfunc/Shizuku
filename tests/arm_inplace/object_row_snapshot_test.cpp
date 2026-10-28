@@ -46,6 +46,17 @@ int main() {
   assert(result.found && error == shizuku::object_error::OK && entry == method);
   assert(result.view.region_base == 0x1000 && result.view.region_limit == 0x2000);
   assert(result.view.instance_generation == 7);
+  // return_region は created と窓の 3 欄だけを seq の組で守る (3A)。
+  auto live = o.return_region(2);
+  assert(live.base == 0x1000 && live.limit == 0x2000);
+  assert(o.return_region(0).base == 0 && o.return_region(0).limit == 0); // created していない行
+  assert(o.return_region(4).base == 0 && o.return_region(4).limit == 0); // 範囲外
+  assert(access::begin(o, 2)); // 書き手が行を差し替え中 (seq 奇数)
+  live = o.return_region(2);
+  assert(live.base == 0 && live.limit == 0);
+  access::end(o, 2);
+  live = o.return_region(2);
+  assert(live.base == 0x1000 && live.limit == 0x2000);
   access::sequence(o, 2, 1);
   assert(!access::begin(o, 2));
   result = o.resolve_method_view(2, 0, 1, error, entry);

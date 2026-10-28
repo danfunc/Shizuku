@@ -47,7 +47,7 @@ template <> void KERNEL::debug_dispatch(KERNEL::CONTEXT *);
 template <> void KERNEL::suspend(uint32_t);
 template <> void KERNEL::resume(uint32_t);
 template <> void KERNEL::arm_step(uint32_t);
-template <> void KERNEL::consume_pending_step();
+template <> void KERNEL::consume_pending_step_slow();
 
 // ---- 貸してもらった記憶をスレッド表として据える ----------------------------
 // ★所有はオブジェクトランド、保護はここで検査する。カーネルの簿記が非特権から
@@ -508,7 +508,7 @@ template <> void KERNEL::arm_step(uint32_t thread) {
 // 立てる — こうすると「次の 1 命令」が確実に対象自身の命令になる。
 // ★CAS で消費する: 2 コアが同時に別の文脈を復帰させても、この予約を
 //   誤って 2 回消費したり、無関係な文脈へ誤爆したりしない。
-template <> SHIZUKU_SVC_RAM void KERNEL::consume_pending_step() {
+template <> SHIZUKU_SVC_RAM void KERNEL::consume_pending_step_slow() {
   const uint32_t thread = m_current[BOARD::core_num()];
   if (ARCH::cas32(&m_step_target, thread, NO_STEP_TARGET))
     ARCH::debug_step(true);
