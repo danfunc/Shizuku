@@ -485,6 +485,10 @@ public:
   }
 
   // オブジェクト切替え (固定エントリに触れず、前計算された固有 8 本の CSR のみ書き込み)
+  // fence / fence.i は置かない。C6 は S-mode・仮想メモリが無く、RISC-V 特権仕様 "Physical Memory
+  // Protection and Paging" 節は「VM が無ければ PMP は access と同期して検査され、SFENCE.VMA は不要」とする。
+  // ESP-IDF 自身の PMP 設定 (esp_cpu_configure_region_protection) も CSR 書込み後に fence を置かない。
+  // 書換えるのは命令ではなく CSR で、直後に mret で U へ入る。根拠: .handoff/v3cost-20261022/c6limit/fence-evidence.md
   [[gnu::always_inline]] static void switch_to_precomputed(const pmp_precomputed_csr &csr) noexcept {
 #if defined(__riscv)
     asm volatile(
@@ -496,8 +500,6 @@ public:
         "csrw 0x3B9, %5\n" // pmpaddr9
         "csrw 0x3A1, %6\n" // pmpcfg1
         "csrw 0x3A2, %7\n" // pmpcfg2
-        "fence.i\n"
-        "fence rw,rw\n"
         :
         : "r"(csr.pmpaddr4), "r"(csr.pmpaddr5),
           "r"(csr.pmpaddr6), "r"(csr.pmpaddr7),
