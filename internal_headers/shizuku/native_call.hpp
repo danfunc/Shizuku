@@ -437,8 +437,12 @@ template <class K, class KObj>
       return;
     }
 
-    // 2. 必要な値をローカルに写す
-    const typename KObj::method_descriptor_entry local_desc = desc;
+    // 2. seq 区間の中で、判定と入場に要る欄だけを読む (項目全体を写さない。seq 自体は写さない)。
+    //    1 回目と 2 回目の seq が同じなら、ここで読んだ値は書込み中のものと混ざっていない。
+    const auto view = kobj.view_of_descriptor(desc);
+    const uintptr_t entry_pc = desc.target_entry;
+    const uint32_t owner_generation = desc.owner_generation;
+    const uint32_t target_generation = desc.target_generation;
 
     // 3. seq を再読し、変わっていれば即 STALE
     uint8_t seq2;
@@ -453,26 +457,25 @@ template <class K, class KObj>
       return;
     }
 
-    // 4. 写した値に対する照合 (順序: BAD_DESCRIPTOR -> STALE_DESCRIPTOR)
-    const uint8_t callee = local_desc.callee;
+    // 4. 読んだ値に対する照合 (順序: BAD_DESCRIPTOR -> STALE_DESCRIPTOR)
+    const uint32_t callee = view.id;
     if (callee == KObj::DESCRIPTOR_NONE || callee >= KObj::OBJECT_COUNT) {
       A::set_result(frame, (uintptr_t)object_error::BAD_DESCRIPTOR, 0);
       return;
     }
-    if (local_desc.owner_generation != caller_generation) {
+    if (owner_generation != caller_generation) {
       A::set_result(frame, (uintptr_t)object_error::STALE_DESCRIPTOR, 0);
       return;
     }
     const uint32_t version = kobj.object_version(callee);
-    if (version == 0 || local_desc.target_generation != version) {
+    if (version == 0 || target_generation != version) {
       A::set_result(frame, (uintptr_t)object_error::STALE_DESCRIPTOR, 0);
       return;
     }
 
-    // 5. 写した値から入場の形を作る (呼び先の行を引かない)。
+    // 5. 読んだ値から入場の形を作る (呼び先の行を引かない)。
     const kernel_error entered = enter_in_place<K, KObj>(
-        kernel, thread, context, kobj.view_of_descriptor(local_desc), local_desc.target_entry,
-        K::LEDGER_DESCRIPTOR_CALL);
+        kernel, thread, context, view, entry_pc, K::LEDGER_DESCRIPTOR_CALL);
 
     if (entered != kernel_error::OK) {
       A::set_result(frame, (uintptr_t)(entered == kernel_error::NO_STACK

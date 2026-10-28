@@ -98,6 +98,27 @@ assert 'shizuku_c6_early_diag_log.magic = SHIZUKU_C6_EARLY_DIAG_ENTRY_MAGIC' not
 assert begin.index('shizuku_c6_early_diag_progress = SHIZUKU_C6_EARLY_DIAG_ENTRY_MAGIC') < begin.index('esp_rom_get_reset_reason')
 
 trap_src = (root / 'chips/esp32_c6/trap.cpp').read_text()
+# U 境界の固有 PMP (4-9) は U へ戻る直前の context_to_frame が 1 回だけ書く。CALL (enter_u_object) と
+# RETURN (switch_object_pmp) は同じ 8 本と fence を重ねて書かない。書かれる bounds は変わらない。
+assert trap_src.count('switch_to_precomputed(') == 1
+c2f = trap_src.split('SHIZUKU_HOT void context_to_frame(arch::context_t &c) {')[1].split('\nextern "C" void shizuku_c6_mark_boot_phase')[0]
+assert ('if (__builtin_expect(s_current_pmp_bounds != bounds || s_current_pmp_epoch != bounds->pmp_epoch, 1)) {\n'
+        '      shizuku::chips::esp32_c6::pmp_controller::switch_to_precomputed(bounds->precomputed);\n'
+        '      s_current_pmp_bounds = bounds;\n      s_current_pmp_epoch = bounds->pmp_epoch;') in c2f
+# precomputed を書き換える経路は update_precomputed() だけで、そこが pmp_epoch を進める (cache が古い窓を残さない)。
+pmp_hpp = (root / 'chips/esp32_c6/pmp_c6.hpp').read_text()
+upd = pmp_hpp.split('constexpr void update_precomputed() noexcept {')[1].split('\n  }\n')[0]
+assert 'precomputed = precompute_object_pmp(' in upd and 'pmp_epoch = pmp_epoch + 1u;' in upd
+assert len(re.findall(r'(?<![\w.])precomputed\s*=[^=]', pmp_hpp)) == 1
+for rel in ('chips/esp32_c6/trap.cpp', 'source/selftest/c6_stage1_safety.cpp'):
+    assert not re.search(r'\.precomputed\s*=[^=]|\.pmp_epoch\s*=[^=]', (root / rel).read_text()), rel
+assert c2f.count('s_current_pmp_bounds = nullptr;') == 1  # M へ戻る disable() の後
+assert trap_src.count('s_current_pmp_bounds = nullptr;') == 3  # 宣言 + disable() の後 + 起動時
+sw_obj = trap_src.split('void plic_vector_mode::switch_object_pmp(uint32_t object_id) {')[1].split('template <class Context, class Frame>')[0]
+assert 'switch_to_precomputed' not in sw_obj and 'stop(0xE004)' in sw_obj  # 未知の caller は止まる
+enter_obj = trap_src.split('void plic_vector_mode::enter_u_object(')[1].split('template void plic_vector_mode::enter_u_object')[0]
+assert 'switch_to_precomputed' not in enter_obj and 'frame.ra = bounds->u_return_trampoline;' in enter_obj
+
 assert '__attribute__((weak))' not in trap_src
 assert 'shizuku_esp_ble_' not in trap_src
 assert 'shizuku_freertos_' not in trap_src

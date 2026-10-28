@@ -159,6 +159,11 @@ uintptr_t s_current_fixed_pmp_code_base = 0;
 uintptr_t s_current_fixed_pmp_code_limit = 0;
 uintptr_t s_current_fixed_pmp_region_base = 0;
 uintptr_t s_current_fixed_pmp_region_limit = 0;
+// 固有 PMP エントリ (4-9) に今入っている object の bounds。固定エントリと同じく、disable() の後と起動時に
+// nullptr へ戻す。同じ object で U へ戻るとき (切替えの無い ECALL など) は 8 本と fence を書かない。
+// bounds の precomputed が作り直されたとき (pmp_epoch が進む) も不一致になって書き直す。
+const void *s_current_pmp_bounds = nullptr;
+uint32_t s_current_pmp_epoch = 0;
 namespace c6 = shizuku::ports::c6;
 constexpr stop_capture::ram_range kC6Dram{0x40800000u, 0x40860000u};
 constexpr uint32_t kBootMarkerMagic = 0x424D3643u; // "C6MB"
@@ -540,8 +545,14 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
       s_current_fixed_pmp_region_limit = c.region_limit;
     }
 
-    // オブジェクト固有エントリへの切替え (前計算済み 8 本の CSR のみ書込み、固定エントリは触らない)
-    shizuku::chips::esp32_c6::pmp_controller::switch_to_precomputed(bounds->precomputed);
+    // オブジェクト固有エントリへの切替え (前計算済み 8 本の CSR のみ書込み、固定エントリは触らない)。
+    // CALL / RETURN の切替え (enter_u_object / switch_object_pmp) はここで書くので、U へ戻る書込みは
+    // 1 往復につきここ 1 回だけ。今の bounds が入っているなら書かない。
+    if (__builtin_expect(s_current_pmp_bounds != bounds || s_current_pmp_epoch != bounds->pmp_epoch, 1)) {
+      shizuku::chips::esp32_c6::pmp_controller::switch_to_precomputed(bounds->precomputed);
+      s_current_pmp_bounds = bounds;
+      s_current_pmp_epoch = bounds->pmp_epoch;
+    }
 #endif
   } else {
     // M-mode への復帰:
@@ -558,6 +569,7 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
     s_current_fixed_pmp_code_limit = 0;
     s_current_fixed_pmp_region_base = 0;
     s_current_fixed_pmp_region_limit = 0;
+    s_current_pmp_bounds = nullptr;
     const uintptr_t current_sp = f.reserved0 != 0
         ? static_cast<uintptr_t>(f.reserved0)
         : reinterpret_cast<uintptr_t>(c.sp) + RV32_FRAME_BYTES;
@@ -595,6 +607,7 @@ extern "C" void shizuku_c6_mark_boot_phase(uint32_t phase) {
     s_current_fixed_pmp_code_limit = 0;
     s_current_fixed_pmp_region_base = 0;
     s_current_fixed_pmp_region_limit = 0;
+    s_current_pmp_bounds = nullptr;
     shizuku_c6_boot_marker_magic = kBootMarkerMagic;
     return;
   }
@@ -1241,7 +1254,8 @@ void plic_vector_mode::switch_object_pmp(uint32_t object_id) {
     bounds = &g_c6_stage1_driver_bounds;
   }
   if (bounds == nullptr) stop(0xE004); // unknown caller window must never retain stale PMP state
-  shizuku::chips::esp32_c6::pmp_controller::switch_to_precomputed(bounds->precomputed);
+  // 固有エントリは U へ戻る直前の context_to_frame が current_object() の bounds で書く (同じ object)。
+  // ここでは書かない: 1 回の RETURN で同じ 8 本と fence を 2 回書いていた。
 #else
   (void)object_id;
 #endif
@@ -1258,7 +1272,7 @@ void plic_vector_mode::enter_u_object(Context &context, Frame &frame, uint32_t c
     bounds = &g_c6_stage1_driver_bounds;
   }
   if (bounds != nullptr) {
-    shizuku::chips::esp32_c6::pmp_controller::switch_to_precomputed(bounds->precomputed);
+    // 固有 PMP は書かない: U へ戻る直前の context_to_frame が current_object() (= callee) の bounds で書く。
     frame.ra = bounds->u_return_trampoline;
     frame.reserved0 = bounds->stack_limit;
     frame.reserved1 = reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack + sizeof(shizuku_c6_kernel_stack));

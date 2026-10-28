@@ -81,10 +81,14 @@ struct c6_stage1_object_bounds {
   uintptr_t mmio_base = 0;
   uintptr_t mmio_limit = 0;
   pmp_precomputed_csr precomputed{};
+  // precomputed を作り直すたびに進める版。trap 側の「今入っている固有 PMP」cache は
+  // (bounds, pmp_epoch) の組で照合するので、同じ bounds の中身を書き換えても古い窓が残らない。
+  uint32_t pmp_epoch = 0;
 
   constexpr void update_precomputed() noexcept {
     precomputed = precompute_object_pmp(
         stack_base, stack_limit, data_base, data_limit, role, mmio_base, mmio_limit);
+    pmp_epoch = pmp_epoch + 1u;
   }
 };
 
