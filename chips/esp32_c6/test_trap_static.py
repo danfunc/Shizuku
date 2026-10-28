@@ -181,7 +181,8 @@ assert 'stop(0xE003)' in trap_src.split('ecall_fault_nested(')[1].split('}')[0]
 # 遅い経路はどれも tail call (成功経路に関数呼出しを持たない): 本体の中で呼ぶのは return 付きだけ。
 import re as _re
 assert not _re.search(r'(?<!return )\b(ecall_other|ecall_fault_\w+|ecall_to_kobj|stop)\(', ecall_direct)
-for name, call in (('exit_method', 'exit_in_place<K, false>'), ('forward_child_exit', 'exit_in_place<K, true>'),
+for name, call in (('exit_method', 'exit_in_place<K, shizuku::KERNEL_OBJECT, false>'),
+                   ('forward_child_exit', 'exit_in_place<K, shizuku::KERNEL_OBJECT, true>'),
                    ('call_method', 'call_method_in_place'), ('call_descriptor', 'call_descriptor_in_place')):
     body = trap_src.split(f'ecall_{name}(arch::exception_frame_t *frame) {{')[1].split('\n}\n')[0]
     assert 'ecall_direct(frame' in body and call in body, name
@@ -236,7 +237,7 @@ assert pub.rindex('__atomic_store_n') > pub.index('desc.callee')
 nc = (root / 'internal_headers/shizuku/native_call.hpp').read_text()
 call_desc = nc.split('inline void call_descriptor_in_place(')[1].split('// EXIT_METHOD (2, Forward')[0]
 assert 'row' not in call_desc and 'kobj.row_id' not in call_desc and 'callee_row' not in call_desc
-assert 'enter_in_place<K, KObj>(' in call_desc and 'kobj.view_of_descriptor(local_desc)' in call_desc
+assert 'enter_in_place<K, KObj>(' in call_desc and 'kobj.view_of_descriptor(desc)' in call_desc
 # trap 内の desc call 経路に表の錠 (table_lock) や LR/SC (cas32)、後方分岐の再試行ループが無いこと
 assert 'table_lock' not in call_desc and 'table_unlock' not in call_desc
 assert 'cas32' not in call_desc and 'lr.w' not in call_desc and 'sc.w' not in call_desc
@@ -255,7 +256,7 @@ assert 'm_objects[self].generation, generation + 1u' in hd  # EXPORT_METHOD
 assert 'm_objects[id].generation,\n                             current_generation + 1u' in hd or \
        'current_generation + 1u' in hd  # 生成・差し替え
 aff = hd.split('uintptr_t KERNEL_OBJECT::set_object_affinity(uintptr_t id, uintptr_t cores,')[1].split(
-    'template <> SHIZUKU_HOT uint32_t KERNEL_OBJECT::object_region_base')[0]
+    'template <> SHIZUKU_HOT SHIZUKU_SVC_RAM uint32_t KERNEL_OBJECT::object_region_base')[0]
 assert 'generation' not in aff  # アフィニティの書き換えは版を上げない
 
 boot_src = (root / 'modules/esp_idf_support/c6/early_boot.cpp').read_text()
