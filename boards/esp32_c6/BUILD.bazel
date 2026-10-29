@@ -8,7 +8,8 @@ exports_files([
     "esp32_c6.hpp",
     "board_esp32_c6.cpp",
     "board_esp32_c6_stubs.cpp",
-    "heartbeat_logic.hpp",
+    "led_gpio.hpp",
+    "led_object.hpp",
 ])
 
 cc_library(
@@ -21,9 +22,18 @@ cc_library(
     ],
 )
 
-# ユーザー LED 点滅の判定 (レジスタに触れない純粋ロジック)。ホストテストと board の両方から使う。
+# ユーザー LED の GPIO 操作 (レジスタ値と Mmio 版の書込み)。実機の board と試験の両方から使う。
 cc_library(
-    name = "heartbeat_logic",
-    hdrs = ["heartbeat_logic.hpp"],
-    deps = ["//chips/esp32_c6:headers"],
+    name = "led_gpio",
+    hdrs = ["led_gpio.hpp"],
+)
+
+# C6 のユーザー LED オブジェクト (WRITE の口は led_blink と同じ ABI)。
+cc_library(
+    name = "led_object",
+    hdrs = ["led_object.hpp"],
+    deps = [
+        ":led_gpio",
+        "//modules/led_blink:led_abi",
+    ],
 )

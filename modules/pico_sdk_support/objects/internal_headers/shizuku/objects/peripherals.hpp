@@ -2,6 +2,7 @@
 #define SHIZUKU_OBJECTS_PERIPHERALS_HPP
 #include <cstdint>
 #include "shizuku/object_ids.hpp"
+#include "modules/led_blink/led_abi.hpp"
 
 // ===========================================================================
 //  ペリフェラルオブジェクト — ボードが提供する、ハードウェアを持つオブジェクト
@@ -60,10 +61,11 @@ enum struct led_method : uintptr_t {
   READ = 2,  // 戻り値 = 最後に書いた値
   POLL = 3,  // CYW43 の owner スレッド (pico2_w の BLE 無し構成のみ起こす)
 };
-
-struct led_request {
-  uint32_t value;
-};
+// WRITE の番号と led_request の形は led_blink の口 (全ボード共通の ABI) と同一。
+// 点滅 (led_blink) はこの口を親子呼出しで叩くので、ずれたら黙って壊れる — ここで縛る。
+static_assert((uintptr_t)led_method::WRITE == led_blink::LED_WRITE_METHOD,
+              "led WRITE のメソッド番号は led_blink と一致させる");
+using led_request = led_blink::led_request;
 
 enum struct temperature_method : uintptr_t {
   MAIN = 0,
