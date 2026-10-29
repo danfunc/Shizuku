@@ -77,6 +77,7 @@ sh_test(
         "//chips/esp32_c6:c6_vectors.S",
         "//chips/esp32_c6:rv32_c6.hpp",
         "//chips/esp32_c6:chip.hpp",
+        "//chips/esp32_c6:pmp_c6.hpp",
         "//chips/esp32_c6:test_trap_static.py",
         "//chips/esp32_c6:trap.cpp",
         "//chips/esp32_c6:trap_api.hpp",
