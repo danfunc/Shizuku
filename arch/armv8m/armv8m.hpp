@@ -452,7 +452,7 @@ public:
                         reinterpret_cast<uint8_t *>(context.sp) + sizeof(exception_frame_t),
                         bytes - sizeof(exception_frame_t));
     }
-    *next = exception_frame_t{};
+    zero_exception_frame(*next);
     next->pc = (uint32_t)pc;
     next->xPSR = 1u << 24;
     context.sp = next;
@@ -460,6 +460,15 @@ public:
     set_region_window(context, base, limit);
     if (scrub) s_resume_scrub[core_slot()] = true;
     return next;
+  }
+
+  // 例外フレーム 8 語を、語ごとのストアで全部ゼロにする (呼び先へ前のスタックの値を漏らさない)。
+  //   `*next = exception_frame_t{}` は 32 バイトの memset 呼出しになるので、展開した直接ストアで書く。
+  //   always_inline なので、直後の pc / xPSR の上書きで死ぬ 2 語のゼロ書きは消え、残るのは r0..lr の 6 語
+  //   (フレーム全 8 語は、ゼロか呼び出し側の指定値のどちらかになる)。本番の操作そのものを host 試験できる。
+  [[gnu::always_inline]] static inline void zero_exception_frame(exception_frame_t &frame) {
+    frame.r0 = 0; frame.r1 = 0; frame.r2 = 0; frame.r3 = 0;
+    frame.r12 = 0; frame.lr = 0; frame.pc = 0; frame.xPSR = 0;
   }
 
   static inline bool s_in_svc[2] = {};

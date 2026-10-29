@@ -12,6 +12,19 @@ using Frame = A::exception_frame_t;
 struct MockFP { static inline unsigned count = 0; static void materialize() { ++count; } };
 
 int main() {
+  {
+    struct guarded_frame {
+      uint32_t before;
+      Frame frame;
+      uint32_t after;
+    } guarded{0xA55AA55Au, {}, 0x5AA55AA5u};
+    for (auto &word : *reinterpret_cast<uint32_t (*)[8]>(&guarded.frame))
+      word = 0xFFFFFFFFu;
+    A::zero_exception_frame(guarded.frame);
+    assert(guarded.before == 0xA55AA55Au && guarded.after == 0x5AA55AA5u);
+    const auto *words = reinterpret_cast<const uint32_t *>(&guarded.frame);
+    for (unsigned i = 0; i < 8; ++i) assert(words[i] == 0);
+  }
   static_assert(shizuku::armv8m_abi::max_reservation_bytes == 128);
   constexpr uintptr_t reserve = A::EXC_FRAME_MAX_BYTES + A::FAULT_CONTEXT_BYTES +
       A::CALL_HEADROOM + 128 + A::HANDLER_STACK_ARG_BYTES;
