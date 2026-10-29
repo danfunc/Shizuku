@@ -5,6 +5,15 @@
 #include "chips/esp32_c6/chip.hpp"
 #include "chips/esp32_c6/trap_api.hpp"
 #include "chips/esp32_c6/selftest_record.h"
+#include "shizuku/object_ids.hpp"
+#include "boards/esp32_c6/esp32_c6.hpp"
+#include "boards/esp32_c6/led_object.hpp"
+#include "modules/led_blink/blink.hpp"
+
+// LED 点滅の有無 (旧 heartbeat と同じスイッチ名)。0 で LED オブジェクトも点滅も組まない。
+#ifndef SHIZUKU_C6_HEARTBEAT_LED
+#define SHIZUKU_C6_HEARTBEAT_LED 1
+#endif
 
 #ifndef SHIZUKU_IRQ_DELAY_US
 #define SHIZUKU_IRQ_DELAY_US 0
@@ -95,6 +104,78 @@ uintptr_t c6_combined_handler(uintptr_t a0, uintptr_t a1, uintptr_t a2,
   return shizuku::kernel_object_instance.handle(a0, a1, a2, a3, unwind_floor);
 }
 
+// ---- LED 点滅 (led_blink) の組立 -------------------------------------------------
+// 親は ROOT (thread0 の名乗り)。LED の WRITE は親の中継メソッドを親子呼出しで叩く (kernel_role は付けない)。
+// 番号は tools/gen_object_ids.py の表から取る (pico_sdk → apps → selftest の順に 2 から振る)。
+// led = 5 (pico_sdk の 4 番目)、blink = 26 (selftest の 13 番目)。C6 の ladder が名前で作るのは
+// selftest の 14..68 (leaf..desc_relay_target 等) だけで、led・blink とは重ならない。
+// 数値 2 は起点 thread1 の object タグで、表の gpio と同じ値。C6 では gpio を作らない。
+// 段ごとの失敗は shizuku_c6_led_diag に残し、失敗しても起動は止めない (点滅は補助機能)。
+volatile uint32_t shizuku_c6_led_diag[2]; // [0] = 失敗した段 (0 = 組めた), [1] = その error / 点滅スレッド番号
+
+constexpr uintptr_t LED_OBJECT_ID = shizuku::object_id::led;
+constexpr uintptr_t BLINK_OBJECT_ID = shizuku::object_id::blink;
+constexpr uintptr_t ROOT_RELAY_METHOD = 1;   // ROOT が export する LED 中継の番号
+constexpr uint64_t BLINK_PERIOD_US = shizuku::led_blink::DEFAULT_PERIOD_US; // 2 Hz 点滅
+constexpr uint64_t BLINK_BUDGET_US = 500;    // 点滅スレッドの予算 (stress と同じ。取り上げられる最悪待ちを短く)
+
+// led_blink の Env。時刻と syscall を C6 の実物へ束ねる。実機では止める理由が無いので running は常に真。
+struct c6_blink_env {
+  static auto syscall(uintptr_t number, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
+    return shizuku::ARCH::syscall(number, a1, a2, a3);
+  }
+  static uint64_t now_us() { return shizuku::boards::esp32_c6::time_us(); }
+  static bool running() { return true; }
+  static void on_period(uint64_t) {}
+};
+
+// LED オブジェクトの main。GPIO を出力にして消灯し、WRITE の口を自分で export する。戻り値は export の失敗数。
+uintptr_t led_object_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  shizuku::boards::esp32_c6_led::led_init();
+  return shizuku::ARCH::syscall(
+             (uintptr_t)shizuku::object_api::EXPORT_METHOD, shizuku::led_blink::LED_WRITE_METHOD,
+             shizuku::method_entry<shizuku::ARCH, &shizuku::boards::esp32_c6_led::led_write>())
+      .error;
+}
+
+// 段を順に組む。どこかで失敗したら、その段と error を diag に残して戻る (残りは作らない)。
+void start_led_blink() {
+  auto ok = [](uint32_t stage, uintptr_t error) {
+    if (error != 0) {
+      shizuku_c6_led_diag[0] = stage;
+      shizuku_c6_led_diag[1] = static_cast<uint32_t>(error);
+      return false;
+    }
+    return true;
+  };
+  // 1. LED オブジェクト (特権) を作り、main を 1 回呼んで WRITE を export させる。
+  const auto led = shizuku::ARCH::syscall((uintptr_t)shizuku::object_api::CREATE_OBJECT, LED_OBJECT_ID,
+                                          shizuku::method_entry<shizuku::ARCH, &led_object_main>(),
+                                          shizuku::OBJECT_PRIVILEGED);
+  if (!ok(1, led.error)) return;
+  const auto led_main = shizuku::ARCH::syscall((uintptr_t)shizuku::object_api::CALL_METHOD, LED_OBJECT_ID, 0, 0);
+  if (!ok(2, led_main.error) || !ok(3, led_main.value)) return;
+  // 2. 親 (ROOT) が LED への中継を export する。点滅はこれを親子呼出しで叩く。
+  const auto relay = shizuku::ARCH::syscall(
+      (uintptr_t)shizuku::object_api::EXPORT_METHOD, ROOT_RELAY_METHOD,
+      shizuku::method_entry<shizuku::ARCH, &shizuku::led_blink::led_relay_entry<c6_blink_env, LED_OBJECT_ID>>());
+  if (!ok(4, relay.error)) return;
+  // 3. 点滅スレッド (特権) を ROOT の子として作り、予算を短くして走らせる。
+  const auto blink = shizuku::ARCH::syscall(
+      (uintptr_t)shizuku::object_api::CREATE_OBJECT, BLINK_OBJECT_ID,
+      shizuku::method_entry<shizuku::ARCH,
+                            &shizuku::led_blink::blink_entry<c6_blink_env, shizuku::KERNEL_OBJECT::ROOT_OBJECT,
+                                                             ROOT_RELAY_METHOD, BLINK_PERIOD_US>>(),
+      shizuku::OBJECT_PRIVILEGED);
+  if (!ok(5, blink.error)) return;
+  const auto spawned = shizuku::ARCH::syscall((uintptr_t)shizuku::object_api::SPAWN, BLINK_OBJECT_ID, 0, 0);
+  if (!ok(6, spawned.error)) return;
+  const auto budget = shizuku::ARCH::syscall((uintptr_t)shizuku::object_api::SET_BUDGET, spawned.value,
+                                             BLINK_BUDGET_US * shizuku::boards::esp32_c6::cycles_per_us());
+  if (!ok(7, budget.error)) return;
+  shizuku_c6_led_diag[1] = static_cast<uint32_t>(spawned.value);
+}
+
 [[noreturn]] void thread1() {
   shizuku_c6_thread1_diag[0] = 0xC6100001;
   for (;;) {
@@ -116,10 +197,14 @@ uintptr_t c6_combined_handler(uintptr_t a0, uintptr_t a1, uintptr_t a2,
   // 2. BLE profile enters the shared ESP-IDF NimBLE stage after the kernel is live.
 #if defined(SHIZUKU_ESP_BLE)
   shizuku_c6_mark_boot_phase(0xC610u);
+  // BLE 側は selftest を走らせないので、点滅はここで組む (stage1 は戻らない)。
+  if constexpr (SHIZUKU_C6_HEARTBEAT_LED != 0) start_led_blink();
   shizuku_esp_ble_stage1_start();
 #else
   // 2. 実 boot 経路での selftest runner 実行 (RAM record への集中記録)
   shizuku_c6_run_selftests();
+  // 点滅は selftest の後で組む (selftest の計測と期待値に点滅を混ぜない)。
+  if constexpr (SHIZUKU_C6_HEARTBEAT_LED != 0) start_led_blink();
 #endif
 
   // 3. 段2 thread1 スポーン (GRANT スイッチ試験用)
@@ -140,6 +225,9 @@ uintptr_t c6_combined_handler(uintptr_t a0, uintptr_t a1, uintptr_t a2,
   // 4. 段2 スイッチループ (thread0/thread1 相互スイッチ & 生存カウンタ更新)
   for (;;) {
     shizuku_c6_thread0_diag[2] = shizuku_c6_thread0_diag[2] + 1;
+    // 点滅 (blink) に番を回す。grant 段の無い起点スレッドの YIELD は kobj の schedule() へ入り、
+    // 締切を過ぎた点滅を選ぶ。これが無いと schedule() は一度も呼ばれず、点滅は SPAWN 後も走らない。
+    shizuku::ARCH::syscall((uintptr_t)shizuku::object_api::YIELD);
     if (spawned.error == shizuku::kernel_error::OK) {
       const auto reply = shizuku::ARCH::syscall(0xC6, 1);
       shizuku_c6_switch_diag[3] = static_cast<uint32_t>(reply.value);

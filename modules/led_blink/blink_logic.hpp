@@ -8,6 +8,9 @@
 // 差は符号付きで取るので、64bit 値の折り返しをまたいでも正しく測れる。
 namespace shizuku::led_blink {
 
+// 既定の点滅周期 [us] (0.25 s ごとに反転 = 2 Hz)。全ボード・selftest の点滅はこれを使う。
+constexpr uint64_t DEFAULT_PERIOD_US = 250000;
+
 struct schedule_t {
   uint64_t next_us; // 次に LED を反転させる時刻
   bool on;          // 今の LED の論理値

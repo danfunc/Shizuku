@@ -361,6 +361,7 @@ cc_library(
     # stress はオブジェクト (peripherals) を相手に試す。
     deps = [
         ":kernel_object",
+        "//modules/led_blink:led_blink",
         "//modules/pico_sdk_support/objects:flash_layout",
         "//modules/pico_sdk_support/objects:flash_ops",
         "//modules/pico_sdk_support/objects:peripherals",
@@ -446,7 +447,7 @@ cc_library(
         "//arch/riscv:pmp",
         "//chips/esp32_c6:headers",
         "//boards/esp32_c6:headers",
-        "//boards/esp32_c6:heartbeat_logic",
-        "//boards/esp32_c6:led_gpio",
+        "//boards/esp32_c6:led_object",
+        "//modules/led_blink:led_blink",
     ],
 )

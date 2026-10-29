@@ -142,6 +142,7 @@ cc_library(
         "//:internal_headers",
         "//:kernel",
         "//configs:config",
+        "//modules/led_blink:led_abi",
         "@pico-sdk//src/rp2_common/hardware_adc",
         "@pico-sdk//src/rp2_common/hardware_gpio",
         "@pico-sdk//src/rp2_common/hardware_i2c",

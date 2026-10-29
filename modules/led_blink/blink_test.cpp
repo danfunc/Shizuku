@@ -180,6 +180,29 @@ int relay_test() {
   return 0;
 }
 
+// 試験 6: 最初から止められていれば (running() が false) 1 回も呼ばず、1 回も書かない。
+// 旧 C6 heartbeat の「無効時 no-op」に当たる。止める口が効くことの確認。
+int stopped_test() {
+  reset();
+  run_blink();
+  CHECK(g.calls.empty());
+  CHECK(g.values.empty());
+  return 0;
+}
+
+// 試験 7: 既定の周期 (DEFAULT_PERIOD_US = 250000 us = 2 Hz) で書くと、書込みは 250 ms と 500 ms。
+// 旧 C6 heartbeat の「PERIOD_TICKS == 4,000,000 (250000 us × 16 ticks/us)」に当たる時刻側の確認。
+int default_period_test() {
+  reset();
+  g.writes_left = 2;
+  lb::blink_entry<fake_env, PARENT, RELAY, lb::DEFAULT_PERIOD_US>(0, 0, 0, 0);
+  CHECK(g.write_times.size() == 2);
+  CHECK(g.write_times[0] == 250000);
+  CHECK(g.write_times[1] == 500000);
+  CHECK(g.values.size() == 2 && g.values[0] == 1u && g.values[1] == 0u);
+  return 0;
+}
+
 } // namespace
 
 int main() {
@@ -188,6 +211,8 @@ int main() {
   if (drift_free_test() != 0) return 1;
   if (late_recovery_test() != 0) return 1;
   if (relay_test() != 0) return 1;
-  std::puts("PASS: blink logic, loop alternation and grid, drift-free writes, late observation, relay");
+  if (stopped_test() != 0) return 1;
+  if (default_period_test() != 0) return 1;
+  std::puts("PASS: blink logic, loop alternation and grid, drift-free writes, late observation, relay, stop, default period");
   return 0;
 }

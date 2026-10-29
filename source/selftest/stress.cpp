@@ -19,6 +19,8 @@
 #include "shizuku/method_entry.hpp"
 #include "shizuku/objects/peripherals.hpp"
 #include "shizuku/selftest.hpp"
+#include "modules/led_blink/blink.hpp"
+#include "modules/led_blink/blink_logic.hpp"
 #if SHIZUKU_KERNEL_SERVICE_PROFILE
 #include "shizuku/service_profile.hpp"
 #endif
@@ -64,8 +66,7 @@ constexpr uintptr_t OBJECT_BLINK = object_id::blink;
 constexpr uintptr_t OBJECT_LOAD = object_id::load;
 constexpr uintptr_t METHOD_MAIN = 0;
 
-// 点滅の周期。人が見て分かる速さで、かつ測定の分解能も確保できるところ。
-constexpr uint64_t BLINK_PERIOD_US = 250000;
+// 点滅の周期は led_blink::DEFAULT_PERIOD_US (全ボード共通)。
 // 何周期ごとに報告するか (報告そのものが負荷にならない程度に間引く)。
 constexpr uint32_t REPORT_PERIODS = 8;
 
@@ -129,15 +130,18 @@ uintptr_t load(uintptr_t kind, uintptr_t, uintptr_t, uintptr_t) {
 // 兄弟関係にある BLINK と LED_OBJECT の直接呼出しを避け、親である ROOT_OBJECT の
 // メソッドを経由して LED_OBJECT を叩く (親子呼出しに正規化し、kernel_role を撤去)。
 constexpr uintptr_t ROOT_METHOD_LED_RELAY = 1;
-uintptr_t root_led_relay(uintptr_t request_ptr, uintptr_t, uintptr_t, uintptr_t) {
-  return ARCH::syscall((uintptr_t)object_api::CALL_METHOD, objects::LED_OBJECT,
-                       (uintptr_t)objects::led_method::WRITE, request_ptr).error;
-}
+// 中継の口 (led_blink::led_relay_entry) が叩く syscall。stress は ARCH をそのまま渡す。
+struct relay_env {
+  static auto syscall(uintptr_t number, uintptr_t a1, uintptr_t a2, uintptr_t a3) {
+    return ARCH::syscall(number, a1, a2, a3);
+  }
+};
 
 uintptr_t blink(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   syscall_value(object_api::DECLARE_NAME, (uintptr_t) "blink");
   objects::led_request request{0};
-  uint64_t next = BOARD::time_us() + BLINK_PERIOD_US;
+  // 周期の締切と遅れは led_blink の共通部品 (blink_logic.hpp) で持つ。
+  led_blink::schedule_t schedule{BOARD::time_us() + led_blink::DEFAULT_PERIOD_US, false};
   uint64_t late_max = 0;      // 起動来の最大 (一過性の山も残る)
   uint64_t late_window = 0;   // 窓ごとの最大 (今も続いているかが分かる)
   // ★LED 書き込みは**最大と最小の両方**を採る。最大だけ見ていたときは budget に
@@ -151,18 +155,19 @@ uintptr_t blink(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 
   while (true) {
     // 絶対グリッドで待つ。相対で待つとズレが積み上がって「遅れ」が測れない。
-    const int64_t remaining = (int64_t)(next - BOARD::time_us());
+    const uint64_t remaining = led_blink::wait_us(schedule, BOARD::time_us());
     if (remaining > 0)
       syscall_value(object_api::SLEEP_US, (uintptr_t)remaining);
 
     const uint64_t now = BOARD::time_us();
-    const uint64_t late = now > next ? now - next : 0;
+    const uint64_t late = led_blink::late_us(schedule, now);
     if (late > late_max)
       late_max = late;
     if (late > late_window)
       late_window = late;
 
-    request.value ^= 1u;
+    led_blink::advance(schedule, led_blink::DEFAULT_PERIOD_US);
+    request.value = schedule.on ? 1u : 0u;
     // ★LED への書き込み時間を別に測る。無線チップ側の LED は SPI 越しなので、
     //   ここが大きいなら「揺らぎ」の一部は周辺デバイスの費用であって
     //   スケジューリングの費用ではない — 混ぜると原因を取り違える。
@@ -176,7 +181,6 @@ uintptr_t blink(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       led_window = led_took;
     if (led_took < led_min)
       led_min = led_took;
-    next += BLINK_PERIOD_US;
 
 #if SHIZUKU_KERNEL_SERVICE_PROFILE
     static uint32_t v3gw_step = 0;
@@ -258,7 +262,7 @@ uintptr_t blink(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
 uint32_t stress_launch() {
   // 親 (ROOT_OBJECT) の中継メソッドを export する (BLINK から LED への親子経由中継)。
   syscall_value(object_api::EXPORT_METHOD, ROOT_METHOD_LED_RELAY,
-                method_entry<ARCH, &root_led_relay>());
+                method_entry<ARCH, &led_blink::led_relay_entry<relay_env, objects::LED_OBJECT>>());
 
   // ★blink は LED = CYW43 を叩く。CYW43 は**初期化したコアからしか触れない**ので
   //   core0 に固定する。実測でここを外すと、blink が core1 へ移った瞬間に
