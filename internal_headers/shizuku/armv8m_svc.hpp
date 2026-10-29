@@ -47,10 +47,10 @@ template <class Thread>
 }
 
 // Windows, privilege and PSP are re-applied only when the body changed the frame.
-[[gnu::always_inline]] inline void return_resumed(KERNEL::CONTEXT *context,
-                                                  uint32_t exc_return, uint32_t api) {
+[[gnu::always_inline]] inline void return_resumed(KERNEL::CONTEXT *context, KERNEL::THREAD &thread,
+                                                  uint32_t core, uint32_t exc_return, uint32_t api) {
   probe(3, exc_return, api);
-  armv8m_prepare_resume();
+  armv8m_prepare_resume(thread, core);
   probe(4, exc_return, api);
   // FPCA/SPSEL remain hardware-owned. Only nPRIV changes on an object switch.
   uint32_t next_control;
@@ -67,24 +67,27 @@ template <class Thread>
 // General path: every number, every caller. Anything the direct bodies decline
 // (thread switches, kernel-object callers, dedicated parent handlers, the
 // service gate, unknown numbers) ends up here.
-[[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void generic(uint32_t exc_return) {
+// core is ARCH::core_slot(), read once on SVC entry. An exception handler runs to its end on the core
+// that took it, and core_slot() is that core's own SIO CPUID, so the value cannot change meanwhile
+// (on RP2350 it is also BOARD::core_num(), which current_thread_on() indexes by).
+[[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void generic(uint32_t exc_return,
+                                                                    uint32_t core) {
   uintptr_t psp;
   uint32_t control;
   asm volatile("mrs %0, psp\nmrs %1, control" : "=r"(psp), "=r"(control) :: "memory");
   auto &kernel = kernel_instance;
-  auto *context = kernel.current_thread().context;
+  auto *context = kernel.current_thread_on(core).context;
   const uint32_t api = reinterpret_cast<ARCH::exception_frame_t *>(psp)->r0;
   if constexpr (route_cost_probe_enabled)
-    cost_probe::routes<true>::record(ARCH::core_slot(), cost_probe::route::generic, api);
+    cost_probe::routes<true>::record(core, cost_probe::route::generic, api);
   probe(0, exc_return, api);
   profile_span profile;
   context->sp = reinterpret_cast<ARCH::exception_frame_t *>(psp);
   context->exc_return = exc_return;
   context->control = control;
-  context->stack_ceiling = stack_ceiling(kernel.current_thread());
+  context->stack_ceiling = stack_ceiling(kernel.current_thread_on(core));
   const uintptr_t pc = context->sp->pc;
-  const auto depth = kernel.current_thread().call_stack.depth;
-  const auto core = ARCH::core_slot();
+  const auto depth = kernel.current_thread_on(core).call_stack.depth;
   ARCH::s_in_svc[core] = true;
   probe(1, exc_return, api);
   kernel.svc_dispatch(context);
@@ -95,12 +98,13 @@ template <class Thread>
     return_pended(context, psp, exc_return, api);
     return;
   }
+  auto &thread = kernel.current_thread_on(core);
   if ((uintptr_t)context->sp == psp && context->sp->pc == pc &&
-      context->control == control && kernel.current_thread().call_stack.depth == depth) {
+      context->control == control && thread.call_stack.depth == depth) {
     probe_return(exc_return, api);
     return;
   }
-  return_resumed(context, exc_return, api);
+  return_resumed(context, thread, core, exc_return, api);
 }
 
 // Direct path (the counterpart of the C6 ecall_direct): the body of one API is
@@ -120,12 +124,15 @@ template <svc_direct_kind Kind>
                           Kind == svc_direct_kind::FORWARD_CHILD_EXIT;
   constexpr bool moves_caller = is_call || scrubs;
   auto &kernel = kernel_instance;
-  auto &thread = kernel.current_thread();
+  // The only core_slot() read of this SVC; the same value goes to the thread lookup, the scrub flag
+  // and the window/MPU preparation (see generic for why it cannot change).
+  const uint32_t core = ARCH::core_slot();
+  auto &thread = kernel.current_thread_on(core);
   auto *frame = reinterpret_cast<ARCH::exception_frame_t *>(psp);
   const uintptr_t pc = frame->pc;
   if (pc == reinterpret_cast<uintptr_t>(&shizuku_v2_service_resume) ||
       !kernel.svc_native_route_of(thread))
-    return generic(exc_return);
+    return generic(exc_return, core);
   uint32_t control;
   asm volatile("mrs %0, control" : "=r"(control));
   const uint32_t api = frame->r0;
@@ -163,14 +170,14 @@ template <svc_direct_kind Kind>
     probe(2, exc_return, api);
     if (result == native::status::DONE) {
       if constexpr (route_cost_probe_enabled)
-        cost_probe::routes<true>::record(ARCH::core_slot(), cost_probe::route::direct, api);
+        cost_probe::routes<true>::record(core, cost_probe::route::direct, api);
       if constexpr (!moves_caller) {
         // Only the reply registers changed: nothing to re-apply.
         probe_return(exc_return, api);
         return;
       } else {
         if constexpr (scrubs) {
-          if (ARCH::s_resume_scrub[ARCH::core_slot()]) {
+          if (ARCH::s_resume_scrub[core]) {
             return_pended(context, psp, exc_return, api);
             return;
           }
@@ -180,14 +187,14 @@ template <svc_direct_kind Kind>
           probe_return(exc_return, api);
           return;
         }
-        return_resumed(context, exc_return, api);
+        return_resumed(context, thread, core, exc_return, api);
         return;
       }
     }
   }
   // The ledger was partly unwound: the same stop the general path reaches.
   if (result == native::status::CORRUPT) KERNEL::BOARD::panic("call ledger count underflow");
-  return generic(exc_return);
+  return generic(exc_return, core);
 }
 
 // One function per number. Each is an ordinary C++ exception function that the
@@ -247,7 +254,7 @@ extern "C" SHIZUKU_SVC_RAM void shizuku_armv8m_svc_handler() {
   case (uint32_t)object_api::GET_CURRENT_OBJECT: return get_current(exc_return, psp);
   case (uint32_t)object_api::GET_CALLER_OBJECT: return get_caller(exc_return, psp);
   case (uint32_t)object_api::SET_BUDGET: return set_budget(exc_return, psp);
-  default: return generic(exc_return);
+  default: return generic(exc_return, ARCH::core_slot());
   }
 }
 

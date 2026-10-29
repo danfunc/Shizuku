@@ -616,15 +616,21 @@ public:
   // の完了を DSB で待つ。ISB は要らない (例外復帰が文脈同期イベント)。書込みが無ければ打たない。
   // 書込みが DSB なしで残るのは、同じ core の次の mpu_sync までに限られる: 窓を動かす経路
   // (SVC の入場・復帰、PendSV、スレッド復帰) はどれも armv8m_prepare_resume で終わる。
-  [[gnu::always_inline]] static inline void mpu_sync() {
-    const auto core = core_slot();
+  //   core は core_slot() の値。例外ハンドラは自分を取った core の上で最後まで走り (core をまたいで動かない)、
+  //   core_slot() は実行中の core の SIO CPUID なので、SVC の入口で 1 度読んだ値をその間使い回せる。
+  [[gnu::always_inline]] static inline void mpu_sync(uint32_t core) {
     if (!s_mpu_dirty[core]) return;
     s_mpu_dirty[core] = false;
     asm volatile("dsb" ::: "memory");
   }
-  [[gnu::always_inline]] static inline bool apply_grant_window(uintptr_t base, uintptr_t end) {
+  [[gnu::always_inline]] static inline void mpu_sync() { mpu_sync(core_slot()); }
+  [[gnu::always_inline]] static inline bool apply_grant_window(uintptr_t base, uintptr_t end,
+                                                               uint32_t core) {
     const auto entry = grant_window_entry(base, end);
-    return region_program(core_slot(), GRANT_REGION_INDEX, entry.rbar, entry.rlar);
+    return region_program(core, GRANT_REGION_INDEX, entry.rbar, entry.rlar);
+  }
+  [[gnu::always_inline]] static inline bool apply_grant_window(uintptr_t base, uintptr_t end) {
+    return apply_grant_window(base, end, core_slot());
   }
 
   static void invalidate_active_object() {
@@ -675,21 +681,25 @@ public:
 
   // 窓の書込みは例外復帰の前にしか呼ばれない。例外復帰は文脈同期イベントなので ISB は要らず、
   // 書込みの完了待ち (DSB) は例外復帰の直前に mpu_sync が 1 度だけ打つ。
-  static void apply_object_window(const object_protection_window &win) {
-    const auto core = core_slot();
+  static void apply_object_window(const object_protection_window &win, uint32_t core) {
     region_program(core, REGION_DATA, win.data.rbar, win.data.rlar);
     region_program(core, REGION_MMIO, win.mmio.rbar, win.mmio.rlar);
   }
+  static void apply_object_window(const object_protection_window &win) {
+    apply_object_window(win, core_slot());
+  }
 
   // 前回張った値と同じなら書かない (同じ thread へ戻る例外復帰は毎回ここを通る)。
-  static void apply_stack_window(uint32_t rbar, uint32_t rlar) {
-    region_program(core_slot(), REGION_STACK, rbar, rlar);
+  static void apply_stack_window(uint32_t rbar, uint32_t rlar, uint32_t core) {
+    region_program(core, REGION_STACK, rbar, rlar);
+  }
+  [[gnu::always_inline]] static inline void apply_stack_window(uint32_t rbar, uint32_t rlar) {
+    apply_stack_window(rbar, rlar, core_slot());
   }
 
   // 非特権の窓 (region 3/4) を id のものにする。すでにそうなら何も書かない。特権は PRIVDEFENA で
   // 全域に触れ、窓に制限されないので、特権の呼び先/呼び元のときは窓を触らない (呼ばない)。
-  static void ensure_object_window(uint32_t id) {
-    const auto core = core_slot();
+  static void ensure_object_window(uint32_t id, uint32_t core) {
     uint32_t &programmed = s_programmed_object[core];
     uint32_t version = id < kMaxObjectWindows
         ? __atomic_load_n(&s_object_window_seq[id], __ATOMIC_ACQUIRE) : 1u;
@@ -702,9 +712,12 @@ public:
       programmed = 0xFFFFFFFFu;
       return;
     }
-    apply_object_window(copy);
+    apply_object_window(copy, core);
     programmed = id;
     s_programmed_object_seq[core] = version;
+  }
+  [[gnu::always_inline]] static inline void ensure_object_window(uint32_t id) {
+    ensure_object_window(id, core_slot());
   }
 
   template <class Frame>
@@ -717,6 +730,10 @@ public:
   // 呼び元が非特権のときだけ呼ぶ (戻り先の窓を戻す)。
   static void switch_caller_protection(uint32_t caller_object) {
     ensure_object_window(caller_object);
+  }
+  [[gnu::always_inline]] static inline void switch_caller_protection(uint32_t caller_object,
+                                                                     uint32_t core) {
+    ensure_object_window(caller_object, core);
   }
   static void stack_limit_set(context_t &context, uintptr_t limit) {
     context.psplim = (uint32_t)limit;

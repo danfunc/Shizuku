@@ -13,9 +13,9 @@
 #endif
 #define SHIZUKU_SVC_INSTANCE(name) __attribute__((section(".time_critical.shizuku." #name)))
 SHIZUKU_SVC_EXTERN template SHIZUKU_SVC_INSTANCE(arg) uintptr_t shizuku::ARCH::arg(const shizuku::ARCH::exception_frame_t &, unsigned);
-SHIZUKU_SVC_EXTERN template SHIZUKU_SVC_INSTANCE(stack) void shizuku::ARCH::apply_stack_window(uint32_t, uint32_t);
-SHIZUKU_SVC_EXTERN template SHIZUKU_SVC_INSTANCE(window) void shizuku::ARCH::ensure_object_window(uint32_t);
-SHIZUKU_SVC_EXTERN template SHIZUKU_SVC_INSTANCE(object_window) void shizuku::ARCH::apply_object_window(const shizuku::ARCH::object_protection_window &);
+SHIZUKU_SVC_EXTERN template SHIZUKU_SVC_INSTANCE(stack) void shizuku::ARCH::apply_stack_window(uint32_t, uint32_t, uint32_t);
+SHIZUKU_SVC_EXTERN template SHIZUKU_SVC_INSTANCE(window) void shizuku::ARCH::ensure_object_window(uint32_t, uint32_t);
+SHIZUKU_SVC_EXTERN template SHIZUKU_SVC_INSTANCE(object_window) void shizuku::ARCH::apply_object_window(const shizuku::ARCH::object_protection_window &, uint32_t);
 SHIZUKU_SVC_EXTERN template SHIZUKU_SVC_INSTANCE(return_room) bool shizuku::ARCH::call_entry_has_return_room(const shizuku::ARCH::context_t &, uint32_t);
 SHIZUKU_SVC_EXTERN template SHIZUKU_SVC_INSTANCE(floor) uint32_t shizuku::KERNEL::current_unwind_floor() const;
 SHIZUKU_SVC_EXTERN template SHIZUKU_SVC_INSTANCE(find_desc) const shizuku::KERNEL_OBJECT::method_descriptor_entry *shizuku::KERNEL_OBJECT::find_method_descriptor(uint32_t, uint32_t, uint32_t, shizuku::object_error &) const;
