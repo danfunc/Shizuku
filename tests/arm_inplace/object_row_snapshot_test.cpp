@@ -23,6 +23,10 @@ struct dispatcher_test_access {
     caller.created = target.created = true;
     caller.creator_object = 0;
     target.creator_object = 1;
+    target.kind = shizuku::object_kind::PLAIN;
+    target.parent_handler_object = 3;
+    target.parent_handler_entry = 0x12345678;
+    target.flags = 0;
     target.methods[0] = method;
     target.region_base = 0x1000;
     target.region_limit = 0x2000;
@@ -30,6 +34,9 @@ struct dispatcher_test_access {
   }
   static void sequence(objects &o, unsigned id, uint32_t value) {
     __atomic_store_n(&o.m_objects[id].seq, value, __ATOMIC_SEQ_CST);
+  }
+  static void flags(objects &o, unsigned id, uintptr_t value) {
+    o.m_objects[id].flags = value;
   }
   static bool begin(objects &o, unsigned id) { return objects::row_write_begin(o.m_objects[id]); }
   static void end(objects &o, unsigned id) { objects::row_write_end(o.m_objects[id]); }
@@ -46,6 +53,16 @@ int main() {
   assert(result.found && error == shizuku::object_error::OK && entry == method);
   assert(result.view.region_base == 0x1000 && result.view.region_limit == 0x2000);
   assert(result.view.instance_generation == 7);
+  assert(result.view.id == 2 && result.view.kind == shizuku::object_kind::PLAIN);
+  assert(result.view.parent_handler_object == 3);
+  assert(result.view.parent_handler_entry == 0x12345678);
+  assert(result.view.privileged);
+  assert(result.view.region_base == 0x1000 && result.view.region_limit == 0x2000);
+  // Privilege is derived from flags in the same validated target-row snapshot.
+  access::flags(o, 2, shizuku::OBJECT_UNPRIVILEGED);
+  result = o.resolve_method_view(2, 0, 1, error, entry);
+  assert(result.found && !result.view.privileged);
+  access::flags(o, 2, 0);
   // return_region は created と窓の 3 欄だけを seq の組で守る (3A)。
   auto live = o.return_region(2);
   assert(live.base == 0x1000 && live.limit == 0x2000);

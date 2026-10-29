@@ -291,6 +291,17 @@ public:
     uint32_t region_base;
     uint32_t region_limit;
   };
+  // Only the target-row fields needed to construct a callee_view. Keeping this
+  // separate from object_t avoids zero-initializing the full table row.
+  struct callee_row_view {
+    uint32_t flags;
+    object_kind kind;
+    uint32_t parent_handler_object;
+    uintptr_t parent_handler_entry;
+    uint32_t instance_generation;
+    uint32_t region_base;
+    uint32_t region_limit;
+  };
   // 方法記述子 (caller が callee を呼ぶ入口)。caller の表の 1 項目で、32 バイト (2 の冪なので index は
   //   シフトで引く)。呼出しに要る値は作成 (publish_descriptor) が呼び先の行から前計算して写す:
   //   入口 pc・親ハンドラの入口・種別・親ハンドラ・特権・窓・instance 世代、そして照合用の持ち主と
@@ -625,7 +636,7 @@ public:
       const bool tcreated = row_load(trow.created);
       const uint32_t tcreator = row_load(trow.creator_object);
       const method_t selected = method < METHOD_COUNT_T ? row_load(trow.methods[method]) : nullptr;
-      object_t view_row{};
+      callee_row_view view_row;
       view_row.flags = row_load(trow.flags);
       view_row.kind = row_load(trow.kind);
       view_row.parent_handler_object = row_load(trow.parent_handler_object);
