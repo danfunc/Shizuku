@@ -145,3 +145,11 @@ cc_test(
     copts = ["-std=c++20"],
     deps = ["//boards/esp32_c6:heartbeat_logic"],
 )
+
+# C6 のユーザー LED オブジェクト (boards/esp32_c6/led_object.hpp) の試験。偽物の Mmio に書かれた内容を見る。
+cc_test(
+    name = "led_object_test",
+    srcs = ["led_object_test.cpp"],
+    copts = ["-std=c++20"],
+    deps = ["//boards/esp32_c6:led_object"],
+)

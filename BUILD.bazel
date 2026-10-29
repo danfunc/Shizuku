@@ -447,5 +447,6 @@ cc_library(
         "//chips/esp32_c6:headers",
         "//boards/esp32_c6:headers",
         "//boards/esp32_c6:heartbeat_logic",
+        "//boards/esp32_c6:led_gpio",
     ],
 )

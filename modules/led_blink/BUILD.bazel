@@ -1,0 +1,30 @@
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# 全ボード共通の LED 点滅。ボードの ARCH / BOARD は Env として外から渡す (このパッケージは
+# chip / pico の固有ヘッダを include しない)。XNO (チップ非依存オブジェクト) へ移す候補。
+
+cc_library(
+    name = "led_abi",
+    hdrs = ["led_abi.hpp"],
+)
+
+cc_library(
+    name = "led_blink",
+    hdrs = [
+        "blink.hpp",
+        "blink_logic.hpp",
+    ],
+    deps = [
+        ":led_abi",
+        "//:internal_headers",
+    ],
+)
+
+cc_test(
+    name = "blink_test",
+    srcs = ["blink_test.cpp"],
+    copts = ["-std=c++20"],
+    deps = [":led_blink"],
+)

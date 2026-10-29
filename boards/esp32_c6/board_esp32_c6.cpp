@@ -3,6 +3,7 @@
 #include "chips/esp32_c6/systimer.hpp"
 #include "chips/esp32_c6/trap_api.hpp"
 #include "boards/esp32_c6/heartbeat_logic.hpp"
+#include "boards/esp32_c6/led_gpio.hpp"
 
 #ifndef SHIZUKU_C6_HEARTBEAT_LED
 #define SHIZUKU_C6_HEARTBEAT_LED 1
@@ -16,20 +17,6 @@ using namespace shizuku::chips::esp32_c6;
 namespace c6 = shizuku::ports::c6;
 
 namespace {
-// Seeed XIAO ESP32C6 のユーザー LED は GPIO15、active low (GPIO を Low で点灯)。
-// レジスタ値は ESP-IDF v6.1 の soc/esp32c6 (reg_base.h, gpio_reg.h, io_mux_reg.h) に揃える。
-constexpr uint32_t LED_GPIO = 15;
-constexpr uint32_t LED_BIT = 1u << LED_GPIO;
-constexpr uint32_t IO_MUX_LED_REG = 0x60090000u + 0x04u + 4u * LED_GPIO; // PERIPHS_IO_MUX_GPIO15_U
-constexpr uint32_t IO_MUX_MCU_SEL_MASK = 0x7u << 12;
-constexpr uint32_t IO_MUX_MCU_SEL_GPIO = 1u << 12; // PIN_FUNC_GPIO = 1
-constexpr uint32_t GPIO_OUT_W1TS = 0x60091000u + 0x08u;
-constexpr uint32_t GPIO_OUT_W1TC = 0x60091000u + 0x0cu;
-constexpr uint32_t GPIO_ENABLE_W1TS = 0x60091000u + 0x24u;
-constexpr uint32_t GPIO_FUNC_OUT_SEL_CFG = 0x60091000u + 0x554u + 4u * LED_GPIO;
-constexpr uint32_t GPIO_FUNC_OUT_SEL_MASK = 0xFFu;
-constexpr uint32_t SIG_GPIO_OUT_IDX = 128; // GPIO matrix の simple GPIO 出力
-
 // LED 点滅に使う SYSTIMER target1 (target0 は kernel の one-shot timer 専用なので触らない)。
 // 出典: ESP-IDF v6.1 soc/esp32c6 の systimer_reg.h (TARGET1_HI/LO/CONF, COMP1_LOAD,
 // INT_ENA/INT_CLR bit1, CONF bit23 = TARGET1_WORK_EN)。割込み源は ETS_SYSTIMER_TARGET1_INTR_SOURCE = 58
@@ -60,16 +47,9 @@ shizuku::boards::esp32_c6_heartbeat::state_t heartbeat_state{};
 // 診断: [0] = 起動時の irq_register の戻り値 (0 が成功, 負は失敗で LED は点かない), [1] = 割込み回数。
 volatile int32_t heartbeat_diag[2] = {};
 
-void set_led(bool on) { mmio_write(on ? GPIO_OUT_W1TC : GPIO_OUT_W1TS, LED_BIT); }
+void set_led(bool on) { shizuku::boards::esp32_c6_led::gpio_set(shizuku::boards::esp32_c6_led::direct_mmio{}, on); }
 
-void heartbeat_led_gpio_init() {
-  mmio_write(GPIO_ENABLE_W1TS, LED_BIT);
-  mmio_write(GPIO_FUNC_OUT_SEL_CFG,
-             (mmio_read(GPIO_FUNC_OUT_SEL_CFG) & ~GPIO_FUNC_OUT_SEL_MASK) | SIG_GPIO_OUT_IDX);
-  mmio_write(IO_MUX_LED_REG,
-             (mmio_read(IO_MUX_LED_REG) & ~IO_MUX_MCU_SEL_MASK) | IO_MUX_MCU_SEL_GPIO);
-  set_led(false);
-}
+void heartbeat_led_gpio_init() { shizuku::boards::esp32_c6_led::gpio_init(shizuku::boards::esp32_c6_led::direct_mmio{}); }
 
 // target1 を絶対 tick で装填する。COMP1_LOAD で比較器に取り込む (target0 と同じ手順)。
 void heartbeat_arm(uint64_t target) {
