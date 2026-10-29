@@ -14,25 +14,56 @@
 #include "shizuku/object_ids.hpp"
 #include "shizuku/selftest.hpp"
 #include "shizuku/u_cost_invariants.hpp"
+#include "shizuku/u_cost_sram_window.hpp"
 #include "shizuku/xip_cost.hpp"
 #include "shizuku/armv8m_abi.hpp"
 
-// 親 P 用データ領域・スタック (32B 整列: ARMv8-M の MPU 境界 32B)
-alignas(32) uint8_t u_cost_p_data_pool[256];
-alignas(32) uint8_t u_cost_p_stack[1024];
+// --//configs:layout_pad_bytes=N の詰め物。flash のコードと .bss を N バイト動かして、
+// 計測値が配置に依らないことを確かめる (0 なら何も足さない)。pad は pool より前に並べる。
+__attribute__((used, no_reorder, section(".text.u_cost_layout_pad")))
+const uint8_t u_cost_layout_pad_flash[shizuku::layout_pad_bytes] = {};
+__attribute__((used, no_reorder, section(".bss.u_cost_data")))
+volatile uint8_t u_cost_layout_pad_bss[shizuku::layout_pad_bytes];
+
+// P/C の可変データと probe 用領域はコード実行窓から分けた専用 SRAM section に置く。
+// 各 object が使う data は従来どおり個別の MPU 窓でだけ開示する。
+alignas(32) __attribute__((used, no_reorder, section(".bss.u_cost_data")))
+uint8_t u_cost_p_data_pool[256];
+alignas(32) __attribute__((used, no_reorder, section(".bss.u_cost_data")))
+uint8_t u_cost_p_stack[1024];
 
 // 子 C 用データ領域・スタック (32B 整列)
-alignas(32) uint8_t u_cost_c_data_pool[256];
-alignas(32) uint8_t u_cost_c_stack[1024];
+alignas(32) __attribute__((used, no_reorder, section(".bss.u_cost_data")))
+uint8_t u_cost_c_data_pool[256];
+alignas(32) __attribute__((used, no_reorder, section(".bss.u_cost_data")))
+uint8_t u_cost_c_stack[1024];
 
-// アセンブリシンボル
+// U 側のコード (P / C 本体と converter・svc stub・計測ループ) は 1 本の SRAM section
+// `.time_critical.u_cost` に置く。flash の XIP キャッシュでカーネルと衝突して振れるのを避けるため。
+// begin / end は同じ section の中のマーカーで、window は 32B 境界の [begin, end)。
+// no_reorder が section 内の並び (begin → C → P → end) を固定する。
+// 非特権に実行を開ける SRAM はこの範囲だけ (rp2350_u_cost() が region 1 に RO+X で張る)。
 extern "C" {
 uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3);
 uintptr_t u_cost_child_worker(uintptr_t arg0, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3);
+void u_cost_code_begin();
+void u_cost_code_end_pad();
+extern const char u_cost_code_end[];
+void u_cost_probe_code_access();
+void u_cost_probe_data_access();
+void u_cost_denied_code();
+extern const char u_cost_probe_data_fault_pc[];
 }
 
 #if defined(__ARM_ARCH_8M_MAIN__)
-__attribute__((naked)) uintptr_t u_cost_child_worker(uintptr_t arg0, uintptr_t, uintptr_t, uintptr_t) {
+#define SHIZUKU_U_COST_CODE \
+  __attribute__((section(".time_critical.u_cost"), used, noinline, no_reorder))
+
+SHIZUKU_U_COST_CODE __attribute__((naked, aligned(32))) void u_cost_code_begin() {
+  asm volatile(".syntax unified\n.thumb\nnop\n");
+}
+
+SHIZUKU_U_COST_CODE __attribute__((naked)) uintptr_t u_cost_child_worker(uintptr_t arg0, uintptr_t, uintptr_t, uintptr_t) {
   asm volatile(
       ".syntax unified\n"
       ".thumb\n"
@@ -41,7 +72,37 @@ __attribute__((naked)) uintptr_t u_cost_child_worker(uintptr_t arg0, uintptr_t, 
   );
 }
 
-uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
+// These two probes stay inside the allowed code window, then deliberately cross it.
+SHIZUKU_U_COST_CODE __attribute__((naked)) void u_cost_probe_code_access() {
+  asm volatile(".syntax unified\n.thumb\nldr r0, =u_cost_denied_code\nbx r0\n");
+}
+
+SHIZUKU_U_COST_CODE __attribute__((naked)) void u_cost_probe_data_access() {
+  asm volatile(
+      ".syntax unified\n.thumb\n"
+      "ldr r0, =u_cost_p_stack\n"
+      ".global u_cost_probe_data_fault_pc\n"
+      "u_cost_probe_data_fault_pc:\n"
+      "ldr r0, [r0]\n"
+      "bx lr\n");
+}
+
+// Registered only after timing so the measured child worker stays two instructions.
+SHIZUKU_U_COST_CODE uintptr_t u_cost_denied_probe_worker(uintptr_t mode, uintptr_t,
+                                                        uintptr_t, uintptr_t) {
+  if (mode == 90) u_cost_probe_code_access();
+  if (mode == 91) u_cost_probe_data_access();
+  return 0;
+}
+
+// This function is intentionally in a separate SRAM input section and is never called
+// by privileged code. The U probe attempts to execute it while only u_cost is enabled.
+__attribute__((used, noinline, aligned(32), section(".time_critical.u_cost_denied"), no_reorder, naked))
+void u_cost_denied_code() {
+  asm volatile(".syntax unified\n.thumb\nbx lr\n");
+}
+
+SHIZUKU_U_COST_CODE uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
   using shizuku::armv8m_abi::syscall;
   auto *const data = reinterpret_cast<volatile uint32_t *>(u_cost_p_data_pool);
   const uintptr_t child = data[0];
@@ -68,7 +129,14 @@ uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
     for (uintptr_t i = 0; i < 32; ++i) (void)call(0);
     return 32;
   }
-  if (cmd < 2 || cmd > 16 || cmd == 7 || cmd == 8 || cmd == 9) return 0;
+  if (cmd < 2 || cmd > 16 || cmd == 7 || cmd == 8 || cmd == 9) {
+    // This cold command is used only after the timing runs. It adds no work to the
+    // normal measured parent command paths.
+    if (cmd == 18)
+      return syscall(static_cast<uintptr_t>(shizuku::object_api::EXPORT_METHOD), 1,
+                     reinterpret_cast<uintptr_t>(&u_cost_denied_probe_worker)).error;
+    return 0;
+  }
   const bool baseline = cmd == 2 || cmd == 5 || cmd == 12 || cmd == 15;
   const bool corrected = cmd >= 12;
   if (!corrected) {
@@ -104,11 +172,19 @@ uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
   return rounds;
 }
 
+// 最後のliteral poolを窓内にflushしてから32B境界へalignし、window終端を置く。
+SHIZUKU_U_COST_CODE __attribute__((naked)) void u_cost_code_end_pad() {
+  asm volatile(".ltorg\n.balign 32\n.global u_cost_code_end\nu_cost_code_end:\n");
+}
+
 #else
 // ホスト環境用スタブ
 extern "C" {
 uintptr_t u_cost_parent_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) { return 0; }
 uintptr_t u_cost_child_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) { return 0; }
+void u_cost_code_begin() {}
+void u_cost_code_end_pad() {}
+const char u_cost_code_end[1] = {};
 }
 #endif
 
@@ -282,6 +358,45 @@ void rp2350_u_cost() {
           0, 0);
     }
 
+    // 1b. U 側コードの SRAM window を検査して region 1 (REGION_UNUSED) に RO+X で張る。
+    //     非特権に実行を開ける SRAM はこの 1 本だけで、計測が終わったら閉じる。
+    //     MPU は core ごとなので、P / C が走る (= この) core にだけ張る。
+    const u_cost_sram::range code_window{
+        u_cost_sram::code_address(reinterpret_cast<uintptr_t>(&u_cost_code_begin)),
+        reinterpret_cast<uintptr_t>(u_cost_code_end)};
+    {
+      const uintptr_t entries[] = {reinterpret_cast<uintptr_t>(&u_cost_parent_worker),
+                                   reinterpret_cast<uintptr_t>(&u_cost_child_worker)};
+      const u_cost_sram::range protected_ranges[] = {
+          {reinterpret_cast<uintptr_t>(u_cost_p_data_pool),
+           reinterpret_cast<uintptr_t>(u_cost_p_data_pool) + sizeof(u_cost_p_data_pool)},
+          {reinterpret_cast<uintptr_t>(u_cost_p_stack),
+           reinterpret_cast<uintptr_t>(u_cost_p_stack) + sizeof(u_cost_p_stack)},
+          {reinterpret_cast<uintptr_t>(u_cost_c_data_pool),
+           reinterpret_cast<uintptr_t>(u_cost_c_data_pool) + sizeof(u_cost_c_data_pool)},
+          {reinterpret_cast<uintptr_t>(u_cost_c_stack),
+           reinterpret_cast<uintptr_t>(u_cost_c_stack) + sizeof(u_cost_c_stack)}};
+      const auto verdict = u_cost_sram::check_code_window(
+          code_window, {CHIP::kSramBase, CHIP::kSramEnd}, entries, protected_ranges);
+      // pad のアドレスを出すのは --gc-sections に pad を捨てさせないため (配置確認にも使う)。
+      BOARD::diag_printf("[UCODE] window=%08lx..%08lx bytes=%lu entries=%08lx,%08lx pad=%lu "
+                         "pad_flash=%08lx pad_bss=%08lx verdict=%u\n",
+                         (unsigned long)code_window.begin, (unsigned long)code_window.end,
+                         (unsigned long)(code_window.end - code_window.begin),
+                         (unsigned long)entries[0], (unsigned long)entries[1],
+                         (unsigned long)shizuku::layout_pad_bytes,
+                         (unsigned long)u_cost_layout_pad_flash,
+                         (unsigned long)u_cost_layout_pad_bss, (unsigned)verdict);
+      drain_diag_if_supported<BOARD>();
+      if (verdict != u_cost_sram::verdict::ok) {
+        BOARD::panic("rp2350_u_cost: U code window is not a valid SRAM window");
+      }
+      if (!u_cost_sram::denied_code_entry(
+              code_window, {CHIP::kSramBase, CHIP::kSramEnd},
+              reinterpret_cast<uintptr_t>(&u_cost_denied_code))) {
+        BOARD::panic("rp2350_u_cost: denied-code probe is not outside the U code window");
+      }
+    }
     // 2. スタックのカナリア初期化
     constexpr uint32_t U_STACK_CANARY = 0x5A5A5A5Au;
     auto *p_stack_words = reinterpret_cast<uint32_t *>(u_cost_p_stack);
@@ -302,6 +417,12 @@ void rp2350_u_cost() {
     shared[1] = reinterpret_cast<uintptr_t>(&u_cost_child_worker);
     shared[2] = 0; // desc_index
     shared[3] = ROUNDS; // 2048
+
+    // REGION_UNUSED is core-global, so keep it open only for this U-cost test interval.
+    // Normal completion closes it by RAII; the only failure exits below are noreturn panic.
+    const auto sync_mpu = [] { asm volatile("dsb\nisb" ::: "memory"); };
+    u_cost_sram::scoped_code_window<ARCH, decltype(sync_mpu)> code_window_scope(
+        code_window, sync_mpu);
 
     // 4. 親 P を CREATE_OBJECT (非特権フラグ OBJECT_UNPRIVILEGED=2 を指定)
     shizuku_rp2350_u_cost_stage = 0xC05010u;
@@ -548,6 +669,54 @@ void rp2350_u_cost() {
     const auto corr_desc_check_res = ARCH::syscall(
         static_cast<uintptr_t>(object_api::CALL_METHOD),
         OBJECT_U_COST_P, 0, 17 /* cmd=17 */);
+
+    // Probe both SRAM execute denial and data denial while the bounded code window is open.
+    // Use a separate thread because faults stop only the offending thread.
+    const auto export_probe_res = ARCH::syscall(
+        static_cast<uintptr_t>(object_api::CALL_METHOD), OBJECT_U_COST_P, 0, 18);
+    record_check("u_cost denied-probe method registered",
+                 export_probe_res.error == 0 && export_probe_res.value == 0,
+                 export_probe_res.value, 0);
+    auto run_denied_probe = [&](uintptr_t mode, const char *name, bool code_probe) {
+      const uint32_t faults_before = kernel_instance.faults().count;
+      const auto spawned = ARCH::syscall(static_cast<uintptr_t>(object_api::SPAWN),
+                                         OBJECT_U_COST_P, 1, mode);
+      const bool spawn_ok = spawned.error == 0 && spawned.value != 0;
+      if (spawn_ok) {
+        for (uint32_t guard = 0;
+             guard < 200 && kernel_instance.faults().count == faults_before; ++guard)
+          ARCH::syscall(static_cast<uintptr_t>(object_api::YIELD));
+      }
+      const auto &fault = kernel_instance.faults();
+      const bool new_fault = spawn_ok && fault.count == faults_before + 1;
+      bool expected_fault = new_fault && fault.thread == spawned.value;
+      if (code_probe) {
+        expected_fault = expected_fault && (fault.status & 0x1u) != 0 &&
+                         (fault.pc & ~uintptr_t(1)) ==
+                             u_cost_sram::code_address(
+                                 reinterpret_cast<uintptr_t>(&u_cost_denied_code));
+      } else {
+        expected_fault = expected_fault && (fault.status & 0x82u) == 0x82u &&
+                         fault.address == reinterpret_cast<uintptr_t>(u_cost_p_stack) &&
+                         (fault.pc & ~uintptr_t(1)) ==
+                             u_cost_sram::code_address(
+                                 reinterpret_cast<uintptr_t>(u_cost_probe_data_fault_pc));
+      }
+      record_check(name, expected_fault, fault.status,
+                   code_probe ? 0x1u : 0x82u);
+      record_check("u_cost SRAM deny probe stopped only its thread",
+                   new_fault && fault.thread == spawned.value,
+                   fault.thread, spawned.value);
+      BOARD::diag_printf("[UCODE-DENY] mode=%lu spawn=%lu faults=%lu thread=%lu "
+                         "pc=%08lx address=%08lx cfsr=%08lx\n",
+                         (unsigned long)mode, (unsigned long)spawned.value,
+                         (unsigned long)fault.count, (unsigned long)fault.thread,
+                         (unsigned long)fault.pc, (unsigned long)fault.address,
+                         (unsigned long)fault.status);
+      drain_diag_if_supported<BOARD>();
+    };
+    run_denied_probe(90, "u_cost SRAM code outside executable window faults", true);
+    run_denied_probe(91, "u_cost SRAM data outside object window faults", false);
 
     // 結果抽出
     const uint32_t corr_meth_final = shared[21];       // offset 84 (want ROUNDS)

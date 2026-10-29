@@ -24,6 +24,9 @@ namespace shizuku{
     // An unset configure_file variable yields 0; Bazel substitutes 0 or 1.
     inline constexpr bool xip_cost_probe_enabled = 0${SHIZUKU_XIP_COST_PROBE} != 0;
     inline constexpr bool route_cost_probe_enabled = 0${SHIZUKU_ROUTE_COST_PROBE} != 0;
+    // Bytes of padding the RP2350 U-cost tester places in flash code, RAM code and .bss
+    // (--//configs:layout_pad_bytes). 0 adds nothing; it only moves addresses.
+    inline constexpr unsigned layout_pad_bytes = ${SHIZUKU_LAYOUT_PAD_BYTES};
 };
 
 #include "shizuku/svc_ram_instances.hpp"

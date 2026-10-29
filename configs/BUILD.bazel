@@ -240,6 +240,13 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Layout-sensitivity check: pads the RP2350 U-cost tester's flash code, RAM code and .bss by N bytes.
+int_flag(
+    name = "layout_pad_bytes",
+    build_setting_default = 0,
+    visibility = ["//visibility:public"],
+)
+
 # ★型は SHIZUKU_RP2040 の #if ではなく構成 (select) で決める。どの arch/board を
 #   入れたかが config.hpp を開けばそのまま読めるようにするため。
 cost_probe_config(
@@ -248,6 +255,7 @@ cost_probe_config(
     is_rp2350 = select({":rp2350": True, "//conditions:default": False}),
     xip_probe = ":rp2350_xip_cost_probe",
     route_probe = ":rp2350_route_cost_probe",
+    layout_pad = ":layout_pad_bytes",
     substitutions = select({
         # 型名は歴史的経緯で rp2040_pico_w だが、Pico / Pico W / XIAO 共通の
         # バックエンド (LED の選び方は peripherals.cpp と SDK のボードマクロ側)。
