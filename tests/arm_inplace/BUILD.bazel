@@ -10,6 +10,13 @@ cc_test(
 )
 
 cc_test(
+    name = "u_cost_sram_window_test",
+    srcs = ["u_cost_sram_window_test.cpp"],
+    copts = ["-std=c++20"],
+    deps = ["//:internal_headers"],
+)
+
+cc_test(
     name = "svc_direct_table_test",
     srcs = ["svc_direct_table_test.cpp"],
     copts = ["-std=c++20"],
