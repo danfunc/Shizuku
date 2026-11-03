@@ -233,8 +233,6 @@ int main() {
     .code_limit = 0x40801000u,
     .data_base = 0x40810000u,
     .data_limit = 0x40811000u,
-    .stack_base = 0x40820000u,
-    .stack_limit = 0x40821000u,
     .u_return_trampoline = 0x40800010u,
     .role = c6_stage1_role::App,
     .mmio_base = 0x60000000u,
@@ -246,8 +244,10 @@ int main() {
   assert(role_allows_kind(static_cast<ObjectRole>(drv_bounds.role), RegionKind::DriverMmio));
 
   // §1b: PMP 配置と切替え CSR 本数の厳格検証 (固定エントリを切替えで書かない)
-  static_assert(pmp_controller::SWITCH_CSR_COUNT == 8u,
-                "PMP switch must touch exactly 8 CSRs");
+  static_assert(pmp_controller::SWITCH_CSR_COUNT == 6u,
+                "PMP switch must touch exactly 6 CSRs");
+  static_assert(pmp_controller::STACK_WINDOW_CSR_COUNT == 2u,
+                "Stack window must touch exactly 2 CSRs");
   static_assert(pmp_controller::FIXED_ENTRIES_TOUCHED_ON_SWITCH == 0u,
                 "PMP switch must not touch fixed entries");
 
@@ -256,11 +256,16 @@ int main() {
 
   // App は MMIO を持たないため pmpcfg2 (entry 8-11) は 0
   assert(app_bounds.precomputed.pmpcfg2 == 0);
-  assert(app_bounds.precomputed.pmpaddr4 == (app_bounds.stack_base >> 2));
-  assert(app_bounds.precomputed.pmpaddr5 == (app_bounds.stack_limit >> 2));
   assert(app_bounds.precomputed.pmpaddr6 == (app_bounds.data_base >> 2));
   assert(app_bounds.precomputed.pmpaddr7 == (app_bounds.data_limit >> 2));
   assert(app_bounds.precomputed.pmpcfg1 != 0);
+
+  // Stack 窓は apply_stack_window で pmpaddr4/5 に動的適用 (TOR)
+  constexpr uintptr_t test_win_lo = 0x40820000u;
+  constexpr uintptr_t test_win_hi = 0x40821000u;
+  pmp_controller::apply_stack_window(test_win_lo, test_win_hi);
+  assert((test_win_lo >> 2) == 0x10208000u);
+  assert((test_win_hi >> 2) == 0x10208400u);
 
   // Driver は MMIO 窓を持つため pmpcfg2 != 0
   assert(drv_bounds.precomputed.pmpcfg2 != 0);

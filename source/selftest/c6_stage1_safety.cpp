@@ -1152,8 +1152,6 @@ void c6_stage1_safety() {
   }
   g_c6_stage1_u_bounds.data_base = reinterpret_cast<uintptr_t>(u_mode_stage1_data_pool);
   g_c6_stage1_u_bounds.data_limit = g_c6_stage1_u_bounds.data_base + sizeof(u_mode_stage1_data_pool);
-  g_c6_stage1_u_bounds.stack_base = reinterpret_cast<uintptr_t>(u_mode_stage1_stack);
-  g_c6_stage1_u_bounds.stack_limit = g_c6_stage1_u_bounds.stack_base + sizeof(u_mode_stage1_stack);
   g_c6_stage1_u_bounds.u_return_trampoline = reinterpret_cast<uintptr_t>(&c6_stage1_u_return_trampoline);
   g_c6_stage1_u_bounds.role = c6_stage1_role::App;
   g_c6_stage1_u_bounds.mmio_base = 0;
@@ -1166,23 +1164,22 @@ void c6_stage1_safety() {
   g_c6_stage1_driver_bounds.code_limit = reinterpret_cast<uintptr_t>(&c6_stage1_u_code_end);
   g_c6_stage1_driver_bounds.data_base = reinterpret_cast<uintptr_t>(u_mode_driver_data_pool);
   g_c6_stage1_driver_bounds.data_limit = g_c6_stage1_driver_bounds.data_base + sizeof(u_mode_driver_data_pool);
-  g_c6_stage1_driver_bounds.stack_base = reinterpret_cast<uintptr_t>(u_mode_driver_stack);
-  g_c6_stage1_driver_bounds.stack_limit = g_c6_stage1_driver_bounds.stack_base + sizeof(u_mode_driver_stack);
   g_c6_stage1_driver_bounds.u_return_trampoline = reinterpret_cast<uintptr_t>(&c6_stage1_u_return_trampoline);
   g_c6_stage1_driver_bounds.role = c6_stage1_role::Driver;
   g_c6_stage1_driver_bounds.mmio_base = 0x60000000u;
   g_c6_stage1_driver_bounds.mmio_limit = 0x60001000u;
   g_c6_stage1_driver_bounds.update_precomputed();
 
+  // 2 つの object (U と driver) が 1 本の thread stack を共有
+  auto &thread = shizuku::kernel_instance.current_thread();
+  thread.set_user_stack(reinterpret_cast<uintptr_t>(u_mode_stage1_stack),
+                        reinterpret_cast<uintptr_t>(u_mode_stage1_stack) + sizeof(u_mode_stage1_stack));
+
   // U worker スタックのカナリア初期化
   constexpr uint32_t U_STACK_CANARY = 0x5A5A5A5Au;
   auto *u_stack_words = reinterpret_cast<volatile uint32_t *>(u_mode_stage1_stack);
   for (size_t i = 0; i < sizeof(u_mode_stage1_stack) / sizeof(uint32_t); ++i) {
     u_stack_words[i] = U_STACK_CANARY;
-  }
-  auto *drv_stack_words = reinterpret_cast<uint32_t *>(u_mode_driver_stack);
-  for (size_t i = 0; i < sizeof(u_mode_driver_stack) / sizeof(uint32_t); ++i) {
-    drv_stack_words[i] = U_STACK_CANARY;
   }
 
   // target pointer の設定
@@ -1408,14 +1405,14 @@ void c6_stage1_safety() {
   record_check("stage1: production predicate rejects uninitialized 0x0", reject_zero, reject_zero ? 1 : 0, 1);
 
   // 10. 本番スタック切り替え述語の検証
-  const uintptr_t test_u_sp = g_c6_stage1_u_bounds.stack_base + 512u;
+  const uintptr_t test_u_sp = thread.stack_lo + 512u;
   const uintptr_t kstack_valid_frame = reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack) + 3600u;
   const uintptr_t routed_m_sp = shizuku_c6_get_m_handler_stack(test_u_sp, kstack_valid_frame);
   const uintptr_t expected_snapshot = (kstack_valid_frame + 144u);
   const bool routed_inside_kstack = (routed_m_sp >= reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack) &&
                                      routed_m_sp <= reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack + sizeof(shizuku_c6_kernel_stack)));
-  const bool routed_outside_u_stack = (routed_m_sp < g_c6_stage1_u_bounds.stack_base ||
-                                       routed_m_sp > g_c6_stage1_u_bounds.stack_limit);
+  const bool routed_outside_u_stack = (routed_m_sp < thread.stack_lo ||
+                                       routed_m_sp > thread.stack_hi);
   record_check("stage1: M handler stack routed inside trusted kernel stack as valid aligned snapshot",
                routed_inside_kstack && (routed_m_sp == expected_snapshot), routed_m_sp, expected_snapshot);
   record_check("stage1: M handler stack routed strictly outside U stack",

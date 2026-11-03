@@ -231,10 +231,14 @@ template <typename CONTEXT> struct thread {
   void set_user_stack(uintptr_t lo, uintptr_t hi) noexcept {
     stack_lo = lo;
     stack_hi = hi;
+    cur_win_lo = lo;
+    cur_win_hi = hi;
   }
   void set_stack_bounds(uintptr_t lo, uintptr_t hi) noexcept {
     stack_lo = lo;
     stack_hi = hi;
+    cur_win_lo = lo;
+    cur_win_hi = hi;
   }
   call_ledger_entry *ledger = nullptr;
   uint32_t ledger_capacity = 0;

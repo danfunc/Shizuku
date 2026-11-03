@@ -100,14 +100,9 @@ uintptr_t shizuku_c6_kstack_limit(void) {
       reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack), shizuku::chips::esp32_c6::KSTACK_GUARD_BYTES);
 }
 uintptr_t shizuku_c6_get_m_handler_stack(uintptr_t current_sp, uintptr_t frame_sp) {
-  uintptr_t s_base = g_c6_stage1_u_bounds.stack_base;
-  uintptr_t s_limit = g_c6_stage1_u_bounds.stack_limit;
-  if (g_c6_stage1_driver_bounds.owner_id != 0 &&
-      current_sp >= g_c6_stage1_driver_bounds.stack_base &&
-      current_sp <= g_c6_stage1_driver_bounds.stack_limit) {
-    s_base = g_c6_stage1_driver_bounds.stack_base;
-    s_limit = g_c6_stage1_driver_bounds.stack_limit;
-  }
+  auto &thread = shizuku::kernel_instance.current_thread();
+  const uintptr_t s_base = thread.stack_lo;
+  const uintptr_t s_limit = thread.stack_hi;
   return shizuku::chips::esp32_c6::get_m_handler_stack(
       current_sp,
       s_base,
@@ -169,6 +164,8 @@ struct c6_pmp_shadow {
   uintptr_t fixed_region_limit;
   const void *bounds;
   uint32_t epoch;
+  uintptr_t win_lo;
+  uintptr_t win_hi;
 };
 c6_pmp_shadow s_pmp_shadow = {};
 namespace c6 = shizuku::ports::c6;
@@ -439,12 +436,13 @@ __attribute__((noinline)) static bool bounds_static_ok(const c6_stage1_object_bo
   if (b.code_base == 0 || b.code_limit <= b.code_base) return false;
   // U return trampoline がオブジェクト所有 code 範囲内にあること
   if (b.u_return_trampoline < b.code_base || b.u_return_trampoline >= b.code_limit) return false;
-  // スタック境界
-  if (b.stack_base == 0 || b.stack_limit <= b.stack_base) return false;
+  // スタック境界 (thread stack)
+  const auto &thread = shizuku::kernel_instance.current_thread();
+  if (thread.stack_lo == 0 || thread.stack_hi <= thread.stack_lo) return false;
   const uintptr_t mk_lo = reinterpret_cast<uintptr_t>(&shizuku_c6_stage1_pma_ready);
   const uintptr_t mk_hi = mk_lo + sizeof(shizuku_c6_stage1_pma_ready);
   if (pmp::pmp_controller::ranges_overlap(b.code_base, b.code_limit, mk_lo, mk_hi) ||
-      pmp::pmp_controller::ranges_overlap(b.stack_base, b.stack_limit, mk_lo, mk_hi) ||
+      pmp::pmp_controller::ranges_overlap(thread.stack_lo, thread.stack_hi, mk_lo, mk_hi) ||
       (b.data_limit != 0 && pmp::pmp_controller::ranges_overlap(b.data_base, b.data_limit, mk_lo, mk_hi)) ||
       (b.mmio_limit != 0 && pmp::pmp_controller::ranges_overlap(b.mmio_base, b.mmio_limit, mk_lo, mk_hi))) {
     return false;
@@ -535,8 +533,6 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
     const uintptr_t code_limit = bounds->code_limit;
     const uintptr_t data_base = bounds->data_base;
     const uintptr_t data_limit = bounds->data_limit;
-    const uintptr_t stack_base = bounds->stack_base;
-    const uintptr_t stack_limit = bounds->stack_limit;
     const uintptr_t trampoline = bounds->u_return_trampoline;
     const uintptr_t mmio_base = bounds->mmio_base;
     const uintptr_t mmio_limit = bounds->mmio_limit;
@@ -556,8 +552,12 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
     }
 
     // active SP (f.reserved0) の設定および検証:
-    if (f.reserved0 < stack_base || f.reserved0 > stack_limit) {
-      f.reserved0 = stack_limit;
+    auto &cur_thread = kernel.current_thread();
+    if (f.reserved0 < cur_thread.stack_lo || f.reserved0 > cur_thread.stack_hi) {
+      active_context = &c;
+      active_frame = c.sp;
+      active_stop_phase = 0xE004u;
+      stop(0xE004);
     }
 
     // U-mode 走行中の mscratch に設定する trusted kernel stack cursor:
@@ -598,6 +598,15 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
       shizuku::chips::esp32_c6::pmp_controller::switch_to_precomputed(bounds->precomputed);
       shadow.bounds = bounds;
       shadow.epoch = bounds->pmp_epoch;
+    }
+
+    // スタック窓の適用 (pmpaddr4/5: TOR)。shadow と比べ、違うときだけ書く。
+    const uintptr_t cur_win_lo = cur_thread.cur_win_lo;
+    const uintptr_t cur_win_hi = cur_thread.cur_win_hi;
+    if (__builtin_expect(shadow.win_lo != cur_win_lo || shadow.win_hi != cur_win_hi, 1)) {
+      shizuku::chips::esp32_c6::pmp_controller::apply_stack_window(cur_win_lo, cur_win_hi);
+      shadow.win_lo = cur_win_lo;
+      shadow.win_hi = cur_win_hi;
     }
 #endif
   } else {
@@ -1249,10 +1258,13 @@ bool plic_vector_mode::user_stack_bounds(uint32_t object_id, uintptr_t &base, ui
   } else if (g_c6_stage1_driver_bounds.owner_id != 0 && object_id == g_c6_stage1_driver_bounds.owner_id) {
     bounds = &g_c6_stage1_driver_bounds;
   }
-  if (bounds == nullptr || bounds->stack_base == 0 || bounds->stack_limit <= bounds->stack_base)
+  if (bounds == nullptr)
     return false;
-  base = bounds->stack_base;
-  limit = bounds->stack_limit;
+  auto &thread = shizuku::kernel_instance.current_thread();
+  if (thread.stack_lo == 0 || thread.stack_hi <= thread.stack_lo)
+    return false;
+  base = thread.stack_lo;
+  limit = thread.stack_hi;
   return true;
 #else
   (void)object_id; (void)base; (void)limit;
@@ -1288,7 +1300,7 @@ void plic_vector_mode::enter_u_object(Context &context, Frame &frame, uint32_t c
   if (bounds != nullptr) {
     // 固有 PMP は書かない: U へ戻る直前の context_to_frame が current_object() (= callee) の bounds で書く。
     frame.ra = bounds->u_return_trampoline;
-    frame.reserved0 = bounds->stack_limit;
+    frame.reserved0 = shizuku::kernel_instance.current_thread().cur_win_hi;
     frame.reserved1 = reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack + sizeof(shizuku_c6_kernel_stack));
     frame.mcause = RV32_TAG_U_ENTRY;
     frame.mstatus = (frame.mstatus & ~0x1800u); // MPP = 0 (U-mode)
