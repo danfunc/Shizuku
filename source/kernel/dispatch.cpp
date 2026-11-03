@@ -114,6 +114,15 @@ template <class A, class B, class Core>
   }
 }
 
+template <class A, class Ctx>
+[[gnu::always_inline]] inline bool caller_fpca_of(const Ctx &c) {
+  if constexpr (requires { A::context_fpca(c); }) {
+    return A::context_fpca(c);
+  } else {
+    return true;
+  }
+}
+
 // trap 内で直接処理する API の種別 (密な連番)。番号 → 種別の表引きで O(1) に振り分ける。
 // 表は svc_attributes の mode == handler の集合と一致することを static_assert で縛る。
 enum class trap_api : uint8_t {
@@ -263,10 +272,7 @@ SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::call_frame_push(KERNEL::THREAD &thread,
   // in-place 経路を持つ arch (RISC-V) は native_call.hpp 側の台帳が権威なので触らない。
   if constexpr (ARCH::HAS_OBJECT_PROTECTION && !arch_call_in_place<ARCH>()) {
     const uintptr_t caller_pc = (context->sp != nullptr) ? ARCH::frame_pc(*context->sp) : 0;
-    bool caller_fpca = true;
-    if constexpr (requires { ARCH::context_fpca(*context); }) {
-      caller_fpca = ARCH::context_fpca(*context);
-    }
+    const bool caller_fpca = caller_fpca_of<ARCH>(*context);
     if (!THREAD::ledger_accessor::record_caller_return_authority(
             thread, thread.call_stack.depth,
             caller_pc,
