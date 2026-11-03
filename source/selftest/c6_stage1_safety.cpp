@@ -2060,9 +2060,25 @@ void c6_stage1_safety() {
                residue_res.value, 0);
 
   // (e) caller 枠不可視: callee が自分の窓の上端 (>= window top) を読む/書くと access fault
+  // 先の試験が立てたカウンタを流用せず、ここで caller 枠への読み (cmd 5)・書き (cmd 8) を再発行し、
+  // それぞれの fault カウンタが 1 ずつ増えたことを見る (窓の上端以上は常に fault)。
+  const uint32_t e_load_before = shizuku_c6_u_mode_diag[7];
+  const uint32_t e_store_before = shizuku_c6_u_mode_diag[9];
+  g_c6_probe_caller_stack_fault_pc = reinterpret_cast<uintptr_t>(&c6_stage1_probe_caller_stack_fault_insn_addr);
+  const auto e_load_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE, METHOD_STAGE1_PROBE, 5 /* cmd=5 */);
+  g_c6_probe_ustore_caller_pc = reinterpret_cast<uintptr_t>(&c6_stage1_probe_ustore_caller_insn_addr);
+  const auto e_store_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE, METHOD_STAGE1_PROBE, 8 /* cmd=8 */);
+  g_c6_probe_ustore_caller_pc = 0;
   record_check("stage1: callee cannot access caller frame (>= window top)",
-               shizuku_c6_u_mode_diag[7] > 0 && shizuku_c6_u_mode_diag[9] > 0,
-               shizuku_c6_u_mode_diag[7] + shizuku_c6_u_mode_diag[9], 2);
+               e_load_res.error == 0 && e_load_res.value == 0xCAFEBABEu &&
+               e_store_res.error == 0 && e_store_res.value == 0xE009u &&
+               shizuku_c6_u_mode_diag[7] == e_load_before + 1u &&
+               shizuku_c6_u_mode_diag[9] == e_store_before + 1u,
+               (shizuku_c6_u_mode_diag[7] - e_load_before) + (shizuku_c6_u_mode_diag[9] - e_store_before), 2);
 #endif
 
   BOARD::diag_printf("[C6_STAGE1] stage 1 verification complete: passed=%lu failed=%lu\n",
