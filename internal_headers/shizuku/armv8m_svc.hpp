@@ -4,6 +4,9 @@
 #include "shizuku/service_profile.hpp"
 #include "shizuku/svc_direct.hpp"
 #include "shizuku/cost_probe.hpp"
+#if defined(SHIZUKU_DIAG_FP)
+#include "shizuku/diag_fp.hpp"
+#endif
 extern "C" void shizuku_svc_breakdown_probe(uint32_t, uint32_t, uint32_t);
 
 namespace shizuku::armv8m_svc_detail {
@@ -184,6 +187,14 @@ template <svc_direct_kind Kind>
           return;
         }
         return_resumed(context, thread, core, exc_return, api);
+#if defined(SHIZUKU_DIAG_FP)
+        if constexpr (is_call) {
+          shizuku::diag_fp::record_point(shizuku::diag_fp::point::K2);
+        } else if constexpr (Kind == svc_direct_kind::EXIT_METHOD) {
+          shizuku::diag_fp::record_point(shizuku::diag_fp::point::K4);
+          shizuku::diag_fp::commit_round();
+        }
+#endif
         return;
       }
     }
@@ -237,6 +248,9 @@ static_assert(shizuku::svc_direct_of((uintptr_t)shizuku::object_api::SET_BUDGET)
 // incoming return address. __builtin_return_address reads that original address
 // even when the prologue has saved LR; no naked asm-to-C call boundary is used.
 extern "C" SHIZUKU_SVC_RAM void shizuku_armv8m_svc_handler() {
+#if defined(SHIZUKU_DIAG_FP)
+  const uint32_t diag_entry_ts = shizuku::diag_fp::read_cyccnt();
+#endif
   using namespace shizuku;
   using namespace shizuku::armv8m_svc_detail;
   const ARCH::core_num core;
@@ -244,9 +258,21 @@ extern "C" SHIZUKU_SVC_RAM void shizuku_armv8m_svc_handler() {
   uintptr_t psp;
   asm volatile("mrs %0, psp" : "=r"(psp));
   switch (reinterpret_cast<ARCH::exception_frame_t *>(psp)->r0) {
-  case (uint32_t)object_api::CALL_METHOD: return call_method(exc_return, psp, core);
-  case (uint32_t)object_api::CALL_METHOD_DESCRIPTOR: return call_descriptor(exc_return, psp, core);
-  case (uint32_t)object_api::EXIT_METHOD: return exit_method(exc_return, psp, core);
+  case (uint32_t)object_api::CALL_METHOD:
+#if defined(SHIZUKU_DIAG_FP)
+    shizuku::diag_fp::on_k1(diag_entry_ts);
+#endif
+    return call_method(exc_return, psp, core);
+  case (uint32_t)object_api::CALL_METHOD_DESCRIPTOR:
+#if defined(SHIZUKU_DIAG_FP)
+    shizuku::diag_fp::on_k1(diag_entry_ts);
+#endif
+    return call_descriptor(exc_return, psp, core);
+  case (uint32_t)object_api::EXIT_METHOD:
+#if defined(SHIZUKU_DIAG_FP)
+    shizuku::diag_fp::on_k3(diag_entry_ts);
+#endif
+    return exit_method(exc_return, psp, core);
   case (uint32_t)object_api::FORWARD_CHILD_EXIT: return forward_child_exit(exc_return, psp, core);
   case (uint32_t)object_api::GET_CURRENT_OBJECT: return get_current(exc_return, psp, core);
   case (uint32_t)object_api::GET_CALLER_OBJECT: return get_caller(exc_return, psp, core);

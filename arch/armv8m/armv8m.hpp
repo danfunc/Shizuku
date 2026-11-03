@@ -8,6 +8,9 @@
 #include "shizuku/hot.hpp"
 #include "shizuku/armv8m_abi.hpp"
 #include "shizuku/core_num.hpp"
+#if defined(SHIZUKU_DIAG_FP)
+#include "shizuku/diag_fp.hpp"
+#endif
 
 // ARMv8-M mainline (Cortex-M33 / RP2350) の arch バックエンド。
 // 文脈退避・復帰・戻り口・スレッドモード移行の実体は armv8m_ctx.S。
@@ -737,10 +740,21 @@ private:
     auto *next = reinterpret_cast<exception_frame_t *>(sp - bytes);
     if (bytes != sizeof(exception_frame_t)) {
       // Materialize any lazy FP frame before relocating its return-value slots.
+#if defined(SHIZUKU_DIAG_FP)
+      shizuku::diag_fp::g_state.has_k3b_k3c = true;
+      shizuku::diag_fp::record_point(shizuku::diag_fp::point::K3B_BEFORE);
+#endif
       FloatingPointState::materialize();
+#if defined(SHIZUKU_DIAG_FP)
+      shizuku::diag_fp::record_point(shizuku::diag_fp::point::K3B_AFTER);
+      shizuku::diag_fp::record_point(shizuku::diag_fp::point::K3C_BEFORE);
+#endif
       __builtin_memmove(reinterpret_cast<uint8_t *>(next) + sizeof(exception_frame_t),
                         reinterpret_cast<uint8_t *>(context.sp) + sizeof(exception_frame_t),
                         bytes - sizeof(exception_frame_t));
+#if defined(SHIZUKU_DIAG_FP)
+      shizuku::diag_fp::record_point(shizuku::diag_fp::point::K3C_AFTER);
+#endif
     }
     zero_exception_frame(*next);
     next->pc = (uint32_t)pc;

@@ -17,6 +17,9 @@
 #include "shizuku/u_cost_sram_window.hpp"
 #include "shizuku/xip_cost.hpp"
 #include "shizuku/armv8m_abi.hpp"
+#if defined(SHIZUKU_DIAG_FP)
+#include "shizuku/diag_fp.hpp"
+#endif
 
 // --//configs:layout_pad_bytes=N の詰め物。flash のコードと .bss を N バイト動かして、
 // 計測値が配置に依らないことを確かめる (0 なら何も足さない)。pad は pool より前に並べる。
@@ -947,6 +950,11 @@ void rp2350_u_cost() {
 #endif
     };
 
+#if defined(SHIZUKU_DIAG_FP)
+    static shizuku::diag_fp::state_t s_fpca0_meth_diag{};
+    static shizuku::diag_fp::state_t s_fpca0_desc_diag{};
+#endif
+
     auto run_fp_condition = [&](uint32_t want_fpca, uint32_t cmd_base) {
       u_cost_fp_invariants_input_t fp_inv{};
       fp_inv.expected_fpca = want_fpca;
@@ -965,12 +973,19 @@ void rp2350_u_cost() {
       const uint32_t fp_base_meth_cycles = t_base_meth_end - t_base_meth_start;
 
       // 3. measure method
+#if defined(SHIZUKU_DIAG_FP)
+      shizuku::diag_fp::reset();
+#endif
       fp_inv.priv_meth_meas = set_boot_fpca(want_fpca);
       const uint32_t t_meth_start = cycles_now<ARCH>();
       const auto fp_meth_res = ARCH::syscall(
           static_cast<uintptr_t>(object_api::CALL_METHOD), OBJECT_U_COST_P, 0, cmd_base + 3);
       const uint32_t t_meth_end = cycles_now<ARCH>();
       const uint32_t fp_meth_cycles = t_meth_end - t_meth_start;
+#if defined(SHIZUKU_DIAG_FP)
+      shizuku::diag_fp::stop();
+      const auto meth_diag = shizuku::diag_fp::g_state;
+#endif
 
       // 4. verify method check (41 -> 42)
       set_boot_fpca(want_fpca);
@@ -991,12 +1006,19 @@ void rp2350_u_cost() {
       const uint32_t fp_base_desc_cycles = t_base_desc_end - t_base_desc_start;
 
       // 7. measure desc
+#if defined(SHIZUKU_DIAG_FP)
+      shizuku::diag_fp::reset();
+#endif
       fp_inv.priv_desc_meas = set_boot_fpca(want_fpca);
       const uint32_t t_desc_start = cycles_now<ARCH>();
       const auto fp_desc_res = ARCH::syscall(
           static_cast<uintptr_t>(object_api::CALL_METHOD), OBJECT_U_COST_P, 0, cmd_base + 6);
       const uint32_t t_desc_end = cycles_now<ARCH>();
       const uint32_t fp_desc_cycles = t_desc_end - t_desc_start;
+#if defined(SHIZUKU_DIAG_FP)
+      shizuku::diag_fp::stop();
+      const auto desc_diag = shizuku::diag_fp::g_state;
+#endif
 
       // 8. verify desc check (41 -> 42)
       set_boot_fpca(want_fpca);
@@ -1056,6 +1078,111 @@ void rp2350_u_cost() {
           (unsigned long)desc_raw_mean,
           (unsigned long)base_desc_mean);
       drain_diag_if_supported<BOARD>();
+
+#if defined(SHIZUKU_DIAG_FP)
+      BOARD::diag_printf(
+          "[DIAG-FP] Note: Diagnostic build incurs probe overhead (few cycles per point); values differ from normal [COST-FP].\n");
+      drain_diag_if_supported<BOARD>();
+
+      auto print_diag_row = [](const char *label, uint32_t fpca_val,
+                               const shizuku::diag_fp::state_t &st) {
+        const uint32_t n = st.sample_count > 0 ? st.sample_count : 1;
+        const uint32_t m_k2_k1 = static_cast<uint32_t>(st.accum_k2_k1 / n);
+        const uint32_t m_k3_k2 = static_cast<uint32_t>(st.accum_k3_k2 / n);
+        const uint32_t m_k4_k3 = static_cast<uint32_t>(st.accum_k4_k3 / n);
+        const uint32_t m_mat   = static_cast<uint32_t>(st.accum_k3b_mat / n);
+        const uint32_t m_move  = static_cast<uint32_t>(st.accum_k3c_memmove / n);
+        const uint32_t m_ret_other = (m_k4_k3 >= m_mat + m_move) ? (m_k4_k3 - m_mat - m_move) : 0;
+        const uint32_t n_caller = st.caller_u_count > 0 ? st.caller_u_count : 1;
+        const uint32_t m_caller = static_cast<uint32_t>(st.accum_caller_u / n_caller);
+        const uint32_t m_total = m_k2_k1 + m_k3_k2 + m_k4_k3 + (st.caller_u_count > 0 ? m_caller : 0);
+
+        BOARD::diag_printf(
+            "[DIAG-FP] %s fpca=%lu K2-K1=%lu K3-K2=%lu K4-K3=%lu (mat=%lu memmove=%lu other=%lu) K1next-K4=%lu total=%lu (mean, N=%lu)\n",
+            label,
+            (unsigned long)fpca_val,
+            (unsigned long)m_k2_k1,
+            (unsigned long)m_k3_k2,
+            (unsigned long)m_k4_k3,
+            (unsigned long)m_mat,
+            (unsigned long)m_move,
+            (unsigned long)m_ret_other,
+            (unsigned long)m_caller,
+            (unsigned long)m_total,
+            (unsigned long)st.sample_count);
+        drain_diag_if_supported<BOARD>();
+      };
+
+      auto print_diag_diff = [](const char *label,
+                                const shizuku::diag_fp::state_t &st0,
+                                const shizuku::diag_fp::state_t &st1) {
+        const uint32_t n0 = st0.sample_count > 0 ? st0.sample_count : 1;
+        const uint32_t n1 = st1.sample_count > 0 ? st1.sample_count : 1;
+        const int32_t d_k2_k1 = static_cast<int32_t>(st1.accum_k2_k1 / n1) - static_cast<int32_t>(st0.accum_k2_k1 / n0);
+        const int32_t d_k3_k2 = static_cast<int32_t>(st1.accum_k3_k2 / n1) - static_cast<int32_t>(st0.accum_k3_k2 / n0);
+        const int32_t d_k4_k3 = static_cast<int32_t>(st1.accum_k4_k3 / n1) - static_cast<int32_t>(st0.accum_k4_k3 / n0);
+        const int32_t d_mat   = static_cast<int32_t>(st1.accum_k3b_mat / n1) - static_cast<int32_t>(st0.accum_k3b_mat / n0);
+        const int32_t d_move  = static_cast<int32_t>(st1.accum_k3c_memmove / n1) - static_cast<int32_t>(st0.accum_k3c_memmove / n0);
+        const uint32_t nc0 = st0.caller_u_count > 0 ? st0.caller_u_count : 1;
+        const uint32_t nc1 = st1.caller_u_count > 0 ? st1.caller_u_count : 1;
+        const int32_t d_caller = static_cast<int32_t>(st1.accum_caller_u / nc1) - static_cast<int32_t>(st0.accum_caller_u / nc0);
+        const int32_t d_total = d_k2_k1 + d_k3_k2 + d_k4_k3 + d_caller;
+
+        BOARD::diag_printf(
+            "[DIAG-FP] %s diff(fpca=1 - fpca=0) K2-K1=%+ld K3-K2=%+ld K4-K3=%+ld (mat=%+ld memmove=%+ld) K1next-K4=%+ld total=%+ld\n",
+            label,
+            (long)d_k2_k1,
+            (long)d_k3_k2,
+            (long)d_k4_k3,
+            (long)d_mat,
+            (long)d_move,
+            (long)d_caller,
+            (long)d_total);
+        drain_diag_if_supported<BOARD>();
+      };
+
+      auto print_fpccr_status = [](const shizuku::diag_fp::state_t &st) {
+        using shizuku::diag_fp::point;
+        BOARD::diag_printf(
+            "[DIAG-FP] FPCCR=0x%08lX LSPEN=%u ASPEN=%u LSPACT@K1=%u @K2=%u @K3=%u @K3b-before=%u @K3b-after=%u @K3c-before=%u @K3c-after=%u @K4=%u\n",
+            (unsigned long)st.last_fpccr,
+            (unsigned)((st.last_fpccr >> 30) & 1u),
+            (unsigned)((st.last_fpccr >> 31) & 1u),
+            (unsigned)st.last_lspact[static_cast<size_t>(point::K1)],
+            (unsigned)st.last_lspact[static_cast<size_t>(point::K2)],
+            (unsigned)st.last_lspact[static_cast<size_t>(point::K3)],
+            (unsigned)st.last_lspact[static_cast<size_t>(point::K3B_BEFORE)],
+            (unsigned)st.last_lspact[static_cast<size_t>(point::K3B_AFTER)],
+            (unsigned)st.last_lspact[static_cast<size_t>(point::K3C_BEFORE)],
+            (unsigned)st.last_lspact[static_cast<size_t>(point::K3C_AFTER)],
+            (unsigned)st.last_lspact[static_cast<size_t>(point::K4)]);
+        drain_diag_if_supported<BOARD>();
+      };
+
+      print_diag_row("method", want_fpca, meth_diag);
+      print_diag_row("desc", want_fpca, desc_diag);
+      print_fpccr_status(meth_diag);
+
+      if (want_fpca == 0) {
+        s_fpca0_meth_diag = meth_diag;
+        s_fpca0_desc_diag = desc_diag;
+      } else {
+        print_diag_diff("method", s_fpca0_meth_diag, meth_diag);
+        print_diag_diff("desc", s_fpca0_desc_diag, desc_diag);
+      }
+
+      // PASS/FAIL record_check (要件 5)
+      if (want_fpca == 1) {
+        const bool diag_monotonic_ok = meth_diag.order_valid && (meth_diag.sample_count == ROUNDS) &&
+                                       desc_diag.order_valid && (desc_diag.sample_count == ROUNDS);
+        const bool diag_fpccr_ok = ((meth_diag.last_fpccr >> 30) & 3u) == 3u; // ASPEN=1, LSPEN=1
+
+        record_check("u_cost [DIAG-FP]: timestamps monotonic K1<K2<K3<K4",
+                     diag_monotonic_ok, diag_monotonic_ok ? 1 : 0, 1);
+        record_check("u_cost [DIAG-FP]: FPCCR valid (ASPEN=1, LSPEN=1)",
+                     diag_fpccr_ok, diag_fpccr_ok ? 1 : 0, 1);
+      }
+#endif
 
       const bool counter_ok = counter_enabled &&
                               (fp_base_meth_cycles > 0) &&
