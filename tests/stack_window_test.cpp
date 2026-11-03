@@ -33,19 +33,29 @@ static void test_open_window() {
   assert(win2.hi == 0x20002000u);
   assert(win2.lo == 0x20001F00u);
 
-  // Remaining space less than 256B but >= 16B
-  auto win3 = open_window(0x20000080u, 0x20000000u);
-  assert(win3.is_valid());
-  assert(win3.hi == 0x20000080u);
-  assert(win3.lo == 0x20000000u);
-  assert(win3.size() == 128u);
+  // 仕様変更 (段 C-0): U 復帰時に resume frame (128B) が caller の ret_sp-128 に
+  // 作られるため、最小窓幅がそれより小さいとゼロ化済みの外に frame の未設定語が
+  // 残りうる。このため kStackWindowMin = 256 (= K) に引き上げられ、
+  // hi - stack_lo < 256 の場合は無効 (NO_STACK) となる。
 
-  // Boundary: exactly 16B space
+  // Remaining space less than 256B (e.g. 128B): now invalid
+  auto win3 = open_window(0x20000080u, 0x20000000u);
+  assert(!win3.is_valid());
+
+  // Remaining space 16B: now invalid (previously minimum boundary)
   auto win4 = open_window(0x20000010u, 0x20000000u);
-  assert(win4.is_valid());
-  assert(win4.hi == 0x20000010u);
-  assert(win4.lo == 0x20000000u);
-  assert(win4.size() == 16u);
+  assert(!win4.is_valid());
+
+  // Boundary: exactly 256B space is valid
+  auto win_boundary = open_window(0x20000100u, 0x20000000u);
+  assert(win_boundary.is_valid());
+  assert(win_boundary.hi == 0x20000100u);
+  assert(win_boundary.lo == 0x20000000u);
+  assert(win_boundary.size() == 256u);
+
+  // Just below boundary: 240B space is invalid
+  auto win_below_boundary = open_window(0x200000F0u, 0x20000000u);
+  assert(!win_below_boundary.is_valid());
 
   // Insufficient space: less than 16B
   auto win_invalid1 = open_window(0x2000000Fu, 0x20000000u);
@@ -58,12 +68,16 @@ static void test_open_window() {
   auto win_invalid3 = open_window(0x1FFFF000u, 0x20000000u);
   assert(!win_invalid3.is_valid());
 
-  // ARM default: stack_lo == 0 with typical SRAM caller_sp
+  // ARM default: stack_lo == 0 with typical SRAM caller_sp (sufficient space)
   auto win_arm = open_window(0x20010000u, 0u);
   assert(win_arm.is_valid());
   assert(win_arm.hi == 0x20010000u);
   assert(win_arm.lo == 0x2000FF00u);
   assert(win_arm.size() == 256u);
+
+  // ARM default: stack_lo == 0 but caller_sp < kStackWindowMin (256B) is invalid
+  auto win_arm_too_small = open_window(0x80u, 0u);
+  assert(!win_arm_too_small.is_valid());
 }
 
 static void test_extend_window() {

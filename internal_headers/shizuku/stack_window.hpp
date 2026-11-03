@@ -7,7 +7,7 @@ namespace shizuku {
 
 // Stack window constants
 static constexpr uintptr_t kStackWindowStep = 256;
-static constexpr uintptr_t kStackWindowMin = 16;
+static constexpr uintptr_t kStackWindowMin = 256;
 
 // Stack window range [lo, hi)
 struct stack_window {
