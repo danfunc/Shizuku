@@ -55,6 +55,8 @@ void u_cost_code_end_pad();
 extern const char u_cost_code_end[];
 void u_cost_probe_code_access();
 void u_cost_probe_data_access();
+uintptr_t u_cost_probe_sp_spoof_child(uintptr_t target);
+uintptr_t u_cost_probe_stream_caller_stack();
 void u_cost_denied_code();
 extern const char u_cost_probe_data_fault_pc[];
 }
@@ -93,10 +95,119 @@ SHIZUKU_U_COST_CODE __attribute__((naked)) void u_cost_probe_data_access() {
 }
 
 // Registered only after timing so the measured child worker stays two instructions.
+SHIZUKU_U_COST_CODE __attribute__((naked)) uintptr_t u_cost_probe_sp_spoof_child(uintptr_t target) {
+  asm volatile(
+      ".syntax unified\n"
+      ".thumb\n"
+      "push {r4, lr}\n"
+      "mov  r1, r0\n"                  // target object in r1
+      "add  sp, sp, #128\n"            // SP 偽装: caller 枠内へ
+      "movs r0, #4\n"                  // CALL_METHOD (4)
+      "movs r2, #0\n"                  // method 0
+      "movs r3, #0\n"
+      "movs r12, #0\n"
+      "svc  #0\n"
+      "sub  sp, sp, #128\n"            // SP 復元
+      "cmp  r0, #6\n"                  // object_error::NO_STACK == 6
+      "bne  1f\n"
+      "movs r0, #0\n"
+      "pop  {r4, pc}\n"
+      "1:\n"
+      "cmp  r0, #0\n"
+      "bne  2f\n"
+      "ldr  r0, =0xDEAD0038\n"
+      "2:\n"
+      "pop  {r4, pc}\n"
+      ".ltorg\n"
+  );
+}
+
+SHIZUKU_U_COST_CODE __attribute__((naked)) uintptr_t u_cost_probe_stream_caller_stack() {
+  asm volatile(
+      ".syntax unified\n"
+      ".thumb\n"
+      "push {r4, lr}\n"
+
+      // 1. STREAM_PUSH_N (29) with request_ptr = sp + 64 (in caller frame)
+      "movs r0, #29\n"                 // STREAM_PUSH_N
+      "movs r1, #0\n"                  // stream id 0
+      "add  r2, sp, #64\n"             // request_ptr in caller frame
+      "movs r3, #0\n"
+      "movs r12, #0\n"
+      "svc  #0\n"
+      "cmp  r0, #15\n"                 // object_error::BAD_STREAM == 15
+      "bne  .Lstream_fail_push_req_%=\n"
+
+      // 2. STREAM_PUSH_N (29) with records = sp + 64 (in caller frame)
+      "add  r1, sp, #64\n"
+      "str  r1, [sp, #-16]!\n"          // push_request.records
+      "movs r1, #1\n"
+      "str  r1, [sp, #4]\n"            // push_request.count = 1
+      "movs r0, #29\n"
+      "movs r1, #0\n"
+      "mov  r2, sp\n"                  // request_ptr on callee stack
+      "movs r3, #0\n"
+      "movs r12, #0\n"
+      "svc  #0\n"
+      "add  sp, sp, #16\n"
+      "cmp  r0, #15\n"
+      "bne  .Lstream_fail_push_rec_%=\n"
+
+      // 3. STREAM_POP_N (30) with records = sp + 64 (in caller frame)
+      "add  r1, sp, #64\n"
+      "str  r1, [sp, #-16]!\n"          // pop_request.records
+      "movs r1, #1\n"
+      "str  r1, [sp, #4]\n"            // pop_request.count = 1
+      "movs r1, #0\n"
+      "str  r1, [sp, #8]\n"            // pop_request.lost = 0
+      "movs r0, #30\n"                 // STREAM_POP_N
+      "movs r1, #0\n"
+      "mov  r2, sp\n"                  // request_ptr on callee stack
+      "movs r3, #0\n"
+      "movs r12, #0\n"
+      "svc  #0\n"
+      "add  sp, sp, #16\n"
+      "cmp  r0, #15\n"
+      "bne  .Lstream_fail_pop_%=\n"
+
+      // 4. STREAM_POP_N (30) with request_ptr = sp + 64 (in caller frame)
+      "movs r0, #30\n"                 // STREAM_POP_N
+      "movs r1, #0\n"
+      "add  r2, sp, #64\n"             // request_ptr in caller frame
+      "movs r3, #0\n"
+      "movs r12, #0\n"
+      "svc  #0\n"
+      "cmp  r0, #15\n"
+      "bne  .Lstream_fail_pop_req_%=\n"
+
+      "movs r0, #0\n"
+      "pop  {r4, pc}\n"
+
+      ".Lstream_fail_push_req_%=:\n"
+      "ldr  r0, =0xDEAD003A\n"
+      "pop  {r4, pc}\n"
+
+      ".Lstream_fail_push_rec_%=:\n"
+      "ldr  r0, =0xDEAD003B\n"
+      "pop  {r4, pc}\n"
+
+      ".Lstream_fail_pop_%=:\n"
+      "ldr  r0, =0xDEAD003C\n"
+      "pop  {r4, pc}\n"
+
+      ".Lstream_fail_pop_req_%=:\n"
+      "ldr  r0, =0xDEAD003D\n"
+      "pop  {r4, pc}\n"
+      ".ltorg\n"
+  );
+}
+
 SHIZUKU_U_COST_CODE uintptr_t u_cost_denied_probe_worker(uintptr_t mode, uintptr_t,
                                                         uintptr_t, uintptr_t) {
   if (mode == 90) u_cost_probe_code_access();
   if (mode == 91) u_cost_probe_data_access();
+  if (mode == 92) return u_cost_probe_sp_spoof_child(object_id::cost_u_parent);
+  if (mode == 93) return u_cost_probe_stream_caller_stack();
   return 0;
 }
 
@@ -143,6 +254,20 @@ SHIZUKU_U_COST_CODE uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t arg1
     if (cmd == 18)
       return syscall(static_cast<uintptr_t>(shizuku::object_api::EXPORT_METHOD), 1,
                      reinterpret_cast<uintptr_t>(&u_cost_denied_probe_worker)).error;
+    if (cmd == 8) {
+      volatile uint32_t sentinel = 0x5F01CAFE;
+      const auto r = syscall(4, object_id::cost_u_parent, 1, 92);
+      if (r.error != 0 || r.value != 0) return r.value != 0 ? r.value : 0xDEAD0038;
+      if (sentinel != 0x5F01CAFE) return 0xDEAD0037;
+      return 0;
+    }
+    if (cmd == 9) {
+      volatile uint32_t sentinel = 0x5F01CAFE;
+      const auto r = syscall(4, object_id::cost_u_parent, 1, 93);
+      if (r.error != 0 || r.value != 0) return r.value != 0 ? r.value : 0xDEAD003A;
+      if (sentinel != 0x5F01CAFE) return 0xDEAD0037;
+      return 0;
+    }
     return 0;
   }
   const bool baseline = cmd == 2 || cmd == 5 || cmd == 12 || cmd == 15;
@@ -792,6 +917,20 @@ void rp2350_u_cost() {
     };
     run_denied_probe(90, "u_cost SRAM code outside executable window faults", true);
     run_denied_probe(91, "u_cost SRAM data outside object window faults", false);
+
+    // (f) callee SP 偽装防止: callee が SP を stack_ceiling 以上に偽装して再呼出し → NO_STACK で拒絶され caller 枠センチネル無傷
+    const auto spoof_res = ARCH::syscall(
+        static_cast<uintptr_t>(object_api::CALL_METHOD), OBJECT_U_COST_P, 0, 8 /* cmd=8 */);
+    record_check("u_cost: callee SP spoofed above ceiling rejected with NO_STACK and caller sentinel intact",
+                 spoof_res.error == 0 && spoof_res.value == 0,
+                 spoof_res.value, 0);
+
+    // (g) stream stack 範囲隔離: callee が STREAM_PUSH_N / POP_N で caller 枠を指定 → BAD_STREAM で拒絶
+    const auto stream_res = ARCH::syscall(
+        static_cast<uintptr_t>(object_api::CALL_METHOD), OBJECT_U_COST_P, 0, 9 /* cmd=9 */);
+    record_check("u_cost: STREAM_PUSH_N / POP_N to caller stack rejected with BAD_STREAM",
+                 stream_res.error == 0 && stream_res.value == 0,
+                 stream_res.value, 0);
 
     // 結果抽出
     const uint32_t corr_meth_final = shared[21];       // offset 84 (want ROUNDS)

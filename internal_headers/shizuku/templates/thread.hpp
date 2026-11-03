@@ -332,12 +332,46 @@ template <typename CONTEXT> struct thread {
     }
   }
 
+  // 台帳由来の活動 stack ceiling (caller_sp)。depth == 0 ならスタック上限。
+  uintptr_t stack_ceiling() const noexcept {
+    if (call_stack.depth != 0 && ledger != nullptr) {
+      return ledger[call_stack.depth - 1].caller_sp();
+    }
+    if constexpr (requires { stack_rlar; }) {
+      if (stack_rlar != 0) {
+        return (stack_rlar & ~uintptr_t(31)) + 32u;
+      }
+    }
+    return 0;
+  }
+
+  uintptr_t stack_floor() const noexcept {
+    if constexpr (requires { stack_rbar; }) {
+      if (stack_rbar != 0) {
+        return stack_rbar & ~uintptr_t(31);
+      }
+    }
+    return 0;
+  }
+
   // stream 要求範囲 [address, address + bytes) が現在の活動窓に収まっているか。
-  // HAS_STACK_WINDOW == false の arch では常に true。
-  bool stream_range_allowed(uintptr_t address, uintptr_t bytes) const noexcept {
+  // HAS_STACK_WINDOW == true の arch では活動窓 [stk.cur_win_lo, stk.cur_win_hi) で検査。
+  // HAS_STACK_WINDOW == false (ARM / RP2350 など) では活動 stack 範囲 [stack 下限, stack_ceiling) で検査。
+  bool stream_range_allowed(uintptr_t address, uintptr_t bytes, uintptr_t base = 0) const noexcept {
     if constexpr (HAS_STACK_WINDOW) {
       if (stk.cur_win_lo != 0 || stk.cur_win_hi != 0) {
         return stream_range_in_window(stk.cur_win_lo, stk.cur_win_hi, address, bytes);
+      }
+    } else {
+      uintptr_t lo = stack_floor();
+      if (lo == 0) lo = base;
+      const uintptr_t ceiling = stack_ceiling();
+      if (ceiling != 0) {
+        if (lo != 0) {
+          return stream_range_in_window(lo, ceiling, address, bytes);
+        }
+        return bytes != 0 && address <= UINTPTR_MAX - bytes &&
+               address < ceiling && address + bytes <= ceiling;
       }
     }
     return true;

@@ -1237,7 +1237,7 @@ template <> bool KERNEL_OBJECT::stream_stack_range(uint32_t thread,
     return false;
   }
   const auto &t = kernel_instance.thread(thread);
-  return t.stream_range_allowed(address, bytes);
+  return t.stream_range_allowed(address, bytes, base);
 }
 
 template <>

@@ -1268,6 +1268,46 @@ static void test_sp_spoofing_prevented() {
   assert(*caller_sentinel == 0x5EEDCAFEu);
 }
 
+// 窓なし構成 (HAS_STACK_WINDOW == false) での stream_range_allowed の検査 (純粋ユニットテスト)
+static void test_nowin_stream_range_allowed() {
+  static_assert(!nowin_kernel::THREAD::HAS_STACK_WINDOW);
+  nowin_kernel::THREAD thread{};
+  nowin_kernel::THREAD::call_ledger_entry ledger_mem[8]{};
+  thread.ledger = ledger_mem;
+  thread.ledger_capacity = 8;
+  const uintptr_t stack_base = 0x20000000u;
+
+  // 1. depth == 0 (呼出し段なし、ベース活動)
+  thread.call_stack.depth = 0;
+  assert(thread.stack_ceiling() == 0);
+  assert(thread.stream_range_allowed(0x20000800u, 64u, stack_base));
+
+  // 2. depth == 1 (Caller が Callee を呼び出し中)
+  // Caller の SP (ceiling) = 0x20001800u
+  const uintptr_t caller_sp = 0x20001800u;
+  ledger_mem[0].ret_sp = caller_sp;
+  thread.call_stack.depth = 1;
+  assert(thread.stack_ceiling() == caller_sp);
+
+  // Callee の活動スタック内 [base, caller_sp)
+  assert(thread.stream_range_allowed(stack_base, 64u, stack_base));
+  assert(thread.stream_range_allowed(0x20001000u, 128u, stack_base));
+  assert(thread.stream_range_allowed(caller_sp - 64u, 64u, stack_base)); // ちょうど ceiling まで
+
+  // Caller 枠またぎ・Caller 枠内アクセス (拒絶)
+  assert(!thread.stream_range_allowed(caller_sp - 32u, 64u, stack_base)); // ceiling をまたぐ
+  assert(!thread.stream_range_allowed(caller_sp, 32u, stack_base));       // caller_sp 境界 (Caller の最下部)
+  assert(!thread.stream_range_allowed(caller_sp + 64u, 32u, stack_base));  // Caller 枠内部
+
+  // 下限外 (base より下) (拒絶)
+  assert(!thread.stream_range_allowed(stack_base - 16u, 32u, stack_base));
+  assert(!thread.stream_range_allowed(0x10000000u, 32u, stack_base));
+
+  // 異常系: bytes == 0 / オーバーフロー
+  assert(!thread.stream_range_allowed(0x20001000u, 0u, stack_base));
+  assert(!thread.stream_range_allowed(UINTPTR_MAX - 10u, 20u, stack_base));
+}
+
 int main() {
   test_open_window();
   test_extend_window();
@@ -1288,6 +1328,7 @@ int main() {
   test_pop_beyond_window_table_is_safe();
   test_window_contains_sp();
   test_stream_range_in_window();
+  test_nowin_stream_range_allowed();
   test_sp_spoofing_prevented();
   return 0;
 }

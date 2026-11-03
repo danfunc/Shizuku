@@ -40,6 +40,10 @@ int main() {
   static_assert(A::call_stack_has_room(sp, sp - reserve, sp));
   static_assert(!A::call_stack_has_room(sp, sp - reserve + 1, sp));
   static_assert(!A::call_stack_has_room(sp, sp - reserve, sp - 32));
+  // Callee SP 偽装 (sp > ceiling) は call_stack_has_room の sp <= ceiling で拒絶される
+  static_assert(!A::call_stack_has_room(sp + 32, sp - reserve, sp));
+  static_assert(!A::call_stack_has_room(sp + 128, sp - reserve, sp));
+  static_assert(!A::call_stack_has_room(sp + 4, sp - reserve, sp));
   static_assert(!A::call_stack_has_room(sp + 4, 0, 0));
   static_assert(!A::call_stack_has_room(32, 0, 0));
   alignas(32) uint32_t storage[512] = {};
@@ -63,6 +67,12 @@ int main() {
       c.psplim++;
       assert(!A::call_header_has_room(c, 0));
       c.psplim = 0;
+      // stack_ceiling による SP 偽装防止の動的検査
+      c.stack_ceiling = static_cast<uint32_t>(ret);
+      assert(A::call_header_has_room(c, 0));
+      c.stack_ceiling = static_cast<uint32_t>(ret - 32); // ceiling < ret (SP 偽装)
+      assert(!A::call_header_has_room(c, 0));
+      c.stack_ceiling = 0;
     }
     c.sp->xPSR ^= 1u << 9;
     assert(!A::call_header_has_room(c, 0));
