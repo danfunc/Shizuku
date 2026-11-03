@@ -383,6 +383,7 @@ asm(
     "  li a3, 2\n"
     "  li a4, 0\n"
     "  ecall\n"
+    "  lw s0, 40(sp)\n"
     "  li t0, 0xE012\n"
     "  bne a1, t0, .Lu2u_fail_3\n"
     "\n"
