@@ -136,7 +136,7 @@ SHIZUKU_U_COST_CODE __attribute__((naked)) uintptr_t u_cost_probe_stream_caller_
       "movs r12, #0\n"
       "svc  #0\n"
       "cmp  r0, #15\n"                 // object_error::BAD_STREAM == 15
-      "bne  .Lstream_fail_push_req_%=\n"
+      "bne  1f\n"
 
       // 2. STREAM_PUSH_N (29) with records = sp + 64 (in caller frame)
       "add  r1, sp, #64\n"
@@ -151,7 +151,7 @@ SHIZUKU_U_COST_CODE __attribute__((naked)) uintptr_t u_cost_probe_stream_caller_
       "svc  #0\n"
       "add  sp, sp, #16\n"
       "cmp  r0, #15\n"
-      "bne  .Lstream_fail_push_rec_%=\n"
+      "bne  2f\n"
 
       // 3. STREAM_POP_N (30) with records = sp + 64 (in caller frame)
       "add  r1, sp, #64\n"
@@ -168,7 +168,7 @@ SHIZUKU_U_COST_CODE __attribute__((naked)) uintptr_t u_cost_probe_stream_caller_
       "svc  #0\n"
       "add  sp, sp, #16\n"
       "cmp  r0, #15\n"
-      "bne  .Lstream_fail_pop_%=\n"
+      "bne  3f\n"
 
       // 4. STREAM_POP_N (30) with request_ptr = sp + 64 (in caller frame)
       "movs r0, #30\n"                 // STREAM_POP_N
@@ -178,24 +178,24 @@ SHIZUKU_U_COST_CODE __attribute__((naked)) uintptr_t u_cost_probe_stream_caller_
       "movs r12, #0\n"
       "svc  #0\n"
       "cmp  r0, #15\n"
-      "bne  .Lstream_fail_pop_req_%=\n"
+      "bne  4f\n"
 
       "movs r0, #0\n"
       "pop  {r4, pc}\n"
 
-      ".Lstream_fail_push_req_%=:\n"
+      "1:\n"
       "ldr  r0, =0xDEAD003A\n"
       "pop  {r4, pc}\n"
 
-      ".Lstream_fail_push_rec_%=:\n"
+      "2:\n"
       "ldr  r0, =0xDEAD003B\n"
       "pop  {r4, pc}\n"
 
-      ".Lstream_fail_pop_%=:\n"
+      "3:\n"
       "ldr  r0, =0xDEAD003C\n"
       "pop  {r4, pc}\n"
 
-      ".Lstream_fail_pop_req_%=:\n"
+      "4:\n"
       "ldr  r0, =0xDEAD003D\n"
       "pop  {r4, pc}\n"
       ".ltorg\n"
@@ -206,7 +206,7 @@ SHIZUKU_U_COST_CODE uintptr_t u_cost_denied_probe_worker(uintptr_t mode, uintptr
                                                         uintptr_t, uintptr_t) {
   if (mode == 90) u_cost_probe_code_access();
   if (mode == 91) u_cost_probe_data_access();
-  if (mode == 92) return u_cost_probe_sp_spoof_child(object_id::cost_u_parent);
+  if (mode == 92) return u_cost_probe_sp_spoof_child(shizuku::object_id::cost_u_parent);
   if (mode == 93) return u_cost_probe_stream_caller_stack();
   return 0;
 }
@@ -256,14 +256,14 @@ SHIZUKU_U_COST_CODE uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t arg1
                      reinterpret_cast<uintptr_t>(&u_cost_denied_probe_worker)).error;
     if (cmd == 8) {
       volatile uint32_t sentinel = 0x5F01CAFE;
-      const auto r = syscall(4, object_id::cost_u_parent, 1, 92);
+      const auto r = syscall(4, shizuku::object_id::cost_u_parent, 1, 92);
       if (r.error != 0 || r.value != 0) return r.value != 0 ? r.value : 0xDEAD0038;
       if (sentinel != 0x5F01CAFE) return 0xDEAD0037;
       return 0;
     }
     if (cmd == 9) {
       volatile uint32_t sentinel = 0x5F01CAFE;
-      const auto r = syscall(4, object_id::cost_u_parent, 1, 93);
+      const auto r = syscall(4, shizuku::object_id::cost_u_parent, 1, 93);
       if (r.error != 0 || r.value != 0) return r.value != 0 ? r.value : 0xDEAD003A;
       if (sentinel != 0x5F01CAFE) return 0xDEAD0037;
       return 0;
