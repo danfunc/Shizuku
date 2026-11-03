@@ -127,9 +127,15 @@ static void test_extend_window() {
   auto rej_inside = extend_window(initial, initial.lo + 4u, stack_lo);
   assert(!rej_inside.is_valid());
 
-  // 8. Rejection: a >= win.hi (caller frame violation)
+  // 8. Rejection: a >= win.hi (caller frame violation) - exact boundary and above
+  auto rej_caller_exact = extend_window(initial, initial.hi, stack_lo);
+  assert(!rej_caller_exact.is_valid());
+
   auto rej_caller = extend_window(initial, initial.hi + 4u, stack_lo);
   assert(!rej_caller.is_valid());
+
+  auto rej_caller_far = extend_window(initial, initial.hi + 0x1000u, stack_lo);
+  assert(!rej_caller_far.is_valid());
 }
 
 static void test_zero_window() {
@@ -275,6 +281,9 @@ static void test_ledger_nesting_a_a() {
   // Initial caller state
   context.user_sp = stack_lo + 0x3000u;
   context.frame.pc = 0x42000010u;
+  // Write sentinel in caller's frame (>= caller_sp, outside callee window)
+  *reinterpret_cast<volatile uint32_t *>(context.user_sp) = 0xC001CAFEu;
+  *reinterpret_cast<volatile uint32_t *>(context.user_sp + 16u) = 0xC001BEEFu;
 
   mock_kobj::callee_view view_a{};
   view_a.id = 2; // Object A
@@ -292,7 +301,9 @@ static void test_ledger_nesting_a_a() {
   assert(thread.cur_win_lo == outer_win.lo);
   assert(thread.cur_win_hi == outer_win.hi);
 
-  // Callee A consumes 128B stack and re-enters A (A -> A)
+  // Callee A writes patterns into its window and consumes 128B stack frame
+  *reinterpret_cast<volatile uint32_t *>(outer_win.hi - 32u) = 0xA1A1A1A1u; // In A1 frame
+  *reinterpret_cast<volatile uint32_t *>(outer_win.lo + 16u) = 0xA1A10001u;
   context.user_sp = outer_win.hi - 128u;
   context.frame.pc = 0x42001020u;
 
@@ -305,9 +316,16 @@ static void test_ledger_nesting_a_a() {
   const auto inner_win = thread.win[1];
   assert(inner_win.hi == (context.user_sp & ~uintptr_t(15)));
   assert(inner_win.lo == inner_win.hi - shizuku::kStackWindowStep);
-  assert(inner_win.hi < outer_win.hi); // Nested below
+  // (a) Stacks stack up without overlap: inner window top matches inner caller_sp,
+  // strictly below outer window top, leaving outer activation frame intact
+  assert(inner_win.hi < outer_win.hi);
+  assert(inner_win.hi <= outer_win.hi - 128u);
   assert(thread.cur_win_lo == inner_win.lo);
   assert(thread.cur_win_hi == inner_win.hi);
+
+  // Inner A writes patterns into its own window
+  *reinterpret_cast<volatile uint32_t *>(inner_win.hi - 16u) = 0xA2A2A2A2u;
+  *reinterpret_cast<volatile uint32_t *>(inner_win.lo + 16u) = 0xA2A20002u;
 
   // 3. Return from inner A (pop_in_place)
   mock_frame *res_frame = nullptr;
@@ -316,9 +334,14 @@ static void test_ledger_nesting_a_a() {
   assert(ok_pop1);
   assert(thread.call_stack.depth == 1);
   assert(test_fake_arch::zeroed_windows.size() == 1);
-  // Opened window of inner A was zeroed
+  // (c) Opened window of inner A was completely zeroed in real memory
   assert(test_fake_arch::zeroed_windows[0].lo == inner_win.lo);
   assert(test_fake_arch::zeroed_windows[0].hi == inner_win.hi);
+  for (uintptr_t p = inner_win.lo; p < inner_win.hi; p += 4) {
+    assert(*reinterpret_cast<const volatile uint32_t *>(p) == 0);
+  }
+  // Caller A1 frame words outside inner window are preserved intact
+  assert(*reinterpret_cast<const volatile uint32_t *>(outer_win.hi - 32u) == 0xA1A1A1A1u);
   // Resumed to outer A's window
   assert(thread.cur_win_lo == outer_win.lo);
   assert(thread.cur_win_hi == outer_win.hi);
@@ -329,9 +352,15 @@ static void test_ledger_nesting_a_a() {
   assert(ok_pop2);
   assert(thread.call_stack.depth == 0);
   assert(test_fake_arch::zeroed_windows.size() == 2);
-  // Outer window zeroed
+  // Outer window zeroed in real memory
   assert(test_fake_arch::zeroed_windows[1].lo == outer_win.lo);
   assert(test_fake_arch::zeroed_windows[1].hi == outer_win.hi);
+  for (uintptr_t p = outer_win.lo; p < outer_win.hi; p += 4) {
+    assert(*reinterpret_cast<const volatile uint32_t *>(p) == 0);
+  }
+  // Base caller sentinels outside outer window are preserved intact
+  assert(*reinterpret_cast<const volatile uint32_t *>(stack_lo + 0x3000u) == 0xC001CAFEu);
+  assert(*reinterpret_cast<const volatile uint32_t *>(stack_lo + 0x3010u) == 0xC001BEEFu);
   // Restored to thread base stack
   assert(thread.cur_win_lo == stack_lo && thread.cur_win_hi == stack_hi);
 }
@@ -358,10 +387,15 @@ static void test_ledger_nesting_a_b_a() {
 
   // 1. Call A (object 2)
   context.user_sp = stack_lo + 0x3000u;
+  *reinterpret_cast<volatile uint32_t *>(context.user_sp) = 0xC001CAFEu;
   mock_kobj::callee_view view_a{2, 0, 0, shizuku::object_kind::PLAIN, false, 0, 0, 1};
   auto err1 = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
       kernel, thread, context, view_a, 0x42001000u, mock_kernel::LEDGER_CALL);
   assert(err1 == shizuku::kernel_error::OK);
+
+  // A1 writes into its window and consumes 160B frame
+  *reinterpret_cast<volatile uint32_t *>(thread.win[0].hi - 32u) = 0xA1A1A1A1u;
+  *reinterpret_cast<volatile uint32_t *>(thread.win[0].lo + 16u) = 0xA1A10001u;
 
   // 2. Call B (object 3)
   context.user_sp = thread.win[0].hi - 160u;
@@ -370,6 +404,10 @@ static void test_ledger_nesting_a_b_a() {
       kernel, thread, context, view_b, 0x42002000u, mock_kernel::LEDGER_CALL);
   assert(err2 == shizuku::kernel_error::OK);
 
+  // B writes into its window and consumes 160B frame
+  *reinterpret_cast<volatile uint32_t *>(thread.win[1].hi - 32u) = 0xBBBBBBBBu;
+  *reinterpret_cast<volatile uint32_t *>(thread.win[1].lo + 16u) = 0xBBBB0001u;
+
   // 3. Call A again (A -> B -> A)
   context.user_sp = thread.win[1].hi - 160u;
   auto err3 = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
@@ -377,12 +415,22 @@ static void test_ledger_nesting_a_b_a() {
   assert(err3 == shizuku::kernel_error::OK);
   assert(thread.call_stack.depth == 3);
 
+  // (a) Stacks stack up without overlap: win2.hi < win1.hi < win0.hi
+  assert(thread.win[2].hi < thread.win[1].hi);
+  assert(thread.win[1].hi < thread.win[0].hi);
+  assert(thread.win[2].hi <= thread.win[1].hi - 160u);
+
   // Simulate stack fault in inner A: extend window
   const uintptr_t fault_addr = thread.win[2].lo - 100u;
   const auto extended = shizuku::extend_window(thread.win[2], fault_addr, stack_lo);
   assert(extended.is_valid());
+  assert(extended.lo < thread.win[2].lo);
   thread.win[2] = extended;
   thread.cur_win_lo = extended.lo;
+
+  // Inner A writes patterns into the extended range and window
+  *reinterpret_cast<volatile uint32_t *>(extended.lo + 4u) = 0xE7E7E7E7u;
+  *reinterpret_cast<volatile uint32_t *>(extended.hi - 16u) = 0xA2A2A2A2u;
 
   // Pop inner A
   mock_frame *res_frame = nullptr;
@@ -390,10 +438,15 @@ static void test_ledger_nesting_a_b_a() {
       kobj, thread, context, res_frame, true, false);
   assert(ok_pop1);
   assert(thread.call_stack.depth == 2);
-  // Verifying that the extended range was passed to zero_window
+  // (b) Verifying that the extended range was passed to zero_window and zeroed in real memory
   assert(test_fake_arch::zeroed_windows.size() == 1);
   assert(test_fake_arch::zeroed_windows[0].lo == extended.lo);
   assert(test_fake_arch::zeroed_windows[0].hi == extended.hi);
+  for (uintptr_t p = extended.lo; p < extended.hi; p += 4) {
+    assert(*reinterpret_cast<const volatile uint32_t *>(p) == 0);
+  }
+  // (c) Outer frame B is preserved intact
+  assert(*reinterpret_cast<const volatile uint32_t *>(thread.win[1].hi - 32u) == 0xBBBBBBBBu);
 
   // Pop B
   bool ok_pop2 = shizuku::native::pop_in_place<mock_kernel, mock_kobj>(
@@ -401,6 +454,11 @@ static void test_ledger_nesting_a_b_a() {
   assert(ok_pop2);
   assert(thread.call_stack.depth == 1);
   assert(test_fake_arch::zeroed_windows.size() == 2);
+  for (uintptr_t p = test_fake_arch::zeroed_windows[1].lo; p < test_fake_arch::zeroed_windows[1].hi; p += 4) {
+    assert(*reinterpret_cast<const volatile uint32_t *>(p) == 0);
+  }
+  // Outer frame A1 is preserved intact
+  assert(*reinterpret_cast<const volatile uint32_t *>(thread.win[0].hi - 32u) == 0xA1A1A1A1u);
 
   // Pop outer A
   bool ok_pop3 = shizuku::native::pop_in_place<mock_kernel, mock_kobj>(
@@ -408,6 +466,11 @@ static void test_ledger_nesting_a_b_a() {
   assert(ok_pop3);
   assert(thread.call_stack.depth == 0);
   assert(test_fake_arch::zeroed_windows.size() == 3);
+  for (uintptr_t p = test_fake_arch::zeroed_windows[2].lo; p < test_fake_arch::zeroed_windows[2].hi; p += 4) {
+    assert(*reinterpret_cast<const volatile uint32_t *>(p) == 0);
+  }
+  // Caller frame is preserved intact
+  assert(*reinterpret_cast<const volatile uint32_t *>(stack_lo + 0x3000u) == 0xC001CAFEu);
 }
 
 // ===========================================================================
@@ -432,12 +495,26 @@ static void test_ledger_unwind_in_place() {
 
   // Push 3 activations
   context.user_sp = stack_lo + 0x3000u;
+  *reinterpret_cast<volatile uint32_t *>(context.user_sp) = 0xC001CAFEu;
   mock_kobj::callee_view view{2, 0, 0, shizuku::object_kind::PLAIN, false, 0, 0, 1};
   assert((shizuku::native::enter_in_place<mock_kernel, mock_kobj>(kernel, thread, context, view, 0x1000u, 1) == shizuku::kernel_error::OK));
+
+  // Activation 0 writes to its window and consumes 160B
+  *reinterpret_cast<volatile uint32_t *>(thread.win[0].hi - 32u) = 0x11111111u;
   context.user_sp = thread.win[0].hi - 160u;
   assert((shizuku::native::enter_in_place<mock_kernel, mock_kobj>(kernel, thread, context, view, 0x1000u, 1) == shizuku::kernel_error::OK));
+
+  // Activation 1 writes to its window and consumes 160B
+  *reinterpret_cast<volatile uint32_t *>(thread.win[1].hi - 32u) = 0x22222222u;
+  *reinterpret_cast<volatile uint32_t *>(thread.win[1].lo + 16u) = 0x22220001u;
   context.user_sp = thread.win[1].hi - 160u;
   assert((shizuku::native::enter_in_place<mock_kernel, mock_kobj>(kernel, thread, context, view, 0x1000u, 1) == shizuku::kernel_error::OK));
+
+  // Activation 2 writes to its window
+  const auto win2 = thread.win[2];
+  const auto win1 = thread.win[1];
+  *reinterpret_cast<volatile uint32_t *>(win2.hi - 32u) = 0x33333333u;
+  *reinterpret_cast<volatile uint32_t *>(win2.lo + 16u) = 0x33330001u;
   assert(thread.call_stack.depth == 3);
 
   // Unwind 2 frames at once (FORWARD_CHILD_EXIT / count = 2)
@@ -448,6 +525,17 @@ static void test_ledger_unwind_in_place() {
   assert(thread.call_stack.depth == 1);
   // Both unwound frames were zeroed
   assert(test_fake_arch::zeroed_windows.size() == 2);
+  // (d) Real memory for both unwound activations is completely zeroed
+  for (uintptr_t p = win2.lo; p < win2.hi; p += 4) {
+    assert(*reinterpret_cast<const volatile uint32_t *>(p) == 0);
+  }
+  for (uintptr_t p = win1.lo; p < win1.hi; p += 4) {
+    assert(*reinterpret_cast<const volatile uint32_t *>(p) == 0);
+  }
+  // Remaining activation 0 frame and base caller frame are preserved intact
+  assert(*reinterpret_cast<const volatile uint32_t *>(thread.win[0].hi - 32u) == 0x11111111u);
+  assert(*reinterpret_cast<const volatile uint32_t *>(stack_lo + 0x3000u) == 0xC001CAFEu);
+
   // Caller window restored to activation 0
   assert(thread.cur_win_lo == thread.win[0].lo);
   assert(thread.cur_win_hi == thread.win[0].hi);
