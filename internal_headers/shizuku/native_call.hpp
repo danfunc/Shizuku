@@ -195,25 +195,32 @@ template <class K, class KObj>
     const auto popped_win = (depth - 1 < thread.MAX_STACK_WINDOWS)
         ? thread.win[depth - 1]
         : stack_window{};
-    zero_window_of<A>(popped_win);
+    if (popped_win.is_valid()) {
+      zero_window_of<A>(popped_win);
+    }
     if (depth - 1 < thread.MAX_STACK_WINDOWS) {
       thread.win[depth - 1] = stack_window{};
     }
 
-    stack_window caller_win{thread.stack_lo, thread.stack_hi};
-    for (int32_t d = static_cast<int32_t>(depth) - 2; d >= 0; --d) {
-      if (static_cast<uint32_t>(d) < thread.MAX_STACK_WINDOWS && thread.win[d].is_valid()) {
-        caller_win = thread.win[d];
-        break;
+    if (entry.ret_privileged == 0) {
+      stack_window caller_win{thread.stack_lo, thread.stack_hi};
+      for (int32_t d = static_cast<int32_t>(depth) - 2; d >= 0; --d) {
+        if (static_cast<uint32_t>(d) < thread.MAX_STACK_WINDOWS && thread.win[d].is_valid()) {
+          caller_win = thread.win[d];
+          break;
+        }
+      }
+      thread.cur_win_lo = caller_win.lo;
+      thread.cur_win_hi = caller_win.hi;
+
+      if (restore) {
+        if constexpr (requires { A::apply_stack_window(context, caller_win.lo, caller_win.hi); }) {
+          A::apply_stack_window(context, caller_win.lo, caller_win.hi);
+        }
       }
     }
-    thread.cur_win_lo = caller_win.lo;
-    thread.cur_win_hi = caller_win.hi;
 
     if (restore) {
-      if constexpr (requires { A::apply_stack_window(context, caller_win.lo, caller_win.hi); }) {
-        A::apply_stack_window(context, caller_win.lo, caller_win.hi);
-      }
       frame = A::call_resume_at(context, entry.ret_pc, entry.ret_sp, entry.ret_privileged != 0,
                                 0, 0, scrub);
       const auto window = resolve_return_region_window(
@@ -301,15 +308,22 @@ template <class K, class KObj>
       return kernel_error::NO_STACK;
     }
     const uintptr_t ret_sp = A::call_return_sp(context);
-    const auto win = open_window(ret_sp, thread.stack_lo);
-    if (!win.is_valid()) {
-      return kernel_error::NO_STACK;
-    }
-    thread.win[depth] = win;
-    thread.cur_win_lo = win.lo;
-    thread.cur_win_hi = win.hi;
-    if constexpr (requires { A::apply_stack_window(context, win.lo, win.hi); }) {
-      A::apply_stack_window(context, win.lo, win.hi);
+    if (!view.privileged) {
+      if (ret_sp < thread.stack_lo || ret_sp > thread.stack_hi) {
+        return kernel_error::NO_STACK;
+      }
+      const auto win = open_window(ret_sp, thread.stack_lo);
+      if (!win.is_valid()) {
+        return kernel_error::NO_STACK;
+      }
+      thread.win[depth] = win;
+      thread.cur_win_lo = win.lo;
+      thread.cur_win_hi = win.hi;
+      if constexpr (requires { A::apply_stack_window(context, win.lo, win.hi); }) {
+        A::apply_stack_window(context, win.lo, win.hi);
+      }
+    } else {
+      thread.win[depth] = stack_window{};
     }
 
     // 記帳は台帳の 1 項目だけ: 呼び先の同定 (object・handler・kind・via・floor・世代) と、この段から

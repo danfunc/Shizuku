@@ -36,6 +36,31 @@ thread (共通) が持つ:
 - **強制巻戻し (count>1 / forced_scrub)**: 各段を落とすたびに、その段の `[win_lo, win_hi)` だけをゼロ化する (全 stack の一括消去はしない)。段数に比例するが、各段は開いた分だけ。
 - **thread 切替え**: PMP の stack 窓は「current thread の `[cur_win_lo, cur_win_hi)`」。切替え先で `cur_win_*` を読んで張る。切替えで窓は閉じない/ゼロ化しない (thread は stack 領域を共有しない)。
 
+## 2.1 特権別の扱い (M↔U 混在 4 経路)
+
+窓の対象は **非特権 (U) の callee だけ** とする。`view.privileged` が真 (M callee) のときは窓を開かず (台帳 win は {} 相当、`cur_win_*` は触らず)、return でもゼロ化しない。U callee のときだけ open/zero/apply を行う。
+
+| 呼出し経路 | Caller 特権 | Callee 特権 | (1) 窓を開くか | (2) return 時にゼロ化する範囲 | (3) return 後に caller の窓 (cur_win) を何に戻すか | (4) ゼロ化が走る時点で生きている trap frame/resume frame が範囲に入らないか |
+|---|---|---|---|---|---|---|
+| **M → M** | M-mode | M-mode | **開かない** (win は `{}` 相当、`thread.cur_win_*` 不変) | **ゼロ化しない** | 触らない (M caller は窓を持たない/不変) | **安全**: ゼロ化自体が走らないため、カーネルスタック上の caller trap frame や resume frame がゼロ化されて mepc=0 に飛ぶ破壊は完全に防止される。 |
+| **M → U** | M-mode | U-mode | **原則拒否 (NO_STACK)**: M caller の `ret_sp` はカーネルスタック上にあり、thread の U stack `[stack_lo, stack_hi)` 外であるため `NO_STACK` で拒否。もし `ret_sp` が U stack 内にあれば `[ret_sp-K, ret_sp)` を開く。 | 開かれた場合 `[win_lo, win_hi)` をゼロ化。拒否時はなし。 | 開かれた場合: Caller (M) に窓はないため触らない。 | **安全**: U callee の trap frame はカーネルスタック上 (`shizuku_c6_kernel_stack`) にあり、ゼロ化対象は U stack 領域内であるためアドレス空間が重ならず安全。 |
+| **U → U** | U-mode | U-mode | **開く**: callee が U のため、caller U stack SP (`ret_sp`) から `open_window(ret_sp, thread.stack_lo)` で開く。 | callee が開いた窓 `[win_lo, win_hi)` 全体をゼロ化。 | 1 つ外側の U caller の窓 (台帳で直前の有効な `win`、なければ `[stack_lo, stack_hi)`) に戻し PMP 適用。 | **安全**: U callee からの return 処理時、trap frame はカーネルスタック上 (`rv32_trap.S:40-50`) に存在する。ゼロ化対象の `[win_lo, win_hi)` は U-mode スタック上であるため、生きた trap frame はゼロ化範囲外で安全。resume frame はカーネル stack 上の trap frame を再利用 (またはゼロ化後に構築) されるため破壊されない。 |
+| **U → M** | U-mode | M-mode | **開かない**: callee が M のため、窓は開かず (win は `{}` 相当)、`cur_win_*` は触らない。M はカーネル stack で動作。 | **ゼロ化しない** (M callee の窓はない)。 | 触らない (U caller の `cur_win_*` がそのまま維持される)。 | **安全**: ゼロ化しないため trap frame / resume frame は破壊されない。また M callee 実行中は PMP 窓が caller のまま保持されるが、M-mode は PMP 非適用 (または MPU 適用外) でカーネルスタックを使うため動作に影響しない。 |
+
+### ゼロ化を frame の読込み/構築より前に行ってよい条件と根拠
+U callee からの return (ECALL 復帰) では、ECALL トラップ発生時に CPU は M-mode に遷移し、スタックポインタ SP は `shizuku_c6_kernel_stack` に切り替わっている (`arch/riscv/rv32_trap.S:40-50`)。
+したがって、トラップフレーム (`active_frame` / `context->sp`) はすべてカーネルスタック上に置かれている。
+一方、ゼロ化される対象は U-mode callee が使っていた U-mode スタック上の領域 `[win.lo, win.hi)` である。
+カーネルスタックと U-mode スタックは完全に独立した別領域であるため、U stack 上の `[win.lo, win.hi)` をゼロ化しても、カーネルスタック上の trap frame や後続の `call_resume_at` で構築される resume frame は一切破壊されない。
+逆に、M-mode callee では trap frame や caller のスタックがカーネルスタック上に同居しているため、もし M callee に対して窓を開いて return 時にゼロ化を行ってしまうと、現在実行中・復帰用の trap frame をゼロクリアしてしまい mepc=0 等の致命的破壊を引き起こす。
+したがって、窓の開設とゼロ化の対象を非特権 (U) callee に限定することが不可欠である。
+
+### M caller が U callee を呼ぶときの境界保証
+M caller が U callee を呼ぶ場合、M caller の SP (`ret_sp = A::call_return_sp(context)`) はカーネルスタックを指している。
+thread の U stack 範囲は `[thread.stack_lo, thread.stack_hi)` (C6 selftest では `thread.set_user_stack` で `u_mode_stage1_stack` の範囲が登録される) である。
+もし `ret_sp < thread.stack_lo || ret_sp > thread.stack_hi` である場合、窓を開いてしまうとカーネルスタック領域が U-mode の PMP スタック窓として公開されてしまう危険がある。
+そのため、`enter_in_place` において `ret_sp < thread.stack_lo || ret_sp > thread.stack_hi` を検査し、U stack 範囲外であれば `kernel_error::NO_STACK` で即座に拒否することで、窓が thread stack の外を指さないことを保証する。
+
 ## 3. PMP エントリ割当て
 
 - entry 4/5 を stack 窓 (TOR, RW, NX) のまま使う。`pmpaddr4 = win_lo >> 2`, `pmpaddr5 = win_hi >> 2`。粒度 4B なので `win_lo/win_hi` は 4B 整列で足りる。
