@@ -45,6 +45,7 @@ uint8_t u_cost_c_stack[1024];
 // 非特権に実行を開ける SRAM はこの範囲だけ (rp2350_u_cost() が region 1 に RO+X で張る)。
 extern "C" {
 uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3);
+uintptr_t u_cost_parent_worker_fp(uintptr_t cmd, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3);
 uintptr_t u_cost_child_worker(uintptr_t arg0, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3);
 void u_cost_code_begin();
 void u_cost_code_end_pad();
@@ -102,7 +103,10 @@ void u_cost_denied_code() {
   asm volatile(".syntax unified\n.thumb\nbx lr\n");
 }
 
-SHIZUKU_U_COST_CODE uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
+SHIZUKU_U_COST_CODE uintptr_t u_cost_parent_worker_fp(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t);
+
+SHIZUKU_U_COST_CODE uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3) {
+  if (cmd >= 20) return u_cost_parent_worker_fp(cmd, arg1, arg2, arg3);
   using shizuku::armv8m_abi::syscall;
   auto *const data = reinterpret_cast<volatile uint32_t *>(u_cost_p_data_pool);
   const uintptr_t child = data[0];
@@ -172,6 +176,62 @@ SHIZUKU_U_COST_CODE uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t, uin
   return rounds;
 }
 
+SHIZUKU_U_COST_CODE uintptr_t u_cost_parent_worker_fp(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
+  using shizuku::armv8m_abi::syscall;
+  auto *const data = reinterpret_cast<volatile uint32_t *>(u_cost_p_data_pool);
+  const uintptr_t child = data[0];
+  const uintptr_t rounds = data[3];
+
+  uint32_t ctrl_b = 0;
+  asm volatile("mrs %0, control" : "=r"(ctrl_b));
+  const uint32_t fpca_before = (ctrl_b >> 2) & 1u;
+
+  const uint32_t sub_cmd = static_cast<uint32_t>(cmd % 10);
+  const bool descriptor = sub_cmd == 1 || sub_cmd >= 5;
+  const uintptr_t target = descriptor ? data[2] : child;
+  const uintptr_t number = descriptor ? 33 : 4;
+  auto call = [&](uintptr_t value) __attribute__((always_inline)) {
+    return descriptor ? syscall(number, target, value) : syscall(number, target, 0, value);
+  };
+
+  if (sub_cmd == 4 || sub_cmd == 7) {
+    const auto result = call(41);
+    data[descriptor ? 52 : 50] = result.value;
+    data[descriptor ? 53 : 51] = result.error;
+    return 1;
+  }
+  if (sub_cmd == 0 || sub_cmd == 1) {
+    for (uintptr_t i = 0; i < 32; ++i) (void)call(0);
+    return 32;
+  }
+
+  const bool baseline = (sub_cmd == 2 || sub_cmd == 5);
+  uintptr_t value = 0, error = 0;
+  for (uintptr_t i = 0; i < rounds; ++i) {
+    if (baseline) {
+      ++value;
+      asm volatile("" : "+r"(value), "+r"(error) : "r"(number), "r"(target) : "memory");
+    } else {
+      const auto result = call(value);
+      value = result.value;
+      error |= result.error;
+    }
+  }
+
+  uint32_t ctrl_a = 0;
+  asm volatile("mrs %0, control" : "=r"(ctrl_a));
+  const uint32_t fpca_after = (ctrl_a >> 2) & 1u;
+
+  const unsigned base_idx = descriptor ? (baseline ? 40 : 45) : (baseline ? 30 : 35);
+  data[base_idx + 0] = fpca_before;
+  data[base_idx + 1] = fpca_after;
+  data[base_idx + 2] = value;
+  data[base_idx + 3] = error;
+  data[base_idx + 4] = rounds;
+
+  return rounds;
+}
+
 // 最後のliteral poolを窓内にflushしてから32B境界へalignし、window終端を置く。
 SHIZUKU_U_COST_CODE __attribute__((naked)) void u_cost_code_end_pad() {
   asm volatile(".ltorg\n.balign 32\n.global u_cost_code_end\nu_cost_code_end:\n");
@@ -181,6 +241,7 @@ SHIZUKU_U_COST_CODE __attribute__((naked)) void u_cost_code_end_pad() {
 // ホスト環境用スタブ
 extern "C" {
 uintptr_t u_cost_parent_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) { return 0; }
+uintptr_t u_cost_parent_worker_fp(uintptr_t, uintptr_t, uintptr_t, uintptr_t) { return 0; }
 uintptr_t u_cost_child_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) { return 0; }
 void u_cost_code_begin() {}
 void u_cost_code_end_pad() {}
@@ -590,6 +651,16 @@ void rp2350_u_cost() {
     shizuku_rp2350_u_cost_stage = 0xC05100u;
     const bool counter_enabled = ARCH::cycle_counter_enable();
 
+    uint32_t default_control = 0;
+#if defined(__ARM_ARCH_8M_MAIN__)
+    asm volatile("mrs %0, control" : "=r"(default_control));
+#endif
+    const uint32_t default_fpca = (default_control >> 2) & 1u;
+    BOARD::diag_printf(
+        "[COST-FP] default fpca=%lu (existing [COST-CORRECTED] measurement ran with this caller state)\n",
+        (unsigned long)default_fpca);
+    drain_diag_if_supported<BOARD>();
+
     // 11. 親 P に cmd=10 (warm-up method: 計測区間外) を実行させる
     const auto corr_meth_warmup_res = ARCH::syscall(
         static_cast<uintptr_t>(object_api::CALL_METHOD), OBJECT_U_COST_P, 0, 10 /* cmd=10 */);
@@ -847,6 +918,237 @@ void rp2350_u_cost() {
     record_check("u_cost [CORRECTED]: descriptor call chain & error accumulation", corr_desc_ok, corr_desc_final, ROUNDS);
 
     shizuku_rp2350_u_cost_record.corr_checked_ok = (counter_ok && desc_create_ok && corr_meth_ok && corr_desc_ok) ? 1u : 0u;
+
+    // =======================================================================
+    // FPCA series (fpca=0 and fpca=1):
+    // =======================================================================
+    auto set_boot_fpca = [](uint32_t want_fpca) -> uint32_t {
+#if defined(__ARM_ARCH_8M_MAIN__)
+      if (want_fpca == 0) {
+        asm volatile(
+            "mrs r0, control\n"
+            "bic r0, r0, #4\n"
+            "msr control, r0\n"
+            "isb\n"
+            ::: "r0", "memory");
+      } else {
+        asm volatile(
+            "movs r0, #0\n"
+            "vmov s0, r0\n"
+            "isb\n"
+            ::: "r0", "s0", "memory");
+      }
+      uint32_t ctrl = 0;
+      asm volatile("mrs %0, control" : "=r"(ctrl));
+      return (ctrl >> 2) & 1u;
+#else
+      return want_fpca;
+#endif
+    };
+
+    auto run_fp_condition = [&](uint32_t want_fpca, uint32_t cmd_base) {
+      u_cost_fp_invariants_input_t fp_inv{};
+      fp_inv.expected_fpca = want_fpca;
+
+      // 1. warmup method
+      set_boot_fpca(want_fpca);
+      const auto fp_warm_meth_res = ARCH::syscall(
+          static_cast<uintptr_t>(object_api::CALL_METHOD), OBJECT_U_COST_P, 0, cmd_base + 0);
+
+      // 2. baseline method
+      fp_inv.priv_meth_base = set_boot_fpca(want_fpca);
+      const uint32_t t_base_meth_start = cycles_now<ARCH>();
+      const auto fp_base_meth_res = ARCH::syscall(
+          static_cast<uintptr_t>(object_api::CALL_METHOD), OBJECT_U_COST_P, 0, cmd_base + 2);
+      const uint32_t t_base_meth_end = cycles_now<ARCH>();
+      const uint32_t fp_base_meth_cycles = t_base_meth_end - t_base_meth_start;
+
+      // 3. measure method
+      fp_inv.priv_meth_meas = set_boot_fpca(want_fpca);
+      const uint32_t t_meth_start = cycles_now<ARCH>();
+      const auto fp_meth_res = ARCH::syscall(
+          static_cast<uintptr_t>(object_api::CALL_METHOD), OBJECT_U_COST_P, 0, cmd_base + 3);
+      const uint32_t t_meth_end = cycles_now<ARCH>();
+      const uint32_t fp_meth_cycles = t_meth_end - t_meth_start;
+
+      // 4. verify method check (41 -> 42)
+      set_boot_fpca(want_fpca);
+      const auto fp_meth_check_res = ARCH::syscall(
+          static_cast<uintptr_t>(object_api::CALL_METHOD), OBJECT_U_COST_P, 0, cmd_base + 4);
+
+      // 5. warmup desc
+      set_boot_fpca(want_fpca);
+      const auto fp_warm_desc_res = ARCH::syscall(
+          static_cast<uintptr_t>(object_api::CALL_METHOD), OBJECT_U_COST_P, 0, cmd_base + 1);
+
+      // 6. baseline desc
+      fp_inv.priv_desc_base = set_boot_fpca(want_fpca);
+      const uint32_t t_base_desc_start = cycles_now<ARCH>();
+      const auto fp_base_desc_res = ARCH::syscall(
+          static_cast<uintptr_t>(object_api::CALL_METHOD), OBJECT_U_COST_P, 0, cmd_base + 5);
+      const uint32_t t_base_desc_end = cycles_now<ARCH>();
+      const uint32_t fp_base_desc_cycles = t_base_desc_end - t_base_desc_start;
+
+      // 7. measure desc
+      fp_inv.priv_desc_meas = set_boot_fpca(want_fpca);
+      const uint32_t t_desc_start = cycles_now<ARCH>();
+      const auto fp_desc_res = ARCH::syscall(
+          static_cast<uintptr_t>(object_api::CALL_METHOD), OBJECT_U_COST_P, 0, cmd_base + 6);
+      const uint32_t t_desc_end = cycles_now<ARCH>();
+      const uint32_t fp_desc_cycles = t_desc_end - t_desc_start;
+
+      // 8. verify desc check (41 -> 42)
+      set_boot_fpca(want_fpca);
+      const auto fp_desc_check_res = ARCH::syscall(
+          static_cast<uintptr_t>(object_api::CALL_METHOD), OBJECT_U_COST_P, 0, cmd_base + 7);
+
+      fp_inv.u_meth_base_before = shared[30];
+      fp_inv.u_meth_base_after = shared[31];
+      const uint32_t meth_base_rounds = shared[34];
+
+      fp_inv.u_meth_meas_before = shared[35];
+      fp_inv.u_meth_meas_after = shared[36];
+      const uint32_t meth_final = shared[37];
+      const uint32_t meth_accum_err = shared[38];
+      const uint32_t meth_rounds = shared[39];
+
+      fp_inv.u_desc_base_before = shared[40];
+      fp_inv.u_desc_base_after = shared[41];
+      const uint32_t desc_base_rounds = shared[44];
+
+      fp_inv.u_desc_meas_before = shared[45];
+      fp_inv.u_desc_meas_after = shared[46];
+      const uint32_t desc_final = shared[47];
+      const uint32_t desc_accum_err = shared[48];
+      const uint32_t desc_rounds = shared[49];
+
+      const uint32_t meth_check_val = shared[50];
+      const uint32_t meth_check_err = shared[51];
+      const uint32_t desc_check_val = shared[52];
+      const uint32_t desc_check_err = shared[53];
+
+      const uint32_t base_meth_mean = fp_base_meth_cycles / ROUNDS;
+      const uint32_t meth_raw_mean = fp_meth_cycles / ROUNDS;
+      const uint32_t net_meth_mean = fp_meth_cycles > fp_base_meth_cycles
+                                         ? (fp_meth_cycles - fp_base_meth_cycles) / ROUNDS
+                                         : 0;
+
+      const uint32_t base_desc_mean = fp_base_desc_cycles / ROUNDS;
+      const uint32_t desc_raw_mean = fp_desc_cycles / ROUNDS;
+      const uint32_t net_desc_mean = fp_desc_cycles > fp_base_desc_cycles
+                                         ? (fp_desc_cycles - fp_base_desc_cycles) / ROUNDS
+                                         : 0;
+
+      BOARD::diag_printf(
+          "[COST-FP] %-24s fpca=%lu net mean %5lu cyc  [raw mean %lu, baseline mean %lu]\n",
+          "U->U method call (1 hop)",
+          (unsigned long)want_fpca,
+          (unsigned long)net_meth_mean,
+          (unsigned long)meth_raw_mean,
+          (unsigned long)base_meth_mean);
+      drain_diag_if_supported<BOARD>();
+      BOARD::diag_printf(
+          "[COST-FP] %-24s fpca=%lu net mean %5lu cyc  [raw mean %lu, baseline mean %lu]\n",
+          "U->U desc call (1 hop)",
+          (unsigned long)want_fpca,
+          (unsigned long)net_desc_mean,
+          (unsigned long)desc_raw_mean,
+          (unsigned long)base_desc_mean);
+      drain_diag_if_supported<BOARD>();
+
+      const bool counter_ok = counter_enabled &&
+                              (fp_base_meth_cycles > 0) &&
+                              (fp_meth_cycles > fp_base_meth_cycles) &&
+                              (fp_base_desc_cycles > 0) &&
+                              (fp_desc_cycles > fp_base_desc_cycles);
+      if (want_fpca == 0) {
+        record_check("u_cost [FP]: DWT cycle counter progressed and valid (fpca=0)",
+                     counter_ok, counter_ok ? 1 : 0, 1);
+      } else {
+        record_check("u_cost [FP]: DWT cycle counter progressed and valid (fpca=1)",
+                     counter_ok, counter_ok ? 1 : 0, 1);
+      }
+
+      const bool fp_readback_ok = evaluate_u_cost_fp_invariants(fp_inv);
+      if (want_fpca == 0) {
+        record_check("u_cost [FP]: fpca=0 readback matched 0 (priv & user before/after)",
+                     fp_readback_ok, fp_readback_ok ? 0 : 1, 0);
+      } else {
+        record_check("u_cost [FP]: fpca=1 readback matched 1 (priv & user before/after)",
+                     fp_readback_ok, fp_readback_ok ? 1 : 0, 1);
+      }
+
+      u_cost_eval_input_t meth_eval{
+          .counter_enabled = counter_enabled,
+          .base_cycles = fp_base_meth_cycles,
+          .measure_cycles = fp_meth_cycles,
+          .final_chain_value = meth_final,
+          .accumulated_error = meth_accum_err,
+          .verify_value = meth_check_val,
+          .verify_error = meth_check_err,
+          .verify_outer_error = static_cast<uint32_t>(fp_meth_check_res.error),
+          .verify_outer_value = static_cast<uint32_t>(fp_meth_check_res.value),
+          .desc_create_error = desc_create_inner_error,
+          .desc_create_outer_error = static_cast<uint32_t>(desc_create_res.error),
+          .expected_rounds = ROUNDS,
+          .outer_error = static_cast<uint32_t>(fp_meth_res.error),
+          .outer_value = static_cast<uint32_t>(fp_meth_res.value),
+          .executed_rounds = meth_rounds,
+          .baseline_outer_error = static_cast<uint32_t>(fp_base_meth_res.error),
+          .baseline_outer_value = static_cast<uint32_t>(fp_base_meth_res.value),
+          .baseline_executed_rounds = meth_base_rounds,
+          .warmup_outer_error = static_cast<uint32_t>(fp_warm_meth_res.error),
+          .warmup_rounds = static_cast<uint32_t>(fp_warm_meth_res.value),
+      };
+      const bool meth_ok = evaluate_u_cost_invariants(meth_eval);
+      if (want_fpca == 0) {
+        record_check("u_cost [FP]: method call chain & error accumulation (fpca=0)",
+                     meth_ok, meth_final, ROUNDS);
+      } else {
+        record_check("u_cost [FP]: method call chain & error accumulation (fpca=1)",
+                     meth_ok, meth_final, ROUNDS);
+      }
+
+      u_cost_eval_input_t desc_eval{
+          .counter_enabled = counter_enabled,
+          .base_cycles = fp_base_desc_cycles,
+          .measure_cycles = fp_desc_cycles,
+          .final_chain_value = desc_final,
+          .accumulated_error = desc_accum_err,
+          .verify_value = desc_check_val,
+          .verify_error = desc_check_err,
+          .verify_outer_error = static_cast<uint32_t>(fp_desc_check_res.error),
+          .verify_outer_value = static_cast<uint32_t>(fp_desc_check_res.value),
+          .desc_create_error = desc_create_inner_error,
+          .desc_create_outer_error = static_cast<uint32_t>(desc_create_res.error),
+          .expected_rounds = ROUNDS,
+          .outer_error = static_cast<uint32_t>(fp_desc_res.error),
+          .outer_value = static_cast<uint32_t>(fp_desc_res.value),
+          .executed_rounds = desc_rounds,
+          .baseline_outer_error = static_cast<uint32_t>(fp_base_desc_res.error),
+          .baseline_outer_value = static_cast<uint32_t>(fp_base_desc_res.value),
+          .baseline_executed_rounds = desc_base_rounds,
+          .warmup_outer_error = static_cast<uint32_t>(fp_warm_desc_res.error),
+          .warmup_rounds = static_cast<uint32_t>(fp_warm_desc_res.value),
+      };
+      const bool desc_ok = evaluate_u_cost_invariants(desc_eval);
+      if (want_fpca == 0) {
+        record_check("u_cost [FP]: descriptor call chain & error accumulation (fpca=0)",
+                     desc_ok, desc_final, ROUNDS);
+      } else {
+        record_check("u_cost [FP]: descriptor call chain & error accumulation (fpca=1)",
+                     desc_ok, desc_final, ROUNDS);
+      }
+    };
+
+    shizuku_rp2350_u_cost_stage = 0xC05200u;
+    run_fp_condition(0, 20);
+
+    shizuku_rp2350_u_cost_stage = 0xC05210u;
+    run_fp_condition(1, 30);
+
+    set_boot_fpca(default_fpca);
+
     shizuku_rp2350_u_cost_stage = 0xC050FFu;
   }
 #endif
