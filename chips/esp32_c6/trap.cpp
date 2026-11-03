@@ -715,6 +715,42 @@ static uintptr_t s_u_ecall_frame_latch = 0;
 [[gnu::always_inline]] inline void record_u_mode_ecall_diag_once(const arch::exception_frame_t *frame) {
   arch::record_u_mode_ecall_diag(*frame, shizuku_c6_u_ecall_diag, shizuku_c6_u_mode_diag);
 }
+
+// U caller からの全 ECALL での SP 検査と必要に応じた窓伸長。
+// 拒否すべきは「SP が窓の上限より上 (祖先領域側)」や「スタック全域外」であり、
+// 窓の下限より下 (未伸長の正当領域) は extend_window で伸長してから通す。
+// 窓がない (depth 0 など、cur_win_* == 0) の場合は thread stack 全域 [stack_lo, stack_hi] でフォールバック検査する。
+[[gnu::always_inline]] inline bool ensure_u_sp_window(arch::context_t *context, uintptr_t u_sp) {
+  if (context->privileged) return true;
+  auto &kernel = shizuku::kernel_instance;
+  auto &thread = kernel.current_thread();
+  if (thread.stk.stack_lo != 0 || thread.stk.stack_hi != 0) {
+    if (__builtin_expect(u_sp < thread.stk.stack_lo || u_sp > thread.stk.stack_hi, 0)) {
+      return false;
+    }
+  }
+  if (thread.stk.cur_win_lo != 0 || thread.stk.cur_win_hi != 0) {
+    if (__builtin_expect(u_sp > thread.stk.cur_win_hi, 0)) {
+      return false; // 上方偽装は即座に拒絶
+    }
+    if (u_sp < thread.stk.cur_win_lo) {
+      const auto win = shizuku::stack_window{thread.stk.cur_win_lo, thread.stk.cur_win_hi};
+      const auto new_win = shizuku::extend_window(win, u_sp, thread.stk.stack_lo);
+      if (__builtin_expect(!new_win.is_valid(), 0)) return false;
+      const uint32_t depth = thread.call_stack.depth;
+      if (depth > 0 && depth - 1 < thread.MAX_STACK_WINDOWS) {
+        thread.set_window_at(depth - 1, new_win);
+      }
+      thread.stk.cur_win_lo = new_win.lo;
+      thread.stk.cur_win_hi = new_win.hi;
+      shizuku::chips::esp32_c6::pmp_controller::apply_stack_window(new_win.lo, new_win.hi);
+      s_pmp_shadow.win_lo = new_win.lo;
+      s_pmp_shadow.win_hi = new_win.hi;
+      shizuku_c6_stack_extend_count = shizuku_c6_stack_extend_count + 1;
+    }
+  }
+  return true;
+}
 #endif
 template <class Body>
 SHIZUKU_HOT inline arch::exception_frame_t *ecall_run(arch::exception_frame_t *frame, Body body) {
@@ -746,10 +782,9 @@ SHIZUKU_HOT inline arch::exception_frame_t *ecall_run(arch::exception_frame_t *f
   frame_to_context(*frame, *context);
   shizuku_c6_trap_diag[4] = shizuku_c6_trap_diag[4] + 1;
 #if defined(SHIZUKU_C6_UMODE)
-  auto &cur_thread = kernel.current_thread();
-  if (!context->privileged && (cur_thread.stk.cur_win_lo != 0 || cur_thread.stk.cur_win_hi != 0)) {
+  if (!context->privileged) {
     const uintptr_t u_sp = arch::u_stack_pointer(*frame);
-    if (__builtin_expect(!shizuku::window_contains_sp(cur_thread.stk.cur_win_lo, cur_thread.stk.cur_win_hi, u_sp), 0)) {
+    if (__builtin_expect(!ensure_u_sp_window(context, u_sp), 0)) {
       arch::set_result(*frame, static_cast<uintptr_t>(shizuku::object_error::NO_STACK), 0);
       context_to_frame(*context);
       auto *result = context->sp;
@@ -863,9 +898,9 @@ SHIZUKU_HOT [[gnu::always_inline]] inline arch::exception_frame_t *ecall_direct(
   // must ledger the caller as U so the return path restores its user SP, PMP window, and U tag.
   arch::set_context_privilege_from_frame(*context, *frame);
 #if defined(SHIZUKU_C6_UMODE)
-  if (!context->privileged && (thread.stk.cur_win_lo != 0 || thread.stk.cur_win_hi != 0)) {
+  if (!context->privileged) {
     const uintptr_t u_sp = arch::u_stack_pointer(*frame);
-    if (__builtin_expect(!shizuku::window_contains_sp(thread.stk.cur_win_lo, thread.stk.cur_win_hi, u_sp), 0)) {
+    if (__builtin_expect(!ensure_u_sp_window(context, u_sp), 0)) {
       arch::set_result(*frame, static_cast<uintptr_t>(shizuku::object_error::NO_STACK), 0);
       return ecall_finish(context);
     }
@@ -1351,7 +1386,10 @@ bool plic_vector_mode::user_stack_bounds(uint32_t object_id, uintptr_t &base, ui
   auto &thread = shizuku::kernel_instance.current_thread();
   if (thread.stk.stack_lo == 0 || thread.stk.stack_hi <= thread.stk.stack_lo)
     return false;
-  base = (thread.stk.cur_win_lo != 0) ? thread.stk.cur_win_lo : thread.stk.stack_lo;
+  // call_header_has_room_in_user_stack (sp - base >= kRequired) で使われるため、
+  // base は下方の未伸長余地を含む thread stack 全域の底 (stack_lo) を返す。
+  // limit は caller 祖先枠への上方偽装侵入を防ぐため現在の活動窓の上限 (cur_win_hi != 0 ? cur_win_hi : stack_hi) とする。
+  base = thread.stk.stack_lo;
   limit = (thread.stk.cur_win_hi != 0) ? thread.stk.cur_win_hi : thread.stk.stack_hi;
   return true;
 #else

@@ -1245,13 +1245,27 @@ static void test_sp_spoofing_prevented() {
   assert(thread.call_stack.depth == 1);
   assert(*caller_sentinel == 0x5EEDCAFEu);
 
-  // (3) callee が自身の窓の下 (w0.lo - 16u) に SP を偽装して再呼出し: NO_STACK で拒絶
-  context.user_sp = w0.lo - 16u;
+  // (3) callee がスタック全域の底外 (stack_lo - 16u) に SP を偽装 (本物のスタック溢れ) して再呼出し: NO_STACK で拒絶
+  context.user_sp = thread.stk.stack_lo - 16u;
   auto err_below = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
       kernel, thread, context, view_u, 0x42001000u, mock_kernel::LEDGER_CALL);
   assert(err_below == shizuku::kernel_error::NO_STACK);
   assert(thread.call_stack.depth == 1);
   assert(*caller_sentinel == 0x5EEDCAFEu);
+
+  // (3b) callee が自身の窓の下だが thread stack 内 (w0.lo - 16u) の未伸長正当領域で再呼出し: 窓が自動伸長されて成功
+  context.user_sp = w0.lo - 16u;
+  auto err_extend_ok = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
+      kernel, thread, context, view_u, 0x42001000u, mock_kernel::LEDGER_CALL);
+  assert(err_extend_ok == shizuku::kernel_error::OK);
+  assert(thread.call_stack.depth == 2);
+  assert(thread.stk.cur_win_lo <= context.user_sp);
+  assert(*caller_sentinel == 0x5EEDCAFEu);
+  // 段を一段戻す
+  thread.call_stack.depth = 1;
+  thread.call_stack.call_count = 1;
+  thread.stk.cur_win_lo = w0.lo;
+  thread.stk.cur_win_hi = w0.hi;
 
   // (4) callee が自身の窓内 (w0.hi - 64u) で正当に再呼出し: 成功
   context.user_sp = w0.hi - 64u;
@@ -1286,6 +1300,52 @@ static void test_sp_spoofing_prevented() {
   // cur_win は U の窓 (w1) のまま維持される
   assert(thread.stk.cur_win_lo == w1.lo && thread.stk.cur_win_hi == w1.hi);
   assert(*caller_sentinel == 0x5EEDCAFEu);
+
+  // (7) U caller が未伸長領域 (w1.lo - 64u) の正当な SP で呼び出し: 窓が自動伸長されて成功
+  // depth 3 (M callee) から一段戻す
+  thread.call_stack.depth = 2;
+  thread.call_stack.call_count = 2;
+  context.privileged = false; // caller は U
+  context.user_sp = w1.lo - 64u; // まだ伸びていない領域だが thread stack 内
+  const auto win_before_extend = thread.stk.cur_win_lo;
+  assert(context.user_sp < win_before_extend);
+  assert(context.user_sp >= thread.stk.stack_lo);
+  auto err_m_extend = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
+      kernel, thread, context, view_m, 0x42002000u, mock_kernel::LEDGER_CALL);
+  assert(err_m_extend == shizuku::kernel_error::OK);
+  assert(thread.call_stack.depth == 3);
+  // 窓が下へ伸長されたことを確認
+  assert(thread.stk.cur_win_lo <= context.user_sp);
+  assert(thread.stk.cur_win_hi == w1.hi);
+  assert(*caller_sentinel == 0x5EEDCAFEu);
+
+  // (8) depth 0 の U caller (cur_win 未設定 {0, 0}) の正当な呼出し: 通る
+  thread.call_stack.depth = 0;
+  thread.call_stack.call_count = 0;
+  thread.stk.cur_win_lo = 0;
+  thread.stk.cur_win_hi = 0;
+  context.privileged = false;
+  context.user_sp = thread.stk.stack_hi - 32u;
+  auto err_d0_valid = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
+      kernel, thread, context, view_m, 0x42002000u, mock_kernel::LEDGER_CALL);
+  assert(err_d0_valid == shizuku::kernel_error::OK);
+
+  // (9) depth 0 の U caller がスタック外の SP で呼出し: NO_STACK で拒絶
+  thread.call_stack.depth = 0;
+  thread.call_stack.call_count = 0;
+  thread.stk.cur_win_lo = 0;
+  thread.stk.cur_win_hi = 0;
+  context.privileged = false;
+  context.user_sp = thread.stk.stack_hi + 64u; // スタック全域の上限外
+  auto err_d0_spoof_hi = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
+      kernel, thread, context, view_m, 0x42002000u, mock_kernel::LEDGER_CALL);
+  assert(err_d0_spoof_hi == shizuku::kernel_error::NO_STACK);
+
+  context.privileged = false;
+  context.user_sp = thread.stk.stack_lo - 16u; // スタック全域の底外
+  auto err_d0_spoof_lo = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
+      kernel, thread, context, view_m, 0x42002000u, mock_kernel::LEDGER_CALL);
+  assert(err_d0_spoof_lo == shizuku::kernel_error::NO_STACK);
 }
 
 // 窓なし構成 (HAS_STACK_WINDOW == false) での stream_range_allowed の検査 (純粋ユニットテスト)

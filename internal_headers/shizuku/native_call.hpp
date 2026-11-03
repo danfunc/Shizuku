@@ -404,15 +404,36 @@ template <class K, class KObj>
     if constexpr (K::THREAD::HAS_STACK_WINDOW) {
       const bool caller_is_u = !A::context_privileged(context);
       // SP 偽装防止: caller が U のとき、
-      // caller の SP は thread 自身の stack 内かつ現在の活動窓 [cur_win_lo, cur_win_hi] の内側でなければならない。
+      // caller の SP は thread 自身の stack 内でなければならず、
+      // かつ活動窓の上限 (cur_win_hi) を超えて祖先領域へ上方偽装してはならない。
+      // 下方の未伸長領域 (ret_sp < cur_win_lo && ret_sp >= stack_lo) は正当な呼出しとして窓を伸長する。
+      // 窓なし (depth 0 など) は thread stack 全域 [stack_lo, stack_hi] の検査のみとする。
       if (caller_is_u) {
         if (thread.stk.stack_lo != 0 || thread.stk.stack_hi != 0) {
           if (ret_sp < thread.stk.stack_lo || ret_sp > thread.stk.stack_hi) {
             return kernel_error::NO_STACK;
           }
         }
-        if (!window_contains_sp(thread.stk.cur_win_lo, thread.stk.cur_win_hi, ret_sp)) {
-          return kernel_error::NO_STACK;
+        if (thread.stk.cur_win_lo != 0 || thread.stk.cur_win_hi != 0) {
+          if (ret_sp > thread.stk.cur_win_hi) {
+            return kernel_error::NO_STACK;
+          }
+          if (ret_sp < thread.stk.cur_win_lo) {
+            const auto extended = extend_window(
+                stack_window{thread.stk.cur_win_lo, thread.stk.cur_win_hi},
+                ret_sp, thread.stk.stack_lo);
+            if (!extended.is_valid()) {
+              return kernel_error::NO_STACK;
+            }
+            thread.stk.cur_win_lo = extended.lo;
+            thread.stk.cur_win_hi = extended.hi;
+            if (depth > 0 && depth - 1 < thread.MAX_STACK_WINDOWS) {
+              thread.set_window_at(depth - 1, extended);
+            }
+            if constexpr (requires { A::apply_stack_window(context, extended.lo, extended.hi); }) {
+              A::apply_stack_window(context, extended.lo, extended.hi);
+            }
+          }
         }
       }
       if (!view.privileged) {
