@@ -63,7 +63,8 @@ extern unsigned char shizuku_c6_dispatch_stack[4096];
 
 // アプリ用データ領域・スタック (16B 整列)
 alignas(16) uint8_t u_mode_stage1_data_pool[256];
-alignas(16) uint8_t u_mode_stage1_stack[1024];
+// U の stack は専用配列ではなく、thread が実際に走る stack (boot thread の stack) の中の
+// caller SP の下 K から切り出す窓 (notes/stack-window-design.md)。
 
 // ドライバ用データ領域・スタック (16B 整列)
 alignas(16) uint8_t u_mode_driver_data_pool[256];
@@ -269,7 +270,8 @@ asm(
     "\n"
     ".Lprobe_ufetch:\n"
     "  mv t2, ra\n"
-    "  la t1, u_mode_stage1_stack\n"
+    // 命令フェッチ先 = 自分の stack 窓の中 (sp - 16)。stack は RW かつ NX でなければならない。
+    "  addi t1, sp, -16\n"
     ".global c6_stage1_probe_ufetch_insn_addr\n"
     "c6_stage1_probe_ufetch_insn_addr:\n"
     "  jalr ra, 0(t1)\n"
@@ -1434,17 +1436,15 @@ void c6_stage1_safety() {
   g_c6_stage1_driver_bounds.mmio_limit = 0x60001000u;
   g_c6_stage1_driver_bounds.update_precomputed();
 
-  // 2 つの object (U と driver) が 1 本の thread stack を共有
+  // 2 つの object (U と driver) が 1 本の thread stack を共有する。thread の stack 範囲は
+  // bootstrap/spawn が登録済み (set_stack_bounds)。ここでは登録しない。
   auto &thread = shizuku::kernel_instance.current_thread();
-  thread.set_user_stack(reinterpret_cast<uintptr_t>(u_mode_stage1_stack),
-                        reinterpret_cast<uintptr_t>(u_mode_stage1_stack) + sizeof(u_mode_stage1_stack));
 
-  // U worker スタックのカナリア初期化
+  // callee 窓 = ecall 時点の M の sp の下 K。sp はこの関数の中で動かない (ARCH::syscall は always_inline)。
+  uintptr_t stage1_m_sp = 0;
+  asm volatile("mv %0, sp" : "=r"(stage1_m_sp));
+  const uintptr_t stage1_win_hi = stage1_m_sp & ~uintptr_t(15);
   constexpr uint32_t U_STACK_CANARY = 0x5A5A5A5Au;
-  auto *u_stack_words = reinterpret_cast<volatile uint32_t *>(u_mode_stage1_stack);
-  for (size_t i = 0; i < sizeof(u_mode_stage1_stack) / sizeof(uint32_t); ++i) {
-    u_stack_words[i] = U_STACK_CANARY;
-  }
 
   // target pointer の設定
   const uintptr_t kstack_addr = reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack) + 16u;
@@ -1460,7 +1460,8 @@ void c6_stage1_safety() {
   data_pool_words[5] = OBJECT_STAGE1_DRIVER;
   data_pool_words[6] = METHOD_STAGE1_PROBE;
   data_pool_words[8] = OBJECT_STAGE1_PROBE;
-  data_pool_words[9] = reinterpret_cast<uintptr_t>(u_mode_stage1_stack) - 4u;
+  // cmd=30: thread の stack 領域の 1 語下 (本物の溢れ)。窓の伸長では救われず fault になる。
+  data_pool_words[9] = thread.stk.stack_lo - 4u;
 
   auto *drv_pool_words = reinterpret_cast<volatile uintptr_t *>(u_mode_driver_data_pool);
   drv_pool_words[0] = target_mmio_addr;
@@ -1501,12 +1502,6 @@ void c6_stage1_safety() {
       denied_create.error == 0 && denied_create.value == (uintptr_t)object_error::NOT_PRIVILEGED,
       denied_create.error != 0 ? denied_create.error : denied_create.value,
       (uintptr_t)object_error::NOT_PRIVILEGED);
-
-  // Exclude earlier legitimate CREATE/permission-probe stack use by starting a
-  // fresh full-stack observation window before commands 1..6. Only their ra
-  // save at stack_limit - 4 is expected to change.
-  for (size_t i = 0; i < sizeof(u_mode_stage1_stack) / sizeof(uint32_t); ++i)
-    u_stack_words[i] = U_STACK_CANARY;
 
   // 2. 0x802 U-mode 読み取り診断
   g_c6_probe_0x802_pc = reinterpret_cast<uintptr_t>(&c6_stage1_probe_0x802_insn_addr);
@@ -1647,18 +1642,27 @@ void c6_stage1_safety() {
   record_check("stage1: multi-trap combo exact fault mtval is kstack address",
                shizuku_c6_u_mode_diag[6] == kstack_addr, shizuku_c6_u_mode_diag[6], kstack_addr);
 
-  // 8. 全域を検査: 最終語は U worker 自身が保存した trampoline と厳密一致。
-  // この区間だけの検査で、CREATE_OBJECT 実行中の stack は対象外。
+  // 8. 窓を閉じた後の検査。callee 窓 [win_hi-K, win_hi) にカナリアを敷き、何もしない U callee
+  // (未定義 cmd=99 は a0=0 で ret) を呼ぶ。戻った直後に (関数呼出しを挟まず) 窓のうち resume frame
+  // (RV32_FRAME_BYTES) より下の語が全部 0 であること = カナリアが残っていない (窓を閉じるとき開いた分が
+  // ゼロ化された) ことを見る。resume frame は M caller の復帰用に窓の最上位へ作られるので対象外。
+  constexpr size_t STAGE1_WIN_WORDS = shizuku::kStackWindowStep / sizeof(uint32_t);
+  constexpr size_t STAGE1_FRAME_WORDS = RV32_FRAME_BYTES / sizeof(uint32_t);
+  auto *u_stack_words = reinterpret_cast<volatile uint32_t *>(stage1_win_hi - shizuku::kStackWindowStep);
+  for (size_t i = 0; i < STAGE1_WIN_WORDS; ++i)
+    u_stack_words[i] = U_STACK_CANARY;
+  const auto closed_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      99 /* cmd=99: no-op U callee */);
   bool canary_intact = true;
-  const uint32_t expected_ra = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&c6_stage1_u_return_trampoline));
-  for (size_t i = 0; i < sizeof(u_mode_stage1_stack) / sizeof(uint32_t); ++i) {
-    if (!stage1_stack_word_matches(i, sizeof(u_mode_stage1_stack) / sizeof(uint32_t),
-                                   u_stack_words[i], U_STACK_CANARY, expected_ra)) {
-      canary_intact = false;
-    }
+  for (size_t i = 0; i < STAGE1_WIN_WORDS - STAGE1_FRAME_WORDS; ++i) {
+    if (u_stack_words[i] != 0u) canary_intact = false;
   }
-  record_check("stage1: privileged M handler stack did not spill into U stack canary (full stack)",
-               canary_intact, canary_intact ? 1 : 0, 1);
+  record_check("stage1: closed callee window leaves no canary and M handler did not spill (below resume frame)",
+               closed_res.error == 0 && closed_res.value == 0 && canary_intact,
+               canary_intact ? 1 : 0, 1);
 
   // 9. 本番判定述語によるオブジェクト ID 束縛・拒否の検証
   const bool auth_probe = shizuku_c6_is_authorized_u_object(OBJECT_STAGE1_PROBE, OBJECT_STAGE1_PROBE);
@@ -1673,14 +1677,14 @@ void c6_stage1_safety() {
   record_check("stage1: production predicate rejects uninitialized 0x0", reject_zero, reject_zero ? 1 : 0, 1);
 
   // 10. 本番スタック切り替え述語の検証
-  const uintptr_t test_u_sp = thread.stack_lo + 512u;
+  const uintptr_t test_u_sp = thread.stk.stack_lo + 512u;
   const uintptr_t kstack_valid_frame = reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack) + 3600u;
   const uintptr_t routed_m_sp = shizuku_c6_get_m_handler_stack(test_u_sp, kstack_valid_frame);
   const uintptr_t expected_snapshot = (kstack_valid_frame + 144u);
   const bool routed_inside_kstack = (routed_m_sp >= reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack) &&
                                      routed_m_sp <= reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack + sizeof(shizuku_c6_kernel_stack)));
-  const bool routed_outside_u_stack = (routed_m_sp < thread.stack_lo ||
-                                       routed_m_sp > thread.stack_hi);
+  const bool routed_outside_u_stack = (routed_m_sp < thread.stk.stack_lo ||
+                                       routed_m_sp > thread.stk.stack_hi);
   record_check("stage1: M handler stack routed inside trusted kernel stack as valid aligned snapshot",
                routed_inside_kstack && (routed_m_sp == expected_snapshot), routed_m_sp, expected_snapshot);
   record_check("stage1: M handler stack routed strictly outside U stack",
@@ -1767,7 +1771,7 @@ void c6_stage1_safety() {
                code_word_after == code_word_before, code_word_after, code_word_before);
 
   // 11d. U instruction fetch from U stack (cmd 10)
-  const uintptr_t ufetch_target = reinterpret_cast<uintptr_t>(u_mode_stage1_stack);
+  const uintptr_t ufetch_target = stage1_win_hi - 16u; // U の sp (= win_hi) - 16 (asm と一致)
   g_c6_probe_ufetch_target = ufetch_target;
   const auto ufetch_res = ARCH::syscall(
       static_cast<uintptr_t>(object_api::CALL_METHOD),
