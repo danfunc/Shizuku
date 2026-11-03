@@ -451,6 +451,19 @@ public:
       asm volatile("vmrs %0, fpscr" : "=r"(fpscr) :: "memory");
       (void)fpscr;
     }
+    [[gnu::always_inline]] static inline void clear_upper_fp_registers() {
+#if defined(__ARM_ARCH_8M_MAIN__)
+      const uint32_t zero = 0;
+      asm volatile(
+          "vmov s16, %0\n" "vmov s17, %0\n" "vmov s18, %0\n" "vmov s19, %0\n"
+          "vmov s20, %0\n" "vmov s21, %0\n" "vmov s22, %0\n" "vmov s23, %0\n"
+          "vmov s24, %0\n" "vmov s25, %0\n" "vmov s26, %0\n" "vmov s27, %0\n"
+          "vmov s28, %0\n" "vmov s29, %0\n" "vmov s30, %0\n" "vmov s31, %0\n"
+          : : "r"(zero) :
+          "s16", "s17", "s18", "s19", "s20", "s21", "s22", "s23",
+          "s24", "s25", "s26", "s27", "s28", "s29", "s30", "s31", "memory");
+#endif
+    }
   };
   [[gnu::always_inline]] static inline void copy_fp_frame_72b(void *dst, const void *src) {
     if (dst == src) return;
@@ -472,17 +485,7 @@ public:
   }
 
   [[gnu::always_inline]] static inline void clear_upper_fp_registers() {
-#if defined(__ARM_ARCH_8M_MAIN__)
-    const uint32_t zero = 0;
-    asm volatile(
-        "vmov s16, %0\n" "vmov s17, %0\n" "vmov s18, %0\n" "vmov s19, %0\n"
-        "vmov s20, %0\n" "vmov s21, %0\n" "vmov s22, %0\n" "vmov s23, %0\n"
-        "vmov s24, %0\n" "vmov s25, %0\n" "vmov s26, %0\n" "vmov s27, %0\n"
-        "vmov s28, %0\n" "vmov s29, %0\n" "vmov s30, %0\n" "vmov s31, %0\n"
-        : : "r"(zero) :
-        "s16", "s17", "s18", "s19", "s20", "s21", "s22", "s23",
-        "s24", "s25", "s26", "s27", "s28", "s29", "s30", "s31", "memory");
-#endif
+    lazy_fp_state::clear_upper_fp_registers();
   }
 
   [[gnu::always_inline]] static inline bool context_fpca(const context_t &context) {
@@ -497,19 +500,8 @@ public:
   }
   template <bool IsReturn = true, class FloatingPointState = lazy_fp_state>
   [[gnu::always_inline]] static inline exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
-      uintptr_t sp, bool privileged, uintptr_t base, uintptr_t limit, bool scrub,
-      core_num core) {
-    return call_resume_at<IsReturn, FloatingPointState>(context, pc, sp, privileged, true, base, limit, scrub, core.index());
-  }
-  template <bool IsReturn = true, class FloatingPointState = lazy_fp_state>
-  [[gnu::always_inline]] static inline exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
       uintptr_t sp, bool privileged, bool caller_fpca = true, uintptr_t base = 0, uintptr_t limit = 0, bool scrub = false) {
     return call_resume_at<IsReturn, FloatingPointState>(context, pc, sp, privileged, caller_fpca, base, limit, scrub, 0);
-  }
-  template <bool IsReturn = true, class FloatingPointState = lazy_fp_state>
-  [[gnu::always_inline]] static inline exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
-      uintptr_t sp, bool privileged, uintptr_t base, uintptr_t limit, bool scrub = false) {
-    return call_resume_at<IsReturn, FloatingPointState>(context, pc, sp, privileged, true, base, limit, scrub, 0);
   }
 
   // 例外フレーム 8 語を、語ごとのストアで全部ゼロにする (呼び先へ前のスタックの値を漏らさない)。
@@ -806,7 +798,7 @@ private:
       const auto *s = reinterpret_cast<const uint32_t *>(reinterpret_cast<const uint8_t *>(context.sp) + sizeof(exception_frame_t));
       if constexpr (IsReturn) {
         if (!caller_fpca) {
-          clear_upper_fp_registers();
+          FloatingPointState::clear_upper_fp_registers();
         }
         const uint32_t s0 = s[0];
         const uint32_t s1 = s[1];

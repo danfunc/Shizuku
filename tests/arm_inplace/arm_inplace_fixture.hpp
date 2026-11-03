@@ -108,9 +108,10 @@ struct test_inplace_adapter : public BaseArch {
     return reinterpret_cast<uintptr_t>(ctx.sp) + sizeof(typename BaseArch::exception_frame_t);
   }
 
+  template <bool IsReturn = true>
   static typename BaseArch::exception_frame_t *call_resume_at(
       typename BaseArch::context_t &ctx, uintptr_t pc, uintptr_t sp,
-      bool privileged, uintptr_t rbase, uintptr_t rlimit, bool scrub) {
+      bool privileged, bool caller_fpca, uintptr_t rbase, uintptr_t rlimit, bool scrub) {
     auto *frame = reinterpret_cast<typename BaseArch::exception_frame_t *>(
         sp - sizeof(typename BaseArch::exception_frame_t));
     frame->pc = (uint32_t)pc;
@@ -127,19 +128,19 @@ struct test_inplace_adapter : public BaseArch {
     return frame;
   }
 
-  template <class Core>
+  template <bool IsReturn = true, class Core>
   static typename BaseArch::exception_frame_t *call_resume_at(
       typename BaseArch::context_t &ctx, uintptr_t pc, uintptr_t sp,
-      bool privileged, uintptr_t rbase, uintptr_t rlimit, bool scrub,
+      bool privileged, bool caller_fpca, uintptr_t rbase, uintptr_t rlimit, bool scrub,
       const Core &) {
-    return call_resume_at(ctx, pc, sp, privileged, rbase, rlimit, scrub);
+    return call_resume_at<IsReturn>(ctx, pc, sp, privileged, caller_fpca, rbase, rlimit, scrub);
   }
 
   static typename BaseArch::exception_frame_t *call_resume(
       typename BaseArch::context_t &ctx, const call_header_t *header, bool scrub) {
     uintptr_t sp = reinterpret_cast<uintptr_t>(header);
     return call_resume_at(ctx, header->pc, sp, header->privileged != 0,
-                          header->region_base, header->region_limit, scrub);
+                          true, header->region_base, header->region_limit, scrub);
   }
 
   template <class Core>
@@ -148,7 +149,7 @@ struct test_inplace_adapter : public BaseArch {
       const Core &core) {
     uintptr_t sp = reinterpret_cast<uintptr_t>(header);
     return call_resume_at(ctx, header->pc, sp, header->privileged != 0,
-                          header->region_base, header->region_limit, scrub, core);
+                          true, header->region_base, header->region_limit, scrub, core);
   }
 
   static void set_entry(typename BaseArch::exception_frame_t &frame, uintptr_t pc, uintptr_t lr) {
