@@ -728,25 +728,6 @@ public:
     shizuku_armv8m_enter_thread_mode(stack_top, stack_limit_address, entry);
   }
 
-  [[gnu::always_inline]] static inline void copy_fp_frame_72b(void *dst, const void *src) {
-    if (dst == src) return;
-    auto *d = reinterpret_cast<uint32_t *>(dst);
-    const auto *s = reinterpret_cast<const uint32_t *>(src);
-    if (d < s) {
-      d[0] = s[0];   d[1] = s[1];   d[2] = s[2];   d[3] = s[3];
-      d[4] = s[4];   d[5] = s[5];   d[6] = s[6];   d[7] = s[7];
-      d[8] = s[8];   d[9] = s[9];   d[10] = s[10]; d[11] = s[11];
-      d[12] = s[12]; d[13] = s[13]; d[14] = s[14]; d[15] = s[15];
-      d[16] = s[16]; d[17] = s[17];
-    } else {
-      d[17] = s[17]; d[16] = s[16]; d[15] = s[15]; d[14] = s[14];
-      d[13] = s[13]; d[12] = s[12]; d[11] = s[11]; d[10] = s[10];
-      d[9] = s[9];   d[8] = s[8];   d[7] = s[7];   d[6] = s[6];
-      d[5] = s[5];   d[4] = s[4];   d[3] = s[3];   d[2] = s[2];
-      d[1] = s[1];   d[0] = s[0];
-    }
-  }
-
 private:
   template <class FloatingPointState = lazy_fp_state>
   static exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
@@ -757,8 +738,9 @@ private:
     if (bytes != sizeof(exception_frame_t)) {
       // Materialize any lazy FP frame before relocating its return-value slots.
       FloatingPointState::materialize();
-      copy_fp_frame_72b(reinterpret_cast<uint8_t *>(next) + sizeof(exception_frame_t),
-                        reinterpret_cast<uint8_t *>(context.sp) + sizeof(exception_frame_t));
+      __builtin_memmove(reinterpret_cast<uint8_t *>(next) + sizeof(exception_frame_t),
+                        reinterpret_cast<uint8_t *>(context.sp) + sizeof(exception_frame_t),
+                        bytes - sizeof(exception_frame_t));
     }
     zero_exception_frame(*next);
     next->pc = (uint32_t)pc;
