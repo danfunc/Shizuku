@@ -11,7 +11,7 @@ extern "C" void shizuku_svc_breakdown_probe(uint32_t, uint32_t, uint32_t);
 #if defined(__ARM_ARCH_8M_MAIN__) || defined(SHIZUKU_RP2350)
 extern "C" {
 extern volatile bool shizuku_cmd8_mpu_diag_b_pending;
-void shizuku_dump_mpu_diag_b(uintptr_t ret_sp, uintptr_t spoof_sp, uintptr_t parent_base, uintptr_t parent_top);
+void shizuku_record_mpu_diag_b(uintptr_t ret_sp, uintptr_t spoof_sp, uintptr_t parent_base, uintptr_t parent_top);
 }
 #endif
 
@@ -78,7 +78,7 @@ template <class Thread>
     const uintptr_t spoof_sp = ret_sp + 120;
     const uintptr_t p_base = thread.stack_rbar & ~uintptr_t(31);
     const uintptr_t p_top = (thread.stack_rlar & ~uintptr_t(31)) + 32;
-    shizuku_dump_mpu_diag_b(ret_sp, spoof_sp, p_base, p_top);
+    shizuku_record_mpu_diag_b(ret_sp, spoof_sp, p_base, p_top);
   }
 #endif
 }

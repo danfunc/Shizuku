@@ -66,7 +66,7 @@ void u_cost_denied_code();
 extern const char u_cost_probe_data_fault_pc[];
 extern const char u_cost_probe_store_fault_pc[];
 extern volatile bool shizuku_cmd8_mpu_diag_b_pending;
-void shizuku_dump_mpu_diag_b(uintptr_t ret_sp, uintptr_t spoof_sp, uintptr_t parent_base, uintptr_t parent_top);
+void shizuku_record_mpu_diag_b(uintptr_t ret_sp, uintptr_t spoof_sp, uintptr_t parent_base, uintptr_t parent_top);
 }
 
 #if defined(__ARM_ARCH_8M_MAIN__)
@@ -333,6 +333,13 @@ SHIZUKU_U_COST_CODE uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t arg1
     if (cmd == 18)
       return syscall(static_cast<uintptr_t>(shizuku::object_api::EXPORT_METHOD), 1,
                      reinterpret_cast<uintptr_t>(&u_cost_denied_probe_worker)).error;
+    if (cmd == 7) {
+      // 偽装なしの予備呼出し: 親 P → callee (method 1, mode 0: no-op) へ正規の CALL_METHOD を 1 回行い、
+      // callee 入場時 (return_resumed) に t=B の MPU 診断を静的バッファに記録させる。
+      const auto r = syscall(static_cast<uintptr_t>(shizuku::object_api::CALL_METHOD),
+                             shizuku::object_id::cost_u_parent, 1, 0 /* mode 0 */);
+      return r.error;
+    }
     if (cmd == 8) {
       data[60] = 0xAAAAAAAAu;
       volatile uint32_t sentinel = 0x5F01CAFEu;
@@ -353,6 +360,13 @@ SHIZUKU_U_COST_CODE uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t arg1
           "str  r4, [r8, #216]\n"       // data[54] = saved_sp
           "str  r5, [r8, #220]\n"       // data[55] = saved_control
           "str  r6, [r8, #224]\n"       // data[56] = saved_r7
+          // t=C 診断情報 (data[64..67]):
+          "str  r4, [r8, #256]\n"       // data[64] = psp
+          "str  r5, [r8, #260]\n"       // data[65] = control
+          "movs r9, #0\n"
+          "str  r9, [r8, #264]\n"       // data[66] = psplim (0: U では未取得)
+          "add  r9, r4, #120\n"         // spoof_sp 予定値
+          "str  r9, [r8, #268]\n"       // data[67] = spoof_sp
           "mov  lr, sp\n"
           "bic  lr, lr, #31\n"
           "sub  lr, lr, #32\n"
@@ -394,6 +408,10 @@ SHIZUKU_U_COST_CODE uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t arg1
       ret_err = r0;
       ret_val = r1;
 #else
+      data[64] = 0x2000f480;
+      data[65] = 0;
+      data[66] = 0;
+      data[67] = 0x2000f4f8;
       const auto r = syscall(4, shizuku::object_id::cost_u_parent, 1, 92);
       uintptr_t ret_err = r.error;
       uintptr_t ret_val = r.value;
@@ -686,28 +704,52 @@ void record_check(const char *name, bool ok, unsigned long got, unsigned long wa
 
 } // namespace
 
+struct shizuku_mpu_diag_buffer_t {
+  struct region_info {
+    uint32_t rbar;
+    uint32_t rlar;
+  };
+  region_info regions[8];
+  uint32_t region_count;
+  uint32_t mpu_ctrl;
+  uint32_t shcsr;
+  uint32_t control;
+  uintptr_t psp;
+  uintptr_t psplim;
+  uintptr_t ret_sp;
+  uintptr_t spoof_sp;
+  uintptr_t parent_base;
+  uintptr_t parent_top;
+  uint32_t generation;
+  bool valid;
+};
+
+// 特権静的領域 (.bss)。callee からは触れない。
+static volatile shizuku_mpu_diag_buffer_t g_mpu_diag_a = {};
+static volatile shizuku_mpu_diag_buffer_t g_mpu_diag_b = {};
+
 extern "C" {
 volatile bool shizuku_cmd8_mpu_diag_b_pending = false;
 
-void shizuku_dump_mpu_diag_b(uintptr_t ret_sp, uintptr_t spoof_sp, uintptr_t parent_base, uintptr_t parent_top) {
+// ハンドラ/カーネル文脈 (return_resumed 内) から呼ばれ、CDC 出力は行わず static バッファへの記録のみ行う。
+void shizuku_record_mpu_diag_b(uintptr_t ret_sp, uintptr_t spoof_sp, uintptr_t parent_base, uintptr_t parent_top) {
 #if defined(__ARM_ARCH_8M_MAIN__) || defined(SHIZUKU_RP2350)
   namespace ppb = shizuku::archs::ppb;
-  using BOARD = shizuku::KERNEL::BOARD;
   const uint32_t orig_rnr = ppb::mpu->rnr;
   const uint32_t region_count = (ppb::mpu->type >> 8) & 0xFFu;
+  const uint32_t count = region_count <= 8 ? region_count : 8;
 
-  for (uint32_t r = 0; r < region_count; ++r) {
+  for (uint32_t r = 0; r < count; ++r) {
     ppb::mpu->rnr = r;
-    const uint32_t rbar = ppb::mpu->rbar;
-    const uint32_t rlar = ppb::mpu->rlar;
-    BOARD::diag_printf("[MPU-DIAG] t=B rnr=%lu rbar=0x%08lx rlar=0x%08lx\n",
-                       (unsigned long)r, (unsigned long)rbar, (unsigned long)rlar);
-    drain_diag_if_supported<BOARD>();
+    g_mpu_diag_b.regions[r].rbar = ppb::mpu->rbar;
+    g_mpu_diag_b.regions[r].rlar = ppb::mpu->rlar;
   }
   ppb::mpu->rnr = orig_rnr;
 
-  const uint32_t mpu_ctrl = ppb::mpu->ctrl;
-  const uint32_t shcsr = *reinterpret_cast<volatile uint32_t *>(0xE000ED24u);
+  g_mpu_diag_b.region_count = count;
+  g_mpu_diag_b.mpu_ctrl = ppb::mpu->ctrl;
+  g_mpu_diag_b.shcsr = *reinterpret_cast<volatile uint32_t *>(0xE000ED24u);
+
   uint32_t control = 0;
   uintptr_t psp = 0;
   uintptr_t psplim = 0;
@@ -715,15 +757,15 @@ void shizuku_dump_mpu_diag_b(uintptr_t ret_sp, uintptr_t spoof_sp, uintptr_t par
   asm volatile("mrs %0, psp" : "=r"(psp));
   asm volatile("mrs %0, psplim" : "=r"(psplim));
 
-  BOARD::diag_printf("[MPU-DIAG] t=B ctrl=0x%08lx shcsr=0x%08lx control=0x%08lx psp=0x%08lx psplim=0x%08lx\n",
-                     (unsigned long)mpu_ctrl, (unsigned long)shcsr,
-                     (unsigned long)control, (unsigned long)psp, (unsigned long)psplim);
-  drain_diag_if_supported<BOARD>();
-
-  BOARD::diag_printf("[MPU-DIAG] t=B ret_sp=0x%08lx spoof_sp=0x%08lx parent_base=0x%08lx parent_top=0x%08lx\n",
-                     (unsigned long)ret_sp, (unsigned long)spoof_sp,
-                     (unsigned long)parent_base, (unsigned long)parent_top);
-  drain_diag_if_supported<BOARD>();
+  g_mpu_diag_b.control = control;
+  g_mpu_diag_b.psp = psp;
+  g_mpu_diag_b.psplim = psplim;
+  g_mpu_diag_b.ret_sp = ret_sp;
+  g_mpu_diag_b.spoof_sp = spoof_sp;
+  g_mpu_diag_b.parent_base = parent_base;
+  g_mpu_diag_b.parent_top = parent_top;
+  g_mpu_diag_b.generation++;
+  g_mpu_diag_b.valid = true;
 #else
   (void)ret_sp; (void)spoof_sp; (void)parent_base; (void)parent_top;
 #endif
@@ -731,24 +773,24 @@ void shizuku_dump_mpu_diag_b(uintptr_t ret_sp, uintptr_t spoof_sp, uintptr_t par
 }
 
 namespace {
-void dump_mpu_diag_a(uintptr_t ret_sp, uintptr_t spoof_sp, uintptr_t parent_base, uintptr_t parent_top) {
+void record_mpu_diag_a(uintptr_t ret_sp, uintptr_t spoof_sp, uintptr_t parent_base, uintptr_t parent_top) {
 #if defined(__ARM_ARCH_8M_MAIN__) || defined(SHIZUKU_RP2350)
   namespace ppb = shizuku::archs::ppb;
   const uint32_t orig_rnr = ppb::mpu->rnr;
   const uint32_t region_count = (ppb::mpu->type >> 8) & 0xFFu;
+  const uint32_t count = region_count <= 8 ? region_count : 8;
 
-  for (uint32_t r = 0; r < region_count; ++r) {
+  for (uint32_t r = 0; r < count; ++r) {
     ppb::mpu->rnr = r;
-    const uint32_t rbar = ppb::mpu->rbar;
-    const uint32_t rlar = ppb::mpu->rlar;
-    BOARD::diag_printf("[MPU-DIAG] t=A rnr=%lu rbar=0x%08lx rlar=0x%08lx\n",
-                       (unsigned long)r, (unsigned long)rbar, (unsigned long)rlar);
-    drain_diag_if_supported<BOARD>();
+    g_mpu_diag_a.regions[r].rbar = ppb::mpu->rbar;
+    g_mpu_diag_a.regions[r].rlar = ppb::mpu->rlar;
   }
   ppb::mpu->rnr = orig_rnr;
 
-  const uint32_t mpu_ctrl = ppb::mpu->ctrl;
-  const uint32_t shcsr = *reinterpret_cast<volatile uint32_t *>(0xE000ED24u);
+  g_mpu_diag_a.region_count = count;
+  g_mpu_diag_a.mpu_ctrl = ppb::mpu->ctrl;
+  g_mpu_diag_a.shcsr = *reinterpret_cast<volatile uint32_t *>(0xE000ED24u);
+
   uint32_t control = 0;
   uintptr_t psp = 0;
   uintptr_t psplim = 0;
@@ -756,18 +798,50 @@ void dump_mpu_diag_a(uintptr_t ret_sp, uintptr_t spoof_sp, uintptr_t parent_base
   asm volatile("mrs %0, psp" : "=r"(psp));
   asm volatile("mrs %0, psplim" : "=r"(psplim));
 
-  BOARD::diag_printf("[MPU-DIAG] t=A ctrl=0x%08lx shcsr=0x%08lx control=0x%08lx psp=0x%08lx psplim=0x%08lx\n",
-                     (unsigned long)mpu_ctrl, (unsigned long)shcsr,
-                     (unsigned long)control, (unsigned long)psp, (unsigned long)psplim);
-  drain_diag_if_supported<BOARD>();
-
-  BOARD::diag_printf("[MPU-DIAG] t=A ret_sp=0x%08lx spoof_sp=0x%08lx parent_base=0x%08lx parent_top=0x%08lx\n",
-                     (unsigned long)ret_sp, (unsigned long)spoof_sp,
-                     (unsigned long)parent_base, (unsigned long)parent_top);
-  drain_diag_if_supported<BOARD>();
+  g_mpu_diag_a.control = control;
+  g_mpu_diag_a.psp = psp;
+  g_mpu_diag_a.psplim = psplim;
+  g_mpu_diag_a.ret_sp = ret_sp;
+  g_mpu_diag_a.spoof_sp = spoof_sp;
+  g_mpu_diag_a.parent_base = parent_base;
+  g_mpu_diag_a.parent_top = parent_top;
+  g_mpu_diag_a.generation++;
+  g_mpu_diag_a.valid = true;
 #else
   (void)ret_sp; (void)spoof_sp; (void)parent_base; (void)parent_top;
 #endif
+}
+
+template <typename BOARD>
+void print_mpu_diag_snapshot(char tag, const volatile shizuku_mpu_diag_buffer_t &buf) {
+  if (!buf.valid) {
+    BOARD::diag_printf("[MPU-DIAG] t=%c (invalid / not recorded)\n", tag);
+    drain_diag_if_supported<BOARD>();
+    return;
+  }
+  for (uint32_t r = 0; r < buf.region_count; ++r) {
+    BOARD::diag_printf("[MPU-DIAG] t=%c rnr=%lu rbar=0x%08lx rlar=0x%08lx\n",
+                       tag, (unsigned long)r,
+                       (unsigned long)buf.regions[r].rbar,
+                       (unsigned long)buf.regions[r].rlar);
+    drain_diag_if_supported<BOARD>();
+  }
+  BOARD::diag_printf("[MPU-DIAG] t=%c ctrl=0x%08lx shcsr=0x%08lx control=0x%08lx psp=0x%08lx psplim=0x%08lx\n",
+                     tag,
+                     (unsigned long)buf.mpu_ctrl,
+                     (unsigned long)buf.shcsr,
+                     (unsigned long)buf.control,
+                     (unsigned long)buf.psp,
+                     (unsigned long)buf.psplim);
+  drain_diag_if_supported<BOARD>();
+
+  BOARD::diag_printf("[MPU-DIAG] t=%c ret_sp=0x%08lx spoof_sp=0x%08lx parent_base=0x%08lx parent_top=0x%08lx\n",
+                     tag,
+                     (unsigned long)buf.ret_sp,
+                     (unsigned long)buf.spoof_sp,
+                     (unsigned long)buf.parent_base,
+                     (unsigned long)buf.parent_top);
+  drain_diag_if_supported<BOARD>();
 }
 
 } // namespace
@@ -1164,16 +1238,28 @@ void rp2350_u_cost() {
     run_denied_probe(94, "u_cost: callee store to caller stack (>= ret_sp) faults with MemManage", false, u_cost_probe_store_fault_pc);
 
     // (f) callee SP 偽装防止: callee が SP を stack_ceiling 以上に偽装して再呼出し
-    //     MPU 診断 (時点 A / B) を出力し、親枠破壊なら FAIL、NO_STACK または fault 停止なら PASS と判定する。
+    //     順序: 記録 → 出力 → 偽装 svc
     const uintptr_t parent_stack_base = reinterpret_cast<uintptr_t>(u_cost_p_stack);
     const uintptr_t parent_stack_top = parent_stack_base + sizeof(u_cost_p_stack);
-    // 時点 A: cmd=8 直前 (特権側)
-    dump_mpu_diag_a(parent_stack_top, parent_stack_top + 120, parent_stack_base, parent_stack_top);
 
-    // 時点 B 保留フラグをセット
+    // 1. 時点 A: 特権 runner (thread 文脈) で親 P 起動前に記録し、その場で出力
+    record_mpu_diag_a(parent_stack_top, parent_stack_top + 120, parent_stack_base, parent_stack_top);
+    print_mpu_diag_snapshot<BOARD>('A', g_mpu_diag_a);
+
+    // 2. 時点 B: 偽装なしの予備呼出し (cmd=7: 正規の CALL_METHOD を 1 回、SP を偽装せず)。
+    //    callee 入場時 (return_resumed) にカーネル側が静的バッファへ記録だけ行う。
+    //    t=B は callee 入場で張られる MPU の値なので、正規の呼出しでも偽装呼出しでも同じ region が張られる
+    //    (偽装 SP だけが違う)。spoof_sp は ret_sp + 120 の予定値として出力される。
+    //    予備呼出しから戻った後、runner が thread 文脈で安全に t=B を出力する。
     shizuku_cmd8_mpu_diag_b_pending = true;
+    const auto probe_res = ARCH::syscall(
+        static_cast<uintptr_t>(object_api::CALL_METHOD), OBJECT_U_COST_P, 0, 7 /* cmd=7: 予備呼出し */);
+    (void)probe_res;
+    print_mpu_diag_snapshot<BOARD>('B', g_mpu_diag_b);
 
-    // 親 P を SPAWN で実行して callee fault 時に特権側がハングするのを防止
+    // 3. 偽装 svc の親 P を起動 (cmd=8)。
+    //    親 P 自身が、svc 発行直前に自分の CONTROL / PSP / PSPLIM / 偽装予定 SP を
+    //    data 窓内の変数 (shared[64..67]) に書いておく (t=C 相当)。
     shared[60] = 0xAAAAAAAAu;
     const uint32_t faults_before = kernel_instance.faults().count;
     const auto spoof_spawned = ARCH::syscall(
@@ -1195,6 +1281,14 @@ void rp2350_u_cost() {
         ARCH::syscall(static_cast<uintptr_t>(object_api::YIELD));
       }
     }
+
+    // 4. 時点 C: 偽装 svc 直前に親 P が data 窓に書いた情報を thread 文脈で出力
+    BOARD::diag_printf("[MPU-DIAG] t=C control=0x%08lx psp=0x%08lx psplim=0x%08lx spoof_sp=0x%08lx\n",
+                       (unsigned long)shared[65],
+                       (unsigned long)shared[64],
+                       (unsigned long)shared[66],
+                       (unsigned long)shared[67]);
+    drain_diag_if_supported<BOARD>();
 
     const auto &spoof_fault = kernel_instance.faults();
     if (spoof_faulted) {

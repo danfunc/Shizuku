@@ -545,7 +545,19 @@ template <> void KERNEL::fault_dispatch(KERNEL::CONTEXT *context) {
   // ★触ろうとした先は**消す前に**読む。違反の記録を消すと同時に無効になるので、
   //   順序を逆にすると意味のない値を報告してしまう (実際それで嘘の値が出た)。
   const uintptr_t address = ARCH::fault_address();
-  const uintptr_t pc = ARCH::frame_pc(*context->sp);
+  // ★MSTKERR (CFSR bit 4) または MUNSTKERR (CFSR bit 3) の場合、ハードウェアは PSP への
+  //   退避に失敗しているため context->sp に有効なフレームは存在しない。また PSP が
+  //   非整列や未マップの場合にデリファレンスするとハンドラ内で HardFault するため安全にガードする。
+  uintptr_t pc = 0;
+  if constexpr (ARCH::IS_ARMV8M) {
+    const bool stacking_err = (status & 0x18u) != 0;
+    const uintptr_t sp_val = reinterpret_cast<uintptr_t>(context->sp);
+    if (!stacking_err && (sp_val & 3u) == 0 && sp_val >= 0x20000000u && sp_val < 0x20080000u) {
+      pc = ARCH::frame_pc(*context->sp);
+    }
+  } else {
+    pc = ARCH::frame_pc(*context->sp);
+  }
   m_faults.count++;
   m_faults.pc = pc;
   m_faults.status = status;

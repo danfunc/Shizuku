@@ -368,6 +368,18 @@ shizuku_armv8m_enter_thread_mode:
 .align 2
 .type shizuku_armv8m_fault_entry, %function
 shizuku_armv8m_fault_entry:
+#if defined(__ARM_FP)
+    // フォールト時、もし落ちたスレッドが FPCA=1 (遅延 FP スタッキング保留中: FPCCR.LSPACT=1)
+    // だった場合、ハンドラモード内で FP 命令 (CTX_SAVE 内の vstmia など) を実行すると、
+    // ハードウェアが不正なスタック (PSP) へ FP 状態を書き込もうとして MemManage (LSPERR)
+    // が再発し、HardFault → LOCKUP する。
+    // 落ちたスレッドは終了 (TERMINATED) されるため、FPCCR.LSPACT をクリアして遅延退避を
+    // 安全にキャンセルする。
+    ldr  r0, =0xE000EF34           // FPCCR
+    ldr  r1, [r0]
+    bic  r1, r1, #1                // LSPACT bit 0 = 0
+    str  r1, [r0]
+#endif
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
     // 診断専用: CTX_SAVE (PSP へ積む) より前に、fault の素性だけを MSP 上の C で記録する。
     push {r0-r3, r12, lr}
@@ -379,6 +391,7 @@ shizuku_armv8m_fault_entry:
     CTX_SAVE
     bl   shizuku_fault_dispatch   // 報告 + 停止 + 切替 (現在文脈を差し替える)
     CTX_RESTORE
+    .ltorg
 
 // ---------------------------------------------------------------------------
 // ブート時にスレッドスタック (PSP) へ移り、entry を呼ぶ。
