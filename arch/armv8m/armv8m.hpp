@@ -451,19 +451,34 @@ public:
       asm volatile("vmrs %0, fpscr" : "=r"(fpscr) :: "memory");
       (void)fpscr;
     }
-    [[gnu::always_inline]] static inline void clear_upper_fp_registers() {
+    // naked + noinline の out-of-line 関数にすることで、呼び元 (exit_method 等) の
+    // プロローグ / エピローグに callee-saved レジスタ d8-d15 (s16-s31) の vpush/vpop が
+    // 生成されるのを防ぐ (vpop による callee 汚染値での上書き復元を阻止する)。
 #if defined(__ARM_ARCH_8M_MAIN__)
-      const uint32_t zero = 0;
+    [[gnu::naked, gnu::noinline]] static void clear_upper_fp_registers() {
       asm volatile(
-          "vmov s16, %0\n" "vmov s17, %0\n" "vmov s18, %0\n" "vmov s19, %0\n"
-          "vmov s20, %0\n" "vmov s21, %0\n" "vmov s22, %0\n" "vmov s23, %0\n"
-          "vmov s24, %0\n" "vmov s25, %0\n" "vmov s26, %0\n" "vmov s27, %0\n"
-          "vmov s28, %0\n" "vmov s29, %0\n" "vmov s30, %0\n" "vmov s31, %0\n"
-          : : "r"(zero) :
-          "s16", "s17", "s18", "s19", "s20", "s21", "s22", "s23",
-          "s24", "s25", "s26", "s27", "s28", "s29", "s30", "s31", "memory");
-#endif
+          "movs r0, #0\n"
+          "vmov s16, r0\n"
+          "vmov s17, r0\n"
+          "vmov s18, r0\n"
+          "vmov s19, r0\n"
+          "vmov s20, r0\n"
+          "vmov s21, r0\n"
+          "vmov s22, r0\n"
+          "vmov s23, r0\n"
+          "vmov s24, r0\n"
+          "vmov s25, r0\n"
+          "vmov s26, r0\n"
+          "vmov s27, r0\n"
+          "vmov s28, r0\n"
+          "vmov s29, r0\n"
+          "vmov s30, r0\n"
+          "vmov s31, r0\n"
+          "bx lr\n");
     }
+#else
+    static void clear_upper_fp_registers() {}
+#endif
   };
   [[gnu::always_inline]] static inline void clear_upper_fp_registers() {
     lazy_fp_state::clear_upper_fp_registers();

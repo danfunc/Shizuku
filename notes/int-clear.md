@@ -87,3 +87,27 @@ record_check("leak direct EXIT bypass int clean",
              c[9] == 0 && c[10] == 42 && direct_int_clean,
              direct_int_clean ? 0 : 1, 0);
 ```
+
+---
+
+## 6. FP レジスタ (s16-s31) における同種現象の発見と解決、および r4-r11 との対比
+
+### (1) 発見: clobber 宣言による s16-s31 (d8-d15) のエピローグ復元
+- **現象**:
+  - AAPCS において `s16-s31` (`d8-d15`) は Callee-saved レジスタである。
+  - `lazy_fp_state::clear_upper_fp_registers` をインラインアセンブリで `s16-s31` を clobber として記述していたため、GCC は `exit_method` および `forward_child_exit` のプロローグで `vpush {d8-d15}` を実行し、エピローグで `vpop {d8-d15}` を生成していた。
+  - プロローグ時点の `s16-s31` は Callee が汚した値であり、しかも最初の FP 命令であるその `vpush` が遅延スタッキングを発火させる。
+  - 関数の途中でインラインアセンブリが `s16-s31` をゼロクリアしても、関数の最後でエピローグの `vpop {d8-d15}` がスタックから Callee の汚染値を復元してしまうため、消去が無効化されていた（§2 で指摘した `r4-r11` のエピローグ復元と全く同一の現象）。
+
+### (2) s16-s31 の解決策: naked out-of-line 関数
+- `lazy_fp_state::clear_upper_fp_registers()` を `[[gnu::naked, gnu::noinline]] static void` とし、オペランド無しの basic asm (`movs r0, #0` / `vmov s16..s31, r0` / `bx lr`) のみで記述。
+- naked 関数であるため自身のプロローグ/エピローグを持たず、clobber 宣言も無いため呼出し元 (`exit_method` 等) のコンパイラは `d8-d15` が壊されることを認識しない (AAPCS 上、呼出し先が保存すると仮定する)。
+- カーネル (`exit_method` / `forward_child_exit`) 自身は浮動小数点演算を行わないため、`vpush` / `vpop {d8-d15}` を生成する理由がなくなり、プロローグ/エピローグから完全に消滅する。
+- したがって、naked 関数がゼロクリアした `s16-s31` がそのまま保持され、Callee の汚染値が上書き復元されることなく安全に Caller へ復帰する。
+
+### (3) r4-r11 は naked の後始末関数では解決しない理由
+- `s16-s31` はカーネルコード自身が使用しないため、コンパイラを「騙す」（clobber を隠す）ことで `exit_method` のプロローグ/エピローグから `vpush/vpop` を排除できた。
+- しかし **`r4-r11` は汎用整数レジスタであり、C++ 関数である `exit_method` 自身が通常の業務 (ポインタ計算・条件判定・ローカル変数退避など) のために必然的に使用する**。
+- そのため、`exit_method` 自身のプロローグにおいて必ず `stmdb sp!, {r4-r11, ...}` で Callee の値がスタックに退避される。
+- たとえ `exit_method` の途中で naked 関数を呼んで `r4-r11` をゼロクリアしたとしても、`exit_method` から抜ける際にコンパイラが生成したエピローグ (`ldmia sp!, {r4-r11, pc}`) が走り、**スタックから Callee の値で必ず上書き復元してしまう**。
+- 結論として、`r4-r11` の消去は **`exit_method` のエピローグより後** (C++ 関数の外側、例外復帰 `bx lr` の直前の asm 領域) で行わなければ根本的に解決しない。
