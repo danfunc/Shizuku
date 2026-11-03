@@ -15,6 +15,10 @@ struct caller_return_record {
   uint8_t ret_privileged = 0;
   uint8_t reserved = 0;
   uint32_t generation = 0;
+
+  constexpr uintptr_t caller_sp() const noexcept {
+    return ret_sp & ~static_cast<uintptr_t>(1);
+  }
 };
 
 // in-place 復帰で台帳に付く arch 固有の型付き payload の既定 (空)。実体は無いので
@@ -334,10 +338,18 @@ template <typename CONTEXT> struct thread {
 
   // 台帳由来の活動 stack ceiling (caller_sp)。depth == 0 ならスタック上限。
   uintptr_t stack_ceiling() const noexcept {
-    if (call_stack.depth != 0 && ledger != nullptr) {
-      return ledger[call_stack.depth - 1].caller_sp();
+    if (call_stack.depth != 0) {
+      if constexpr (requires(const call_ledger_entry &e) { e.caller_sp(); }) {
+        if (ledger != nullptr) {
+          return ledger[call_stack.depth - 1].caller_sp();
+        }
+      } else {
+        if (return_records != nullptr && call_stack.depth - 1 < 34) {
+          return return_records[call_stack.depth - 1].caller_sp();
+        }
+      }
     }
-    if constexpr (requires { stack_rlar; }) {
+    if constexpr (compact_ledger_enabled<CONTEXT>()) {
       if (stack_rlar != 0) {
         return (stack_rlar & ~uintptr_t(31)) + 32u;
       }
@@ -346,7 +358,7 @@ template <typename CONTEXT> struct thread {
   }
 
   uintptr_t stack_floor() const noexcept {
-    if constexpr (requires { stack_rbar; }) {
+    if constexpr (compact_ledger_enabled<CONTEXT>()) {
       if (stack_rbar != 0) {
         return stack_rbar & ~uintptr_t(31);
       }
