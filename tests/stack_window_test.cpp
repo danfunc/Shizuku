@@ -718,6 +718,76 @@ static void test_window_extension_fault_semantics() {
   assert(!shizuku::extend_window(dispatch_win, fault_addr, stack_lo).is_valid());
 }
 
+// M-mode callee does not open stack window, does not apply PMP, and zero_window is NOT called on return,
+// protecting caller's trap frame (at ret_sp - 128) from being corrupted.
+void test_m_mode_callee_no_window_and_frame_protected() {
+  test_fake_arch::reset();
+  mock_kernel kernel{};
+  mock_context context{};
+  shizuku::templates::thread<mock_context> thread{};
+  shizuku::templates::thread<mock_context>::call_ledger_entry ledger_mem[8]{};
+  thread.ledger = ledger_mem;
+  thread.ledger_capacity = 8;
+  thread.base_object = 1;
+
+  // U-stack bounds
+  const uintptr_t u_stack_lo = 0x20000000u;
+  const uintptr_t u_stack_hi = 0x20004000u;
+  thread.set_user_stack(u_stack_lo, u_stack_hi);
+
+  // Kernel stack for M caller
+  alignas(16) static uint8_t dummy_kernel_stack[0x1000];
+  const uintptr_t ret_sp = reinterpret_cast<uintptr_t>(dummy_kernel_stack + 0x800);
+  context.user_sp = ret_sp;
+  context.privileged = true;
+
+  // Simulate live trap frame words around ret_sp - 128
+  volatile uint32_t *trap_frame_mepc = reinterpret_cast<volatile uint32_t *>(ret_sp - 128u);
+  volatile uint32_t *trap_frame_ra   = reinterpret_cast<volatile uint32_t *>(ret_sp - 64u);
+  volatile uint32_t *trap_frame_word = reinterpret_cast<volatile uint32_t *>(ret_sp - 4u);
+  *trap_frame_mepc = 0x42001234u;
+  *trap_frame_ra   = 0x42005678u;
+  *trap_frame_word = 0xC001CAFEu;
+
+  // M-mode callee
+  mock_kobj::callee_view view_m{2, 0, 0, shizuku::object_kind::PLAIN, true /* privileged */, 0, 0, 1};
+
+  // 1. Enter M-mode callee (M -> M)
+  auto err = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
+      kernel, thread, context, view_m, 0x42002000u, mock_kernel::LEDGER_CALL);
+  assert(err == shizuku::kernel_error::OK);
+  assert(thread.call_stack.depth == 1);
+  assert(!thread.win[0].is_valid());
+  assert(test_fake_arch::applied_windows.empty());
+
+  // 2. Return from M-mode callee (M -> M)
+  mock_frame *frame_ptr = nullptr;
+  mock_kobj kobj{};
+  bool pop_ok = shizuku::native::pop_in_place<mock_kernel, mock_kobj>(
+      kobj, thread, context, frame_ptr, true, false);
+  assert(pop_ok);
+  assert(thread.call_stack.depth == 0);
+
+  // (1) Zeroing function must NOT be called for M-mode callee
+  assert(test_fake_arch::zeroed_windows.empty());
+  // (2) PMP apply must NOT be called for M-mode caller
+  assert(test_fake_arch::applied_windows.empty());
+
+  // (3) Live trap frame words must remain completely uncorrupted
+  assert(*trap_frame_mepc == 0x42001234u);
+  assert(*trap_frame_ra   == 0x42005678u);
+  assert(*trap_frame_word == 0xC001CAFEu);
+
+  // 3. M caller calling U callee (M -> U) where caller ret_sp is on kernel stack (outside U stack)
+  mock_kobj::callee_view view_u{3, 0, 0, shizuku::object_kind::PLAIN, false /* unprivileged */, 0, 0, 1};
+  context.user_sp = ret_sp; // Kernel stack, outside [u_stack_lo, u_stack_hi)
+  auto err_m_to_u = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
+      kernel, thread, context, view_u, 0x42003000u, mock_kernel::LEDGER_CALL);
+  // Must be rejected with NO_STACK to protect kernel stack from being exposed as U stack window
+  assert(err_m_to_u == shizuku::kernel_error::NO_STACK);
+  assert(thread.call_stack.depth == 0);
+}
+
 int main() {
   test_open_window();
   test_extend_window();
@@ -729,5 +799,6 @@ int main() {
   test_max_stack_windows_exceeded_rejection();
   test_pop_in_place_with_dispatch_caller();
   test_window_extension_fault_semantics();
+  test_m_mode_callee_no_window_and_frame_protected();
   return 0;
 }
