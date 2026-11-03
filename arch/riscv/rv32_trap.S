@@ -343,21 +343,36 @@ shizuku_rv32_restore:
 //   sp に U-mode の元のスタックポインタ (RESERVED0) を戻して mret する。
 .Lrv32_umode_exit_entry:
   lw t0, RV32_F_MEPC(sp)
+  sw zero, RV32_F_MEPC(sp)
   csrw mepc, t0
   lw t0, RV32_F_MSTATUS(sp)
+  sw zero, RV32_F_MSTATUS(sp)
   csrw mstatus, t0
   lw ra, RV32_F_RA(sp)
+  sw zero, RV32_F_RA(sp)
   lw a0, RV32_F_A0(sp)
+  sw zero, RV32_F_A0(sp)
   lw a1, RV32_F_A1(sp)
+  sw zero, RV32_F_A1(sp)
   lw a2, RV32_F_A2(sp)
+  sw zero, RV32_F_A2(sp)
   lw a3, RV32_F_A3(sp)
+  sw zero, RV32_F_A3(sp)
   lw a4, RV32_F_A4(sp)
+  sw zero, RV32_F_A4(sp)
   lw a5, RV32_F_A5(sp)
+  sw zero, RV32_F_A5(sp)
   lw a6, RV32_F_A6(sp)
+  sw zero, RV32_F_A6(sp)
   lw a7, RV32_F_A7(sp)
+  sw zero, RV32_F_A7(sp)
   lw t0, RV32_F_RESERVED1(sp)
   csrw mscratch, t0
-  lw sp, RV32_F_RESERVED0(sp)
+  sw zero, RV32_F_RESERVED1(sp)
+  lw t0, RV32_F_RESERVED0(sp)
+  sw zero, RV32_F_RESERVED0(sp)
+  mv sp, t0
+  mv t0, zero
   mret
 
 // ---- U-mode からの戻り (RV32_TAG_U_ECALL / RV32_TAG_U_SCRUB、レジスタ消去)。
@@ -366,14 +381,19 @@ shizuku_rv32_restore:
 //   gp/tp はカーネルは触らない (callee/caller 側の責任)。
 //   trusted stack cursor を mscratch へ載せるのに t0 を使った後、mret 直前に
 //   t0 を 0 に消去し、カーネル内部領域アドレスの漏洩を防ぐ。
+//   frame の各語はロード直後に sw zero でゼロ化し、user stack 上に frame の残りを残さない。
 .Lrv32_umode_exit_ecall:
 .Lrv32_umode_exit_scrub:
   lw t0, RV32_F_MEPC(sp)
+  sw zero, RV32_F_MEPC(sp)
   csrw mepc, t0
   lw t0, RV32_F_MSTATUS(sp)
+  sw zero, RV32_F_MSTATUS(sp)
   csrw mstatus, t0
   lw a0, RV32_F_A0(sp)
+  sw zero, RV32_F_A0(sp)
   lw a1, RV32_F_A1(sp)
+  sw zero, RV32_F_A1(sp)
   mv ra, zero
   mv t1, zero
   mv t2, zero
@@ -401,8 +421,11 @@ shizuku_rv32_restore:
   mv s11, zero
   lw t0, RV32_F_RESERVED1(sp)
   csrw mscratch, t0
+  sw zero, RV32_F_RESERVED1(sp)
+  lw t0, RV32_F_RESERVED0(sp)
+  sw zero, RV32_F_RESERVED0(sp)
+  mv sp, t0
   mv t0, zero
-  lw sp, RV32_F_RESERVED0(sp)
   mret
 #endif
 .size shizuku_rv32_trap_entry, .-shizuku_rv32_trap_entry
