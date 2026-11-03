@@ -160,10 +160,13 @@ static_assert(sizeof(KERNEL::call_ledger_entry) == 16,
 static_assert(KERNEL_OBJECT::MAX_DEPTH <= KERNEL::THREAD::CALL_IDENTITY_CAPACITY,
               "per-thread call identity snapshot stack must cover MAX_DEPTH");
 #if defined(SHIZUKU_C5_BLE)
-alignas(8) static uint8_t g_bookkeeping_storage[16 * 1024];
+inline constexpr size_t kBookkeepingStorageBytes = 16 * 1024;
 #else
-alignas(8) static uint8_t g_bookkeeping_storage[65536];
+// On 64-bit host platforms (tests), pointers and alignments are 8 bytes, requiring ~67KiB for 32 threads.
+// On 32-bit embedded target platforms, thread records are smaller and comfortably fit within 44KiB of the 64KiB arena.
+inline constexpr size_t kBookkeepingStorageBytes = (sizeof(void *) > 4) ? (96 * 1024) : 65536;
 #endif
+alignas(8) static uint8_t g_bookkeeping_storage[kBookkeepingStorageBytes];
 static_assert(KERNEL::thread_record_bytes() * KERNEL_OBJECT::THREAD_COUNT +
                   sizeof(KERNEL_OBJECT::block) + KERNEL_OBJECT::BLOCK_ALIGN - 1 +
                   KERNEL_OBJECT::THREAD_COUNT *

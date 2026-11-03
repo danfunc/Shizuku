@@ -921,13 +921,13 @@ bool shizuku_c6_handle_fault(arch::exception_frame_t *frame) {
     auto &thread = shizuku::kernel_instance.current_thread();
     const uint32_t depth = thread.call_stack.depth;
     if (depth > 0 && depth - 1 < thread.MAX_STACK_WINDOWS) {
-      auto &win = thread.win[depth - 1];
+      const auto win = thread.window_at(depth - 1);
       if (win.is_valid()) {
         const uintptr_t fault_addr = frame->mtval;
         if (fault_addr >= thread.stack_lo && fault_addr < win.lo) {
           const auto new_win = shizuku::extend_window(win, fault_addr, thread.stack_lo);
           if (new_win.is_valid()) {
-            win = new_win;
+            thread.set_window_at(depth - 1, new_win);
             thread.cur_win_lo = new_win.lo;
             thread.cur_win_hi = new_win.hi;
             shizuku::chips::esp32_c6::pmp_controller::apply_stack_window(new_win.lo, new_win.hi);

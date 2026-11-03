@@ -218,15 +218,61 @@ template <typename CONTEXT> struct thread {
   uint32_t stack_rbar = 0;
   uint32_t stack_rlar = 0;
   // Stack window tracking (thread-owned, stacked per depth).
-  // Kept in a dedicated array rather than call_ledger_entry because
-  // sizeof(call_ledger_entry) is constrained to 32B by static_assert in
-  // tests/arm_inplace/armv8m_inplace_test.cpp and arm_inplace_fixture.hpp.
-  static constexpr uint32_t MAX_STACK_WINDOWS = 34;
-  stack_window win[MAX_STACK_WINDOWS]{};
+  // Compacted: stores 16-bit span (hi - lo) per depth; hi is derived from ledger[d].ret_sp & ~15.
+  // span == 0 indicates an invalid / un-opened window (M callee or dispatch activation).
+  // On ARM (no in-place stack windows), win_span is eliminated via empty_ledger_payload.
+  static constexpr uint32_t MAX_STACK_WINDOWS = (requires { CONTEXT::CALL_HEADER_ON_STACK; }) ? 34 : 0;
+  struct window_span_array {
+    uint16_t data[34]{};
+    constexpr uint16_t &operator[](uint32_t i) noexcept { return data[i]; }
+    constexpr const uint16_t &operator[](uint32_t i) const noexcept { return data[i]; }
+  };
+  [[no_unique_address]] std::conditional_t<MAX_STACK_WINDOWS != 0,
+      window_span_array, empty_ledger_payload> win_span{};
   uintptr_t stack_lo = 0;
   uintptr_t stack_hi = 0;
   uintptr_t cur_win_lo = 0;
   uintptr_t cur_win_hi = 0;
+
+  stack_window window_at(uint32_t d) const noexcept {
+    if constexpr (MAX_STACK_WINDOWS == 0) {
+      (void)d;
+      return stack_window{0, 0};
+    } else {
+      if (d >= MAX_STACK_WINDOWS || win_span[d] == 0 || ledger == nullptr || d >= ledger_capacity) {
+        return stack_window{0, 0};
+      }
+      const uintptr_t hi = ledger[d].ret_sp & ~uintptr_t(15);
+      const uintptr_t span = win_span[d];
+      if (hi < span) return stack_window{0, 0};
+      return stack_window{hi - span, hi};
+    }
+  }
+
+  void set_window_at(uint32_t d, stack_window win) noexcept {
+    if constexpr (MAX_STACK_WINDOWS == 0) {
+      (void)d; (void)win;
+    } else {
+      if (d < MAX_STACK_WINDOWS) {
+        if (win.is_valid()) {
+          const uintptr_t span = win.hi - win.lo;
+          win_span[d] = static_cast<uint16_t>(span > 0xFFFFu ? 0xFFFFu : span);
+        } else {
+          win_span[d] = 0;
+        }
+      }
+    }
+  }
+
+  void clear_window_at(uint32_t d) noexcept {
+    if constexpr (MAX_STACK_WINDOWS == 0) {
+      (void)d;
+    } else {
+      if (d < MAX_STACK_WINDOWS) {
+        win_span[d] = 0;
+      }
+    }
+  }
 
   void set_user_stack(uintptr_t lo, uintptr_t hi) noexcept {
     stack_lo = lo;

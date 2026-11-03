@@ -192,21 +192,18 @@ template <class K, class KObj>
       thread.call_stack.call_top = entry.prev_call;
     }
     // Zero the opened stack window of this activation before returning to caller
-    const auto popped_win = (depth - 1 < thread.MAX_STACK_WINDOWS)
-        ? thread.win[depth - 1]
-        : stack_window{};
+    const auto popped_win = thread.window_at(depth - 1);
     if (popped_win.is_valid()) {
       zero_window_of<A>(popped_win);
     }
-    if (depth - 1 < thread.MAX_STACK_WINDOWS) {
-      thread.win[depth - 1] = stack_window{};
-    }
+    thread.clear_window_at(depth - 1);
 
     if (entry.ret_privileged == 0) {
       stack_window caller_win{thread.stack_lo, thread.stack_hi};
       for (int32_t d = static_cast<int32_t>(depth) - 2; d >= 0; --d) {
-        if (static_cast<uint32_t>(d) < thread.MAX_STACK_WINDOWS && thread.win[d].is_valid()) {
-          caller_win = thread.win[d];
+        const auto w = thread.window_at(d);
+        if (w.is_valid()) {
+          caller_win = w;
           break;
         }
       }
@@ -308,28 +305,31 @@ template <class K, class KObj>
       return kernel_error::NO_STACK;
     }
     const uintptr_t ret_sp = A::call_return_sp(context);
+    auto &entry = thread.ledger[depth];
+    entry.ret_sp = ret_sp;
     if (!view.privileged) {
-      if (ret_sp < thread.stack_lo || ret_sp > thread.stack_hi) {
-        return kernel_error::NO_STACK;
+      if (thread.stack_lo != 0 || thread.stack_hi != 0) {
+        if (ret_sp < thread.stack_lo || ret_sp > thread.stack_hi) {
+          return kernel_error::NO_STACK;
+        }
       }
       const auto win = open_window(ret_sp, thread.stack_lo);
       if (!win.is_valid()) {
         return kernel_error::NO_STACK;
       }
-      thread.win[depth] = win;
+      thread.set_window_at(depth, win);
       thread.cur_win_lo = win.lo;
       thread.cur_win_hi = win.hi;
       if constexpr (requires { A::apply_stack_window(context, win.lo, win.hi); }) {
         A::apply_stack_window(context, win.lo, win.hi);
       }
     } else {
-      thread.win[depth] = stack_window{};
+      thread.clear_window_at(depth);
     }
 
     // 記帳は台帳の 1 項目だけ: 呼び先の同定 (object・handler・kind・via・floor・世代) と、この段から
     // 戻るときの caller の再開点 (pc・sp・特権) と、ひとつ外側の call 段への鎖 (prev_call)。窓は復帰時に解決する。
     // user stack のヘッダは書かない。current / caller の識別は call 段の列から導く (call_top だけ更新)。
-    auto &entry = thread.ledger[depth];
     entry.object = view.id;
     entry.handler_object = view.parent_handler_object;
     entry.handler_entry = view.parent_handler_entry;
@@ -338,7 +338,6 @@ template <class K, class KObj>
     entry.unwind_floor = (uint16_t)depth;
     entry.generation = view.instance_generation;
     entry.ret_pc = A::frame_pc(frame);
-    entry.ret_sp = ret_sp;
     entry.prev_call = (uint16_t)stack.call_top;
     entry.ret_privileged = A::context_privileged(context) ? 1 : 0;
     stack.depth = depth + 1;

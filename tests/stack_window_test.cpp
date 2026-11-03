@@ -173,6 +173,7 @@ struct mock_frame {
 };
 
 struct mock_context {
+  static constexpr bool CALL_HEADER_ON_STACK = true;
   mock_frame frame{};
   mock_frame *sp = &frame;
   uintptr_t user_sp = 0;
@@ -294,8 +295,8 @@ static void test_ledger_nesting_a_a() {
       kernel, thread, context, view_a, 0x42001000u, mock_kernel::LEDGER_CALL);
   assert(err1 == shizuku::kernel_error::OK);
   assert(thread.call_stack.depth == 1);
-  assert(thread.win[0].is_valid());
-  const auto outer_win = thread.win[0];
+  assert(thread.window_at(0).is_valid());
+  const auto outer_win = thread.window_at(0);
   assert(outer_win.hi == (context.user_sp & ~uintptr_t(15)));
   assert(outer_win.lo == outer_win.hi - shizuku::kStackWindowStep);
   assert(thread.cur_win_lo == outer_win.lo);
@@ -312,8 +313,8 @@ static void test_ledger_nesting_a_a() {
       kernel, thread, context, view_a, 0x42001000u, mock_kernel::LEDGER_CALL);
   assert(err2 == shizuku::kernel_error::OK);
   assert(thread.call_stack.depth == 2);
-  assert(thread.win[1].is_valid());
-  const auto inner_win = thread.win[1];
+  assert(thread.window_at(1).is_valid());
+  const auto inner_win = thread.window_at(1);
   assert(inner_win.hi == (context.user_sp & ~uintptr_t(15)));
   assert(inner_win.lo == inner_win.hi - shizuku::kStackWindowStep);
   // (a) Stacks stack up without overlap: inner window top matches inner caller_sp,
@@ -394,38 +395,41 @@ static void test_ledger_nesting_a_b_a() {
   assert(err1 == shizuku::kernel_error::OK);
 
   // A1 writes into its window and consumes 160B frame
-  *reinterpret_cast<volatile uint32_t *>(thread.win[0].hi - 32u) = 0xA1A1A1A1u;
-  *reinterpret_cast<volatile uint32_t *>(thread.win[0].lo + 16u) = 0xA1A10001u;
+  const auto win0 = thread.window_at(0);
+  *reinterpret_cast<volatile uint32_t *>(win0.hi - 32u) = 0xA1A1A1A1u;
+  *reinterpret_cast<volatile uint32_t *>(win0.lo + 16u) = 0xA1A10001u;
 
   // 2. Call B (object 3)
-  context.user_sp = thread.win[0].hi - 160u;
+  context.user_sp = win0.hi - 160u;
   mock_kobj::callee_view view_b{3, 0, 0, shizuku::object_kind::PLAIN, false, 0, 0, 1};
   auto err2 = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
       kernel, thread, context, view_b, 0x42002000u, mock_kernel::LEDGER_CALL);
   assert(err2 == shizuku::kernel_error::OK);
 
   // B writes into its window and consumes 160B frame
-  *reinterpret_cast<volatile uint32_t *>(thread.win[1].hi - 32u) = 0xBBBBBBBBu;
-  *reinterpret_cast<volatile uint32_t *>(thread.win[1].lo + 16u) = 0xBBBB0001u;
+  const auto win1 = thread.window_at(1);
+  *reinterpret_cast<volatile uint32_t *>(win1.hi - 32u) = 0xBBBBBBBBu;
+  *reinterpret_cast<volatile uint32_t *>(win1.lo + 16u) = 0xBBBB0001u;
 
   // 3. Call A again (A -> B -> A)
-  context.user_sp = thread.win[1].hi - 160u;
+  context.user_sp = win1.hi - 160u;
   auto err3 = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
       kernel, thread, context, view_a, 0x42001000u, mock_kernel::LEDGER_CALL);
   assert(err3 == shizuku::kernel_error::OK);
   assert(thread.call_stack.depth == 3);
 
   // (a) Stacks stack up without overlap: win2.hi < win1.hi < win0.hi
-  assert(thread.win[2].hi < thread.win[1].hi);
-  assert(thread.win[1].hi < thread.win[0].hi);
-  assert(thread.win[2].hi <= thread.win[1].hi - 160u);
+  const auto win2 = thread.window_at(2);
+  assert(win2.hi < win1.hi);
+  assert(win1.hi < win0.hi);
+  assert(win2.hi <= win1.hi - 160u);
 
   // Simulate stack fault in inner A: extend window
-  const uintptr_t fault_addr = thread.win[2].lo - 100u;
-  const auto extended = shizuku::extend_window(thread.win[2], fault_addr, stack_lo);
+  const uintptr_t fault_addr = win2.lo - 100u;
+  const auto extended = shizuku::extend_window(win2, fault_addr, stack_lo);
   assert(extended.is_valid());
-  assert(extended.lo < thread.win[2].lo);
-  thread.win[2] = extended;
+  assert(extended.lo < win2.lo);
+  thread.set_window_at(2, extended);
   thread.cur_win_lo = extended.lo;
 
   // Inner A writes patterns into the extended range and window
@@ -446,7 +450,7 @@ static void test_ledger_nesting_a_b_a() {
     assert(*reinterpret_cast<const volatile uint32_t *>(p) == 0);
   }
   // (c) Outer frame B is preserved intact
-  assert(*reinterpret_cast<const volatile uint32_t *>(thread.win[1].hi - 32u) == 0xBBBBBBBBu);
+  assert(*reinterpret_cast<const volatile uint32_t *>(win1.hi - 32u) == 0xBBBBBBBBu);
 
   // Pop B
   bool ok_pop2 = shizuku::native::pop_in_place<mock_kernel, mock_kobj>(
@@ -458,7 +462,7 @@ static void test_ledger_nesting_a_b_a() {
     assert(*reinterpret_cast<const volatile uint32_t *>(p) == 0);
   }
   // Outer frame A1 is preserved intact
-  assert(*reinterpret_cast<const volatile uint32_t *>(thread.win[0].hi - 32u) == 0xA1A1A1A1u);
+  assert(*reinterpret_cast<const volatile uint32_t *>(win0.hi - 32u) == 0xA1A1A1A1u);
 
   // Pop outer A
   bool ok_pop3 = shizuku::native::pop_in_place<mock_kernel, mock_kobj>(
@@ -500,19 +504,20 @@ static void test_ledger_unwind_in_place() {
   assert((shizuku::native::enter_in_place<mock_kernel, mock_kobj>(kernel, thread, context, view, 0x1000u, 1) == shizuku::kernel_error::OK));
 
   // Activation 0 writes to its window and consumes 160B
-  *reinterpret_cast<volatile uint32_t *>(thread.win[0].hi - 32u) = 0x11111111u;
-  context.user_sp = thread.win[0].hi - 160u;
+  const auto win0 = thread.window_at(0);
+  *reinterpret_cast<volatile uint32_t *>(win0.hi - 32u) = 0x11111111u;
+  context.user_sp = win0.hi - 160u;
   assert((shizuku::native::enter_in_place<mock_kernel, mock_kobj>(kernel, thread, context, view, 0x1000u, 1) == shizuku::kernel_error::OK));
 
   // Activation 1 writes to its window and consumes 160B
-  *reinterpret_cast<volatile uint32_t *>(thread.win[1].hi - 32u) = 0x22222222u;
-  *reinterpret_cast<volatile uint32_t *>(thread.win[1].lo + 16u) = 0x22220001u;
-  context.user_sp = thread.win[1].hi - 160u;
+  const auto win1 = thread.window_at(1);
+  *reinterpret_cast<volatile uint32_t *>(win1.hi - 32u) = 0x22222222u;
+  *reinterpret_cast<volatile uint32_t *>(win1.lo + 16u) = 0x22220001u;
+  context.user_sp = win1.hi - 160u;
   assert((shizuku::native::enter_in_place<mock_kernel, mock_kobj>(kernel, thread, context, view, 0x1000u, 1) == shizuku::kernel_error::OK));
 
   // Activation 2 writes to its window
-  const auto win2 = thread.win[2];
-  const auto win1 = thread.win[1];
+  const auto win2 = thread.window_at(2);
   *reinterpret_cast<volatile uint32_t *>(win2.hi - 32u) = 0x33333333u;
   *reinterpret_cast<volatile uint32_t *>(win2.lo + 16u) = 0x33330001u;
   assert(thread.call_stack.depth == 3);
@@ -533,12 +538,12 @@ static void test_ledger_unwind_in_place() {
     assert(*reinterpret_cast<const volatile uint32_t *>(p) == 0);
   }
   // Remaining activation 0 frame and base caller frame are preserved intact
-  assert(*reinterpret_cast<const volatile uint32_t *>(thread.win[0].hi - 32u) == 0x11111111u);
+  assert(*reinterpret_cast<const volatile uint32_t *>(win0.hi - 32u) == 0x11111111u);
   assert(*reinterpret_cast<const volatile uint32_t *>(stack_lo + 0x3000u) == 0xC001CAFEu);
 
   // Caller window restored to activation 0
-  assert(thread.cur_win_lo == thread.win[0].lo);
-  assert(thread.cur_win_hi == thread.win[0].hi);
+  assert(thread.cur_win_lo == win0.lo);
+  assert(thread.cur_win_hi == win0.hi);
 }
 
 // ===========================================================================
@@ -617,7 +622,7 @@ static void test_pop_in_place_with_dispatch_caller() {
   // Case 1: Base (depth 0) -> Dispatch (depth 1, win={}) -> Call (depth 2)
   thread.ledger[0].via = mock_kernel::LEDGER_DISPATCH;
   thread.ledger[0].object = 1;
-  thread.win[0] = shizuku::stack_window{}; // Dispatch activation has empty window
+  thread.clear_window_at(0); // Dispatch activation has empty window
   thread.call_stack.depth = 1;
 
   context.user_sp = stack_hi - 0x200u;
@@ -626,7 +631,7 @@ static void test_pop_in_place_with_dispatch_caller() {
       kernel, thread, context, view, 0x1000u, 1);
   assert(err == shizuku::kernel_error::OK);
   assert(thread.call_stack.depth == 2);
-  assert(thread.win[1].is_valid());
+  assert(thread.window_at(1).is_valid());
 
   // Pop Call activation (returning to Dispatch activation)
   mock_frame *res_frame = nullptr;
@@ -642,12 +647,12 @@ static void test_pop_in_place_with_dispatch_caller() {
   thread.call_stack.depth = 0;
   context.user_sp = stack_hi - 0x100u;
   assert((shizuku::native::enter_in_place<mock_kernel, mock_kobj>(kernel, thread, context, view, 0x1000u, 1) == shizuku::kernel_error::OK));
-  const auto win_call_a = thread.win[0];
+  const auto win_call_a = thread.window_at(0);
   assert(win_call_a.is_valid());
 
   // Dispatch activation pushed at depth 1
   thread.ledger[1].via = mock_kernel::LEDGER_DISPATCH;
-  thread.win[1] = shizuku::stack_window{};
+  thread.clear_window_at(1);
   thread.call_stack.depth = 2;
 
   // Call B pushed at depth 2
@@ -694,7 +699,7 @@ static void test_window_extension_fault_semantics() {
   mock_kobj::callee_view view{2, 0, 0, shizuku::object_kind::PLAIN, false, 0, 0, 1};
   assert((shizuku::native::enter_in_place<mock_kernel, mock_kobj>(kernel, thread, context, view, 0x1000u, 1) == shizuku::kernel_error::OK));
   assert(thread.call_stack.depth == 1);
-  const auto initial_win = thread.win[0];
+  const auto initial_win = thread.window_at(0);
   assert(initial_win.is_valid());
 
   // Fault in [stack_lo, win.lo): window extends down
@@ -757,7 +762,7 @@ void test_m_mode_callee_no_window_and_frame_protected() {
       kernel, thread, context, view_m, 0x42002000u, mock_kernel::LEDGER_CALL);
   assert(err == shizuku::kernel_error::OK);
   assert(thread.call_stack.depth == 1);
-  assert(!thread.win[0].is_valid());
+  assert(!thread.window_at(0).is_valid());
   assert(test_fake_arch::applied_windows.empty());
 
   // 2. Return from M-mode callee (M -> M)
