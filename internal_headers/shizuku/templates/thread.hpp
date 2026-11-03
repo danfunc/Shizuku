@@ -119,10 +119,12 @@ template <typename CONTEXT> struct thread {
     // ---- [SHIZUKU_LEAN_LEDGER] 戻りと識別の権威を 1 つの記録 (この特権メモリの台帳) に集める ----
     uint32_t generation;      // call 段: 入ったときの呼び先の instance 世代。dispatch 段: 0
     uintptr_t ret_pc;         // この段から戻ったとき caller が再開する pc
-    uintptr_t ret_sp;         // caller の例外時 SP (再開フレームはこの直下)
+    uintptr_t ret_sp;         // caller の例外時 SP (再開フレームはこの直下、bit 0 は caller の FPCA フラグ)
     uint16_t prev_call;       // この段を積む前の call_stack.call_top
     uint8_t ret_privileged;   // caller の特権
     uint8_t reserved;
+    constexpr bool ret_fpca() const { return (ret_sp & 1u) != 0; }
+    constexpr uintptr_t caller_sp() const { return ret_sp & ~1u; }
 #else
     static constexpr bool compact_allowed = false;
 #endif
@@ -141,6 +143,9 @@ template <typename CONTEXT> struct thread {
     uintptr_t handler_entry;
     uintptr_t ret_pc;
     uintptr_t ret_sp;
+
+    constexpr bool ret_fpca() const { return (ret_sp & 1u) != 0; }
+    constexpr uintptr_t caller_sp() const { return ret_sp & ~1u; }
 
     constexpr compact_call_ledger_entry() = default;
     constexpr compact_call_ledger_entry(uint32_t obj, uint32_t handler,

@@ -216,19 +216,21 @@ template <class K, class KObj>
       thread.call_stack.call_top = entry.prev_call;
     }
     if (restore) {
+      const bool caller_fpca = (entry.ret_sp & 1u) != 0;
+      const uintptr_t clean_sp = entry.ret_sp & ~1u;
       if constexpr (arch_has_core_num<A>) {
-        frame = A::template call_resume_at<true>(context, entry.ret_pc, entry.ret_sp, entry.ret_privileged != 0,
-                                                 0, 0, scrub, core);
+        frame = A::template call_resume_at<true>(context, entry.ret_pc, clean_sp, entry.ret_privileged != 0,
+                                                 caller_fpca, 0, 0, scrub, core);
       } else {
-        frame = A::template call_resume_at<true>(context, entry.ret_pc, entry.ret_sp, entry.ret_privileged != 0,
-                                                 0, 0, scrub);
+        frame = A::template call_resume_at<true>(context, entry.ret_pc, clean_sp, entry.ret_privileged != 0,
+                                                 caller_fpca, 0, 0, scrub);
       }
       const auto window = resolve_return_region_window(
           kobj, caller_via, K::LEDGER_DISPATCH, caller_object);
       A::set_region_window(context, window.base, window.limit);
       if (!caller_is_dispatch && !A::context_privileged(context)) {
-        if constexpr (requires { A::set_unprivileged_resume_metadata(*frame, entry.ret_sp, A::trusted_stack_top(), scrub); }) {
-          A::set_unprivileged_resume_metadata(*frame, entry.ret_sp, A::trusted_stack_top(), scrub);
+        if constexpr (requires { A::set_unprivileged_resume_metadata(*frame, clean_sp, A::trusted_stack_top(), scrub); }) {
+          A::set_unprivileged_resume_metadata(*frame, clean_sp, A::trusted_stack_top(), scrub);
         }
         if constexpr (arch_has_core_num<A>) {
           A::switch_caller_protection(caller_object, core);
@@ -344,7 +346,12 @@ template <class K, class KObj>
     entry.unwind_floor = (uint16_t)depth;
     entry.generation = view.instance_generation;
     entry.ret_pc = A::frame_pc(frame);
-    entry.ret_sp = A::call_return_sp(context);
+    const uintptr_t ret_sp = A::call_return_sp(context);
+    bool caller_fpca = false;
+    if constexpr (requires { A::context_fpca(context); }) {
+      caller_fpca = A::context_fpca(context);
+    }
+    entry.ret_sp = ret_sp | (caller_fpca ? 1u : 0u);
     entry.prev_call = (uint16_t)stack.call_top;
     entry.ret_privileged = A::context_privileged(context) ? 1 : 0;
     stack.depth = depth + 1;

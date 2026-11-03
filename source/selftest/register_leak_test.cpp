@@ -50,6 +50,21 @@ extern "C" __attribute__((noinline, used)) uintptr_t leak_callee_body(
     data[13] = d.error;
     return f.error | d.error;
   }
+  if (command == 88) {
+    // Return stub を迂回し、s0-s31/FPSCR を汚した状態で直接 EXIT_METHOD (2) を打つ
+    leak_dirty_fp();
+    asm volatile(
+        "movw r3, #0xbeef\n"
+        "movt r3, #0xcafe\n"
+        "vmov s16, r3\n" "vmov s17, r3\n" "vmov s18, r3\n" "vmov s19, r3\n"
+        "vmov s20, r3\n" "vmov s21, r3\n" "vmov s22, r3\n" "vmov s23, r3\n"
+        "vmov s24, r3\n" "vmov s25, r3\n" "vmov s26, r3\n" "vmov s27, r3\n"
+        "vmov s28, r3\n" "vmov s29, r3\n" "vmov s30, r3\n" "vmov s31, r3\n"
+        : : : "r3", "s16", "s17", "s18", "s19", "s20", "s21", "s22", "s23",
+              "s24", "s25", "s26", "s27", "s28", "s29", "s30", "s31", "memory");
+    (void)shizuku::armv8m_abi::syscall(static_cast<uintptr_t>(shizuku::object_api::EXIT_METHOD), 1, 42, 0);
+    return 99;
+  }
   asm volatile(
       "mrs r3, control\n"
       "tst r3, #4\n"
@@ -160,6 +175,21 @@ uintptr_t leak_caller_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
     data[12] = control_after;
     return r.value;
   }
+  if (cmd == 6) {
+    uint32_t control_before, control_after;
+    asm volatile("mrs %0, control" : "=r"(control_before));
+    data[11] = control_before;
+    for (unsigned i = 20; i <= 36; ++i) data[i] = 0xffffffffu;
+    const auto r = shizuku::armv8m_abi::syscall<false, false, true>(
+        4, data[0], 0, 88, reinterpret_cast<uintptr_t>(leak_caller_data + 80));
+    data[9] = r.error;
+    data[10] = r.value;
+    asm volatile("mrs %0, control" : "=r"(control_after));
+    data[12] = control_after;
+    uint32_t *out_upper = reinterpret_cast<uint32_t *>(leak_caller_data) + 37;
+    asm volatile("vstmia %0, {s16-s31}" : : "r"(out_upper) : "memory");
+    return r.value;
+  }
   uint32_t before, after;
   asm volatile("mrs %0, control" : "=r"(before));
   data[11] = before;
@@ -266,6 +296,17 @@ void register_leak_test() {
                c[56] == 0 && c[57] == 0, c[54] | c[55] | c[56] | c[57], 0);
   record_check("leak B return lower FP zero", fp_lower_zero && c[13] == 0,
                c[13], 0);
+
+  // Callee が return stub を通らず EXIT_METHOD を直接打って戻る漏洩試験
+  const auto direct_exit = run_fresh(6);
+  bool direct_lower_clean = (c[36] == 0); // fpscr
+  for (unsigned i = 0; i < 16; ++i) direct_lower_clean &= (c[20 + i] == 0);
+  bool direct_upper_clean = true;
+  for (unsigned i = 0; i < 16; ++i) direct_upper_clean &= (c[37 + i] != 0xcafebeefu);
+  record_check("leak direct EXIT bypass FP clean",
+               direct_exit.error == 0 && direct_exit.value == 42 &&
+               direct_lower_clean && direct_upper_clean,
+               c[20] | (direct_upper_clean ? 0 : 1), 0);
 #endif
 }
 } // namespace shizuku::selftest
