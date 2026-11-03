@@ -95,6 +95,7 @@ int main() {
   run_inplace_descriptor_failures_ledger_invariant<adapter>("ARMv6-M");
   run_inplace_lean_push_pop<adapter>("ARMv6-M");
   run_inplace_return_window_current_row<adapter>("ARMv6-M");
+  run_inplace_exit_fp_marker<adapter>("ARMv6-M");
   run_inplace_exit_validation<adapter>("ARMv6-M");
 
   printf("All ARMv6-M in-place host tests PASSED successfully!\n");

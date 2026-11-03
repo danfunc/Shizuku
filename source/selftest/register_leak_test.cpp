@@ -344,8 +344,12 @@ void register_leak_test() {
 
   // Callee が return stub を通らず EXIT_METHOD を直接打って戻る漏洩試験
   const auto direct_exit = run_fresh(6);
-  bool direct_lower_clean = (c[36] == 0); // fpscr
-  for (unsigned i = 0; i < 16; ++i) direct_lower_clean &= (c[20 + i] == 0);
+  // 語単位の切り分け: s0/s1 (FP 戻り値の置き場)、s2-s15、FPSCR を別々に見る。
+  // 印なしの直接 EXIT では、カーネルが s0/s1 も含めて FP 部 18 語すべてを 0 にする。
+  const bool direct_s01_clean = (c[20] == 0) && (c[21] == 0);
+  bool direct_s2_15_clean = true;
+  for (unsigned i = 2; i < 16; ++i) direct_s2_15_clean &= (c[20 + i] == 0);
+  const bool direct_fpscr_clean = (c[36] == 0);
   bool direct_upper_clean = true;
   for (unsigned i = 0; i < 16; ++i) direct_upper_clean &= (c[37 + i] == 0);
 
@@ -354,8 +358,10 @@ void register_leak_test() {
   if (direct_exit.value != (uintptr_t)grant_end::YIELDED) got_direct |= 1u << 1;
   if (c[9] != 0) got_direct |= 1u << 2;  // caller error
   if (c[10] != 42) got_direct |= 1u << 3; // return value 42
-  if (!direct_lower_clean) got_direct |= 1u << 4; // s0-s15 or fpscr non-zero
-  if (!direct_upper_clean) got_direct |= 1u << 5; // s16-s31 non-zero
+  if (!direct_s01_clean) got_direct |= 1u << 4;    // s0 or s1 non-zero
+  if (!direct_upper_clean) got_direct |= 1u << 5;  // s16-s31 non-zero
+  if (!direct_s2_15_clean) got_direct |= 1u << 6;  // s2-s15 non-zero
+  if (!direct_fpscr_clean) got_direct |= 1u << 7;  // fpscr non-zero
   record_check("leak direct EXIT bypass FP clean",
                got_direct == 0, got_direct, 0);
 #endif

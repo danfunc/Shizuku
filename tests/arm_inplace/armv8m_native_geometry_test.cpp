@@ -67,8 +67,16 @@ int main() {
     c.sp->xPSR ^= 1u << 9;
     assert(!A::call_header_has_room(c, 0));
   }
-  // 1. RETURN 側: 戻りでカーネルが返り値以外を消す (s0,s1 が保たれ、s2-s15/FPSCR は 0)
-  for (bool extended : {false, true}) for (bool overlap : {false, true}) {
+  // 0. EXIT の印の判定ヘルパ: 通常 stub (0xA55A) と FP 戻り値あり (0xA55B) を区別する
+  static_assert(shizuku::RETURN_STUB_MARKER == 0xA55Au && shizuku::RETURN_STUB_MARKER_FP == 0xA55Bu);
+  static_assert(shizuku::is_return_stub_marker(0xA55Au) && shizuku::is_return_stub_marker(0xA55Bu));
+  static_assert(!shizuku::is_return_stub_marker(0) && !shizuku::is_return_stub_marker(0xA559u) &&
+                !shizuku::is_return_stub_marker(0xA55Cu) && !shizuku::is_return_stub_marker(0x1A55Au));
+  static_assert(!shizuku::is_fp_result_marker(0xA55Au) && shizuku::is_fp_result_marker(0xA55Bu) &&
+                !shizuku::is_fp_result_marker(0));
+  // 1. RETURN 側: 戻りでカーネルが返り値以外を消す。
+  //    fp_result=true (FP 印あり) は s0,s1 を保ち s2-s15/FPSCR を 0、false は FP 部 18 語すべて 0。
+  for (bool fp_result : {false, true}) for (bool extended : {false, true}) for (bool overlap : {false, true}) {
     std::memset(storage, 0, sizeof(storage));
     A::context_t c{};
     c.exc_return = extended ? 0xffffffed : 0xfffffffd;
@@ -79,7 +87,7 @@ int main() {
     const uintptr_t ret = target + (extended ? 104 : 32);
     MockFP::count = 0;
     auto *result = A::call_resume_at<MockFP>(c, 0x12345679, ret, overlap,
-                                                   /*caller_fpca=*/true, 0x2000, 0x3000, false, core);
+                                                   /*caller_fpca=*/true, 0x2000, 0x3000, false, fp_result, core);
     assert(reinterpret_cast<uintptr_t>(result) == target && c.sp == result);
     assert(result->pc == 0x12345679 && result->xPSR == (1u << 24));
     assert(result->r0 == 0 && result->r1 == 0 && result->r2 == 0 &&
@@ -89,8 +97,8 @@ int main() {
     assert(MockFP::count == (extended ? 1u : 0u));
     if (extended) {
       const auto *saved = reinterpret_cast<const uint32_t *>(result + 1);
-      assert(saved[0] == 0xabc00000u);
-      assert(saved[1] == 0xabc00001u);
+      assert(saved[0] == (fp_result ? 0xabc00000u : 0u));
+      assert(saved[1] == (fp_result ? 0xabc00001u : 0u));
       for (unsigned i = 2; i < 18; ++i) assert(saved[i] == 0);
     }
     assert(A::call_return_sp(c) == ret);
@@ -108,7 +116,8 @@ int main() {
     for (unsigned i = 2; i < 18; ++i) fp[i] = 0xbeef0000u + i;
     const uintptr_t ret = base + 512 + 24 + 104;
     MockFP::count = 0;
-    auto *resumed = A::call_resume_at<MockFP>(c, 0x12345679, ret, true, /*caller_fpca=*/true, 0, 0, false, core);
+    auto *resumed = A::call_resume_at<MockFP>(c, 0x12345679, ret, true, /*caller_fpca=*/true, 0, 0, false,
+                                              /*fp_result=*/true, core);
     const auto *saved = reinterpret_cast<const uint32_t *>(resumed + 1);
     assert(MockFP::count == 1 && saved[0] == (is_double ? 0u : 0x3fc00000u));
     assert(saved[1] == (is_double ? 0x3ff80000u : 0u));
