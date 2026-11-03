@@ -465,25 +465,6 @@ public:
 #endif
     }
   };
-  [[gnu::always_inline]] static inline void copy_fp_frame_72b(void *dst, const void *src) {
-    if (dst == src) return;
-    auto *d = reinterpret_cast<uint32_t *>(dst);
-    const auto *s = reinterpret_cast<const uint32_t *>(src);
-    if (d < s) {
-      d[0] = s[0];   d[1] = s[1];   d[2] = s[2];   d[3] = s[3];
-      d[4] = s[4];   d[5] = s[5];   d[6] = s[6];   d[7] = s[7];
-      d[8] = s[8];   d[9] = s[9];   d[10] = s[10]; d[11] = s[11];
-      d[12] = s[12]; d[13] = s[13]; d[14] = s[14]; d[15] = s[15];
-      d[16] = s[16]; d[17] = s[17];
-    } else {
-      d[17] = s[17]; d[16] = s[16]; d[15] = s[15]; d[14] = s[14];
-      d[13] = s[13]; d[12] = s[12]; d[11] = s[11]; d[10] = s[10];
-      d[9] = s[9];   d[8] = s[8];   d[7] = s[7];   d[6] = s[6];
-      d[5] = s[5];   d[4] = s[4];   d[3] = s[3];   d[2] = s[2];
-      d[1] = s[1];   d[0] = s[0];
-    }
-  }
-
   [[gnu::always_inline]] static inline void clear_upper_fp_registers() {
     lazy_fp_state::clear_upper_fp_registers();
   }
@@ -492,16 +473,16 @@ public:
     return (context.exc_return & 0x10u) == 0;
   }
 
-  template <bool IsReturn = true, class FloatingPointState = lazy_fp_state>
+  template <class FloatingPointState = lazy_fp_state>
   [[gnu::always_inline]] static inline exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
       uintptr_t sp, bool privileged, bool caller_fpca, uintptr_t base, uintptr_t limit, bool scrub,
       core_num core) {
-    return call_resume_at<IsReturn, FloatingPointState>(context, pc, sp, privileged, caller_fpca, base, limit, scrub, core.index());
+    return call_resume_at<FloatingPointState>(context, pc, sp, privileged, caller_fpca, base, limit, scrub, core.index());
   }
-  template <bool IsReturn = true, class FloatingPointState = lazy_fp_state>
+  template <class FloatingPointState = lazy_fp_state>
   [[gnu::always_inline]] static inline exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
       uintptr_t sp, bool privileged, bool caller_fpca = true, uintptr_t base = 0, uintptr_t limit = 0, bool scrub = false) {
-    return call_resume_at<IsReturn, FloatingPointState>(context, pc, sp, privileged, caller_fpca, base, limit, scrub, 0);
+    return call_resume_at<FloatingPointState>(context, pc, sp, privileged, caller_fpca, base, limit, scrub, 0);
   }
 
   // 例外フレーム 8 語を、語ごとのストアで全部ゼロにする (呼び先へ前のスタックの値を漏らさない)。
@@ -777,7 +758,7 @@ public:
   }
 
 private:
-  template <bool IsReturn = true, class FloatingPointState = lazy_fp_state>
+  template <class FloatingPointState = lazy_fp_state>
   [[gnu::always_inline]] static inline exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
       uintptr_t sp, bool privileged, bool caller_fpca, uintptr_t base, uintptr_t limit, bool scrub,
       uint32_t core) {
@@ -796,21 +777,17 @@ private:
 #endif
       auto *d = reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(next) + sizeof(exception_frame_t));
       const auto *s = reinterpret_cast<const uint32_t *>(reinterpret_cast<const uint8_t *>(context.sp) + sizeof(exception_frame_t));
-      if constexpr (IsReturn) {
-        if (!caller_fpca) {
-          FloatingPointState::clear_upper_fp_registers();
-        }
-        const uint32_t s0 = s[0];
-        const uint32_t s1 = s[1];
-        d[0] = s0;
-        d[1] = s1;
-        d[2] = 0;  d[3] = 0;  d[4] = 0;  d[5] = 0;
-        d[6] = 0;  d[7] = 0;  d[8] = 0;  d[9] = 0;
-        d[10] = 0; d[11] = 0; d[12] = 0; d[13] = 0;
-        d[14] = 0; d[15] = 0; d[16] = 0; d[17] = 0;
-      } else {
-        copy_fp_frame_72b(d, s);
+      if (!caller_fpca) {
+        FloatingPointState::clear_upper_fp_registers();
       }
+      const uint32_t s0 = s[0];
+      const uint32_t s1 = s[1];
+      d[0] = s0;
+      d[1] = s1;
+      d[2] = 0;  d[3] = 0;  d[4] = 0;  d[5] = 0;
+      d[6] = 0;  d[7] = 0;  d[8] = 0;  d[9] = 0;
+      d[10] = 0; d[11] = 0; d[12] = 0; d[13] = 0;
+      d[14] = 0; d[15] = 0; d[16] = 0; d[17] = 0;
 #if defined(SHIZUKU_DIAG_FP)
       shizuku::diag_fp::record_point(shizuku::diag_fp::point::K3C_AFTER);
 #endif

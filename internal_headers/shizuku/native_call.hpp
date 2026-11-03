@@ -219,11 +219,16 @@ template <class K, class KObj>
       const bool caller_fpca = (entry.ret_sp & 1u) != 0;
       const uintptr_t clean_sp = entry.ret_sp & ~1u;
       if constexpr (arch_has_core_num<A>) {
-        frame = A::template call_resume_at<true>(context, entry.ret_pc, clean_sp, entry.ret_privileged != 0,
-                                                 caller_fpca, 0, 0, scrub, core);
+        frame = A::call_resume_at(context, entry.ret_pc, clean_sp, entry.ret_privileged != 0,
+                                  caller_fpca, 0, 0, scrub, core);
       } else {
-        frame = A::template call_resume_at<true>(context, entry.ret_pc, clean_sp, entry.ret_privileged != 0,
-                                                 caller_fpca, 0, 0, scrub);
+        if constexpr (requires { A::call_resume_at(context, entry.ret_pc, clean_sp, entry.ret_privileged != 0, caller_fpca, (uintptr_t)0, (uintptr_t)0, scrub); }) {
+          frame = A::call_resume_at(context, entry.ret_pc, clean_sp, entry.ret_privileged != 0,
+                                    caller_fpca, 0, 0, scrub);
+        } else {
+          frame = A::call_resume_at(context, entry.ret_pc, clean_sp, entry.ret_privileged != 0,
+                                    0, 0, scrub);
+        }
       }
       const auto window = resolve_return_region_window(
           kobj, caller_via, K::LEDGER_DISPATCH, caller_object);

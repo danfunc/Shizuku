@@ -108,7 +108,6 @@ struct test_inplace_adapter : public BaseArch {
     return reinterpret_cast<uintptr_t>(ctx.sp) + sizeof(typename BaseArch::exception_frame_t);
   }
 
-  template <bool IsReturn = true>
   static typename BaseArch::exception_frame_t *call_resume_at(
       typename BaseArch::context_t &ctx, uintptr_t pc, uintptr_t sp,
       bool privileged, bool caller_fpca, uintptr_t rbase, uintptr_t rlimit, bool scrub) {
@@ -128,12 +127,12 @@ struct test_inplace_adapter : public BaseArch {
     return frame;
   }
 
-  template <bool IsReturn = true, class Core>
+  template <class Core>
   static typename BaseArch::exception_frame_t *call_resume_at(
       typename BaseArch::context_t &ctx, uintptr_t pc, uintptr_t sp,
       bool privileged, bool caller_fpca, uintptr_t rbase, uintptr_t rlimit, bool scrub,
       const Core &) {
-    return call_resume_at<IsReturn>(ctx, pc, sp, privileged, caller_fpca, rbase, rlimit, scrub);
+    return call_resume_at(ctx, pc, sp, privileged, caller_fpca, rbase, rlimit, scrub);
   }
 
   static typename BaseArch::exception_frame_t *call_resume(
