@@ -789,6 +789,11 @@ SHIZUKU_HOT inline arch::exception_frame_t *ecall_run(arch::exception_frame_t *f
       context_to_frame(*context);
       auto *result = context->sp;
       active_mstatus = previous_mstatus;
+      shizuku_c6_trap_depth = shizuku_c6_trap_depth - 1;
+      active_frame = nullptr;
+      active_context = nullptr;
+      active_stop_phase = 0u;
+      s_u_ecall_frame_latch = 0;
       return result;
     }
   }
