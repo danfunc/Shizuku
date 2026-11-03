@@ -55,10 +55,12 @@ void u_cost_code_end_pad();
 extern const char u_cost_code_end[];
 void u_cost_probe_code_access();
 void u_cost_probe_data_access();
+void u_cost_probe_caller_stack_store();
 uintptr_t u_cost_probe_sp_spoof_child(uintptr_t target);
 uintptr_t u_cost_probe_stream_caller_stack();
 void u_cost_denied_code();
 extern const char u_cost_probe_data_fault_pc[];
+extern const char u_cost_probe_store_fault_pc[];
 }
 
 #if defined(__ARM_ARCH_8M_MAIN__)
@@ -90,6 +92,18 @@ SHIZUKU_U_COST_CODE __attribute__((naked)) void u_cost_probe_data_access() {
       ".global u_cost_probe_data_fault_pc\n"
       "u_cost_probe_data_fault_pc:\n"
       "ldr r0, [r0]\n"
+      "bx lr\n"
+      ".ltorg\n");
+}
+
+SHIZUKU_U_COST_CODE __attribute__((naked)) void u_cost_probe_caller_stack_store() {
+  asm volatile(
+      ".syntax unified\n.thumb\n"
+      "ldr r0, =u_cost_p_stack\n"
+      "movs r1, #0x5A\n"
+      ".global u_cost_probe_store_fault_pc\n"
+      "u_cost_probe_store_fault_pc:\n"
+      "str r1, [r0]\n"
       "bx lr\n"
       ".ltorg\n");
 }
@@ -234,6 +248,7 @@ SHIZUKU_U_COST_CODE uintptr_t u_cost_denied_probe_worker(uintptr_t mode, uintptr
   if (mode == 91) u_cost_probe_data_access();
   if (mode == 92) return u_cost_probe_sp_spoof_child(shizuku::object_id::cost_u_parent);
   if (mode == 93) return u_cost_probe_stream_caller_stack();
+  if (mode == 94) u_cost_probe_caller_stack_store();
   return 0;
 }
 
@@ -903,7 +918,7 @@ void rp2350_u_cost() {
     record_check("u_cost denied-probe method registered",
                  export_probe_res.error == 0 && export_probe_res.value == 0,
                  export_probe_res.value, 0);
-    auto run_denied_probe = [&](uintptr_t mode, const char *name, bool code_probe) {
+    auto run_denied_probe = [&](uintptr_t mode, const char *name, bool code_probe, const char *expected_pc = nullptr) {
       const uint32_t faults_before = kernel_instance.faults().count;
       const auto spawned = ARCH::syscall(static_cast<uintptr_t>(object_api::SPAWN),
                                          OBJECT_U_COST_P, 1, mode);
@@ -922,11 +937,12 @@ void rp2350_u_cost() {
                              u_cost_sram::code_address(
                                  reinterpret_cast<uintptr_t>(&u_cost_denied_code));
       } else {
+        const uintptr_t target_pc = expected_pc ? reinterpret_cast<uintptr_t>(expected_pc)
+                                                : reinterpret_cast<uintptr_t>(u_cost_probe_data_fault_pc);
         expected_fault = expected_fault && (fault.status & 0x82u) == 0x82u &&
                          fault.address == reinterpret_cast<uintptr_t>(u_cost_p_stack) &&
                          (fault.pc & ~uintptr_t(1)) ==
-                             u_cost_sram::code_address(
-                                 reinterpret_cast<uintptr_t>(u_cost_probe_data_fault_pc));
+                             u_cost_sram::code_address(target_pc);
       }
       record_check(name, expected_fault, fault.status,
                    code_probe ? 0x1u : 0x82u);
@@ -942,7 +958,8 @@ void rp2350_u_cost() {
       drain_diag_if_supported<BOARD>();
     };
     run_denied_probe(90, "u_cost SRAM code outside executable window faults", true);
-    run_denied_probe(91, "u_cost SRAM data outside object window faults", false);
+    run_denied_probe(91, "u_cost SRAM data outside object window faults", false, u_cost_probe_data_fault_pc);
+    run_denied_probe(94, "u_cost: callee store to caller stack (>= ret_sp) faults with MemManage", false, u_cost_probe_store_fault_pc);
 
     // (f) callee SP 偽装防止: callee が SP を stack_ceiling 以上に偽装して再呼出し → NO_STACK で拒絶され caller 枠センチネル無傷
     const auto spoof_res = ARCH::syscall(

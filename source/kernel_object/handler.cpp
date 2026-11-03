@@ -900,6 +900,10 @@ template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
       //   ことがある。CAS は READY からしか取れないので、この枝が無いと
       //   「旗は立っているが二度と READY にならない」相手の記憶が永久に
       //   返らなくなる (旗を見て continue するので、下の回収にも届かない)。
+      // まだいずれかのコアで動作中 (文脈から離脱していない) のスレッドのスタックは回収しない
+      if (kernel_instance.is_thread_active_on_any_core(candidate)) {
+        continue;
+      }
       const bool mine =
           kernel_instance.terminate_if_idle(candidate) ||
           kernel_instance.thread_state(candidate) == state_t::TERMINATED;
@@ -932,6 +936,10 @@ template <> bool KERNEL_OBJECT::schedule(uint32_t self) {
     //   走り終えた本人には自分のスタックを返せない (その上で走っているため)。
     if (kernel_instance.thread_state(candidate) == state_t::TERMINATED &&
         m_thread_stack[candidate] != 0) {
+      // まだいずれかのコアで動作中 (文脈から離脱していない) のスレッドのスタックは回収しない
+      if (kernel_instance.is_thread_active_on_any_core(candidate)) {
+        continue;
+      }
       // ★arena は共有なので錠が要る。この区間に syscall は 1 つも無い
       //   (握ったまま実行権を手放すと、相手のコアが走っていない持ち主を待つ)。
       table_lock();

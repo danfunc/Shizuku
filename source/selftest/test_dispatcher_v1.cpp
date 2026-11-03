@@ -2737,6 +2737,14 @@ static void run_dispatcher_tests() {
     printf("  21. consume_pending_step fast path: no-pending passes through, foreign arm kept, own arm fires exactly once: PASS\n");
   }
 
+  // 22. is_thread_active_on_any_core の検査
+  {
+    const uint32_t current_id = kernel_instance.current_thread_id();
+    assert(kernel_instance.is_thread_active_on_any_core(current_id));
+    assert(!kernel_instance.is_thread_active_on_any_core(999u));
+    printf("  22. is_thread_active_on_any_core: active on current core detected, idle rejected: PASS\n");
+  }
+
   // 後始末
   thread.call_stack.depth = 0;
   thread.call_stack.call_count = 0;

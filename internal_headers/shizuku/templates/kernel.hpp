@@ -356,6 +356,12 @@ public:
 
   uint32_t current_thread_id() const { return m_current[BOARD::core_num()]; }
   uint32_t current_thread_id_on(uint32_t core) const { return m_current[core]; }
+  bool is_thread_active_on_any_core(uint32_t thread_id) const {
+    for (uint32_t c = 0; c < CORE_COUNT; ++c) {
+      if (m_current[c] == thread_id) return true;
+    }
+    return false;
+  }
   // 現在のスレッドは 1 語のキャッシュ (m_current_thread) から引く: id × スレッド記録の大きさの
   // 乗算と表の先頭の読みを ecall のたびに払わない。m_current を書く所は set_current だけ。
   THREAD &current_thread() { return *m_current_thread[BOARD::core_num()]; }
