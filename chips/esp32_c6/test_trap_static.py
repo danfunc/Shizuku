@@ -224,6 +224,61 @@ u2u_s0_save = u2u_fault.index('"  sw s0, 40(sp)\\n"')
 u2u_s0_reload = u2u_fault.index('"  la s0, u_mode_stage1_data_pool\\n"', u2u_ecall)
 u2u_s0_use = u2u_fault.index('"  lw t0, 16(s0)\\n"', u2u_ecall)
 assert u2u_s0_save < u2u_ecall < u2u_s0_reload < u2u_s0_use
+# U probe の枠規約 (実機で再入の内側 probe が枠なしに 16(sp) へ書き Store Access Fault した再発防止)。
+# U callee の入場 sp は callee 窓の上端 hi で、sp 以上は caller の枠 (PMP が拒否する)。したがって probe 内の
+# sp 基準の正のオフセットの store/load (N(sp), N >= 0, 4 バイト) は、その probe の中で先に
+# `addi sp, sp, -M` で確保した枠の中 (N + 4 <= M) になければならない。負のオフセット (sp より下 = 自分の窓、
+# 窓伸長) は対象外。許可リスト: 窓の外を意図的に叩く probe (cmd 5 caller 枠の読み・cmd 8 caller 枠への書き) は
+# 「pool から取ったアドレスのレジスタ基準」で叩き sp 基準ではないので、この検査の対象にそもそも入らない。
+# sp 基準で窓の外を意図的に叩く probe が将来できた場合だけ、理由つきで下の表に足す。
+_STACK_FRAME_ALLOW = {}  # {entry ラベル: 理由}
+_asm_region = stage1.split('"u_mode_probe_worker:\\n"', 1)[1].split('".size u_mode_driver_worker', 1)[0]
+
+
+def _u_probe_frame_violations(region, allow=None):
+    allow = allow or {}
+    out, entry, frame, peak, n_checked = [], None, 0, 0, 0
+    for raw in region.splitlines():
+        m = re.match(r'^\s*"\s*(.*?)\\n"\s*$', raw)
+        if not m:
+            continue
+        line = m.group(1).strip()
+        lab = re.match(r'^(\.L\w+|u_mode_\w+_worker):$', line)
+        if lab:
+            name = lab.group(1)
+            if re.search(r'(error|done|fail)', name):  # 同じ probe の出口・失敗枝: 枠は entry の最大値
+                frame = peak
+            else:
+                entry, frame, peak = name, 0, 0
+            continue
+        a = re.match(r'^addi sp, sp, (-?\d+)$', line)
+        if a:
+            frame -= int(a.group(1))
+            peak = max(peak, frame)
+            continue
+        s = re.match(r'^(sw|lw)\s+\w+, (-?\d+)\(sp\)$', line)
+        if s and int(s.group(2)) >= 0 and entry not in allow:
+            n_checked += 1
+            if int(s.group(2)) + 4 > frame:
+                out.append((entry, line, frame))
+    return out, n_checked
+
+
+_viol, _n_checked = _u_probe_frame_violations(_asm_region, _STACK_FRAME_ALLOW)
+assert not _viol, f'U probe が自分の枠 (addi sp, sp, -M) の外 = sp 以上に触れる: {_viol}'
+assert _n_checked > 100  # 空振り防止: 退避・復帰・パターンの sp 相対アクセスを実際に検査している
+# 検査自体の試験: 枠なしの内側 probe (修正前の .Lreentrant_a_child) と、枠が足りない probe を検出できること。
+_bad_child = '    ".Lreentrant_a_child:\\n"\n    "  li t0, 0xAA02BEEF\\n"\n    "  sw t0, 16(sp)\\n"\n    "  ret\\n"\n'
+assert _u_probe_frame_violations(_bad_child)[0] == [('.Lreentrant_a_child', 'sw t0, 16(sp)', 0)]
+_short = '    ".Lp:\\n"\n    "  addi sp, sp, -16\\n"\n    "  sw ra, 16(sp)\\n"\n'
+assert len(_u_probe_frame_violations(_short)[0]) == 1
+_ok = '    ".Lp:\\n"\n    "  addi sp, sp, -32\\n"\n    "  sw ra, 28(sp)\\n"\n    "  sw t0, -512(sp)\\n"\n    "  addi sp, sp, 32\\n"\n'
+assert _u_probe_frame_violations(_ok)[0] == []
+# 内側 probe 2 つは自分の枠を取り、外側の 16(sp) と別の枠に書く。
+for _inner in ('.Lreentrant_a_child', '.Lreentrant_aba_child_a2'):
+    _blk = stage1.split(f'"{_inner}:\\n"', 1)[1].split('"  ret\\n"', 1)[0]
+    assert _blk.index('"  addi sp, sp, -32\\n"') < _blk.index('"  sw t0, 16(sp)\\n"') < _blk.index('"  addi sp, sp, 32\\n"'), _inner
+    assert '"  li a0, 0x42\\n"' in _blk, _inner
 c5_src = (root / 'chips/esp32_c5/trap.cpp').read_text()
 assert c5_src.count('const auto *const entered = context;') == 3
 assert c5_src.count('if (context != entered) arch::scrub_on_switch(*context);') == 3
