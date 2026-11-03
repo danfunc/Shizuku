@@ -217,11 +217,11 @@ template <class K, class KObj>
     }
     if (restore) {
       if constexpr (arch_has_core_num<A>) {
-        frame = A::call_resume_at(context, entry.ret_pc, entry.ret_sp, entry.ret_privileged != 0,
-                                  0, 0, scrub, core);
+        frame = A::template call_resume_at<true>(context, entry.ret_pc, entry.ret_sp, entry.ret_privileged != 0,
+                                                 0, 0, scrub, core);
       } else {
-        frame = A::call_resume_at(context, entry.ret_pc, entry.ret_sp, entry.ret_privileged != 0,
-                                  0, 0, scrub);
+        frame = A::template call_resume_at<true>(context, entry.ret_pc, entry.ret_sp, entry.ret_privileged != 0,
+                                                 0, 0, scrub);
       }
       const auto window = resolve_return_region_window(
           kobj, caller_via, K::LEDGER_DISPATCH, caller_object);

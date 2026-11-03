@@ -61,6 +61,7 @@ int main() {
     c.sp->xPSR ^= 1u << 9;
     assert(!A::call_header_has_room(c, 0));
   }
+  // 1. CALL 側: caller の FP 値を callee に見せるため、18 語全部が保たれることを検証
   for (bool extended : {false, true}) for (bool overlap : {false, true}) {
     std::memset(storage, 0, sizeof(storage));
     A::context_t c{};
@@ -71,8 +72,8 @@ int main() {
     const uintptr_t target = base + (overlap ? 512 : 832) + (extended ? 24 : 0);
     const uintptr_t ret = target + (extended ? 104 : 32);
     MockFP::count = 0;
-    auto *result = A::call_resume_at<MockFP>(c, 0x12345679, ret, overlap,
-                                             0x2000, 0x3000, false, core);
+    auto *result = A::call_resume_at<false, MockFP>(c, 0x12345679, ret, overlap,
+                                                    0x2000, 0x3000, false, core);
     assert(reinterpret_cast<uintptr_t>(result) == target && c.sp == result);
     assert(result->pc == 0x12345679 && result->xPSR == (1u << 24));
     assert(result->r0 == 0 && result->r1 == 0 && result->r2 == 0 &&
@@ -84,6 +85,48 @@ int main() {
       assert(reinterpret_cast<uint32_t *>(result + 1)[i] == 0xabc00000u + i);
     assert(A::call_return_sp(c) == ret);
   }
+  // 2. RETURN 側: 戻りでカーネルが返り値以外を消す (s0,s1 が保たれ、s2-s15/FPSCR は 0)
+  for (bool extended : {false, true}) for (bool overlap : {false, true}) {
+    std::memset(storage, 0, sizeof(storage));
+    A::context_t c{};
+    c.exc_return = extended ? 0xffffffed : 0xfffffffd;
+    c.sp = reinterpret_cast<Frame *>(base + 512);
+    auto *fp = reinterpret_cast<uint32_t *>(c.sp + 1);
+    for (unsigned i = 0; i < 18; ++i) fp[i] = 0xabc00000u + i;
+    const uintptr_t target = base + (overlap ? 512 : 832) + (extended ? 24 : 0);
+    const uintptr_t ret = target + (extended ? 104 : 32);
+    MockFP::count = 0;
+    auto *result = A::call_resume_at<true, MockFP>(c, 0x12345679, ret, overlap,
+                                                   0x2000, 0x3000, false, core);
+    assert(reinterpret_cast<uintptr_t>(result) == target && c.sp == result);
+    assert(result->pc == 0x12345679 && result->xPSR == (1u << 24));
+    assert(result->r0 == 0 && result->r1 == 0 && result->r2 == 0 &&
+           result->r3 == 0 && result->r12 == 0 && result->lr == 0);
+    assert(c.control == (overlap ? A::CONTROL_PRIV_PSP : A::CONTROL_UNPRIV_PSP));
+    assert(c.region_base == 0x2000 && c.region_limit == 0x3000);
+    assert(MockFP::count == (extended ? 1u : 0u));
+    if (extended) {
+      const auto *saved = reinterpret_cast<const uint32_t *>(result + 1);
+      assert(saved[0] == 0xabc00000u);
+      assert(saved[1] == 0xabc00001u);
+      for (unsigned i = 2; i < 18; ++i) assert(saved[i] == 0);
+    }
+    assert(A::call_return_sp(c) == ret);
+  }
+  // copy_fp_frame_72b 単体の重なりケース (dst<src, dst>src)
+  {
+    alignas(16) uint32_t buf[64];
+    for (int offset = -18; offset <= 18; ++offset) {
+      for (unsigned i = 0; i < 64; ++i) buf[i] = 0xdead0000u + i;
+      const int src_idx = 20;
+      const int dst_idx = src_idx + offset;
+      for (unsigned i = 0; i < 18; ++i) buf[src_idx + i] = 0x11223300u + i;
+      A::copy_fp_frame_72b(&buf[dst_idx], &buf[src_idx]);
+      for (unsigned i = 0; i < 18; ++i) {
+        assert(buf[dst_idx + i] == 0x11223300u + i);
+      }
+    }
+  }
   // Model the two FP return stubs' extended exception frames, including the
   // overlap that occurs when the callee's frame sits below the caller SP.
   for (bool is_double : {false, true}) {
@@ -94,9 +137,10 @@ int main() {
     auto *fp = reinterpret_cast<uint32_t *>(c.sp + 1);
     fp[0] = is_double ? 0u : 0x3fc00000u;
     fp[1] = is_double ? 0x3ff80000u : 0u;
+    for (unsigned i = 2; i < 18; ++i) fp[i] = 0xbeef0000u + i;
     const uintptr_t ret = base + 512 + 24 + 104;
     MockFP::count = 0;
-    auto *resumed = A::call_resume_at<MockFP>(c, 0x12345679, ret, true, 0, 0, false, core);
+    auto *resumed = A::call_resume_at<true, MockFP>(c, 0x12345679, ret, true, 0, 0, false, core);
     const auto *saved = reinterpret_cast<const uint32_t *>(resumed + 1);
     assert(MockFP::count == 1 && saved[0] == (is_double ? 0u : 0x3fc00000u));
     assert(saved[1] == (is_double ? 0x3ff80000u : 0u));
