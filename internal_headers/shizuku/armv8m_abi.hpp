@@ -88,6 +88,7 @@ fp_body(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4) {
 // call_entry has already placed argument five at [sp]. This leaf changes no
 // arguments or callee-saved registers and passes control to a normal body.
 template <auto F>
+#if defined(__ARM_ARCH_8M_MAIN__)
 __attribute__((naked, used)) void fp_entry() {
   using R = typename fp_entry_traits<decltype(F)>::result_type;
   static_assert(fp_entry_traits<decltype(F)>::supported);
@@ -101,6 +102,9 @@ __attribute__((naked, used)) void fp_entry() {
                  "bx r12\n" : : "i" (&fp_body<F>));
   }
 }
+#else
+void fp_entry() {}
+#endif
 
 template <auto F> inline uintptr_t entry_address() {
   if constexpr (fp_entry_traits<decltype(F)>::supported)
@@ -122,6 +126,7 @@ template <bool Service = false, bool ObserveScratch = false, bool ObserveFP = fa
 [[gnu::always_inline]] inline result syscall(uintptr_t number, uintptr_t a1 = 0,
                                              uintptr_t a2 = 0, uintptr_t a3 = 0,
                                              uintptr_t a4 = 0) {
+#if defined(__ARM_ARCH_8M_MAIN__)
   static_assert(!(ObserveScratch && ObserveFP));
   register uintptr_t r0 asm("r0") = number;
   register uintptr_t r1 asm("r1") = a1;
@@ -146,27 +151,6 @@ template <bool Service = false, bool ObserveScratch = false, bool ObserveFP = fa
       ".if %c[observe] + %c[observe_fp]\n"
       "str r12, [sp, #8]\n"
       ".endif\n"
-      "tst r5, #4\n"
-      "beq .Lshizuku_no_fp_clear_%=\n"
-      "movs r4, #0\n"
-      "vmov s0, r4\n"  "vmov s1, r4\n"
-      "vmov s2, r4\n"  "vmov s3, r4\n"
-      "vmov s4, r4\n"  "vmov s5, r4\n"
-      "vmov s6, r4\n"  "vmov s7, r4\n"
-      "vmov s8, r4\n"  "vmov s9, r4\n"
-      "vmov s10, r4\n" "vmov s11, r4\n"
-      "vmov s12, r4\n" "vmov s13, r4\n"
-      "vmov s14, r4\n" "vmov s15, r4\n"
-      "vmov s16, r4\n" "vmov s17, r4\n"
-      "vmov s18, r4\n" "vmov s19, r4\n"
-      "vmov s20, r4\n" "vmov s21, r4\n"
-      "vmov s22, r4\n" "vmov s23, r4\n"
-      "vmov s24, r4\n" "vmov s25, r4\n"
-      "vmov s26, r4\n" "vmov s27, r4\n"
-      "vmov s28, r4\n" "vmov s29, r4\n"
-      "vmov s30, r4\n" "vmov s31, r4\n"
-      "vmsr fpscr, r4\n"
-      ".Lshizuku_no_fp_clear_%=:\n"
       "movs r4, #0\n"
       "movs r5, #0\n"
       "movs r6, #0\n"
@@ -217,6 +201,10 @@ template <bool Service = false, bool ObserveScratch = false, bool ObserveFP = fa
         "s8", "s9", "s10", "s11", "s12", "s13", "s14", "s15",
         "vfpcc", "cc", "memory");
   return {r0, r1};
+#else
+  (void)number; (void)a1; (void)a2; (void)a3; (void)a4;
+  return {0, 0};
+#endif
 }
 
 } // namespace shizuku::armv8m_abi

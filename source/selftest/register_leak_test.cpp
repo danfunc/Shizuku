@@ -50,6 +50,23 @@ extern "C" __attribute__((noinline, used)) uintptr_t leak_callee_body(
     data[13] = d.error;
     return f.error | d.error;
   }
+  if (command == 88) {
+    // Return stub を迂回し、s0-s31/FPSCR を汚した状態で直接 EXIT_METHOD (2) を打つ
+    leak_dirty_fp();
+    asm volatile(
+        "movw r3, #0xbeef\n"
+        "movt r3, #0xcafe\n"
+        "vmov s16, r3\n" "vmov s17, r3\n" "vmov s18, r3\n" "vmov s19, r3\n"
+        "vmov s20, r3\n" "vmov s21, r3\n" "vmov s22, r3\n" "vmov s23, r3\n"
+        "vmov s24, r3\n" "vmov s25, r3\n" "vmov s26, r3\n" "vmov s27, r3\n"
+        "vmov s28, r3\n" "vmov s29, r3\n" "vmov s30, r3\n" "vmov s31, r3\n"
+        : : : "r3", "s16", "s17", "s18", "s19", "s20", "s21", "s22", "s23",
+              "s24", "s25", "s26", "s27", "s28", "s29", "s30", "s31", "memory");
+    // 直接 EXIT_METHOD の正しい呼び方: a1 に戻り先深さ target=0 (深さ 1 の callee から深さ 0 の caller への復帰)、
+    // a2 に戻り値 42、a3 にエラー 0 を渡す (marker なしの直接 EXIT)。
+    (void)shizuku::armv8m_abi::syscall(static_cast<uintptr_t>(shizuku::object_api::EXIT_METHOD), 0, 42, 0);
+    return 99;
+  }
   asm volatile(
       "mrs r3, control\n"
       "tst r3, #4\n"
@@ -60,6 +77,10 @@ extern "C" __attribute__((noinline, used)) uintptr_t leak_callee_body(
       "vmov s4, r3\n" "vmov s5, r3\n" "vmov s6, r3\n" "vmov s7, r3\n"
       "vmov s8, r3\n" "vmov s9, r3\n" "vmov s10, r3\n" "vmov s11, r3\n"
       "vmov s12, r3\n" "vmov s13, r3\n" "vmov s14, r3\n" "vmov s15, r3\n"
+      "vmov s16, r3\n" "vmov s17, r3\n" "vmov s18, r3\n" "vmov s19, r3\n"
+      "vmov s20, r3\n" "vmov s21, r3\n" "vmov s22, r3\n" "vmov s23, r3\n"
+      "vmov s24, r3\n" "vmov s25, r3\n" "vmov s26, r3\n" "vmov s27, r3\n"
+      "vmov s28, r3\n" "vmov s29, r3\n" "vmov s30, r3\n" "vmov s31, r3\n"
       "mov.w r3, #0x400000\n"
       "vmsr fpscr, r3\n"
       "1:\n"
@@ -68,7 +89,14 @@ extern "C" __attribute__((noinline, used)) uintptr_t leak_callee_body(
       "movw r3, #3\n" "movt r3, #0xcafe\n"
       "movw r12, #12\n" "movt r12, #0xcafe\n"
       : : : "r1", "r2", "r3", "r12", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7",
-              "s8", "s9", "s10", "s11", "s12", "s13", "s14", "s15", "vfpcc", "memory");
+              "s8", "s9", "s10", "s11", "s12", "s13", "s14", "s15",
+              "s16", "s17", "s18", "s19", "s20", "s21", "s22", "s23",
+              "s24", "s25", "s26", "s27", "s28", "s29", "s30", "s31", "vfpcc", "memory");
+  return 42;
+}
+
+extern "C" __attribute__((noinline, used)) uintptr_t leak_callee_int_body(
+    uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   return 42;
 }
 
@@ -89,6 +117,8 @@ __attribute__((naked)) uintptr_t leak_callee_worker(uintptr_t, uintptr_t, uintpt
       "vmrs r1, fpscr\n"
       "str r1, [r0, #-20]\n"
       "1: pop {r0-r3}\n"
+      "cmp r0, #10\n"
+      "beq leak_callee_int_body\n"
       "b leak_callee_body\n");
 }
 
@@ -154,11 +184,33 @@ uintptr_t leak_caller_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
     data[12] = control_after;
     return r.value;
   }
+  if (cmd == 6) {
+    uint32_t control_before, control_after;
+    asm volatile("mrs %0, control" : "=r"(control_before));
+    data[11] = control_before;
+    for (unsigned i = 20; i <= 36; ++i) data[i] = 0xffffffffu;
+    const auto r = shizuku::armv8m_abi::syscall<false, false, true>(
+        4, data[0], 0, 88, reinterpret_cast<uintptr_t>(leak_caller_data + 80));
+    data[9] = r.error;
+    data[10] = r.value;
+    asm volatile("mrs %0, control" : "=r"(control_after));
+    data[12] = control_after;
+    uint32_t *out_upper = reinterpret_cast<uint32_t *>(leak_caller_data) + 37;
+    asm volatile("vstmia %0, {s16-s31}" : : "r"(out_upper) : "memory");
+    return r.value;
+  }
   uint32_t before, after;
   asm volatile("mrs %0, control" : "=r"(before));
   data[11] = before;
   if (cmd == 1) {
-    const auto r = shizuku::armv8m_abi::syscall(4, data[0], 0, 99);
+    for (unsigned i = 20; i <= 36; ++i) data[i] = 0xffffffffu;
+    const auto r = shizuku::armv8m_abi::syscall<false, false, true>(
+        4, data[0], 0, 99, reinterpret_cast<uintptr_t>(leak_caller_data + 80));
+    data[9] = r.error; data[10] = r.value;
+    uint32_t *out_upper = reinterpret_cast<uint32_t *>(leak_caller_data) + 37;
+    asm volatile("vstmia %0, {s16-s31}" : : "r"(out_upper) : "memory");
+  } else if (cmd == 7) {
+    const auto r = shizuku::armv8m_abi::syscall(4, data[0], 0, 10);
     data[9] = r.error; data[10] = r.value;
   } else {
     (void)leak_active_call(data[0]);
@@ -216,12 +268,41 @@ void register_leak_test() {
     return ARCH::syscall(static_cast<uintptr_t>(object_api::RUN_FOR), spawned.value,
                          5000u * BOARD::cycles_per_us());
   };
-  auto inactive = run_fresh(1);
-  record_check("leak inactive FPCA preserved",
-               inactive.error == 0 && inactive.value == (uintptr_t)grant_end::YIELDED &&
-               c[9] == 0 && c[10] == 42 &&
-               d[9] == 0xcafebeefu && (c[11] & 4u) == 0 && (c[12] & 4u) == 0 && (d[10] & 4u) == 0,
-               (c[11] | c[12] | d[10]) & 4u, 0);
+  // Callee が FP を使わない場合: caller の FPCA は 0 のまま保たれることを縛る
+  auto inactive_int = run_fresh(7);
+  uint32_t got_int = 0;
+  if (inactive_int.error != 0) got_int |= 1u << 0;
+  if (inactive_int.value != (uintptr_t)grant_end::YIELDED) got_int |= 1u << 1;
+  if (c[9] != 0) got_int |= 1u << 2;
+  if (c[10] != 42) got_int |= 1u << 3;
+  if ((c[11] & 4u) != 0) got_int |= 1u << 4;
+  if ((c[12] & 4u) != 0) got_int |= 1u << 5;
+  if ((d[10] & 4u) != 0) got_int |= 1u << 6;
+  record_check("leak inactive FPCA preserved", got_int == 0, got_int, 0);
+
+  // Callee が FP を使用した場合:
+  // EXC_RETURN bit4 がハードウェアの規則で FPCA を決めるため、caller の CONTROL.FPCA が
+  // 0→1 に昇格することを許容する。カーネルは EXC_RETURN を細工せず、機密性は FP 値の
+  // 完全消去によって担保される。
+  // caller から見て s0-s15/FPSCR に callee の値が残らず、s16-s31 も 0 であること
+  // (caller FPCA=0 始まりのためカーネルが消去) を検証する。
+  auto inactive_fp = run_fresh(1);
+  bool inactive_fp_lower_clean = (c[36] == 0); // fpscr
+  for (unsigned i = 0; i < 16; ++i) inactive_fp_lower_clean &= (c[20 + i] == 0);
+  bool inactive_fp_upper_clean = true;
+  for (unsigned i = 0; i < 16; ++i) inactive_fp_upper_clean &= (c[37 + i] == 0);
+
+  uint32_t got_conf = 0;
+  if (inactive_fp.error != 0) got_conf |= 1u << 0;
+  if (inactive_fp.value != (uintptr_t)grant_end::YIELDED) got_conf |= 1u << 1;
+  if (c[9] != 0) got_conf |= 1u << 2;
+  if (c[10] != 42) got_conf |= 1u << 3;
+  if (d[9] != 0xcafebeefu) got_conf |= 1u << 4;
+  if ((c[11] & 4u) != 0) got_conf |= 1u << 5; // caller before FPCA=0
+  if ((d[10] & 4u) != 0) got_conf |= 1u << 6; // callee entry FPCA=0
+  if (!inactive_fp_lower_clean) got_conf |= 1u << 7; // s0-s15 / fpscr clean
+  if (!inactive_fp_upper_clean) got_conf |= 1u << 8; // s16-s31 clean (0)
+  record_check("leak inactive FPCA confidential", got_conf == 0, got_conf, 0);
 
   const auto exported = ARCH::syscall(static_cast<uintptr_t>(object_api::CALL_METHOD), caller, 0, 3);
   record_check("FP return methods exported", exported.error == 0 && exported.value == 0 &&
@@ -239,26 +320,50 @@ void register_leak_test() {
 
   for (unsigned i = 0; i < 64; ++i) d[i] = 0xffffffffu;
   auto active = ARCH::syscall(static_cast<uintptr_t>(object_api::CALL_METHOD), caller, 0, 2);
-  bool gp_zero = true, gp_restored = true, fp_entry_zero = true;
+  bool gp_zero = true, gp_restored = true;
+  bool fp_entry_caller_visible = true, fpscr_caller_visible = (d[11] == 0x00400000u);
   bool fp_lower_zero = true, fp_upper_restored = true;
   for (unsigned i = 0; i < 8; ++i) {
     gp_zero &= d[i] == 0;
     gp_restored &= c[i + 1] == 0xdead0004u + i;
   }
-  for (unsigned i = 0; i < 32; ++i) fp_entry_zero &= d[16 + i] == 0;
+  for (unsigned i = 0; i < 32; ++i) fp_entry_caller_visible &= d[16 + i] == (0x3f800100u + i);
   for (unsigned i = 0; i < 16; ++i) {
     fp_lower_zero &= c[20 + i] == 0;
     fp_upper_restored &= c[36 + i] == 0x3f800110u + i;
   }
   record_check("leak A callee entry", active.error == 0 && active.value == 42 &&
                c[9] == 0 && c[10] == 42 && d[9] == 0xcafebeefu &&
-               (d[10] & 4u) && gp_zero && fp_entry_zero && d[11] == 0, d[9], 0xcafebeefu);
+               (d[10] & 4u) && gp_zero && fp_entry_caller_visible && fpscr_caller_visible, d[9], 0xcafebeefu);
   record_check("leak B caller registers restored", gp_restored && fp_upper_restored,
                gp_restored | (fp_upper_restored << 1), 3);
   record_check("leak B return scratch zero", c[54] == 0 && c[55] == 0 &&
                c[56] == 0 && c[57] == 0, c[54] | c[55] | c[56] | c[57], 0);
   record_check("leak B return lower FP zero", fp_lower_zero && c[13] == 0,
                c[13], 0);
+
+  // Callee が return stub を通らず EXIT_METHOD を直接打って戻る漏洩試験
+  const auto direct_exit = run_fresh(6);
+  // 語単位の切り分け: s0/s1 (FP 戻り値の置き場)、s2-s15、FPSCR を別々に見る。
+  // 印なしの直接 EXIT では、カーネルが s0/s1 も含めて FP 部 18 語すべてを 0 にする。
+  const bool direct_s01_clean = (c[20] == 0) && (c[21] == 0);
+  bool direct_s2_15_clean = true;
+  for (unsigned i = 2; i < 16; ++i) direct_s2_15_clean &= (c[20 + i] == 0);
+  const bool direct_fpscr_clean = (c[36] == 0);
+  bool direct_upper_clean = true;
+  for (unsigned i = 0; i < 16; ++i) direct_upper_clean &= (c[37 + i] == 0);
+
+  uint32_t got_direct = 0;
+  if (direct_exit.error != 0) got_direct |= 1u << 0;
+  if (direct_exit.value != (uintptr_t)grant_end::YIELDED) got_direct |= 1u << 1;
+  if (c[9] != 0) got_direct |= 1u << 2;  // caller error
+  if (c[10] != 42) got_direct |= 1u << 3; // return value 42
+  if (!direct_s01_clean) got_direct |= 1u << 4;    // s0 or s1 non-zero
+  if (!direct_upper_clean) got_direct |= 1u << 5;  // s16-s31 non-zero
+  if (!direct_s2_15_clean) got_direct |= 1u << 6;  // s2-s15 non-zero
+  if (!direct_fpscr_clean) got_direct |= 1u << 7;  // fpscr non-zero
+  record_check("leak direct EXIT bypass FP clean",
+               got_direct == 0, got_direct, 0);
 #endif
 }
 } // namespace shizuku::selftest

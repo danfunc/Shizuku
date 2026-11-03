@@ -7,6 +7,10 @@
 #include "shizuku/kernel_abi.hpp"
 #include "shizuku/hot.hpp"
 #include "shizuku/armv8m_abi.hpp"
+#include "shizuku/core_num.hpp"
+#if defined(SHIZUKU_DIAG_FP)
+#include "shizuku/diag_fp.hpp"
+#endif
 
 // ARMv8-M mainline (Cortex-M33 / RP2350) の arch バックエンド。
 // 文脈退避・復帰・戻り口・スレッドモード移行の実体は armv8m_ctx.S。
@@ -72,6 +76,14 @@ public:
   static constexpr bool IS_ARMV8M = true;
   static constexpr bool CALL_IN_PLACE = true;
   static constexpr bool SVC_BREAKDOWN_ENABLED = SHIZUKU_RP2350_SVC_BREAKDOWN != 0;
+
+  // SIO CPUID レジスタ (0xD0000000) からコア番号を取得するリーダーポリシー
+  struct sio_cpuid_reader {
+    static uint32_t read() noexcept {
+      return *(volatile const uint32_t *)0xD0000000u & 1u;
+    }
+  };
+  using core_num = shizuku::basic_core_num<sio_cpuid_reader>;
 
   // armv8m_ctx.S の .equ (CTX_*) と一致させること。下の static_assert が両縛りする。
   struct context_t {
@@ -439,27 +451,61 @@ public:
       asm volatile("vmrs %0, fpscr" : "=r"(fpscr) :: "memory");
       (void)fpscr;
     }
-  };
-  template <class FloatingPointState = lazy_fp_state>
-  static exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
-      uintptr_t sp, bool privileged, uintptr_t base, uintptr_t limit, bool scrub) {
-    const uint32_t bytes = exc_frame_bytes(context);
-    auto *next = reinterpret_cast<exception_frame_t *>(sp - bytes);
-    if (bytes != sizeof(exception_frame_t)) {
-      // Materialize any lazy FP frame before relocating its return-value slots.
-      FloatingPointState::materialize();
-      __builtin_memmove(reinterpret_cast<uint8_t *>(next) + sizeof(exception_frame_t),
-                        reinterpret_cast<uint8_t *>(context.sp) + sizeof(exception_frame_t),
-                        bytes - sizeof(exception_frame_t));
+    // naked + noinline の out-of-line 関数にすることで、呼び元 (exit_method 等) の
+    // プロローグ / エピローグに callee-saved レジスタ d8-d15 (s16-s31) の vpush/vpop が
+    // 生成されるのを防ぐ (vpop による callee 汚染値での上書き復元を阻止する)。
+#if defined(__ARM_ARCH_8M_MAIN__)
+    [[gnu::naked, gnu::noinline]] static void clear_upper_fp_registers() {
+      asm volatile(
+          "movs r0, #0\n"
+          "vmov s16, r0\n"
+          "vmov s17, r0\n"
+          "vmov s18, r0\n"
+          "vmov s19, r0\n"
+          "vmov s20, r0\n"
+          "vmov s21, r0\n"
+          "vmov s22, r0\n"
+          "vmov s23, r0\n"
+          "vmov s24, r0\n"
+          "vmov s25, r0\n"
+          "vmov s26, r0\n"
+          "vmov s27, r0\n"
+          "vmov s28, r0\n"
+          "vmov s29, r0\n"
+          "vmov s30, r0\n"
+          "vmov s31, r0\n"
+          "bx lr\n");
     }
-    zero_exception_frame(*next);
-    next->pc = (uint32_t)pc;
-    next->xPSR = 1u << 24;
-    context.sp = next;
-    set_priv(context, privileged);
-    set_region_window(context, base, limit);
-    if (scrub) s_resume_scrub[core_slot()] = true;
-    return next;
+#else
+    static void clear_upper_fp_registers() {}
+#endif
+  };
+  [[gnu::always_inline]] static inline void clear_upper_fp_registers() {
+    lazy_fp_state::clear_upper_fp_registers();
+  }
+
+  [[gnu::always_inline]] static inline bool context_fpca(const context_t &context) {
+    return (context.exc_return & 0x10u) == 0;
+  }
+
+  template <class FloatingPointState = lazy_fp_state>
+  [[gnu::always_inline]] static inline exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
+      uintptr_t sp, bool privileged, bool caller_fpca, uintptr_t base, uintptr_t limit, bool scrub,
+      core_num core) {
+    return call_resume_at<FloatingPointState>(context, pc, sp, privileged, caller_fpca, base, limit, scrub, false, core.index());
+  }
+  // fp_result: EXIT の印 (RETURN_STUB_MARKER_FP) が s0/s1 の FP 戻り値を宣言したか。
+  //   true のときだけ s0/s1 を再開フレームへ写す。false (印なし・整数/void 戻り・直接 EXIT) は FP 部 18 語すべて 0。
+  template <class FloatingPointState = lazy_fp_state>
+  [[gnu::always_inline]] static inline exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
+      uintptr_t sp, bool privileged, bool caller_fpca, uintptr_t base, uintptr_t limit, bool scrub,
+      bool fp_result, core_num core) {
+    return call_resume_at<FloatingPointState>(context, pc, sp, privileged, caller_fpca, base, limit, scrub, fp_result, core.index());
+  }
+  template <class FloatingPointState = lazy_fp_state>
+  [[gnu::always_inline]] static inline exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
+      uintptr_t sp, bool privileged, bool caller_fpca = true, uintptr_t base = 0, uintptr_t limit = 0, bool scrub = false) {
+    return call_resume_at<FloatingPointState>(context, pc, sp, privileged, caller_fpca, base, limit, scrub, false, 0);
   }
 
   // 例外フレーム 8 語を、語ごとのストアで全部ゼロにする (呼び先へ前のスタックの値を漏らさない)。
@@ -474,17 +520,11 @@ public:
   static inline bool s_in_svc[2] = {};
   static inline bool s_deferred_svc[2] = {};
   static inline bool s_resume_scrub[2] = {};
-  static bool defer_svc_switch() {
-    const auto core = core_slot();
-    if (!s_in_svc[core]) return false;
-    s_deferred_svc[core] = true;
-    return true;
+  static bool defer_svc_switch(core_num core) {
+    return defer_svc_switch(core.index());
   }
-  static bool take_deferred_svc() {
-    const auto core = core_slot();
-    const bool pending = s_deferred_svc[core];
-    s_deferred_svc[core] = false;
-    return pending;
+  static bool take_deferred_svc(core_num core) {
+    return take_deferred_svc(core.index());
   }
   static constexpr uint32_t shrink_stack_limit(uint32_t original, uintptr_t ceiling) {
     return (uint32_t)((ceiling - 1) & ~uintptr_t(31)) | (original & 31u);
@@ -560,7 +600,6 @@ public:
   static inline object_protection_window s_object_windows[kMaxObjectWindows] = {};
   static inline uint32_t s_object_window_seq[kMaxObjectWindows] = {};
   // MPU は core ごとに持つので、「今 region 3/4 に張ってある窓の持ち主」も core ごとに覚える。
-  static uint32_t core_slot() { return *(volatile const uint32_t *)0xD0000000u & 1u; }
   static inline uint32_t s_programmed_object[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
   static inline uint32_t s_programmed_object_seq[2] = {};
 
@@ -593,48 +632,24 @@ public:
     return {((uint32_t)base & ~0x1Fu) | (ACCESS_RO_ALL << 1),
             (grant_window_limit(end) & ~0x1Fu) | 1u};
   }
-  // region index を (rbar, rlar) にする。覚えた値と同じなら何も書かず false。書いたら true
-  // (書込みの完了待ち DSB は mpu_sync が 1 度にまとめて打つ)。
-  [[gnu::always_inline]] static inline bool region_program(uint32_t core, uint32_t index,
+  [[gnu::always_inline]] static inline bool region_program(core_num core, uint32_t index,
                                                            uint32_t rbar, uint32_t rlar) {
-    auto &shadow = s_programmed_region[core][index];
-    if (region_matches(shadow, rbar, rlar)) return false;
-    ppb::mpu->rnr = index;
-    if (rlar != 0) {
-      ppb::mpu->rbar = rbar;
-      ppb::mpu->rlar = rlar;
-    } else {
-      ppb::mpu->rlar = 0;
-    }
-    const auto want = canonical_region(rbar, rlar);
-    shadow.rbar = want.rbar;
-    shadow.rlar = want.rlar;
-    s_mpu_dirty[core] = true;
-    return true;
+    return region_program(core.index(), index, rbar, rlar);
   }
   // 例外復帰の直前に 1 度だけ呼ぶ。この呼び出しまでの MPU 書込み (入場・復帰の窓、貸与窓、stack 窓)
   // の完了を DSB で待つ。ISB は要らない (例外復帰が文脈同期イベント)。書込みが無ければ打たない。
   // 書込みが DSB なしで残るのは、同じ core の次の mpu_sync までに限られる: 窓を動かす経路
   // (SVC の入場・復帰、PendSV、スレッド復帰) はどれも armv8m_prepare_resume で終わる。
-  //   core は core_slot() の値。例外ハンドラは自分を取った core の上で最後まで走り (core をまたいで動かない)、
-  //   core_slot() は実行中の core の SIO CPUID なので、SVC の入口で 1 度読んだ値をその間使い回せる。
-  [[gnu::always_inline]] static inline void mpu_sync(uint32_t core) {
-    if (!s_mpu_dirty[core]) return;
-    s_mpu_dirty[core] = false;
-    asm volatile("dsb" ::: "memory");
+  [[gnu::always_inline]] static inline void mpu_sync(core_num core) {
+    mpu_sync(core.index());
   }
-  [[gnu::always_inline]] static inline void mpu_sync() { mpu_sync(core_slot()); }
   [[gnu::always_inline]] static inline bool apply_grant_window(uintptr_t base, uintptr_t end,
-                                                               uint32_t core) {
-    const auto entry = grant_window_entry(base, end);
-    return region_program(core, GRANT_REGION_INDEX, entry.rbar, entry.rlar);
-  }
-  [[gnu::always_inline]] static inline bool apply_grant_window(uintptr_t base, uintptr_t end) {
-    return apply_grant_window(base, end, core_slot());
+                                                               core_num core) {
+    return apply_grant_window(base, end, core.index());
   }
 
-  static void invalidate_active_object() {
-    s_programmed_object[core_slot()] = 0xFFFFFFFFu;
+  static void invalidate_active_object(core_num core) {
+    invalidate_active_object(core.index());
   }
 
   static bool has_object_bounds(uint32_t object_id) {
@@ -681,59 +696,32 @@ public:
 
   // 窓の書込みは例外復帰の前にしか呼ばれない。例外復帰は文脈同期イベントなので ISB は要らず、
   // 書込みの完了待ち (DSB) は例外復帰の直前に mpu_sync が 1 度だけ打つ。
-  static void apply_object_window(const object_protection_window &win, uint32_t core) {
-    region_program(core, REGION_DATA, win.data.rbar, win.data.rlar);
-    region_program(core, REGION_MMIO, win.mmio.rbar, win.mmio.rlar);
-  }
-  static void apply_object_window(const object_protection_window &win) {
-    apply_object_window(win, core_slot());
+  static void apply_object_window(const object_protection_window &win, core_num core) {
+    apply_object_window(win, core.index());
   }
 
   // 前回張った値と同じなら書かない (同じ thread へ戻る例外復帰は毎回ここを通る)。
-  static void apply_stack_window(uint32_t rbar, uint32_t rlar, uint32_t core) {
-    region_program(core, REGION_STACK, rbar, rlar);
-  }
-  [[gnu::always_inline]] static inline void apply_stack_window(uint32_t rbar, uint32_t rlar) {
-    apply_stack_window(rbar, rlar, core_slot());
+  [[gnu::always_inline]] static inline void apply_stack_window(uint32_t rbar, uint32_t rlar,
+                                                               core_num core) {
+    apply_stack_window(rbar, rlar, core.index());
   }
 
   // 非特権の窓 (region 3/4) を id のものにする。すでにそうなら何も書かない。特権は PRIVDEFENA で
   // 全域に触れ、窓に制限されないので、特権の呼び先/呼び元のときは窓を触らない (呼ばない)。
-  static void ensure_object_window(uint32_t id, uint32_t core) {
-    uint32_t &programmed = s_programmed_object[core];
-    uint32_t version = id < kMaxObjectWindows
-        ? __atomic_load_n(&s_object_window_seq[id], __ATOMIC_ACQUIRE) : 1u;
-    if (programmed == id && !(version & 1u) && s_programmed_object_seq[core] == version)
-      return;
-    object_protection_window copy{};
-    if (!snapshot_object_window(id, copy, version)) {
-      region_program(core, REGION_DATA, 0, 0);
-      region_program(core, REGION_MMIO, 0, 0);
-      programmed = 0xFFFFFFFFu;
-      return;
-    }
-    apply_object_window(copy, core);
-    programmed = id;
-    s_programmed_object_seq[core] = version;
-  }
-  [[gnu::always_inline]] static inline void ensure_object_window(uint32_t id) {
-    ensure_object_window(id, core_slot());
+  [[gnu::always_inline]] static inline void ensure_object_window(uint32_t id, core_num core) {
+    ensure_object_window(id, core.index());
   }
 
   template <class Frame>
-  static void switch_callee_protection(context_t &context, Frame &frame, uint32_t callee_id, bool privileged) {
-    (void)context;
-    (void)frame;
-    if (!privileged) ensure_object_window(callee_id);
+  static void switch_callee_protection(context_t &context, Frame &frame, uint32_t callee_id,
+                                       bool privileged, core_num core) {
+    switch_callee_protection(context, frame, callee_id, privileged, core.index());
   }
 
   // 呼び元が非特権のときだけ呼ぶ (戻り先の窓を戻す)。
-  static void switch_caller_protection(uint32_t caller_object) {
-    ensure_object_window(caller_object);
-  }
   [[gnu::always_inline]] static inline void switch_caller_protection(uint32_t caller_object,
-                                                                     uint32_t core) {
-    ensure_object_window(caller_object, core);
+                                                                     core_num core) {
+    switch_caller_protection(caller_object, core.index());
   }
   static void stack_limit_set(context_t &context, uintptr_t limit) {
     context.psplim = (uint32_t)limit;
@@ -790,6 +778,140 @@ public:
                                              uintptr_t stack_limit_address,
                                              void (*entry)()) {
     shizuku_armv8m_enter_thread_mode(stack_top, stack_limit_address, entry);
+  }
+
+private:
+  template <class FloatingPointState = lazy_fp_state>
+  [[gnu::always_inline]] static inline exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
+      uintptr_t sp, bool privileged, bool caller_fpca, uintptr_t base, uintptr_t limit, bool scrub,
+      bool fp_result, uint32_t core) {
+    const uint32_t bytes = exc_frame_bytes(context);
+    auto *next = reinterpret_cast<exception_frame_t *>(sp - bytes);
+    if (bytes != sizeof(exception_frame_t)) {
+      // Materialize any lazy FP frame before relocating its return-value slots.
+#if defined(SHIZUKU_DIAG_FP)
+      shizuku::diag_fp::g_state.has_k3b_k3c = true;
+      shizuku::diag_fp::record_point(shizuku::diag_fp::point::K3B_BEFORE);
+#endif
+      FloatingPointState::materialize();
+#if defined(SHIZUKU_DIAG_FP)
+      shizuku::diag_fp::record_point(shizuku::diag_fp::point::K3B_AFTER);
+      shizuku::diag_fp::record_point(shizuku::diag_fp::point::K3C_BEFORE);
+#endif
+      auto *d = reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(next) + sizeof(exception_frame_t));
+      const auto *s = reinterpret_cast<const uint32_t *>(reinterpret_cast<const uint8_t *>(context.sp) + sizeof(exception_frame_t));
+      if (!caller_fpca) {
+        FloatingPointState::clear_upper_fp_registers();
+      }
+      // s0/s1 は FP 戻り値の置き場。EXIT の印が宣言したときだけ写し、それ以外は 0 (分岐なしのマスク)。
+      // d と s は重なりうるので、書く前に両方読む。
+      const uint32_t keep = 0u - static_cast<uint32_t>(fp_result);
+      const uint32_t s0 = s[0] & keep;
+      const uint32_t s1 = s[1] & keep;
+      d[0] = s0;
+      d[1] = s1;
+      d[2] = 0;  d[3] = 0;  d[4] = 0;  d[5] = 0;
+      d[6] = 0;  d[7] = 0;  d[8] = 0;  d[9] = 0;
+      d[10] = 0; d[11] = 0; d[12] = 0; d[13] = 0;
+      d[14] = 0; d[15] = 0; d[16] = 0; d[17] = 0;
+#if defined(SHIZUKU_DIAG_FP)
+      shizuku::diag_fp::record_point(shizuku::diag_fp::point::K3C_AFTER);
+#endif
+    }
+    zero_exception_frame(*next);
+    next->pc = (uint32_t)pc;
+    next->xPSR = 1u << 24;
+    context.sp = next;
+    set_priv(context, privileged);
+    set_region_window(context, base, limit);
+    if (scrub) s_resume_scrub[core] = true;
+    return next;
+  }
+
+  static bool defer_svc_switch(uint32_t core) {
+    if (!s_in_svc[core]) return false;
+    s_deferred_svc[core] = true;
+    return true;
+  }
+
+  static bool take_deferred_svc(uint32_t core) {
+    const bool pending = s_deferred_svc[core];
+    s_deferred_svc[core] = false;
+    return pending;
+  }
+
+  [[gnu::always_inline]] static inline bool region_program(uint32_t core, uint32_t index,
+                                                           uint32_t rbar, uint32_t rlar) {
+    auto &shadow = s_programmed_region[core][index];
+    if (region_matches(shadow, rbar, rlar)) return false;
+    ppb::mpu->rnr = index;
+    if (rlar != 0) {
+      ppb::mpu->rbar = rbar;
+      ppb::mpu->rlar = rlar;
+    } else {
+      ppb::mpu->rlar = 0;
+    }
+    const auto want = canonical_region(rbar, rlar);
+    shadow.rbar = want.rbar;
+    shadow.rlar = want.rlar;
+    s_mpu_dirty[core] = true;
+    return true;
+  }
+
+  [[gnu::always_inline]] static inline void mpu_sync(uint32_t core) {
+    if (!s_mpu_dirty[core]) return;
+    s_mpu_dirty[core] = false;
+    asm volatile("dsb" ::: "memory");
+  }
+
+  [[gnu::always_inline]] static inline bool apply_grant_window(uintptr_t base, uintptr_t end,
+                                                               uint32_t core) {
+    const auto entry = grant_window_entry(base, end);
+    return region_program(core, GRANT_REGION_INDEX, entry.rbar, entry.rlar);
+  }
+
+  static void invalidate_active_object(uint32_t core) {
+    s_programmed_object[core] = 0xFFFFFFFFu;
+  }
+
+  static void apply_object_window(const object_protection_window &win, uint32_t core) {
+    region_program(core, REGION_DATA, win.data.rbar, win.data.rlar);
+    region_program(core, REGION_MMIO, win.mmio.rbar, win.mmio.rlar);
+  }
+
+  static void apply_stack_window(uint32_t rbar, uint32_t rlar, uint32_t core) {
+    region_program(core, REGION_STACK, rbar, rlar);
+  }
+
+  static void ensure_object_window(uint32_t id, uint32_t core) {
+    uint32_t &programmed = s_programmed_object[core];
+    uint32_t version = id < kMaxObjectWindows
+        ? __atomic_load_n(&s_object_window_seq[id], __ATOMIC_ACQUIRE) : 1u;
+    if (programmed == id && !(version & 1u) && s_programmed_object_seq[core] == version)
+      return;
+    object_protection_window copy{};
+    if (!snapshot_object_window(id, copy, version)) {
+      region_program(core, REGION_DATA, 0, 0);
+      region_program(core, REGION_MMIO, 0, 0);
+      programmed = 0xFFFFFFFFu;
+      return;
+    }
+    apply_object_window(copy, core);
+    programmed = id;
+    s_programmed_object_seq[core] = version;
+  }
+
+  template <class Frame>
+  static void switch_callee_protection(context_t &context, Frame &frame, uint32_t callee_id,
+                                       bool privileged, uint32_t core) {
+    (void)context;
+    (void)frame;
+    if (!privileged) ensure_object_window(callee_id, core);
+  }
+
+  [[gnu::always_inline]] static inline void switch_caller_protection(uint32_t caller_object,
+                                                                     uint32_t core) {
+    ensure_object_window(caller_object, core);
   }
 };
 

@@ -49,4 +49,29 @@ inline bool evaluate_u_cost_invariants(const u_cost_eval_input_t &in) {
   return true;
 }
 
+struct u_cost_fp_invariants_input_t {
+  uint32_t expected_fpca = 0;
+  uint32_t priv_meth_base = 0;
+  uint32_t u_meth_base_before = 0;
+  uint32_t u_meth_base_after = 0;
+  uint32_t priv_meth_meas = 0;
+  uint32_t u_meth_meas_before = 0;
+  uint32_t u_meth_meas_after = 0;
+  uint32_t priv_desc_base = 0;
+  uint32_t u_desc_base_before = 0;
+  uint32_t u_desc_base_after = 0;
+  uint32_t priv_desc_meas = 0;
+  uint32_t u_desc_meas_before = 0;
+  uint32_t u_desc_meas_after = 0;
+};
+
+inline bool evaluate_u_cost_fp_invariants(const u_cost_fp_invariants_input_t &in) {
+  const auto exp = in.expected_fpca;
+  if (in.priv_meth_base != exp || in.u_meth_base_before != exp || in.u_meth_base_after != exp) return false;
+  if (in.priv_meth_meas != exp || in.u_meth_meas_before != exp || in.u_meth_meas_after != exp) return false;
+  if (in.priv_desc_base != exp || in.u_desc_base_before != exp || in.u_desc_base_after != exp) return false;
+  if (in.priv_desc_meas != exp || in.u_desc_meas_before != exp || in.u_desc_meas_after != exp) return false;
+  return true;
+}
+
 } // namespace shizuku::selftest

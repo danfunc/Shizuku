@@ -217,15 +217,16 @@ shizuku_armv8m_return_stub:
     vmsr  fpscr, r3
 .Lreturn_no_fp:
 .Lreturn_exit:
+    movs  r1, #0x5A     // r1 = RETURN_STUB_MARKER の下位バイト (通常 stub)
+.Lreturn_exit_marker:
     mov   r3, sp
     bic   r3, r3, #31
     mov   sp, r3          // EXIT does not return to this stack
-    movs  r1, #1        // legacy one-pop notification
-    movs  r3, #0        // a3 = エラーコード 0 (成功)
     movs  r3, #0xA5
     lsls  r3, r3, #8
-    adds  r3, #0x5A
-    mov   r12, r3       // RETURN_STUB_MARKER
+    adds  r3, r1        // r3 = 0xA55A (通常) / 0xA55B (FP 戻り値あり)
+    mov   r12, r3       // RETURN_STUB_MARKER / RETURN_STUB_MARKER_FP
+    movs  r1, #1        // legacy one-pop notification
     movs  r3, #0        // keep the RETURN error argument clear; marker lives in r12
     movs  r0, #2        // a0 = RETURN (kernel_abi.hpp と static_assert で両縛り)
     svc   0
@@ -271,7 +272,8 @@ shizuku_armv8m_return_double_stub:
     vmsr  fpscr, r3
 .Lreturn_fp_exit:
     movs  r2, #0
-    b     .Lreturn_exit
+    movs  r1, #0x5B     // r1 = RETURN_STUB_MARKER_FP の下位バイト (s0/s1 に FP 戻り値)
+    b     .Lreturn_exit_marker
 .size shizuku_armv8m_return_double_stub, .-shizuku_armv8m_return_double_stub
 
 // ---------------------------------------------------------------------------

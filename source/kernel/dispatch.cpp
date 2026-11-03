@@ -58,6 +58,71 @@ extern "C" void shizuku_boot_trace_primitive_stage(uint32_t);
 
 namespace shizuku {
 
+template <class K, class Core>
+[[gnu::always_inline]] inline typename K::THREAD &current_thread_for(K &k, Core core) {
+  if constexpr (arch_has_core_num<typename K::ARCH>) {
+    return k.current_thread_on(core.index());
+  } else {
+    return k.current_thread();
+  }
+}
+
+template <class K, class Core>
+[[gnu::always_inline]] inline uint32_t current_thread_id_for(const K &k, Core core) {
+  if constexpr (arch_has_core_num<typename K::ARCH>) {
+    return k.current_thread_id_on(core.index());
+  } else {
+    return k.current_thread_id();
+  }
+}
+
+template <class K, class Core>
+[[gnu::always_inline]] inline bool grant_active_for(const K &k, Core core) {
+  if constexpr (arch_has_core_num<typename K::ARCH>) {
+    return k.grant_active_on(core.index());
+  } else {
+    return k.grant_active();
+  }
+}
+
+template <class A, class Core>
+[[gnu::always_inline]] inline void dispatch_switch_caller_protection(
+    uint32_t caller_object, Core core) {
+  if constexpr (arch_has_core_num<A>) {
+    A::switch_caller_protection(caller_object, core);
+  } else {
+    A::switch_caller_protection(caller_object);
+  }
+}
+
+template <class A, class Frame, class Context, class Core>
+[[gnu::always_inline]] inline void dispatch_switch_callee_protection(
+    Context &context, Frame &frame, uint32_t callee_object, bool privileged, Core core) {
+  if constexpr (arch_has_core_num<A>) {
+    A::switch_callee_protection(context, frame, callee_object, privileged, core);
+  } else if constexpr (requires { A::switch_callee_protection(context, frame, callee_object, privileged); }) {
+    A::switch_callee_protection(context, frame, callee_object, privileged);
+  }
+}
+
+template <class A, class B, class Core>
+[[gnu::always_inline]] inline uint32_t dispatch_core_index(Core core) {
+  if constexpr (arch_has_core_num<A>) {
+    return core.index();
+  } else {
+    return B::core_num();
+  }
+}
+
+template <class A, class Ctx>
+[[gnu::always_inline]] inline bool caller_fpca_of(const Ctx &c) {
+  if constexpr (requires { A::context_fpca(c); }) {
+    return A::context_fpca(c);
+  } else {
+    return true;
+  }
+}
+
 // trap 内で直接処理する API の種別 (密な連番)。番号 → 種別の表引きで O(1) に振り分ける。
 // 表は svc_attributes の mode == handler の集合と一致することを static_assert で縛る。
 enum class trap_api : uint8_t {
@@ -207,13 +272,15 @@ SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::call_frame_push(KERNEL::THREAD &thread,
   // in-place 経路を持つ arch (RISC-V) は native_call.hpp 側の台帳が権威なので触らない。
   if constexpr (ARCH::HAS_OBJECT_PROTECTION && !arch_call_in_place<ARCH>()) {
     const uintptr_t caller_pc = (context->sp != nullptr) ? ARCH::frame_pc(*context->sp) : 0;
+    const bool caller_fpca = caller_fpca_of<ARCH>(*context);
     if (!THREAD::ledger_accessor::record_caller_return_authority(
             thread, thread.call_stack.depth,
             caller_pc,
             (uintptr_t)context->sp,
             !is_context_unprivileged(context) ? 1 : 0,
             (uint16_t)thread.call_stack.call_count,
-            0))
+            0,
+            caller_fpca))
       return false;
   }
 
@@ -245,7 +312,8 @@ SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::call_frame_push(KERNEL::THREAD &thread,
 
 template <>
 SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
-                            KERNEL::FRAME **frame, bool restore, bool scrub) {
+                            KERNEL::FRAME **frame, bool restore, bool scrub,
+                            core_arg_t<ARCH> core, bool fp_result) {
 #if defined(SHIZUKU_LEAN_LEDGER)
   // 最内ヘッダへのポインタ (top) は持たない。落とす段があるかは深さで見る。
   if (thread.call_stack.depth == 0)
@@ -259,7 +327,7 @@ SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, 
     // 再開フレームを caller の SP の直下に作る (a0/a1 以外は素通し。scrub のときは出口が消す)。
     // frame のコピーも戻しも無い。
     // (call の段の識別の戻しと underflow の検査は trap 内の EXIT_METHOD と共有: native_call.hpp)
-    if (!native::pop_in_place<KERNEL>(kernel_object_instance, thread, *context, *frame, restore, scrub))
+    if (!native::pop_in_place<KERNEL>(kernel_object_instance, thread, *context, *frame, restore, scrub, core, fp_result))
       BOARD::panic("call ledger count underflow");
     return true;
   }
@@ -322,18 +390,19 @@ SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, 
       kernel_object_instance, caller_via, LEDGER_DISPATCH, caller_obj);
   ARCH::set_region_window(*context, window.base, window.limit);
   if (!caller_is_dispatch && is_context_unprivileged(context))
-    ARCH::switch_caller_protection(caller_obj);
+    dispatch_switch_caller_protection<ARCH>(caller_obj, core);
   return true;
 }
 
 template <>
 SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::call_unwind(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
-                                     KERNEL::FRAME **frame, uintptr_t count) {
+                                     KERNEL::FRAME **frame, uintptr_t count,
+                                     core_arg_t<ARCH> core, bool fp_result) {
   // 途中の段は再開しない。最後に落とす段の caller だけが走り出す。2 段以上を一度に落とす
   // 巻き戻しは callee が自分の意思で戻らないので、再開の出口でレジスタを消す (scrub)。
   const bool scrub = count > 1;
   for (uintptr_t index = 0; index < count; ++index)
-    call_frame_pop(thread, context, frame, index + 1 == count, scrub);
+    call_frame_pop(thread, context, frame, index + 1 == count, scrub, core, fp_result);
 }
 
 // 通常 CALL と方法記述子の直接 call が共有する前半。台帳段を via (LEDGER_CALL か
@@ -342,7 +411,8 @@ SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::call_unwind(KERNEL::THREAD &thread, KER
 template <>
 SHIZUKU_HOT SHIZUKU_SVC_RAM kernel_error KERNEL::enter_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                                 KERNEL::FRAME **frame,
-                                const call_request &request, uint8_t via) {
+                                const call_request &request, uint8_t via,
+                                core_arg_t<ARCH> core) {
   // ★偽装防止 (指摘4): 一般 call_request から KERNEL_OBJECT 種別や
   //   m_object_svc_handler_object を名乗ることは拒否する。
   if (request.callee_kind == (uint32_t)object_kind::KERNEL_OBJECT ||
@@ -410,7 +480,8 @@ SHIZUKU_HOT SHIZUKU_SVC_RAM kernel_error KERNEL::enter_call(KERNEL::THREAD &thre
 template <>
 SHIZUKU_SVC_RAM kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                              KERNEL::FRAME **frame,
-                             const call_request &request) {
+                             const call_request &request,
+                             core_arg_t<ARCH> core) {
   if (request.entry_pc == 0)
     return kernel_error::BAD_REQUEST;
 #if defined(SHIZUKU_RP2040)
@@ -420,7 +491,7 @@ SHIZUKU_SVC_RAM kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CON
 #if defined(SHIZUKU_DEEP_DIAG)
   shizuku_push_diag_kind = 1; // do_call 経由の push
 #endif
-  const kernel_error error = enter_call(thread, context, frame, request, LEDGER_CALL);
+  const kernel_error error = enter_call(thread, context, frame, request, LEDGER_CALL, core);
   if (error != kernel_error::OK)
     return error;
   // 戻り口は常にカーネルの 1 本。撃つ svc は同じでも、そこから出たときの**種別**で
@@ -430,9 +501,8 @@ SHIZUKU_SVC_RAM kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CON
   ARCH::set_args(**frame, request.args);
   ARCH::set_priv(*context, (request.protection & PROTECTION_UNPRIVILEGED) == 0);
   ARCH::set_region_window(*context, request.region_base, request.region_limit);
-  if constexpr (requires { ARCH::switch_callee_protection(*context, **frame, request.callee_object, (request.protection & PROTECTION_UNPRIVILEGED) == 0); }) {
-    ARCH::switch_callee_protection(*context, **frame, request.callee_object, (request.protection & PROTECTION_UNPRIVILEGED) == 0);
-  }
+  dispatch_switch_callee_protection<ARCH>(*context, **frame, request.callee_object,
+                                         (request.protection & PROTECTION_UNPRIVILEGED) == 0, core);
   return kernel_error::OK;
 }
 
@@ -448,8 +518,8 @@ SHIZUKU_SVC_RAM kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CON
 
 // 呼び出し元が登録済み kernel object 本人のとき: 番号は primitive の番号空間 (CALL / RETURN /
 // SWITCH / GRANT)。
-template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_primitive(KERNEL::CONTEXT *context) {
-  THREAD &thread = current_thread();
+template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_primitive(KERNEL::CONTEXT *context, core_arg_t<ARCH> core) {
+  THREAD &thread = current_thread_for(*this, core);
   FRAME *frame = context->sp;
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(411);
@@ -469,7 +539,7 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_primitive(KERNEL::CONTE
       break;
     }
     const call_request request = *pointer;
-    const kernel_error error = do_call(thread, context, &frame, request);
+    const kernel_error error = do_call(thread, context, &frame, request, core);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     shizuku_boot_trace_call_leave((uint32_t)context->sp, (uint32_t)frame);
 #endif
@@ -488,7 +558,8 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_primitive(KERNEL::CONTE
     const uintptr_t target_arg = ARCH::arg(*frame, 4);
     const uint32_t floor = current_unwind_floor();
     uint32_t target_depth;
-    if (target_arg == RETURN_STUB_MARKER) {
+    const bool fp_result = is_fp_result_marker(target_arg);
+    if (is_return_stub_marker(target_arg)) {
       const auto request = resolve_return_stub(depth);
       target_depth = request.target_depth;
       count = request.count;
@@ -505,7 +576,7 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_primitive(KERNEL::CONTE
       ARCH::set_result(*frame, (uintptr_t)validation, depth);
       break;
     }
-    call_unwind(thread, context, &frame, count);
+    call_unwind(thread, context, &frame, count, core, fp_result);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     shizuku_boot_trace_return_leave((uint32_t)context->sp, (uint32_t)frame);
 #endif
@@ -513,7 +584,7 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_primitive(KERNEL::CONTE
     break;
   }
   case primitive::SWITCH: {
-    if (native::defer_thread_switch<ARCH>()) return;
+    if (native::defer_thread_switch<ARCH>(core)) return;
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     shizuku_boot_trace_primitive_stage(417);
 #endif
@@ -522,7 +593,7 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_primitive(KERNEL::CONTE
     break;
   }
   case primitive::GRANT: {
-    if (native::defer_thread_switch<ARCH>()) return;
+    if (native::defer_thread_switch<ARCH>(core)) return;
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     shizuku_boot_trace_primitive_stage(418);
 #endif
@@ -548,15 +619,15 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_primitive(KERNEL::CONTE
 // 前提: svc_native_route() (root KernelObject 宛て、呼び出し元は kobj 本人でない)。
 // 戻り値 true = 処理した (応答を書いた)、false = kobj へ回す。
 
-template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_get_current(KERNEL::CONTEXT *context) {
+template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_get_current(KERNEL::CONTEXT *context, core_arg_t<ARCH> core) {
   ARCH::set_result(*context->sp, (uintptr_t)object_error::OK,
-                   current_object(current_thread_id()));
+                   current_object(current_thread_id_for(*this, core)));
   return true;
 }
 
-template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_get_caller(KERNEL::CONTEXT *context) {
+template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_get_caller(KERNEL::CONTEXT *context, core_arg_t<ARCH> core) {
   ARCH::set_result(*context->sp, (uintptr_t)object_error::OK,
-                   caller_object(current_thread_id()));
+                   caller_object(current_thread_id_for(*this, core)));
   return true;
 }
 
@@ -565,10 +636,10 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_get_caller(KERNEL::CONT
 //   次に実行権を貰って再開したときのために先に置いておく。
 //   grant 段が無い (貸し手が居ない = 起点のスレッド) ときは、起点のスレッドがスケジューラ役
 //   なので従来どおり kobj の schedule() へ転送する (false)。
-template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_yield(KERNEL::CONTEXT *context) {
-  if (!grant_active())
+template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_yield(KERNEL::CONTEXT *context, core_arg_t<ARCH> core) {
+  if (!grant_active_for(*this, core))
     return false;
-  if (native::defer_thread_switch<ARCH>()) return true;
+  if (native::defer_thread_switch<ARCH>(core)) return true;
   ARCH::set_result(*context->sp, (uintptr_t)object_error::OK, 0);
   grant_unwind(grant_end::YIELDED);
   return true;
@@ -576,21 +647,21 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_yield(KERNEL::CONTEXT *
 
 // EXIT_METHOD (2) / FORWARD_CHILD_EXIT (27): 戻り先の絶対深さ d を検証して
 //   current_depth - d 段を落とす。27 は専用 HANDLER からだけ (parent_ledger 権限)。
-//   a1 = d, a2 = value, a3 = error。非 KOBJ の return stub (a4 = RETURN_STUB_MARKER、2 のみ) は
+//   a1 = d, a2 = value, a3 = error。非 KOBJ の return stub (a4 = RETURN_STUB_MARKER / _FP、2 のみ) は
 //   d を持たないので、台帳の unwind floor (= 呼び先を積む前の深さ) を d とする。
 //   検査は primitive RETURN と同じ (validate_return_depth)。弾いたら 1 枚も落とさず
 //   UNWIND_REJECTED + kernel_error を呼び出し元へ返す (従来の exit_method の reply と同じ)。
 //   従来は dispatch 段が 1 枚積まれていたため d == current_depth も通ったが、今は段が
 //   無いので d >= current_depth は DEPTH_MISMATCH で弾く。
-template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_exit(KERNEL::CONTEXT *context, bool forward) {
-  THREAD &thread = current_thread();
+template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_exit(KERNEL::CONTEXT *context, bool forward, core_arg_t<ARCH> core) {
+  THREAD &thread = current_thread_for(*this, core);
   // ヘッダ枠方式 (RV32) の本体は native_call.hpp (例外入口が 1 関数に展開するものと同じ)。
   if (arch_call_in_place<ARCH>()) {
     const native::status result =
         forward ? native::exit_in_place<KERNEL, KERNEL_OBJECT, true>(
-                      *this, kernel_object_instance, thread, *context)
+                      *this, kernel_object_instance, thread, *context, core)
                 : native::exit_in_place<KERNEL, KERNEL_OBJECT, false>(
-                      *this, kernel_object_instance, thread, *context);
+                      *this, kernel_object_instance, thread, *context, core);
     if (result == native::status::CORRUPT)
       BOARD::panic("call ledger count underflow");
     return result == native::status::DONE;
@@ -613,7 +684,8 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_exit(KERNEL::CONTEXT *c
   }
   const uint32_t depth = thread.call_stack.depth;
   const uint32_t floor = current_unwind_floor();
-  const bool from_stub = !forward && ARCH::arg(*frame, 4) == RETURN_STUB_MARKER;
+  const bool from_stub = !forward && is_return_stub_marker(ARCH::arg(*frame, 4));
+  const bool fp_result = !forward && is_fp_result_marker(ARCH::arg(*frame, 4));
   const uintptr_t d = from_stub ? (uintptr_t)floor : ARCH::arg(*frame, 1);
   // スレッドの最外のメソッドが戻ったとき (d == 0 かつ呼出し段なし) は「スレッドの
   // 終わり」で、次のスレッドの選び方に踏み込むので kobj の exit_thread に任せる
@@ -631,17 +703,17 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_exit(KERNEL::CONTEXT *c
   }
   const uintptr_t value = ARCH::arg(*frame, 2);
   const uintptr_t error = ARCH::arg(*frame, 3);
-  call_unwind(thread, context, &frame, count);
+  call_unwind(thread, context, &frame, count, core, fp_result);
   ARCH::set_result(*frame, error, value);
   return true;
 }
 
-template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_exit_method(KERNEL::CONTEXT *context) {
-  return svc_exit(context, false);
+template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_exit_method(KERNEL::CONTEXT *context, core_arg_t<ARCH> core) {
+  return svc_exit(context, false, core);
 }
 
-template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_forward_child_exit(KERNEL::CONTEXT *context) {
-  return svc_exit(context, true);
+template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_forward_child_exit(KERNEL::CONTEXT *context, core_arg_t<ARCH> core) {
+  return svc_exit(context, true, core);
 }
 
 // CALL_METHOD (4): a1 = オブジェクト ID, a2 = メソッド番号, a3 = 引数。
@@ -650,11 +722,11 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_forward_child_exit(KERN
 //   呼び先から見た GET_CALLER_OBJECT は呼び出し元そのものになる。
 //   エラーの種類・順序は BAD_OBJECT → NOT_PRIVILEGED → BAD_METHOD → UNDECLARED_METHOD →
 //   NO_STACK。応答は (error, 0)。
-template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_call_method(KERNEL::CONTEXT *context) {
-  THREAD &thread = current_thread();
+template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_call_method(KERNEL::CONTEXT *context, core_arg_t<ARCH> core) {
+  THREAD &thread = current_thread_for(*this, core);
   // ヘッダ枠方式 (RV32) の本体は native_call.hpp (例外入口が 1 関数に展開するものと同じ)。
   if (arch_call_in_place<ARCH>()) {
-    native::call_method_in_place(*this, thread, *context, kernel_object_instance);
+    native::call_method_in_place(*this, thread, *context, kernel_object_instance, core);
     return true;
   }
   FRAME *frame = context->sp;
@@ -670,7 +742,7 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_call_method(KERNEL::CON
     return true;
   }
   request.args[0] = ARCH::arg(*frame, 3);
-  const kernel_error entered = do_call(thread, context, &frame, request);
+  const kernel_error entered = do_call(thread, context, &frame, request, core);
   // 入れなかったときは台帳に段が残らない (frame もそのまま = 呼び出し元の svc フレーム)。
   if (entered != kernel_error::OK)
     ARCH::set_result(*frame, (uintptr_t)(entered == kernel_error::NO_STACK
@@ -685,8 +757,8 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_call_method(KERNEL::CON
 //   (OK, YIELDED) を置いておく点は primitive GRANT と同じ。貸せなかったときの
 //   変換は従来どおり: GRANT_TOO_SMALL → NO_TIME (こちらに配れる持ち分が無い。
 //   NOT_RUNNABLE と区別しないとスケジューラが空回りする)、それ以外 → NOT_RUNNABLE。
-template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_run_for(KERNEL::CONTEXT *context) {
-  if (native::defer_thread_switch<ARCH>()) return true;
+template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_run_for(KERNEL::CONTEXT *context, core_arg_t<ARCH> core) {
+  if (native::defer_thread_switch<ARCH>(core)) return true;
   FRAME *frame = context->sp;
   // 引数は応答の既定値を置く前に読む (応答は同じ a0/a1 に載る)。
   const uint32_t target = (uint32_t)ARCH::arg(*frame, 1);
@@ -703,7 +775,7 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_run_for(KERNEL::CONTEXT
 }
 
 // SET_BUDGET (12): a1 = スレッド ID, a2 = クロック数。範囲外は黙って何もしない。
-template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_set_budget(KERNEL::CONTEXT *context) {
+template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_set_budget(KERNEL::CONTEXT *context, core_arg_t<ARCH> core) {
   FRAME *frame = context->sp;
   kernel_object_instance.set_budget(ARCH::arg(*frame, 1), ARCH::arg(*frame, 2));
   ARCH::set_result(*frame, (uintptr_t)object_error::OK, 0);
@@ -715,12 +787,12 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_set_budget(KERNEL::CONT
 //   ものと同じ)。ヘッダ枠方式でない ARCH (ARM) は do_call 経由 (引数は a2 の 1 個だけ)。
 //   Region grants can change after descriptor creation. The live trusted window is used,
 //   while keeping authorization out of the O(1) call path.
-template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_call_descriptor(KERNEL::CONTEXT *context) {
+template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_call_descriptor(KERNEL::CONTEXT *context, core_arg_t<ARCH> core) {
   if (!arch_call_in_place<ARCH>()) {
     // ヘッダ枠方式でない ARCH (ARM): 記述子の検査は同じ (index・持ち主の世代・呼び先の version)、
     //   入場は CALL_METHOD と同じ do_call を通す。引数は a2 → 呼び先の a0 (ARM の svc ABI は
     //   a0..a4 だけなので a3 以降は載せない)。
-    THREAD &thread = current_thread();
+    THREAD &thread = current_thread_for(*this, core);
     FRAME *frame = context->sp;
     object_error lookup = object_error::OK;
     const auto *desc = kernel_object_instance.find_method_descriptor(
@@ -737,7 +809,7 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_call_descriptor(KERNEL:
     call_request request =
         kernel_object_instance.callee_request(desc->callee, desc->target_entry);
     request.args[0] = ARCH::arg(*frame, 2);
-    const kernel_error entered = do_call(thread, context, &frame, request);
+    const kernel_error entered = do_call(thread, context, &frame, request, core);
     if (entered != kernel_error::OK)
       ARCH::set_result(*frame, (uintptr_t)(entered == kernel_error::NO_STACK
                                                ? object_error::NO_STACK
@@ -748,15 +820,15 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_call_descriptor(KERNEL:
 #if defined(SHIZUKU_DEEP_DIAG)
   shizuku_push_diag_kind = 3; // CALL_METHOD_DESCRIPTOR 経路 (riscv のみ)
 #endif
-  native::call_descriptor_in_place(*this, current_thread(), *context, kernel_object_instance);
+  native::call_descriptor_in_place(*this, current_thread_for(*this, core), *context, kernel_object_instance, core);
   return true;
 }
 
 // 親ハンドラ (root KernelObject か専用ハンドラ) への配送: dispatch 段を積み、親ハンドラの
 // 入口へ svc の引数を渡して入る。kobj へ回す thread mode の API と、専用の親ハンドラ宛ての
 // raw svc (全番号、無加工) がここを通る。
-template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_forward(KERNEL::CONTEXT *context, bool service_gate) {
-  THREAD &thread = current_thread();
+template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_forward(KERNEL::CONTEXT *context, bool service_gate, core_arg_t<ARCH> core) {
+  THREAD &thread = current_thread_for(*this, core);
   FRAME *frame = context->sp;
   const uintptr_t target_entry = service_gate ? m_object_svc_handler : thread.current_handler_entry();
   const uint32_t target_object = service_gate ? m_object_svc_handler_object : thread.current_handler_object();
@@ -804,7 +876,7 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_forward(KERNEL::CONTEXT
   // A return stub cannot know its parent's absolute depth. Its private marker
   // turns the legacy one-pop notification into a return to the actor's floor.
   if (args[0] == (uintptr_t)primitive::RETURN &&
-      ARCH::arg(*frame, 4) == RETURN_STUB_MARKER)
+      is_return_stub_marker(ARCH::arg(*frame, 4)))
     args[1] = unwind_floor;
   args[4] = unwind_floor;
 
@@ -818,11 +890,11 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_forward(KERNEL::CONTEXT
 #endif
 }
 
-template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_dispatch(KERNEL::CONTEXT *context) {
+template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_dispatch(KERNEL::CONTEXT *context, core_arg_t<ARCH> core) {
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
   shizuku_boot_trace_phase(410);
 #endif
-  THREAD &thread = current_thread();
+  THREAD &thread = current_thread_for(*this, core);
   FRAME *frame = context->sp;
   // Only this privileged internal gate bypasses parent routing. The public
   // objectland raw-SVC path below, including colliding numbers, is unchanged.
@@ -850,7 +922,7 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_dispatch(KERNEL::CONTEX
   //   ID が m_object_svc_handler_object) だけが kernel primitive を直接解釈できる。
   if (!service_gate && thread.current_kind() == (uint32_t)object_kind::KERNEL_OBJECT &&
       thread.current_object() == m_object_svc_handler_object) {
-    svc_primitive(context);
+    svc_primitive(context, core);
     return;
   }
 
@@ -878,51 +950,51 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_dispatch(KERNEL::CONTEX
     case trap_api::NONE:
       break;
     case trap_api::GET_CURRENT:
-      svc_get_current(context);
+      svc_get_current(context, core);
       return;
     case trap_api::GET_CALLER:
-      svc_get_caller(context);
+      svc_get_caller(context, core);
       return;
     case trap_api::YIELD:
-      if (svc_yield(context)) return;
+      if (svc_yield(context, core)) return;
       break;
     case trap_api::EXIT_METHOD:
-      if (svc_exit_method(context)) return;
+      if (svc_exit_method(context, core)) return;
       break;
     case trap_api::FORWARD_CHILD_EXIT:
-      if (svc_forward_child_exit(context)) return;
+      if (svc_forward_child_exit(context, core)) return;
       break;
     case trap_api::CALL_METHOD:
-      svc_call_method(context);
+      svc_call_method(context, core);
       return;
     case trap_api::RUN_FOR:
-      svc_run_for(context);
+      svc_run_for(context, core);
       return;
     case trap_api::SET_BUDGET:
-      svc_set_budget(context);
+      svc_set_budget(context, core);
       return;
     case trap_api::CALL_DESCRIPTOR:
-      svc_call_descriptor(context);
+      svc_call_descriptor(context, core);
       return;
     }
   }
 
-  svc_forward(context, service_gate);
+  svc_forward(context, service_gate, core);
 }
 
 // 最低優先度の遅延例外 = 実行権の強制巻き取り。ここへ来た時点で全ての割り込みは
 // 捌けており、syscall の途中でもない (優先度規約が保証する)。
 // ★発火が余分でも壊れないようにガードは自己安定型にしてある — 早期復帰と期限が
 //   競っても「もう貸していない / まだ期限前」なら何もしないで戻るだけ。
-template <> SHIZUKU_SVC_RAM void KERNEL::pendsv_dispatch(KERNEL::CONTEXT *context) {
+template <> SHIZUKU_SVC_RAM void KERNEL::pendsv_dispatch(KERNEL::CONTEXT *context, core_arg_t<ARCH> core) {
   // CTX_SAVE has completed before any current/state/claim mutation. Replaying a
   // deferred SVC here keeps the outgoing thread pinned until its registers are
   // safe, including YIELD's publication of READY on the other core.
-  const auto scrub = []<class A, class Context>(Context *context) {
+  const auto scrub = []<class A, class B, class Context, class Core>(Context *context, Core core_val) {
     if constexpr (requires { A::s_resume_scrub[0]; context->r4; }) {
-      const auto core = A::core_slot();
-      if (A::s_resume_scrub[core]) {
-        A::s_resume_scrub[core] = false;
+      const auto core_idx = dispatch_core_index<A, B>(core_val);
+      if (A::s_resume_scrub[core_idx]) {
+        A::s_resume_scrub[core_idx] = false;
         context->r4 = context->r5 = context->r6 = context->r7 = 0;
         context->r8 = context->r9 = context->r10 = context->r11 = 0;
         for (auto &word : context->fp) word = 0;
@@ -935,27 +1007,32 @@ template <> SHIZUKU_SVC_RAM void KERNEL::pendsv_dispatch(KERNEL::CONTEXT *contex
     }
     return false;
   };
-  (void)scrub.template operator()<ARCH>(context);
-  const auto replay = []<class A>() {
-    if constexpr (requires { A::take_deferred_svc(); }) return A::take_deferred_svc();
-    return false;
+  (void)scrub.template operator()<ARCH, BOARD>(context, core);
+  const auto replay = []<class A, class Core>(Core core_val) {
+    if constexpr (arch_has_core_num<A>) {
+      return A::take_deferred_svc(core_val);
+    } else if constexpr (requires { A::take_deferred_svc(); }) {
+      return A::take_deferred_svc();
+    } else {
+      return false;
+    }
   };
-  if (replay.template operator()<ARCH>()) {
-    svc_dispatch(context);
+  if (replay.template operator()<ARCH>(core)) {
+    svc_dispatch(context, core);
   }
-  const uint32_t core = BOARD::core_num();
-  grant_stack &grants = m_grants[core];
+  const uint32_t core_idx = dispatch_core_index<ARCH, BOARD>(core);
+  grant_stack &grants = m_grants[core_idx];
   if (grants.depth == 0)
     return;
-  grant_charge();
+  grant_charge_on(core_idx);
   if (grants.frames[grants.depth - 1].remaining != 0) {
     arm_timer();
     return;
   }
   // ★借り手がオブジェクトランドのハンドラまたはカーネルオブジェクトの中に居るなら、
   //   共有台帳等の同期保護のため取り上げを見送る (指摘3: execution role)。
-  if (current_thread().current_kind() == (uint32_t)object_kind::HANDLER ||
-      current_thread().current_kind() == (uint32_t)object_kind::KERNEL_OBJECT) {
+  if (current_thread_for(*this, core).current_kind() == (uint32_t)object_kind::HANDLER ||
+      current_thread_for(*this, core).current_kind() == (uint32_t)object_kind::KERNEL_OBJECT) {
     grants.frames[grants.depth - 1].remaining = GRANT_RETRY_CYCLES;
     arm_timer();
     return;

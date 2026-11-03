@@ -197,6 +197,61 @@ int main() {
   observe_svc_breakdown_probe(probes, 1, 0, 1, 2, 0, 0, 60);
   CHECK(probes.invalid && !probes.active && probes.hits[1] == 0);
 
+  // FPCA invariant assertions: valid fpca=0, valid fpca=1, and all mismatches fail closed.
+  u_cost_fp_invariants_input_t valid_fp0{
+      .expected_fpca = 0,
+      .priv_meth_base = 0, .u_meth_base_before = 0, .u_meth_base_after = 0,
+      .priv_meth_meas = 0, .u_meth_meas_before = 0, .u_meth_meas_after = 0,
+      .priv_desc_base = 0, .u_desc_base_before = 0, .u_desc_base_after = 0,
+      .priv_desc_meas = 0, .u_desc_meas_before = 0, .u_desc_meas_after = 0,
+  };
+  CHECK(evaluate_u_cost_fp_invariants(valid_fp0) == true);
+
+  u_cost_fp_invariants_input_t valid_fp1{
+      .expected_fpca = 1,
+      .priv_meth_base = 1, .u_meth_base_before = 1, .u_meth_base_after = 1,
+      .priv_meth_meas = 1, .u_meth_meas_before = 1, .u_meth_meas_after = 1,
+      .priv_desc_base = 1, .u_desc_base_before = 1, .u_desc_base_after = 1,
+      .priv_desc_meas = 1, .u_desc_meas_before = 1, .u_desc_meas_after = 1,
+  };
+  CHECK(evaluate_u_cost_fp_invariants(valid_fp1) == true);
+
+  auto bad_fp_pmb = valid_fp0; bad_fp_pmb.priv_meth_base = 1;
+  CHECK(evaluate_u_cost_fp_invariants(bad_fp_pmb) == false);
+
+  auto bad_fp_umb_b = valid_fp0; bad_fp_umb_b.u_meth_base_before = 1;
+  CHECK(evaluate_u_cost_fp_invariants(bad_fp_umb_b) == false);
+
+  auto bad_fp_umb_a = valid_fp0; bad_fp_umb_a.u_meth_base_after = 1;
+  CHECK(evaluate_u_cost_fp_invariants(bad_fp_umb_a) == false);
+
+  auto bad_fp_pmm = valid_fp0; bad_fp_pmm.priv_meth_meas = 1;
+  CHECK(evaluate_u_cost_fp_invariants(bad_fp_pmm) == false);
+
+  auto bad_fp_umm_b = valid_fp0; bad_fp_umm_b.u_meth_meas_before = 1;
+  CHECK(evaluate_u_cost_fp_invariants(bad_fp_umm_b) == false);
+
+  auto bad_fp_umm_a = valid_fp0; bad_fp_umm_a.u_meth_meas_after = 1;
+  CHECK(evaluate_u_cost_fp_invariants(bad_fp_umm_a) == false);
+
+  auto bad_fp_pdb = valid_fp0; bad_fp_pdb.priv_desc_base = 1;
+  CHECK(evaluate_u_cost_fp_invariants(bad_fp_pdb) == false);
+
+  auto bad_fp_udb_b = valid_fp0; bad_fp_udb_b.u_desc_base_before = 1;
+  CHECK(evaluate_u_cost_fp_invariants(bad_fp_udb_b) == false);
+
+  auto bad_fp_udb_a = valid_fp0; bad_fp_udb_a.u_desc_base_after = 1;
+  CHECK(evaluate_u_cost_fp_invariants(bad_fp_udb_a) == false);
+
+  auto bad_fp_pdm = valid_fp0; bad_fp_pdm.priv_desc_meas = 1;
+  CHECK(evaluate_u_cost_fp_invariants(bad_fp_pdm) == false);
+
+  auto bad_fp_udm_b = valid_fp0; bad_fp_udm_b.u_desc_meas_before = 1;
+  CHECK(evaluate_u_cost_fp_invariants(bad_fp_udm_b) == false);
+
+  auto bad_fp_udm_a = valid_fp0; bad_fp_udm_a.u_desc_meas_after = 1;
+  CHECK(evaluate_u_cost_fp_invariants(bad_fp_udm_a) == false);
+
   printf("[PASS] test_u_cost_invariants: invariants, corrected counters, and SVC probe state verified (always-on CHECK)\n");
   return 0;
 }

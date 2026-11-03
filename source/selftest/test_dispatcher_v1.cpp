@@ -802,7 +802,7 @@ static void run_dispatcher_tests() {
 #if defined(SHIZUKU_LEAN_LEDGER)
     // SHIZUKU_LEAN_LEDGER の版: user stack にヘッダは無い。戻りの権威は台帳の項目 (特権メモリ) に 1 つ。
     const auto &rec = thread.ledger[0];
-    assert(rec.ret_sp == reinterpret_cast<uintptr_t>(frame) + sizeof(KERNEL::FRAME));
+    assert(rec.caller_sp() == reinterpret_cast<uintptr_t>(frame) + sizeof(KERNEL::FRAME));
     assert(rec.prev_call == 0 && rec.ret_pc == A_PC && rec.ret_privileged == 1);
     assert(rec.generation == 0);
     assert(thread.call_stack.call_top == 1 && thread.call_stack.call_count == 1);
@@ -1877,12 +1877,12 @@ static void run_dispatcher_tests() {
 #if defined(SHIZUKU_LEAN_LEDGER)
       // 戻りの権威は台帳の項目: 段 i の caller の再開点 (pc・sp) と、ひとつ外側の call 段への鎖 (prev_call)。
       const auto &rec = thread.ledger[i];
-      headers[i] = rec.ret_sp;
-      assert(rec.ret_sp == reinterpret_cast<uintptr_t>(cur) + sizeof(KERNEL::FRAME));
+      headers[i] = rec.caller_sp();
+      assert(rec.caller_sp() == reinterpret_cast<uintptr_t>(cur) + sizeof(KERNEL::FRAME));
       assert(rec.prev_call == i && rec.ret_pc == A_PC + 0x10 * i);
       assert(thread.call_stack.call_top == i + 1);
       // 各段の caller の再開点は前の段の再開点より下 (スタックは下へ伸びる)。
-      assert(i == 0 || rec.ret_sp < thread.ledger[i - 1].ret_sp);
+      assert(i == 0 || rec.caller_sp() < thread.ledger[i - 1].caller_sp());
       (void)headers;
 #else
       headers[i] = thread.call_stack.top;
