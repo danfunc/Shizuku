@@ -75,7 +75,7 @@ SHIZUKU_U_COST_CODE __attribute__((naked)) uintptr_t u_cost_child_worker(uintptr
 
 // These two probes stay inside the allowed code window, then deliberately cross it.
 SHIZUKU_U_COST_CODE __attribute__((naked)) void u_cost_probe_code_access() {
-  asm volatile(".syntax unified\n.thumb\nldr r0, =u_cost_denied_code\nbx r0\n");
+  asm volatile(".syntax unified\n.thumb\nldr r0, =u_cost_denied_code\nbx r0\n.ltorg\n");
 }
 
 SHIZUKU_U_COST_CODE __attribute__((naked)) void u_cost_probe_data_access() {
@@ -85,7 +85,8 @@ SHIZUKU_U_COST_CODE __attribute__((naked)) void u_cost_probe_data_access() {
       ".global u_cost_probe_data_fault_pc\n"
       "u_cost_probe_data_fault_pc:\n"
       "ldr r0, [r0]\n"
-      "bx lr\n");
+      "bx lr\n"
+      ".ltorg\n");
 }
 
 // Registered only after timing so the measured child worker stays two instructions.
