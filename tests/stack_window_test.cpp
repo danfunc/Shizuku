@@ -977,6 +977,134 @@ static void test_gate_false_no_window_no_zero() {
   (void)kobj;
 }
 
+// ===========================================================================
+// M callee は窓を持たない不変条件 (win_span[depth] == 0)、cur_win は U の入場・戻りでしか動かない
+//   (U -> M -> U2 -> M -> U の入れ子でも、M 段を戻るとき cur_win が U caller の窓のまま)
+// ===========================================================================
+static void test_m_callee_leaves_window_state_untouched() {
+  test_fake_arch::reset();
+  mock_kernel kernel{};
+  mock_kobj kobj{};
+  mock_context context{};
+  mock_kernel::THREAD thread{};
+  mock_kernel::THREAD::call_ledger_entry ledger_mem[12]{};
+  thread.ledger = ledger_mem;
+  thread.ledger_capacity = 12;
+  thread.base_object = 1;
+
+  alignas(16) static uint8_t stack_mem[0x4000];
+  const uintptr_t lo = reinterpret_cast<uintptr_t>(stack_mem);
+  const uintptr_t hi = lo + sizeof(stack_mem);
+  thread.set_stack_bounds(lo, hi);
+  const uintptr_t full_lo = thread.stk.cur_win_lo;
+  const uintptr_t full_hi = thread.stk.cur_win_hi;
+
+  mock_kobj::callee_view view_u{3, 0, 0, shizuku::object_kind::PLAIN, false, 0, 0, 1};
+  mock_kobj::callee_view view_m{4, 0, 0, shizuku::object_kind::PLAIN, true, 0, 0, 1};
+
+  // (1) M -> M: 窓を開かず、cur_win も applied も zeroed も動かない。win_span は全段 0 のまま。
+  context.privileged = true;
+  context.user_sp = lo + 0x3000u;
+  for (int i = 0; i < 3; ++i) {
+    auto e = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
+        kernel, thread, context, view_m, 0x42004000u, mock_kernel::LEDGER_CALL);
+    assert(e == shizuku::kernel_error::OK);
+    assert(thread.call_stack.depth == static_cast<uint32_t>(i + 1));
+    assert(thread.win_span[i] == 0);
+    assert(thread.stk.cur_win_lo == full_lo && thread.stk.cur_win_hi == full_hi);
+  }
+  assert(test_fake_arch::applied_windows.empty());
+  for (int i = 0; i < 3; ++i) {
+    mock_frame *f = nullptr;
+    assert((shizuku::native::pop_in_place<mock_kernel, mock_kobj>(kobj, thread, context, f, true, false)));
+    assert(thread.stk.cur_win_lo == full_lo && thread.stk.cur_win_hi == full_hi);
+  }
+  assert(thread.call_stack.depth == 0);
+  assert(test_fake_arch::zeroed_windows.empty());
+  assert(test_fake_arch::applied_windows.empty());
+
+  auto enter = [&](const mock_kobj::callee_view &v, uintptr_t pc) {
+    return shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
+        kernel, thread, context, v, pc, mock_kernel::LEDGER_CALL);
+  };
+  // (2) U1 -> M -> U2。U2 を M へ戻した後、M を U1 へ戻しても cur_win は U1 の窓。
+  context.privileged = false;
+  context.user_sp = lo + 0x3000u;
+  assert(enter(view_u, 0x42001000u) == shizuku::kernel_error::OK);
+  const auto w1 = thread.window_at(0);
+  assert(w1.is_valid() && thread.stk.cur_win_lo == w1.lo && thread.stk.cur_win_hi == w1.hi);
+
+  context.user_sp = w1.lo + 0x80u; // U1 が走っている sp
+  const size_t applied_after_u1 = test_fake_arch::applied_windows.size();
+  assert(enter(view_m, 0x42004000u) == shizuku::kernel_error::OK);
+  assert(thread.win_span[1] == 0); // M 入場後も 0
+  assert(thread.stk.cur_win_lo == w1.lo && thread.stk.cur_win_hi == w1.hi);
+  assert(test_fake_arch::applied_windows.size() == applied_after_u1);
+
+  context.user_sp = lo + 0x1000u; // M が走っている sp (thread stack の内側)
+  assert(enter(view_u, 0x42002000u) == shizuku::kernel_error::OK);
+  const auto w2 = thread.window_at(2);
+  assert(w2.is_valid() && w2.hi == lo + 0x1000u);
+  assert(thread.stk.cur_win_lo == w2.lo && thread.stk.cur_win_hi == w2.hi);
+
+  mock_frame *f = nullptr;
+  // U2 -> M へ戻る: U2 の窓だけをゼロ化し、cur_win は最内の U 窓 = U1 の窓へ戻る
+  assert((shizuku::native::pop_in_place<mock_kernel, mock_kobj>(kobj, thread, context, f, true, false)));
+  assert(thread.win_span[2] == 0);
+  assert(test_fake_arch::zeroed_windows.size() == 1);
+  assert(test_fake_arch::zeroed_windows[0].lo == w2.lo && test_fake_arch::zeroed_windows[0].hi == w2.hi);
+  assert(thread.stk.cur_win_lo == w1.lo && thread.stk.cur_win_hi == w1.hi);
+
+  // M -> U1 へ戻る: 窓関連は何もしない (ゼロ化なし・apply なし・win_span 不変)、cur_win は U1 の窓のまま
+  const size_t applied_before_m_pop = test_fake_arch::applied_windows.size();
+  assert((shizuku::native::pop_in_place<mock_kernel, mock_kobj>(kobj, thread, context, f, true, false)));
+  assert(thread.win_span[1] == 0);
+  assert(test_fake_arch::zeroed_windows.size() == 1);
+  assert(test_fake_arch::applied_windows.size() == applied_before_m_pop);
+  assert(thread.stk.cur_win_lo == w1.lo && thread.stk.cur_win_hi == w1.hi);
+
+  // U1 を戻す: U1 の窓をゼロ化し、cur_win は stack 全域へ
+  assert((shizuku::native::pop_in_place<mock_kernel, mock_kobj>(kobj, thread, context, f, true, false)));
+  assert(test_fake_arch::zeroed_windows.size() == 2);
+  assert(test_fake_arch::zeroed_windows[1].lo == w1.lo && test_fake_arch::zeroed_windows[1].hi == w1.hi);
+  assert(thread.stk.cur_win_lo == full_lo && thread.stk.cur_win_hi == full_hi);
+  for (uint32_t d = 0; d < 3; ++d)
+    assert(thread.win_span[d] == 0);
+  assert(thread.call_stack.depth == 0);
+}
+
+// MAX_STACK_WINDOWS 以上の段 (dispatch 段など) を戻すとき win_span を範囲外で読まない。
+static void test_pop_beyond_window_table_is_safe() {
+  test_fake_arch::reset();
+  mock_kernel kernel{};
+  mock_kobj kobj{};
+  mock_context context{};
+  mock_kernel::THREAD thread{};
+  constexpr uint32_t cap = mock_kernel::THREAD::MAX_STACK_WINDOWS + 6;
+  std::vector<mock_kernel::THREAD::call_ledger_entry> ledger_mem(cap);
+  thread.ledger = ledger_mem.data();
+  thread.ledger_capacity = cap;
+  thread.base_object = 1;
+  alignas(16) static uint8_t stack_mem[0x1000];
+  const uintptr_t lo = reinterpret_cast<uintptr_t>(stack_mem);
+  thread.set_stack_bounds(lo, lo + sizeof(stack_mem));
+
+  const uint32_t top = mock_kernel::THREAD::MAX_STACK_WINDOWS + 1u; // 段 index MAX は表の外
+  for (uint32_t d = 0; d < top; ++d) {
+    ledger_mem[d].via = mock_kernel::LEDGER_DISPATCH;
+    ledger_mem[d].object = 1;
+    ledger_mem[d].ret_privileged = 1;
+    ledger_mem[d].prev_call = 0;
+  }
+  thread.call_stack.depth = top;
+  context.privileged = true;
+  mock_frame *f = nullptr;
+  assert((shizuku::native::pop_in_place<mock_kernel, mock_kobj>(kobj, thread, context, f, true, false)));
+  assert(thread.call_stack.depth == top - 1u);
+  assert(test_fake_arch::zeroed_windows.empty());
+  (void)kernel;
+}
+
 int main() {
   test_open_window();
   test_extend_window();
@@ -992,5 +1120,7 @@ int main() {
   test_set_stack_bounds_alignment();
   test_m_caller_u_callee_window();
   test_gate_false_no_window_no_zero();
+  test_m_callee_leaves_window_state_untouched();
+  test_pop_beyond_window_table_is_safe();
   return 0;
 }

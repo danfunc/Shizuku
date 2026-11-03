@@ -308,6 +308,15 @@ template <typename CONTEXT> struct thread {
     }
   }
   void set_user_stack(uintptr_t lo, uintptr_t hi) noexcept { set_stack_bounds(lo, hi); }
+  // 台帳を作り直すとき (thread の再利用) に窓の記帳を空にする。win_span[d] == 0 が
+  // 「M callee / dispatch 段」の不変条件なので、前の利用者の残りを持ち越さない。
+  void reset_windows() noexcept {
+    if constexpr (MAX_STACK_WINDOWS != 0) {
+      for (uint32_t d = 0; d < MAX_STACK_WINDOWS; ++d) win_span[d] = 0;
+      stk.cur_win_lo = stk.stack_lo;
+      stk.cur_win_hi = stk.stack_hi;
+    }
+  }
   call_ledger_entry *ledger = nullptr;
   uint32_t ledger_capacity = 0;
   uint32_t base_object = 0;

@@ -97,6 +97,7 @@ template <> void KERNEL::set_thread_ledger(
   thread.ledger = memory;
   thread.ledger_capacity = capacity;
   thread.call_stack = {};
+  thread.reset_windows();
   thread.base_object = object;
   thread.call_stack.base_object_generation = object_generation;
   thread.base_kind = kind;
