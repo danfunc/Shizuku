@@ -191,13 +191,14 @@ for label, next_label in (
     assert block.index('"  lw ra, 12(sp)\\n"', ecall_pos) > ecall_pos
     assert block.index('"  addi sp, sp, 16\\n"', ecall_pos) < block.rindex('"  ret\\n"')
 # U-to-U probe: ecall 通常 return / scrub で s0-s11, ra が消去されるため、
-# .Lprobe_u_to_u_call_fault は ecall 直後に stack から s0 を復元してから自窓 16(s0) をアクセスすること。
+# .Lprobe_u_to_u_call_fault は ecall 直後に自窓アドレス (u_mode_stage1_data_pool) を再ロードしてから
+# 16(s0) をアクセスすること (40(sp) にあるのは caller の s0 であり自窓アドレスではない)。
 u2u_fault = stage1.split('".Lprobe_u_to_u_call_fault:\\n"', 1)[1].split('".Lprobe_u_to_u_leak:\\n"', 1)[0]
 u2u_ecall = u2u_fault.index('"  ecall\\n"')
 u2u_s0_save = u2u_fault.index('"  sw s0, 40(sp)\\n"')
-u2u_s0_restore = u2u_fault.index('"  lw s0, 40(sp)\\n"', u2u_ecall)
+u2u_s0_reload = u2u_fault.index('"  la s0, u_mode_stage1_data_pool\\n"', u2u_ecall)
 u2u_s0_use = u2u_fault.index('"  lw t0, 16(s0)\\n"', u2u_ecall)
-assert u2u_s0_save < u2u_ecall < u2u_s0_restore < u2u_s0_use
+assert u2u_s0_save < u2u_ecall < u2u_s0_reload < u2u_s0_use
 c5_src = (root / 'chips/esp32_c5/trap.cpp').read_text()
 assert c5_src.count('const auto *const entered = context;') == 3
 assert c5_src.count('if (context != entered) arch::scrub_on_switch(*context);') == 3
