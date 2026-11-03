@@ -52,6 +52,9 @@ extern volatile uintptr_t g_c6_probe_mfetch_target;
 extern volatile uintptr_t g_c6_probe_app_mmio_fault_pc;
 extern volatile uintptr_t g_c6_probe_app_driver_data_fault_pc;
 extern volatile uintptr_t g_c6_probe_driver_app_data_fault_pc;
+extern volatile uintptr_t g_c6_probe_below_stack_lo_pc;
+extern volatile uint32_t shizuku_c6_stack_extend_count;
+extern volatile uint32_t shizuku_c6_stack_overflow_fault_count;
 extern volatile uint32_t shizuku_c6_m_pma_diag[2];
 extern c6_stage1_object_bounds g_c6_stage1_u_bounds;
 extern c6_stage1_object_bounds g_c6_stage1_driver_bounds;
@@ -88,6 +91,7 @@ extern const char c6_stage1_probe_driver_mmio_insn_addr[];
 extern const char c6_stage1_probe_driver_app_data_fault_insn_addr[];
 extern const char c6_stage1_probe_mstore_iram_insn_addr[];
 extern const char c6_stage1_probe_mfetch_insn_addr[];
+extern const char c6_stage1_probe_below_stack_lo_insn_addr[];
 uintptr_t u_mode_probe_worker(uintptr_t cmd, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3);
 uintptr_t u_mode_driver_worker(uintptr_t cmd, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3);
 uintptr_t shizuku_c6_m_store_probe(uintptr_t target, uint32_t value);
@@ -166,6 +170,16 @@ asm(
     "  beq a0, t0, .Lprobe_call_driver_mmio\n"
     "  li t0, 19\n"
     "  beq a0, t0, .Lprobe_call_driver_app_data\n"
+    "  li t0, 27\n"
+    "  beq a0, t0, .Lprobe_reentrant_a_to_a\n"
+    "  li t0, 28\n"
+    "  beq a0, t0, .Lprobe_reentrant_a_b_a\n"
+    "  li t0, 29\n"
+    "  beq a0, t0, .Lprobe_stack_extend_below_k\n"
+    "  li t0, 30\n"
+    "  beq a0, t0, .Lprobe_write_below_stack_lo\n"
+    "  li t0, 31\n"
+    "  beq a0, t0, .Lprobe_callee_stack_residue\n"
     "  li a0, 0\n"
     "  ret\n"
     "\n"
@@ -715,6 +729,182 @@ asm(
     "  addi sp, sp, 48\n"
     "  ret\n"
     "\n"
+    ".Lprobe_reentrant_a_to_a:\n"
+    "  addi sp, sp, -32\n"
+    "  sw ra, 28(sp)\n"
+    "  sw s0, 24(sp)\n"
+    "  sw s1, 20(sp)\n"
+    "  bnez a1, .Lreentrant_a_child\n"
+    "  li t0, 0xAA01CAFE\n"
+    "  sw t0, 16(sp)\n"
+    "  la s0, u_mode_stage1_data_pool\n"
+    "  lw s1, 32(s0)\n"
+    "  li a0, 4\n"
+    "  mv a1, s1\n"
+    "  li a2, 0\n"
+    "  li a3, 27\n"
+    "  li a4, 1\n"
+    "  ecall\n"
+    "  li t2, 0x42\n"
+    "  bne a1, t2, .Lreentrant_a_fail_child\n"
+    "  lw t0, 16(sp)\n"
+    "  li t1, 0xAA01CAFE\n"
+    "  bne t0, t1, .Lreentrant_a_fail_stack\n"
+    "  li a0, 0\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Lreentrant_a_child:\n"
+    "  li t0, 0xAA02BEEF\n"
+    "  sw t0, 16(sp)\n"
+    "  li a0, 0x42\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Lreentrant_a_fail_child:\n"
+    "  li a0, 0xDEAD0027\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Lreentrant_a_fail_stack:\n"
+    "  li a0, 0xDEAD0028\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    "\n"
+    ".Lprobe_reentrant_a_b_a:\n"
+    "  addi sp, sp, -32\n"
+    "  sw ra, 28(sp)\n"
+    "  sw s0, 24(sp)\n"
+    "  sw s1, 20(sp)\n"
+    "  bnez a1, .Lreentrant_aba_child_a2\n"
+    "  li t0, 0xABA1CAFE\n"
+    "  sw t0, 16(sp)\n"
+    "  la s0, u_mode_stage1_data_pool\n"
+    "  lw s1, 20(s0)\n"
+    "  li a0, 4\n"
+    "  mv a1, s1\n"
+    "  li a2, 0\n"
+    "  li a3, 5\n"
+    "  li a4, 0\n"
+    "  ecall\n"
+    "  li t2, 0x42\n"
+    "  bne a1, t2, .Lreentrant_aba_fail_driver\n"
+    "  lw t0, 16(sp)\n"
+    "  li t1, 0xABA1CAFE\n"
+    "  bne t0, t1, .Lreentrant_aba_fail_stack_a1\n"
+    "  li a0, 0\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Lreentrant_aba_child_a2:\n"
+    "  li t0, 0xABA2BEEF\n"
+    "  sw t0, 16(sp)\n"
+    "  li a0, 0x42\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Lreentrant_aba_fail_driver:\n"
+    "  li a0, 0xDEAD0029\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Lreentrant_aba_fail_stack_a1:\n"
+    "  li a0, 0xDEAD002A\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    "\n"
+    ".Lprobe_stack_extend_below_k:\n"
+    "  addi sp, sp, -16\n"
+    "  sw ra, 12(sp)\n"
+    "  li t0, 0x57ACEC70\n"
+    "  sw t0, -512(sp)\n"
+    "  lw t1, -512(sp)\n"
+    "  bne t0, t1, .Lextend_fail\n"
+    "  li a0, 0\n"
+    "  lw ra, 12(sp)\n"
+    "  addi sp, sp, 16\n"
+    "  ret\n"
+    ".Lextend_fail:\n"
+    "  li a0, 0xDEAD002D\n"
+    "  lw ra, 12(sp)\n"
+    "  addi sp, sp, 16\n"
+    "  ret\n"
+    "\n"
+    ".Lprobe_write_below_stack_lo:\n"
+    "  addi sp, sp, -16\n"
+    "  sw ra, 12(sp)\n"
+    "  la t1, u_mode_stage1_data_pool\n"
+    "  lw a1, 36(t1)\n"
+    "  li t0, 0x0BAD57AC\n"
+    ".global c6_stage1_probe_below_stack_lo_insn_addr\n"
+    "c6_stage1_probe_below_stack_lo_insn_addr:\n"
+    "  sw t0, 0(a1)\n"
+    "  lw ra, 12(sp)\n"
+    "  addi sp, sp, 16\n"
+    "  ret\n"
+    "\n"
+    ".Lprobe_callee_stack_residue:\n"
+    "  addi sp, sp, -32\n"
+    "  sw ra, 28(sp)\n"
+    "  sw s0, 24(sp)\n"
+    "  sw s1, 20(sp)\n"
+    "  la s0, u_mode_stage1_data_pool\n"
+    "  lw s1, 20(s0)\n"
+    "  li a0, 4\n"
+    "  mv a1, s1\n"
+    "  li a2, 0\n"
+    "  li a3, 6\n"
+    "  li a4, 0\n"
+    "  ecall\n"
+    "  li t2, 0x42\n"
+    "  bne a1, t2, .Lresidue_fail_callee\n"
+    "  mv t0, sp\n"
+    "  addi t0, t0, -256\n"
+    "  mv t1, sp\n"
+    "1:\n"
+    "  lw t2, 0(t0)\n"
+    "  bnez t2, .Lresidue_fail_nonzero\n"
+    "  addi t0, t0, 4\n"
+    "  bltu t0, t1, 1b\n"
+    "  li a0, 0\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Lresidue_fail_callee:\n"
+    "  li a0, 0xDEAD002E\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Lresidue_fail_nonzero:\n"
+    "  mv a0, t2\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    "\n"
     ".size u_mode_probe_worker, .-u_mode_probe_worker\n"
     "\n"
     ".balign 4\n"
@@ -729,6 +919,10 @@ asm(
     "  beq a0, t0, .Ldriver_probe_echo\n"
     "  li t0, 4\n"
     "  beq a0, t0, .Ldriver_probe_leak\n"
+    "  li t0, 5\n"
+    "  beq a0, t0, .Ldriver_probe_reentrant_b_to_a\n"
+    "  li t0, 6\n"
+    "  beq a0, t0, .Ldriver_probe_write_stack_pattern\n"
     "  li a0, 0\n"
     "  ret\n"
     "\n"
@@ -784,6 +978,69 @@ asm(
     "c6_stage1_probe_driver_app_data_fault_insn_addr:\n"
     "  lw a0, 0(a1)\n"
     "  ret\n"
+    "\n"
+    ".Ldriver_probe_reentrant_b_to_a:\n"
+    "  addi sp, sp, -32\n"
+    "  sw ra, 28(sp)\n"
+    "  sw s0, 24(sp)\n"
+    "  sw s1, 20(sp)\n"
+    "  li t0, 0xABB1F00D\n"
+    "  sw t0, 16(sp)\n"
+    "  la s0, u_mode_driver_data_pool\n"
+    "  lw s1, 12(s0)\n"
+    "  li a0, 4\n"
+    "  mv a1, s1\n"
+    "  li a2, 0\n"
+    "  li a3, 28\n"
+    "  li a4, 2\n"
+    "  ecall\n"
+    "  li t2, 0x42\n"
+    "  bne a1, t2, .Ldriver_aba_fail_a2\n"
+    "  lw t0, 16(sp)\n"
+    "  li t1, 0xABB1F00D\n"
+    "  bne t0, t1, .Ldriver_aba_fail_stack_b\n"
+    "  li a0, 0x42\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Ldriver_aba_fail_a2:\n"
+    "  li a0, 0xDEAD002B\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Ldriver_aba_fail_stack_b:\n"
+    "  li a0, 0xDEAD002C\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    "\n"
+    ".Ldriver_probe_write_stack_pattern:\n"
+    "  li t0, 0xA5A50004\n"
+    "  sw t0, -4(sp)\n"
+    "  li t0, 0xA5A50020\n"
+    "  sw t0, -32(sp)\n"
+    "  li t0, 0xA5A50040\n"
+    "  sw t0, -64(sp)\n"
+    "  li t0, 0xA5A50060\n"
+    "  sw t0, -96(sp)\n"
+    "  li t0, 0xA5A50080\n"
+    "  sw t0, -128(sp)\n"
+    "  li t0, 0xA5A500A0\n"
+    "  sw t0, -160(sp)\n"
+    "  li t0, 0xA5A500C0\n"
+    "  sw t0, -192(sp)\n"
+    "  li t0, 0xA5A500E0\n"
+    "  sw t0, -224(sp)\n"
+    "  li t0, 0xA5A50100\n"
+    "  sw t0, -256(sp)\n"
+    "  li a0, 0x42\n"
+    "  ret\n"
     ".size u_mode_driver_worker, .-u_mode_driver_worker\n"
     "\n"
     ".balign 16\n"
@@ -813,6 +1070,7 @@ const char c6_stage1_probe_app_mmio_fault_insn_addr[] = "";
 const char c6_stage1_probe_app_driver_data_fault_insn_addr[] = "";
 const char c6_stage1_probe_driver_mmio_insn_addr[] = "";
 const char c6_stage1_probe_driver_app_data_fault_insn_addr[] = "";
+const char c6_stage1_probe_below_stack_lo_insn_addr[] = "";
 uintptr_t u_mode_probe_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
   if (cmd == 17) {
     const auto res = ARCH::syscall(
@@ -834,6 +1092,12 @@ uintptr_t u_mode_probe_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
     data_pool_words[17] = 0;    // a1
     for (int i = 18; i < 44; ++i) data_pool_words[i] = 0;
     return 0;
+  }
+  if (cmd == 27 || cmd == 28 || cmd == 29 || cmd == 31) {
+    return 0;
+  }
+  if (cmd == 30) {
+    return 0xE00Fu;
   }
   return 0;
 }
@@ -1195,10 +1459,14 @@ void c6_stage1_safety() {
   data_pool_words[3] = reinterpret_cast<uintptr_t>(u_mode_driver_data_pool);
   data_pool_words[5] = OBJECT_STAGE1_DRIVER;
   data_pool_words[6] = METHOD_STAGE1_PROBE;
+  data_pool_words[8] = OBJECT_STAGE1_PROBE;
+  data_pool_words[9] = reinterpret_cast<uintptr_t>(u_mode_stage1_stack) - 4u;
 
   auto *drv_pool_words = reinterpret_cast<volatile uintptr_t *>(u_mode_driver_data_pool);
   drv_pool_words[0] = target_mmio_addr;
   drv_pool_words[1] = reinterpret_cast<uintptr_t>(u_mode_stage1_data_pool);
+  drv_pool_words[3] = OBJECT_STAGE1_PROBE;
+  drv_pool_words[4] = METHOD_STAGE1_PROBE;
 
   // 1. オブジェクト登録
   // PROBE は純粋な非特権 (OBJECT_UNPRIVILEGED) として登録 (kernel_role は付与しない)。
@@ -1733,6 +2001,68 @@ void c6_stage1_safety() {
   const bool t0_leaks_kstack = (cap_t0 >= kstack_begin && cap_t0 <= kstack_end);
   record_check("stage1: U-to-U return t0 does not leak kernel stack address",
                !t0_leaks_kstack && cap_t0 == 0, cap_t0, 0);
+
+  // 段 C-1: スタック窓の契約検証 (再入・伸長・不可視・隔離)
+  // (a) 再入: A→A (PROBE が自分の method を呼ぶ)
+  const auto reentrant_a_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      27 /* cmd=27: reentrant A-to-A */,
+      0 /* depth=0 */);
+  record_check("stage1: reentrant A-to-A keeps each activation stack intact",
+               reentrant_a_res.error == 0 && reentrant_a_res.value == 0,
+               reentrant_a_res.error == 0 ? reentrant_a_res.value : reentrant_a_res.error, 0);
+
+  // (a) 再入: A→B→A (PROBE → DRIVER → PROBE 戻り呼出し)
+  const auto reentrant_aba_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      28 /* cmd=28: reentrant A-to-B-to-A */,
+      0 /* depth=0 */);
+  record_check("stage1: reentrant A-to-B-to-A keeps each activation stack intact",
+               reentrant_aba_res.error == 0 && reentrant_aba_res.value == 0,
+               reentrant_aba_res.error == 0 ? reentrant_aba_res.value : reentrant_aba_res.error, 0);
+
+  // (b) 窓伸長: callee が窓の下 K を超えて (-512) へ書き正常に戻る
+  const uint32_t extend_cnt_before = shizuku_c6_stack_extend_count;
+  const auto extend_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      29 /* cmd=29: extend below K */);
+  const uint32_t extend_cnt_after = shizuku_c6_stack_extend_count;
+  record_check("stage1: callee stack window extends below K and returns normally",
+               extend_res.error == 0 && extend_res.value == 0 && extend_cnt_after > extend_cnt_before,
+               extend_cnt_after, extend_cnt_before + 1);
+
+  // (b) 窓伸長: thread の stack_lo を越える書込みは genuine overflow fault になる
+  g_c6_probe_below_stack_lo_pc = reinterpret_cast<uintptr_t>(&c6_stage1_probe_below_stack_lo_insn_addr);
+  const auto overflow_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      30 /* cmd=30: write below thread stack_lo */);
+  g_c6_probe_below_stack_lo_pc = 0;
+  record_check("stage1: write below thread stack_lo faults (genuine overflow)",
+               overflow_res.error == 0 && overflow_res.value == 0xE00Fu && shizuku_c6_stack_overflow_fault_count > 0,
+               overflow_res.value, 0xE00Fu);
+
+  // (c) 残り値の不可視: callee が窓全体にパターンを書いて戻った後、base が [sp-256, sp) 全語 0 を確認
+  const auto residue_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      31 /* cmd=31: callee stack residue invisible */);
+  record_check("stage1: callee stack residue invisible to caller (window zeroed on return)",
+               residue_res.error == 0 && residue_res.value == 0,
+               residue_res.value, 0);
+
+  // (e) caller 枠不可視: callee が自分の窓の上端 (>= window top) を読む/書くと access fault
+  record_check("stage1: callee cannot access caller frame (>= window top)",
+               shizuku_c6_u_mode_diag[7] > 0 && shizuku_c6_u_mode_diag[9] > 0,
+               shizuku_c6_u_mode_diag[7] + shizuku_c6_u_mode_diag[9], 2);
 #endif
 
   BOARD::diag_printf("[C6_STAGE1] stage 1 verification complete: passed=%lu failed=%lu\n",

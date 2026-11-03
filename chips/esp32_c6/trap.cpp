@@ -73,6 +73,9 @@ volatile uintptr_t g_c6_probe_mfetch_target;
 volatile uintptr_t g_c6_probe_app_mmio_fault_pc;
 volatile uintptr_t g_c6_probe_app_driver_data_fault_pc;
 volatile uintptr_t g_c6_probe_driver_app_data_fault_pc;
+volatile uintptr_t g_c6_probe_below_stack_lo_pc;
+volatile uint32_t shizuku_c6_stack_extend_count = 0;
+volatile uint32_t shizuku_c6_stack_overflow_fault_count = 0;
 volatile uint32_t shizuku_c6_m_pma_diag[2];
 #endif
 using c6_stage1_object_bounds = shizuku::chips::esp32_c6::c6_stage1_object_bounds;
@@ -930,6 +933,7 @@ bool shizuku_c6_handle_fault(arch::exception_frame_t *frame) {
             shizuku::chips::esp32_c6::pmp_controller::apply_stack_window(new_win.lo, new_win.hi);
             s_pmp_shadow.win_lo = new_win.lo;
             s_pmp_shadow.win_hi = new_win.hi;
+            shizuku_c6_stack_extend_count = shizuku_c6_stack_extend_count + 1;
             // mepc を進めず再実行 (同じ命令を再試行)
             return true;
           }
@@ -1021,6 +1025,12 @@ bool shizuku_c6_handle_fault(arch::exception_frame_t *frame) {
     if (g_c6_probe_ustore_code_pc != 0 && frame->mepc == g_c6_probe_ustore_code_pc) {
       shizuku_c6_u_mode_diag[10] = shizuku_c6_u_mode_diag[10] + 1;
       frame->a0 = 0xE00Au;
+      frame->mepc += 4;
+      return true;
+    }
+    if (g_c6_probe_below_stack_lo_pc != 0 && frame->mepc == g_c6_probe_below_stack_lo_pc) {
+      shizuku_c6_stack_overflow_fault_count = shizuku_c6_stack_overflow_fault_count + 1;
+      frame->a0 = 0xE00Fu;
       frame->mepc += 4;
       return true;
     }
