@@ -485,6 +485,130 @@ static void test_max_stack_windows_exceeded_rejection() {
   assert(thread.call_stack.depth == mock_kernel::THREAD::MAX_STACK_WINDOWS);
 }
 
+// ===========================================================================
+// Test pop_in_place does not copy empty dispatch window to cur_win
+// ===========================================================================
+static void test_pop_in_place_with_dispatch_caller() {
+  test_fake_arch::reset();
+  mock_kernel kernel{};
+  mock_kobj kobj{};
+  mock_kernel::THREAD thread{};
+  mock_context context{};
+
+  shizuku::templates::thread<mock_context>::call_ledger_entry ledger_mem[8]{};
+  thread.ledger = ledger_mem;
+  thread.ledger_capacity = 8;
+  thread.base_object = 1;
+
+  alignas(16) static uint8_t dummy_user_stack[0x4000];
+  const uintptr_t stack_lo = reinterpret_cast<uintptr_t>(dummy_user_stack);
+  const uintptr_t stack_hi = stack_lo + sizeof(dummy_user_stack);
+  thread.set_user_stack(stack_lo, stack_hi);
+
+  // Case 1: Base (depth 0) -> Dispatch (depth 1, win={}) -> Call (depth 2)
+  thread.ledger[0].via = mock_kernel::LEDGER_DISPATCH;
+  thread.ledger[0].object = 1;
+  thread.win[0] = shizuku::stack_window{}; // Dispatch activation has empty window
+  thread.call_stack.depth = 1;
+
+  context.user_sp = stack_hi - 0x200u;
+  mock_kobj::callee_view view{2, 0, 0, shizuku::object_kind::PLAIN, false, 0, 0, 1};
+  auto err = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
+      kernel, thread, context, view, 0x1000u, 1);
+  assert(err == shizuku::kernel_error::OK);
+  assert(thread.call_stack.depth == 2);
+  assert(thread.win[1].is_valid());
+
+  // Pop Call activation (returning to Dispatch activation)
+  mock_frame *res_frame = nullptr;
+  bool ok_pop = shizuku::native::pop_in_place<mock_kernel, mock_kobj>(
+      kobj, thread, context, res_frame, true, false);
+  assert(ok_pop);
+  assert(thread.call_stack.depth == 1);
+  // cur_win must NOT be {0, 0}; it must fall back to base thread stack [stack_lo, stack_hi)
+  assert(thread.cur_win_lo == stack_lo);
+  assert(thread.cur_win_hi == stack_hi);
+
+  // Case 2: Call A (depth 1) -> Dispatch (depth 2, win={}) -> Call B (depth 3)
+  thread.call_stack.depth = 0;
+  context.user_sp = stack_hi - 0x100u;
+  assert((shizuku::native::enter_in_place<mock_kernel, mock_kobj>(kernel, thread, context, view, 0x1000u, 1) == shizuku::kernel_error::OK));
+  const auto win_call_a = thread.win[0];
+  assert(win_call_a.is_valid());
+
+  // Dispatch activation pushed at depth 1
+  thread.ledger[1].via = mock_kernel::LEDGER_DISPATCH;
+  thread.win[1] = shizuku::stack_window{};
+  thread.call_stack.depth = 2;
+
+  // Call B pushed at depth 2
+  context.user_sp = win_call_a.hi - 160u;
+  assert((shizuku::native::enter_in_place<mock_kernel, mock_kobj>(kernel, thread, context, view, 0x1000u, 1) == shizuku::kernel_error::OK));
+  assert(thread.call_stack.depth == 3);
+
+  // Pop Call B (returning to Dispatch activation)
+  res_frame = nullptr;
+  ok_pop = shizuku::native::pop_in_place<mock_kernel, mock_kobj>(
+      kobj, thread, context, res_frame, true, false);
+  assert(ok_pop);
+  assert(thread.call_stack.depth == 2);
+  // cur_win must recover outer Call A window rather than {0, 0}
+  assert(thread.cur_win_lo == win_call_a.lo);
+  assert(thread.cur_win_hi == win_call_a.hi);
+}
+
+// ===========================================================================
+// Test window extension semantics during fault
+// ===========================================================================
+static void test_window_extension_fault_semantics() {
+  test_fake_arch::reset();
+  mock_kernel kernel{};
+  mock_kernel::THREAD thread{};
+  mock_context context{};
+
+  shizuku::templates::thread<mock_context>::call_ledger_entry ledger_mem[8]{};
+  thread.ledger = ledger_mem;
+  thread.ledger_capacity = 8;
+  thread.base_object = 1;
+
+  const uintptr_t stack_lo = 0x20000000u;
+  const uintptr_t stack_hi = 0x20004000u;
+  thread.set_user_stack(stack_lo, stack_hi);
+
+  // depth == 0 (base): cannot extend window
+  assert(thread.call_stack.depth == 0);
+  assert(thread.cur_win_lo == stack_lo);
+  assert(thread.cur_win_hi == stack_hi);
+
+  // Enter Call activation: win = [0x20003E00, 0x20003F00)
+  context.user_sp = stack_hi - 0x100u;
+  mock_kobj::callee_view view{2, 0, 0, shizuku::object_kind::PLAIN, false, 0, 0, 1};
+  assert((shizuku::native::enter_in_place<mock_kernel, mock_kobj>(kernel, thread, context, view, 0x1000u, 1) == shizuku::kernel_error::OK));
+  assert(thread.call_stack.depth == 1);
+  const auto initial_win = thread.win[0];
+  assert(initial_win.is_valid());
+
+  // Fault in [stack_lo, win.lo): window extends down
+  const uintptr_t fault_addr = initial_win.lo - 64u;
+  assert(fault_addr >= stack_lo && fault_addr < initial_win.lo);
+  const auto extended_win = shizuku::extend_window(initial_win, fault_addr, stack_lo);
+  assert(extended_win.is_valid());
+  assert(extended_win.lo <= fault_addr);
+  assert(extended_win.hi == initial_win.hi);
+
+  // Fault < stack_lo: out of bounds, rejected
+  assert(!shizuku::extend_window(initial_win, stack_lo - 4u, stack_lo).is_valid());
+
+  // Fault >= win.hi: out of bounds, rejected
+  assert(!shizuku::extend_window(initial_win, initial_win.hi, stack_lo).is_valid());
+  assert(!shizuku::extend_window(initial_win, initial_win.hi + 16u, stack_lo).is_valid());
+
+  // Dispatch activation has empty window: extend_window on {} must fail
+  const shizuku::stack_window dispatch_win{};
+  assert(!dispatch_win.is_valid());
+  assert(!shizuku::extend_window(dispatch_win, fault_addr, stack_lo).is_valid());
+}
+
 int main() {
   test_open_window();
   test_extend_window();
@@ -494,5 +618,7 @@ int main() {
   test_ledger_unwind_in_place();
   test_insufficient_stack_rejection();
   test_max_stack_windows_exceeded_rejection();
+  test_pop_in_place_with_dispatch_caller();
+  test_window_extension_fault_semantics();
   return 0;
 }

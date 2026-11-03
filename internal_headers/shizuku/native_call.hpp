@@ -200,9 +200,13 @@ template <class K, class KObj>
       thread.win[depth - 1] = stack_window{};
     }
 
-    const auto caller_win = (depth > 1 && depth - 2 < thread.MAX_STACK_WINDOWS)
-        ? thread.win[depth - 2]
-        : stack_window{thread.stack_lo, thread.stack_hi};
+    stack_window caller_win{thread.stack_lo, thread.stack_hi};
+    for (int32_t d = static_cast<int32_t>(depth) - 2; d >= 0; --d) {
+      if (static_cast<uint32_t>(d) < thread.MAX_STACK_WINDOWS && thread.win[d].is_valid()) {
+        caller_win = thread.win[d];
+        break;
+      }
+    }
     thread.cur_win_lo = caller_win.lo;
     thread.cur_win_hi = caller_win.hi;
 

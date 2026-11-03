@@ -8,6 +8,7 @@
 #include "chips/esp32_c6/trap_api.hpp"
 #include "chips/esp32_c6/stop_capture.hpp"
 #include "chips/esp32_c6/pmp_c6.hpp"
+#include "shizuku/stack_window.hpp"
 
 #include <array>
 #include <cstddef>
@@ -908,6 +909,34 @@ bool shizuku_c6_handle_fault(arch::exception_frame_t *frame) {
   shizuku_c6_u_mode_diag[4] = frame->mcause;
   shizuku_c6_u_mode_diag[5] = frame->mepc;
   shizuku_c6_u_mode_diag[6] = frame->mtval;
+
+  // 0. スタック窓の伸長 (U からの mcause 5/7: Load/Store access fault)
+  // depth == 0 (base) は全 stack が窓なので伸長しない。
+  // 最内活動が dispatch 段 (LEDGER_DISPATCH) の場合、win は {} なので伸長せず従来の fault 処理へ。
+  if ((frame->mcause == 5 || frame->mcause == 7) &&
+      ((frame->mstatus & RV32_MSTATUS_MPP) == 0)) {
+    auto &thread = shizuku::kernel_instance.current_thread();
+    const uint32_t depth = thread.call_stack.depth;
+    if (depth > 0 && depth - 1 < thread.MAX_STACK_WINDOWS) {
+      auto &win = thread.win[depth - 1];
+      if (win.is_valid()) {
+        const uintptr_t fault_addr = frame->mtval;
+        if (fault_addr >= thread.stack_lo && fault_addr < win.lo) {
+          const auto new_win = shizuku::extend_window(win, fault_addr, thread.stack_lo);
+          if (new_win.is_valid()) {
+            win = new_win;
+            thread.cur_win_lo = new_win.lo;
+            thread.cur_win_hi = new_win.hi;
+            shizuku::chips::esp32_c6::pmp_controller::apply_stack_window(new_win.lo, new_win.hi);
+            s_pmp_shadow.win_lo = new_win.lo;
+            s_pmp_shadow.win_hi = new_win.hi;
+            // mepc を進めず再実行 (同じ命令を再試行)
+            return true;
+          }
+        }
+      }
+    }
+  }
 
   // 1. 0x802 読み取りプローブ時の Illegal Instruction (mcause == 2) 捕捉
   if (frame->mcause == 2) {
