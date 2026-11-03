@@ -66,7 +66,14 @@ volatile uintptr_t g_c6_probe_combo_pmp_pc;
 volatile uintptr_t g_c6_probe_ustore_kstack_pc;
 volatile uintptr_t g_c6_probe_ustore_caller_pc;
 volatile uintptr_t g_c6_probe_ustore_code_pc;
-volatile uintptr_t g_c6_probe_ufetch_target;
+// cmd 10 (U の命令フェッチ拒否) の probe。期待アドレスを C++ 側の sp 推測で作らない:
+//   selftest は jalr の戻り先 (probe の insn + 4) だけを渡して arm し (0 = 無効)、handler が
+//   frame から U の sp (reserved0) を読み、mepc == U_sp - 16 の厳密一致で回収して、
+//   観測した U の sp と、そのときの窓 [cur_win_lo, cur_win_hi) を下の診断変数へ残す。
+volatile uintptr_t g_c6_probe_ufetch_ra;
+volatile uintptr_t g_c6_probe_ufetch_usp;
+volatile uintptr_t g_c6_probe_ufetch_win_lo;
+volatile uintptr_t g_c6_probe_ufetch_win_hi;
 volatile uintptr_t g_c6_probe_upmpcfg_pc;
 volatile uintptr_t g_c6_probe_mstore_iram_pc;
 volatile uintptr_t g_c6_probe_mfetch_target;
@@ -1056,7 +1063,15 @@ bool shizuku_c6_handle_fault(arch::exception_frame_t *frame) {
       frame->mepc = frame->ra; // probe 呼出し元へ復帰
       return true;
     }
-    if (g_c6_probe_ufetch_target != 0 && frame->mepc == g_c6_probe_ufetch_target) {
+    // U の命令フェッチ probe: jalr の戻り先 (ra) が arm 時の値で、フェッチ先が U の sp - 16 (asm の
+    // addi t1, sp, -16) と厳密に一致するものだけを回収する。U の sp は frame の reserved0 (trap 入口が
+    // mscratch から保存した U の元の sp) から取る。
+    if (g_c6_probe_ufetch_ra != 0 && frame->ra == g_c6_probe_ufetch_ra &&
+        frame->mepc == frame->reserved0 - 16u) {
+      auto &fetch_thread = shizuku::kernel_instance.current_thread();
+      g_c6_probe_ufetch_usp = frame->reserved0;
+      g_c6_probe_ufetch_win_lo = fetch_thread.stk.cur_win_lo;
+      g_c6_probe_ufetch_win_hi = fetch_thread.stk.cur_win_hi;
       shizuku_c6_u_mode_diag[11] = shizuku_c6_u_mode_diag[11] + 1;
       frame->a0 = 0xE00Bu;
       frame->mepc = frame->ra; // probe 呼出し元へ復帰

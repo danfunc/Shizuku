@@ -45,7 +45,10 @@ extern volatile uintptr_t g_c6_probe_combo_pmp_pc;
 extern volatile uintptr_t g_c6_probe_ustore_kstack_pc;
 extern volatile uintptr_t g_c6_probe_ustore_caller_pc;
 extern volatile uintptr_t g_c6_probe_ustore_code_pc;
-extern volatile uintptr_t g_c6_probe_ufetch_target;
+extern volatile uintptr_t g_c6_probe_ufetch_ra;
+extern volatile uintptr_t g_c6_probe_ufetch_usp;
+extern volatile uintptr_t g_c6_probe_ufetch_win_lo;
+extern volatile uintptr_t g_c6_probe_ufetch_win_hi;
 extern volatile uintptr_t g_c6_probe_upmpcfg_pc;
 extern volatile uintptr_t g_c6_probe_mstore_iram_pc;
 extern volatile uintptr_t g_c6_probe_mfetch_target;
@@ -181,6 +184,8 @@ asm(
     "  beq a0, t0, .Lprobe_write_below_stack_lo\n"
     "  li t0, 31\n"
     "  beq a0, t0, .Lprobe_callee_stack_residue\n"
+    "  li t0, 32\n"
+    "  beq a0, t0, .Lprobe_return_sp\n"
     "  li a0, 0\n"
     "  ret\n"
     "\n"
@@ -905,6 +910,12 @@ asm(
     "  lw s0, 24(sp)\n"
     "  lw s1, 20(sp)\n"
     "  addi sp, sp, 32\n"
+    "  ret\n"
+    "\n"
+    // cmd 32: 入場時の自分の sp (= callee 窓の上端 win_hi) を返す。M 側が C++ の sp 推測ではなく
+    // 実測値で窓の位置を知るための較正用。
+    ".Lprobe_return_sp:\n"
+    "  mv a0, sp\n"
     "  ret\n"
     "\n"
     ".size u_mode_probe_worker, .-u_mode_probe_worker\n"
@@ -1648,7 +1659,24 @@ void c6_stage1_safety() {
   // ゼロ化された) ことを見る。resume frame は M caller の復帰用に窓の最上位へ作られるので対象外。
   constexpr size_t STAGE1_WIN_WORDS = shizuku::kStackWindowStep / sizeof(uint32_t);
   constexpr size_t STAGE1_FRAME_WORDS = RV32_FRAME_BYTES / sizeof(uint32_t);
-  auto *u_stack_words = reinterpret_cast<volatile uint32_t *>(stage1_win_hi - shizuku::kStackWindowStep);
+  // callee 窓の上端は C++ の sp からは推測しない。ARCH::syscall は ecall の前に gp/tp/s0 の退避枠を sp から
+  // 取るため、ecall 時点の sp (= U callee の入場 sp = win_hi) は stage1_win_hi より小さい。U callee 自身に
+  // 入場 sp を返させて (cmd 32) 実測し、窓の位置と caller 枠の位置関係を確かめてから使う。
+  const auto sp_probe_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      32 /* cmd=32: return entry sp */);
+  const uintptr_t stage1_callee_hi = sp_probe_res.value;
+  record_check("stage1: measured callee window top is 16B aligned, below M sp by a small syscall spill, "
+               "inside thread stack, and the M caller frame lies above it",
+               sp_probe_res.error == 0 && (stage1_callee_hi & 15u) == 0u &&
+                   stage1_callee_hi <= stage1_win_hi && stage1_win_hi - stage1_callee_hi <= 0x100u &&
+                   stage1_callee_hi >= thread.stk.stack_lo + shizuku::kStackWindowStep &&
+                   stage1_callee_hi <= thread.stk.stack_hi &&
+                   caller_sentinel_addr >= stage1_callee_hi,
+               stage1_callee_hi, stage1_win_hi);
+  auto *u_stack_words = reinterpret_cast<volatile uint32_t *>(stage1_callee_hi - shizuku::kStackWindowStep);
   for (size_t i = 0; i < STAGE1_WIN_WORDS; ++i)
     u_stack_words[i] = U_STACK_CANARY;
   const auto closed_res = ARCH::syscall(
@@ -1663,6 +1691,14 @@ void c6_stage1_safety() {
   record_check("stage1: closed callee window leaves no canary and M handler did not spill (below resume frame)",
                closed_res.error == 0 && closed_res.value == 0 && canary_intact,
                canary_intact ? 1 : 0, 1);
+  const auto sp_probe_res2 = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      32 /* cmd=32: return entry sp */);
+  record_check("stage1: callee entry sp is the same on a second call (window position is stable)",
+               sp_probe_res2.error == 0 && sp_probe_res2.value == stage1_callee_hi,
+               sp_probe_res2.value, stage1_callee_hi);
 
   // 9. 本番判定述語によるオブジェクト ID 束縛・拒否の検証
   const bool auth_probe = shizuku_c6_is_authorized_u_object(OBJECT_STAGE1_PROBE, OBJECT_STAGE1_PROBE);
@@ -1771,14 +1807,20 @@ void c6_stage1_safety() {
                code_word_after == code_word_before, code_word_after, code_word_before);
 
   // 11d. U instruction fetch from U stack (cmd 10)
-  const uintptr_t ufetch_target = stage1_win_hi - 16u; // U の sp (= win_hi) - 16 (asm と一致)
-  g_c6_probe_ufetch_target = ufetch_target;
+  // 期待アドレスは C++ の sp 推測で作らない。handler が frame (reserved0 = U の sp) から
+  // mepc == U_sp - 16 かつ ra == jalr の戻り先を厳密に確かめて回収し、観測した U の sp と窓を診断変数へ残す。
+  g_c6_probe_ufetch_usp = 0;
+  g_c6_probe_ufetch_win_lo = 0;
+  g_c6_probe_ufetch_win_hi = 0;
+  g_c6_probe_ufetch_ra = reinterpret_cast<uintptr_t>(&c6_stage1_probe_ufetch_insn_addr) + 4u;
   const auto ufetch_res = ARCH::syscall(
       static_cast<uintptr_t>(object_api::CALL_METHOD),
       OBJECT_STAGE1_PROBE,
       METHOD_STAGE1_PROBE,
       10 /* cmd=10 */);
-  g_c6_probe_ufetch_target = 0;
+  g_c6_probe_ufetch_ra = 0;
+  const uintptr_t ufetch_usp = g_c6_probe_ufetch_usp;
+  const uintptr_t ufetch_target = ufetch_usp - 16u;
   record_check("stage1: U instruction fetch from U stack denied (fault trapped)",
                ufetch_res.error == 0 && ufetch_res.value == 0xE00Bu && shizuku_c6_u_mode_diag[11] == 1u,
                shizuku_c6_u_mode_diag[11], 1);
@@ -1788,6 +1830,12 @@ void c6_stage1_safety() {
                shizuku_c6_u_mode_diag[5] == ufetch_target, shizuku_c6_u_mode_diag[5], ufetch_target);
   record_check("stage1: U fetch exact mtval is fetch target (U stack)",
                shizuku_c6_u_mode_diag[6] == ufetch_target, shizuku_c6_u_mode_diag[6], ufetch_target);
+  // フェッチ先は callee の窓の中 [win_hi - K, win_hi) にあり、U の入場 sp は実測した窓の上端と一致する。
+  record_check("stage1: U fetch target lies inside the callee stack window [win_hi-K, win_hi)",
+               ufetch_usp == stage1_callee_hi && g_c6_probe_ufetch_win_hi == ufetch_usp &&
+                   g_c6_probe_ufetch_win_lo == ufetch_usp - shizuku::kStackWindowStep &&
+                   ufetch_target >= g_c6_probe_ufetch_win_lo && ufetch_target < g_c6_probe_ufetch_win_hi,
+               ufetch_target, g_c6_probe_ufetch_win_lo);
 
   // 11e. U csrr pmpcfg0 (0x3A0) (cmd 11)
   g_c6_probe_upmpcfg_pc = reinterpret_cast<uintptr_t>(&c6_stage1_probe_upmpcfg_insn_addr);
