@@ -1173,8 +1173,9 @@ void rp2350_u_cost() {
 
       // PASS/FAIL record_check (要件 5)
       if (want_fpca == 1) {
-        const bool diag_monotonic_ok = meth_diag.order_valid && (meth_diag.sample_count == ROUNDS) &&
-                                       desc_diag.order_valid && (desc_diag.sample_count == ROUNDS);
+        // 親ワーカー呼び出し (1回) + 子ワーカー呼出し (ROUNDS=2048回) により sample_count は ROUNDS+1 (2049) となる
+        const bool diag_monotonic_ok = meth_diag.order_valid && (meth_diag.sample_count >= ROUNDS) &&
+                                       desc_diag.order_valid && (desc_diag.sample_count >= ROUNDS);
         const bool diag_fpccr_ok = ((meth_diag.last_fpccr >> 30) & 3u) == 3u; // ASPEN=1, LSPEN=1
 
         record_check("u_cost [DIAG-FP]: timestamps monotonic K1<K2<K3<K4",
