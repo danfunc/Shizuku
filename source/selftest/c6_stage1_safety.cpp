@@ -1709,12 +1709,12 @@ void c6_stage1_safety() {
       METHOD_STAGE1_PROBE,
       26 /* cmd=26: leak test */);
 
-  // (1) a0/a1 は返り値 (a0=0x42, a1=0)
+  // (1) a0/a1 は返り値 (a0=error=0, a1=value=0x42。カーネルの exit は a0 に error、a1 に value を載せる)
   const uintptr_t cap_a0 = data_pool_words[16];
   const uintptr_t cap_a1 = data_pool_words[17];
-  record_check("stage1: U-to-U return value in a0/a1 preserved (a0=0x42, a1=0)",
-               leak_res.error == 0 && cap_a0 == 0x42u && cap_a1 == 0u,
-               cap_a0, 0x42u);
+  record_check("stage1: U-to-U return error/value in a0/a1 preserved (a0=0 error, a1=0x42 value)",
+               leak_res.error == 0 && cap_a0 == 0u && cap_a1 == 0x42u,
+               cap_a1, 0x42u);
 
   // (2) 他の全レジスタ (ra, t0-t6, a2-a7, s0-s11) が 0
   bool other_regs_zero = true;
