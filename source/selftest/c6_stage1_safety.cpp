@@ -126,6 +126,8 @@ asm(
     "  bltu t0, t1, .Lprobe_cost_dispatch\n"
     "  li t0, 25\n"
     "  beq a0, t0, .Lprobe_reject_priv_child\n"
+    "  li t0, 26\n"
+    "  beq a0, t0, .Lprobe_u_to_u_leak\n"
     "  li t0, 1\n"
     "  beq a0, t0, .Lprobe_0x802\n"
     "  li t0, 2\n"
@@ -445,6 +447,74 @@ asm(
     "  li a0, 0xDEAD0005\n"
     "  ret\n"
     "\n"
+    ".Lprobe_u_to_u_leak:\n"
+    "  addi sp, sp, -48\n"
+    "  sw ra, 44(sp)\n"
+    "  sw s0, 40(sp)\n"
+    "  sw s1, 36(sp)\n"
+    "  sw s2, 32(sp)\n"
+    "  la s0, u_mode_stage1_data_pool\n"
+    "  lw s1, 20(s0)\n"
+    "  lw s2, 24(s0)\n"
+    "\n"
+    "  li a0, 4\n"
+    "  mv a1, s1\n"
+    "  mv a2, s2\n"
+    "  li a3, 4\n"
+    "  li a4, 0\n"
+    "  ecall\n"
+    "\n"
+    "  addi sp, sp, -128\n"
+    "  sw a0, 0(sp)\n"
+    "  sw a1, 4(sp)\n"
+    "  sw a2, 8(sp)\n"
+    "  sw a3, 12(sp)\n"
+    "  sw a4, 16(sp)\n"
+    "  sw a5, 20(sp)\n"
+    "  sw a6, 24(sp)\n"
+    "  sw a7, 28(sp)\n"
+    "  sw t0, 32(sp)\n"
+    "  sw t1, 36(sp)\n"
+    "  sw t2, 40(sp)\n"
+    "  sw t3, 44(sp)\n"
+    "  sw t4, 48(sp)\n"
+    "  sw t5, 52(sp)\n"
+    "  sw t6, 56(sp)\n"
+    "  sw s0, 60(sp)\n"
+    "  sw s1, 64(sp)\n"
+    "  sw s2, 68(sp)\n"
+    "  sw s3, 72(sp)\n"
+    "  sw s4, 76(sp)\n"
+    "  sw s5, 80(sp)\n"
+    "  sw s6, 84(sp)\n"
+    "  sw s7, 88(sp)\n"
+    "  sw s8, 92(sp)\n"
+    "  sw s9, 96(sp)\n"
+    "  sw s10, 100(sp)\n"
+    "  sw s11, 104(sp)\n"
+    "  sw ra, 108(sp)\n"
+    "\n"
+    "  la t0, u_mode_stage1_data_pool\n"
+    "  addi t0, t0, 64\n"
+    "  mv t1, sp\n"
+    "  li t2, 28\n"
+    "1:\n"
+    "  lw t3, 0(t1)\n"
+    "  sw t3, 0(t0)\n"
+    "  addi t1, t1, 4\n"
+    "  addi t0, t0, 4\n"
+    "  addi t2, t2, -1\n"
+    "  bnez t2, 1b\n"
+    "\n"
+    "  addi sp, sp, 128\n"
+    "  lw ra, 44(sp)\n"
+    "  lw s0, 40(sp)\n"
+    "  lw s1, 36(sp)\n"
+    "  lw s2, 32(sp)\n"
+    "  addi sp, sp, 48\n"
+    "  li a0, 0\n"
+    "  ret\n"
+    "\n"
     ".Lprobe_create_driver:\n"
     "  addi sp, sp, -32\n"
     "  sw ra, 28(sp)\n"
@@ -656,6 +726,8 @@ asm(
     "  beq a0, t0, .Ldriver_probe_app_data\n"
     "  li t0, 3\n"
     "  beq a0, t0, .Ldriver_probe_echo\n"
+    "  li t0, 4\n"
+    "  beq a0, t0, .Ldriver_probe_leak\n"
     "  li a0, 0\n"
     "  ret\n"
     "\n"
@@ -664,6 +736,35 @@ asm(
     "  lw t0, 8(t1)\n"
     "  addi t0, t0, 1\n"
     "  sw t0, 8(t1)\n"
+    "  li a0, 0x42\n"
+    "  ret\n"
+    "\n"
+    ".Ldriver_probe_leak:\n"
+    "  li t0, 0xA5A50100\n"
+    "  li t1, 0xA5A50101\n"
+    "  li t2, 0xA5A50102\n"
+    "  li t3, 0xA5A50103\n"
+    "  li t4, 0xA5A50104\n"
+    "  li t5, 0xA5A50105\n"
+    "  li t6, 0xA5A50106\n"
+    "  li a2, 0xA5A50202\n"
+    "  li a3, 0xA5A50203\n"
+    "  li a4, 0xA5A50204\n"
+    "  li a5, 0xA5A50205\n"
+    "  li a6, 0xA5A50206\n"
+    "  li a7, 0xA5A50207\n"
+    "  li s0, 0xA5A50000\n"
+    "  li s1, 0xA5A50001\n"
+    "  li s2, 0xA5A50002\n"
+    "  li s3, 0xA5A50003\n"
+    "  li s4, 0xA5A50004\n"
+    "  li s5, 0xA5A50005\n"
+    "  li s6, 0xA5A50006\n"
+    "  li s7, 0xA5A50007\n"
+    "  li s8, 0xA5A50008\n"
+    "  li s9, 0xA5A50009\n"
+    "  li s10, 0xA5A5000A\n"
+    "  li s11, 0xA5A5000B\n"
     "  li a0, 0x42\n"
     "  ret\n"
     "\n"
@@ -725,6 +826,13 @@ uintptr_t u_mode_probe_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
   }
   if (cmd == 19) {
     return 0xE012u;
+  }
+  if (cmd == 26) {
+    auto *data_pool_words = reinterpret_cast<volatile uintptr_t *>(u_mode_stage1_data_pool);
+    data_pool_words[16] = 0x42; // a0
+    data_pool_words[17] = 0;    // a1
+    for (int i = 18; i < 44; ++i) data_pool_words[i] = 0;
+    return 0;
   }
   return 0;
 }
@@ -1588,6 +1696,45 @@ void c6_stage1_safety() {
   record_check("stage1: caller restored its own data window successfully",
                data_pool_words[4] == 0xBEEFCAFEu,
                data_pool_words[4], 0xBEEFCAFEu);
+
+  // 16. U→U 通常 return レジスタ漏洩試験 (Task 2)
+  // cmd 26: PROBE が DRIVER (cmd 4) を呼び、DRIVER が全レジスタを既知パターンで汚して通常 return。
+  // caller が戻り直後の全レジスタ (a0-a7, t0-t6, s0-s11, ra) をキャプチャ。
+  // 事前に capture 領域 (word 16..43) を 0xFF で汚しておく。
+  for (size_t i = 16; i < 44; ++i) data_pool_words[i] = 0xFFFFFFFFu;
+  const auto leak_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      26 /* cmd=26: leak test */);
+
+  // (1) a0/a1 は返り値 (a0=0x42, a1=0)
+  const uintptr_t cap_a0 = data_pool_words[16];
+  const uintptr_t cap_a1 = data_pool_words[17];
+  record_check("stage1: U-to-U return value in a0/a1 preserved (a0=0x42, a1=0)",
+               leak_res.error == 0 && cap_a0 == 0x42u && cap_a1 == 0u,
+               cap_a0, 0x42u);
+
+  // (2) 他の全レジスタ (ra, t0-t6, a2-a7, s0-s11) が 0
+  bool other_regs_zero = true;
+  uintptr_t non_zero_val = 0;
+  for (size_t i = 18; i < 44; ++i) {
+    if (data_pool_words[i] != 0) {
+      other_regs_zero = false;
+      non_zero_val = data_pool_words[i];
+      break;
+    }
+  }
+  record_check("stage1: U-to-U return scrubbed all caller-visible registers (ra, t0-t6, a2-a7, s0-s11 zero)",
+               other_regs_zero, non_zero_val, 0);
+
+  // (3) t0 が kernel 領域アドレス (kernel stack 範囲・trusted stack cursor 値) でない
+  const uintptr_t cap_t0 = data_pool_words[24]; // capture[8]: t0
+  const uintptr_t kstack_begin = reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack);
+  const uintptr_t kstack_end = kstack_begin + sizeof(shizuku_c6_kernel_stack);
+  const bool t0_leaks_kstack = (cap_t0 >= kstack_begin && cap_t0 <= kstack_end);
+  record_check("stage1: U-to-U return t0 does not leak kernel stack address",
+               !t0_leaks_kstack && cap_t0 == 0, cap_t0, 0);
 #endif
 
   BOARD::diag_printf("[C6_STAGE1] stage 1 verification complete: passed=%lu failed=%lu\n",
