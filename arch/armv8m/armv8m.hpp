@@ -223,8 +223,6 @@ public:
   static constexpr uintptr_t DFSR_ADDRESS = 0xE000ED30u;
   static constexpr uintptr_t FP_CTRL_ADDRESS = 0xE0002000u;
   static constexpr uintptr_t FP_COMP_ADDRESS = 0xE0002008u;
-  static constexpr uintptr_t FPCCR_ADDRESS = 0xE000EF34u;
-  static constexpr uint32_t FPCCR_LSPACT = 1u << 0;
   static constexpr uint32_t DEMCR_TRCENA = 1u << 24;
   static constexpr uint32_t DEMCR_MON_REQ = 1u << 19;
   static constexpr uint32_t DEMCR_MON_STEP = 1u << 18;
@@ -444,24 +442,11 @@ public:
   static bool call_header_has_room(const context_t &context, uint32_t) {
     return call_stack_has_room(call_return_sp(context), context.psplim, context.stack_ceiling);
   }
-  // 案 2b (実験・競合窓あり): FPCCR.LSPACT==1 のときに 72B FP フレームの materialize と語コピーを省く最適化。
-  // false に変更すると案 2a (常に materialize + copy_fp_frame_72b) に戻る。
-  static constexpr bool ENABLE_FP_LAZY_RELOCATE_OPT = true;
-
   struct lazy_fp_state {
     static void materialize() {
-#if defined(__ARM_ARCH_8M_MAIN__) || defined(SHIZUKU_RP2350)
       uint32_t fpscr;
       asm volatile("vmrs %0, fpscr" : "=r"(fpscr) :: "memory");
       (void)fpscr;
-#endif
-    }
-    static bool is_lazy_active() {
-#if defined(__ARM_ARCH_8M_MAIN__) || defined(SHIZUKU_RP2350)
-      return (at(FPCCR_ADDRESS) & FPCCR_LSPACT) != 0;
-#else
-      return false;
-#endif
     }
   };
   template <class FloatingPointState = lazy_fp_state>
@@ -770,30 +755,10 @@ private:
     const uint32_t bytes = exc_frame_bytes(context);
     auto *next = reinterpret_cast<exception_frame_t *>(sp - bytes);
     if (bytes != sizeof(exception_frame_t)) {
-      // 案 2b (実験・競合窓あり):
-      // ARMv8-M の例外復帰は、FPCCR.LSPACT==1 (遅延積みが未実行) なら FP 部のアンスタックを行わず
-      // LSPACT をクリアするだけ (FP レジスタは生きた値のまま) という仕様に基づく。
-      // LSPACT==1 ならば、フレーム FP 部のメモリ実体化 (materialize) および Caller フレームへの
-      // 72B コピーを完全に省略できる。
-      //
-      // [残る競合窓とセキュリティ/機能影響]
-      // LSPACT 読み出しと例外復帰 (BX LR / EXC_RETURN) の間に FP を使用する割り込みハンドラが
-      // 割り込むと、ハードウェアによって旧フレーム (context.sp) へ実体化が行われ LSPACT=0 に落ちる。
-      // その後例外復帰する際、新フレーム (next) の FP 部は未初期化 (未コピー) であるため、
-      // 以下の影響が生じる:
-      //  (1) 機密性: 復帰時にアンスタックされるのは呼び手自身のスタック領域内の残骸だけであり、
-      //      他者・他オブジェクトの機密値が漏れることはない。
-      //  (2) 機能性: 呼び先 (Callee) が返した FP 戻り値 (s0/s1) が失われ、スタックの残骸で上書きされうる。
-      // [塞ぐ手段の検討]
-      // 割り込みハンドラ内での浮動小数点命令使用を禁止・監査するか、または例外復帰直前まで
-      // PRIMASK / FAULTMASK 等で割り込みを保留する等の対策が必要となる。
-      const bool skip_relocate = ENABLE_FP_LAZY_RELOCATE_OPT && FloatingPointState::is_lazy_active();
-      if (!skip_relocate) {
-        // Materialize any lazy FP frame before relocating its return-value slots.
-        FloatingPointState::materialize();
-        copy_fp_frame_72b(reinterpret_cast<uint8_t *>(next) + sizeof(exception_frame_t),
-                          reinterpret_cast<uint8_t *>(context.sp) + sizeof(exception_frame_t));
-      }
+      // Materialize any lazy FP frame before relocating its return-value slots.
+      FloatingPointState::materialize();
+      copy_fp_frame_72b(reinterpret_cast<uint8_t *>(next) + sizeof(exception_frame_t),
+                        reinterpret_cast<uint8_t *>(context.sp) + sizeof(exception_frame_t));
     }
     zero_exception_frame(*next);
     next->pc = (uint32_t)pc;
