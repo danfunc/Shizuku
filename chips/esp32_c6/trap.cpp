@@ -404,7 +404,7 @@ void interrupt_init() {
   asm volatile("csrr %0, mie" : "=r"(mie));
   shizuku_c6_timer_diag[5] = mie;
 }
-__attribute__((noinline)) [[noreturn]] void stop(uint32_t status) {
+[[noreturn]] __attribute__((noinline)) void stop(uint32_t status) {
   asm volatile("csrci mstatus, 8\n fence rw,rw" ::: "memory");
   if (active_stop_phase == 0u) active_stop_phase = status;
   const uint32_t caller_pc = static_cast<uint32_t>(
