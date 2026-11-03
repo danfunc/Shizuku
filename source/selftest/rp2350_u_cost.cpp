@@ -99,25 +99,51 @@ SHIZUKU_U_COST_CODE __attribute__((naked)) uintptr_t u_cost_probe_sp_spoof_child
   asm volatile(
       ".syntax unified\n"
       ".thumb\n"
-      "push {r4, lr}\n"
-      "mov  r1, r0\n"                  // target object in r1
-      "add  sp, sp, #128\n"            // SP 偽装: caller 枠内へ
+      // SP 偽装 (add sp, #248) して svc #0 を発行すると、ARM ハードウェア例外エントリが
+      // 現在の SP (SP_p + 104) から下方に 104 バイト (0x68) の例外フレームを自動退避する。
+      // この [SP_p, SP_p + 104) の領域は親の armv8m_abi::syscall 退避領域 [SP_p, SP_p + 32)
+      // (元の親 SP や CONTROL 等) と重複するため、svc 前に安全なスタックへ 104 バイトを退避し、
+      // 復帰後に元の位置へ復元する。親の sentinel (SP_p + 112 以上) には触れない。
+      "push {r4, r5, r6, r7, lr}\n"
+      "sub  sp, sp, #108\n"
+      "mov  r4, r0\n"                  // target object in r4
+      "mov  r5, sp\n"                  // dst = 退避バッファ (sp)
+      "add  r6, sp, #144\n"            // src = 親の SP_p (SP_in + 16 = sp + 128 + 16 = sp + 144)
+      "movs r7, #26\n"                 // 26 words = 104 bytes
+      "0:\n"
+      "ldr  r1, [r6], #4\n"
+      "str  r1, [r5], #4\n"
+      "subs r7, r7, #1\n"
+      "bne  0b\n"
+      "add  sp, sp, #248\n"            // SP 偽装: sp = SP_p + 104 (ceiling を超える caller 枠内)
+      "mov  r1, r4\n"                  // target object in r1
       "movs r0, #4\n"                  // CALL_METHOD (4)
       "movs r2, #0\n"                  // method 0
       "movs r3, #0\n"
       "movs r12, #0\n"
       "svc  #0\n"
-      "sub  sp, sp, #128\n"            // SP 復元
-      "cmp  r0, #6\n"                  // object_error::NO_STACK == 6
-      "bne  1f\n"
-      "movs r0, #0\n"
-      "pop  {r4, pc}\n"
+      "sub  sp, sp, #248\n"            // SP 復元: sp = SP_in - 128
+      "mov  r4, r0\n"                  // syscall 戻り値 (r0 = 6: NO_STACK) を r4 に退避
+      "mov  r5, sp\n"                  // src = 退避バッファ (sp)
+      "add  r6, sp, #144\n"            // dst = 親の SP_p (sp + 144)
+      "movs r7, #26\n"                 // 26 words = 104 bytes
       "1:\n"
-      "cmp  r0, #0\n"
+      "ldr  r1, [r5], #4\n"
+      "str  r1, [r6], #4\n"
+      "subs r7, r7, #1\n"
+      "bne  1b\n"
+      "add  sp, sp, #108\n"            // 退避バッファ解放
+      "mov  r0, r4\n"                  // r0 = syscall 戻り値
+      "cmp  r0, #6\n"                  // object_error::NO_STACK == 6
       "bne  2f\n"
-      "ldr  r0, =0xDEAD0038\n"
+      "movs r0, #0\n"                  // 正常 (NO_STACK で拒絶された)
+      "pop  {r4, r5, r6, r7, pc}\n"
       "2:\n"
-      "pop  {r4, pc}\n"
+      "cmp  r0, #0\n"
+      "bne  3f\n"
+      "ldr  r0, =0xDEAD0038\n"
+      "3:\n"
+      "pop  {r4, r5, r6, r7, pc}\n"
       ".ltorg\n"
   );
 }
