@@ -8,7 +8,7 @@
 #include "shizuku/diag_fp.hpp"
 #endif
 extern "C" void shizuku_svc_breakdown_probe(uint32_t, uint32_t, uint32_t);
-#if defined(__ARM_ARCH_8M_MAIN__) || defined(SHIZUKU_RP2350)
+#if (defined(__ARM_ARCH_8M_MAIN__) || defined(SHIZUKU_RP2350)) && defined(SHIZUKU_CMD8_DIAG)
 extern "C" {
 extern volatile bool shizuku_cmd8_mpu_diag_b_pending;
 void shizuku_record_mpu_diag_b(uintptr_t ret_sp, uintptr_t spoof_sp, uintptr_t parent_base, uintptr_t parent_top);
@@ -71,7 +71,7 @@ template <class Thread>
   asm volatile("msr psp, %0\nmsr psplim, %1\nmsr control, %2"
       :: "r"(context->sp), "r"(context->psplim), "r"(next_control) : "memory");
   probe(6, exc_return, api);
-#if defined(__ARM_ARCH_8M_MAIN__) || defined(SHIZUKU_RP2350)
+#if (defined(__ARM_ARCH_8M_MAIN__) || defined(SHIZUKU_RP2350)) && defined(SHIZUKU_CMD8_DIAG)
   if (__builtin_expect(shizuku_cmd8_mpu_diag_b_pending, false) && thread.call_stack.depth != 0) {
     shizuku_cmd8_mpu_diag_b_pending = false;
     const uintptr_t ret_sp = thread.ledger[thread.call_stack.depth - 1].caller_sp();

@@ -339,7 +339,20 @@ template <typename CONTEXT> struct thread {
   // 台帳由来の活動 stack ceiling (caller_sp)。depth == 0 ならスタック上限。
   uintptr_t stack_ceiling() const noexcept {
     if (call_stack.depth != 0) {
-      if constexpr (requires(const call_ledger_entry &e) { e.caller_sp(); }) {
+      if constexpr (requires(const call_ledger_entry &e) { e.caller_sp(); e.via; }) {
+        if (ledger != nullptr) {
+          uint32_t d = call_stack.depth;
+          // 最上段が actor dispatch (LEDGER_DISPATCH == 2) の場合、その caller_sp は
+          // 要求元自身の SP であるため、要求元アクティベーションの ceiling ではない。
+          // DISPATCH 段をスキップして要求元アクティベーションの ceiling を導出する。
+          while (d > 0 && ledger[d - 1].via == 2 /* LEDGER_DISPATCH */) {
+            --d;
+          }
+          if (d != 0) {
+            return ledger[d - 1].caller_sp();
+          }
+        }
+      } else if constexpr (requires(const call_ledger_entry &e) { e.caller_sp(); }) {
         if (ledger != nullptr) {
           return ledger[call_stack.depth - 1].caller_sp();
         }

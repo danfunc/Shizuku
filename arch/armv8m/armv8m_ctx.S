@@ -373,12 +373,19 @@ shizuku_armv8m_fault_entry:
     // だった場合、ハンドラモード内で FP 命令 (CTX_SAVE 内の vstmia など) を実行すると、
     // ハードウェアが不正なスタック (PSP) へ FP 状態を書き込もうとして MemManage (LSPERR)
     // が再発し、HardFault → LOCKUP する。
-    // 落ちたスレッドは終了 (TERMINATED) されるため、FPCCR.LSPACT をクリアして遅延退避を
-    // 安全にキャンセルする。
+    // 落ちたスレッドは終了 (TERMINATED) されるため、スタッキング系エラー (CFSR の
+    // MSTKERR / MLSPERR / BSTKERR / BLSPERR) のときだけ FPCCR.LSPACT をクリアして
+    // 遅延退避を安全にキャンセルする。
+    ldr  r0, =0xE000ED28           // CFSR
+    ldr  r1, [r0]
+    movw r2, #0x3030               // MSTKERR(bit 4) | MLSPERR(bit 5) | BSTKERR(bit 12) | BLSPERR(bit 13)
+    tst  r1, r2
+    beq  1f
     ldr  r0, =0xE000EF34           // FPCCR
     ldr  r1, [r0]
     bic  r1, r1, #1                // LSPACT bit 0 = 0
     str  r1, [r0]
+1:
 #endif
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
     // 診断専用: CTX_SAVE (PSP へ積む) より前に、fault の素性だけを MSP 上の C で記録する。

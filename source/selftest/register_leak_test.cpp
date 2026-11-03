@@ -324,7 +324,14 @@ uintptr_t leak_caller_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
     register uintptr_t r10_out asm("r10");
     register uintptr_t r11_out asm("r11");
     asm volatile(
+        "mov r12, sp\n"
+        "bic r12, r12, #31\n"
+        "sub r12, r12, #32\n"
+        "str sp, [r12, #0]\n"
+        "mov sp, r12\n"
         "svc 0\n"
+        "ldr r12, [sp, #0]\n"
+        "mov sp, r12\n"
         : "+r"(r0), "+r"(r1),
           "=r"(r4_out), "=r"(r5_out), "=r"(r6_out), "=r"(r7_out),
           "=r"(r8_out), "=r"(r9_out), "=r"(r10_out), "=r"(r11_out)

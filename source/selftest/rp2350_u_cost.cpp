@@ -17,6 +17,7 @@
 #include "shizuku/u_cost_sram_window.hpp"
 #include "shizuku/xip_cost.hpp"
 #include "shizuku/armv8m_abi.hpp"
+#include "shizuku/stream.hpp"
 #if defined(__ARM_ARCH_8M_MAIN__) || defined(SHIZUKU_RP2350)
 #include "arch/ppb.hpp"
 #endif
@@ -65,8 +66,10 @@ uintptr_t u_cost_probe_stream_caller_stack();
 void u_cost_denied_code();
 extern const char u_cost_probe_data_fault_pc[];
 extern const char u_cost_probe_store_fault_pc[];
+#if defined(SHIZUKU_CMD8_DIAG)
 extern volatile bool shizuku_cmd8_mpu_diag_b_pending;
 void shizuku_record_mpu_diag_b(uintptr_t ret_sp, uintptr_t spoof_sp, uintptr_t parent_base, uintptr_t parent_top);
+#endif
 }
 
 #if defined(__ARM_ARCH_8M_MAIN__)
@@ -199,84 +202,47 @@ SHIZUKU_U_COST_CODE __attribute__((naked)) uintptr_t u_cost_probe_unaligned_sp_c
   );
 }
 
-SHIZUKU_U_COST_CODE __attribute__((naked)) uintptr_t u_cost_probe_stream_caller_stack() {
-  asm volatile(
-      ".syntax unified\n"
-      ".thumb\n"
-      "push {r4, lr}\n"
+SHIZUKU_U_COST_CODE uintptr_t u_cost_probe_stream_caller_stack() {
+  using shizuku::armv8m_abi::syscall;
+  using shizuku::object_error;
 
-      // 1. STREAM_PUSH_N (29) with request_ptr = sp + 64 (in caller frame)
-      "movs r0, #29\n"                 // STREAM_PUSH_N
-      "movs r1, #0\n"                  // stream id 0
-      "add  r2, sp, #64\n"             // request_ptr in caller frame
-      "movs r3, #0\n"
-      "movs r12, #0\n"
-      "svc  #0\n"
-      "cmp  r0, #15\n"                 // object_error::BAD_STREAM == 15
-      "bne  1f\n"
+  uintptr_t sp_val = 0;
+  asm volatile("mov %0, sp" : "=r"(sp_val));
+  // 親アクティベーションのフレーム内 (ret_sp = ceiling 以上) を指すポインタ
+  const uintptr_t caller_frame_ptr = sp_val + 160;
 
-      // 2. STREAM_PUSH_N (29) with records = sp + 64 (in caller frame)
-      "add  r1, sp, #64\n"
-      "str  r1, [sp, #-16]!\n"          // push_request.records
-      "movs r1, #1\n"
-      "str  r1, [sp, #4]\n"            // push_request.count = 1
-      "movs r0, #29\n"
-      "movs r1, #0\n"
-      "mov  r2, sp\n"                  // request_ptr on callee stack
-      "movs r3, #0\n"
-      "movs r12, #0\n"
-      "svc  #0\n"
-      "add  sp, sp, #16\n"
-      "cmp  r0, #15\n"
-      "bne  2f\n"
+  // 1. STREAM_PUSH_N (29) with request_ptr in caller frame
+  const auto r1 = syscall(29, 0, caller_frame_ptr);
+  if (r1.error != static_cast<uintptr_t>(object_error::BAD_STREAM)) {
+    return 0xDEAD003A;
+  }
 
-      // 3. STREAM_POP_N (30) with records = sp + 64 (in caller frame)
-      "add  r1, sp, #64\n"
-      "str  r1, [sp, #-16]!\n"          // pop_request.records
-      "movs r1, #1\n"
-      "str  r1, [sp, #4]\n"            // pop_request.count = 1
-      "movs r1, #0\n"
-      "str  r1, [sp, #8]\n"            // pop_request.lost = 0
-      "movs r0, #30\n"                 // STREAM_POP_N
-      "movs r1, #0\n"
-      "mov  r2, sp\n"                  // request_ptr on callee stack
-      "movs r3, #0\n"
-      "movs r12, #0\n"
-      "svc  #0\n"
-      "add  sp, sp, #16\n"
-      "cmp  r0, #15\n"
-      "bne  3f\n"
+  // 2. STREAM_PUSH_N (29) with records in caller frame
+  shizuku::stream::push_request push_req = {};
+  push_req.records = reinterpret_cast<const void *>(caller_frame_ptr);
+  push_req.count = 1;
+  const auto r2 = syscall(29, 0, reinterpret_cast<uintptr_t>(&push_req));
+  if (r2.error != static_cast<uintptr_t>(object_error::BAD_STREAM)) {
+    return 0xDEAD003B;
+  }
 
-      // 4. STREAM_POP_N (30) with request_ptr = sp + 64 (in caller frame)
-      "movs r0, #30\n"                 // STREAM_POP_N
-      "movs r1, #0\n"
-      "add  r2, sp, #64\n"             // request_ptr in caller frame
-      "movs r3, #0\n"
-      "movs r12, #0\n"
-      "svc  #0\n"
-      "cmp  r0, #15\n"
-      "bne  4f\n"
+  // 3. STREAM_POP_N (30) with records in caller frame
+  shizuku::stream::pop_request pop_req = {};
+  pop_req.records = reinterpret_cast<void *>(caller_frame_ptr);
+  pop_req.count = 1;
+  pop_req.lost = 0;
+  const auto r3 = syscall(30, 0, reinterpret_cast<uintptr_t>(&pop_req));
+  if (r3.error != static_cast<uintptr_t>(object_error::BAD_STREAM)) {
+    return 0xDEAD003C;
+  }
 
-      "movs r0, #0\n"
-      "pop  {r4, pc}\n"
+  // 4. STREAM_POP_N (30) with request_ptr in caller frame
+  const auto r4 = syscall(30, 0, caller_frame_ptr);
+  if (r4.error != static_cast<uintptr_t>(object_error::BAD_STREAM)) {
+    return 0xDEAD003D;
+  }
 
-      "1:\n"
-      "ldr  r0, =0xDEAD003A\n"
-      "pop  {r4, pc}\n"
-
-      "2:\n"
-      "ldr  r0, =0xDEAD003B\n"
-      "pop  {r4, pc}\n"
-
-      "3:\n"
-      "ldr  r0, =0xDEAD003C\n"
-      "pop  {r4, pc}\n"
-
-      "4:\n"
-      "ldr  r0, =0xDEAD003D\n"
-      "pop  {r4, pc}\n"
-      ".ltorg\n"
-  );
+  return 0;
 }
 
 SHIZUKU_U_COST_CODE uintptr_t u_cost_denied_probe_worker(uintptr_t mode, uintptr_t,
@@ -360,13 +326,13 @@ SHIZUKU_U_COST_CODE uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t arg1
           "str  r4, [r8, #216]\n"       // data[54] = saved_sp
           "str  r5, [r8, #220]\n"       // data[55] = saved_control
           "str  r6, [r8, #224]\n"       // data[56] = saved_r7
-          // t=C 診断情報 (data[64..67]):
-          "str  r4, [r8, #256]\n"       // data[64] = psp
-          "str  r5, [r8, #260]\n"       // data[65] = control
+          // t=C 診断情報 (data[48..51]):
+          "str  r4, [r8, #192]\n"       // data[48] = psp
+          "str  r5, [r8, #196]\n"       // data[49] = control
           "movs r9, #0\n"
-          "str  r9, [r8, #264]\n"       // data[66] = psplim (0: U では未取得)
+          "str  r9, [r8, #200]\n"       // data[50] = psplim (0: U では未取得)
           "add  r9, r4, #120\n"         // spoof_sp 予定値
-          "str  r9, [r8, #268]\n"       // data[67] = spoof_sp
+          "str  r9, [r8, #204]\n"       // data[51] = spoof_sp
           "mov  lr, sp\n"
           "bic  lr, lr, #31\n"
           "sub  lr, lr, #32\n"
@@ -408,10 +374,10 @@ SHIZUKU_U_COST_CODE uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t arg1
       ret_err = r0;
       ret_val = r1;
 #else
-      data[64] = 0x2000f480;
-      data[65] = 0;
-      data[66] = 0;
-      data[67] = 0x2000f4f8;
+      data[48] = 0x2000f480;
+      data[49] = 0;
+      data[50] = 0;
+      data[51] = 0x2000f4f8;
       const auto r = syscall(4, shizuku::object_id::cost_u_parent, 1, 92);
       uintptr_t ret_err = r.error;
       uintptr_t ret_val = r.value;
@@ -728,6 +694,7 @@ struct shizuku_mpu_diag_buffer_t {
 static volatile shizuku_mpu_diag_buffer_t g_mpu_diag_a = {};
 static volatile shizuku_mpu_diag_buffer_t g_mpu_diag_b = {};
 
+#if defined(SHIZUKU_CMD8_DIAG)
 extern "C" {
 volatile bool shizuku_cmd8_mpu_diag_b_pending = false;
 
@@ -771,6 +738,7 @@ void shizuku_record_mpu_diag_b(uintptr_t ret_sp, uintptr_t spoof_sp, uintptr_t p
 #endif
 }
 }
+#endif
 
 namespace {
 void record_mpu_diag_a(uintptr_t ret_sp, uintptr_t spoof_sp, uintptr_t parent_base, uintptr_t parent_top) {
@@ -1246,6 +1214,7 @@ void rp2350_u_cost() {
     record_mpu_diag_a(parent_stack_top, parent_stack_top + 120, parent_stack_base, parent_stack_top);
     print_mpu_diag_snapshot<BOARD>('A', g_mpu_diag_a);
 
+#if defined(SHIZUKU_CMD8_DIAG)
     // 2. 時点 B: 偽装なしの予備呼出し (cmd=7: 正規の CALL_METHOD を 1 回、SP を偽装せず)。
     //    callee 入場時 (return_resumed) にカーネル側が静的バッファへ記録だけ行う。
     //    t=B は callee 入場で張られる MPU の値なので、正規の呼出しでも偽装呼出しでも同じ region が張られる
@@ -1256,10 +1225,11 @@ void rp2350_u_cost() {
         static_cast<uintptr_t>(object_api::CALL_METHOD), OBJECT_U_COST_P, 0, 7 /* cmd=7: 予備呼出し */);
     (void)probe_res;
     print_mpu_diag_snapshot<BOARD>('B', g_mpu_diag_b);
+#endif
 
     // 3. 偽装 svc の親 P を起動 (cmd=8)。
     //    親 P 自身が、svc 発行直前に自分の CONTROL / PSP / PSPLIM / 偽装予定 SP を
-    //    data 窓内の変数 (shared[64..67]) に書いておく (t=C 相当)。
+    //    data 窓内の変数 (shared[48..51]) に書いておく (t=C 相当)。
     shared[60] = 0xAAAAAAAAu;
     const uint32_t faults_before = kernel_instance.faults().count;
     const auto spoof_spawned = ARCH::syscall(
@@ -1284,10 +1254,10 @@ void rp2350_u_cost() {
 
     // 4. 時点 C: 偽装 svc 直前に親 P が data 窓に書いた情報を thread 文脈で出力
     BOARD::diag_printf("[MPU-DIAG] t=C control=0x%08lx psp=0x%08lx psplim=0x%08lx spoof_sp=0x%08lx\n",
-                       (unsigned long)shared[65],
-                       (unsigned long)shared[64],
-                       (unsigned long)shared[66],
-                       (unsigned long)shared[67]);
+                       (unsigned long)shared[49],
+                       (unsigned long)shared[48],
+                       (unsigned long)shared[50],
+                       (unsigned long)shared[51]);
     drain_diag_if_supported<BOARD>();
 
     const auto &spoof_fault = kernel_instance.faults();
