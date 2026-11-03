@@ -243,7 +243,7 @@ uintptr_t leak_caller_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
           "=r"(r4_out), "=r"(r5_out), "=r"(r6_out), "=r"(r7_out),
           "=r"(r8_out), "=r"(r9_out), "=r"(r10_out), "=r"(r11_out)
         : "r"(r2), "r"(r3)
-        : "r2", "r3", "r12", "lr", "cc", "memory");
+        : "r12", "lr", "cc", "memory");
     data[1] = r4_out;
     data[2] = r5_out;
     data[3] = r6_out;
