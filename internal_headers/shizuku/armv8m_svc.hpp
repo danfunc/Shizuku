@@ -213,10 +213,10 @@ template <svc_direct_kind Kind>
 [[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void call_descriptor(uint32_t e, uintptr_t p, ARCH::core_num core) {
   direct<svc_direct_kind::CALL_DESCRIPTOR>(e, p, core);
 }
-[[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void exit_method(uint32_t e, uintptr_t p, ARCH::core_num core) {
+extern "C" [[gnu::noinline, gnu::noclone]] SHIZUKU_SVC_RAM void shizuku_armv8m_exit_method_body(uint32_t e, uintptr_t p, ARCH::core_num core) {
   direct<svc_direct_kind::EXIT_METHOD>(e, p, core);
 }
-[[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void forward_child_exit(uint32_t e, uintptr_t p, ARCH::core_num core) {
+extern "C" [[gnu::noinline, gnu::noclone]] SHIZUKU_SVC_RAM void shizuku_armv8m_forward_child_exit_body(uint32_t e, uintptr_t p, ARCH::core_num core) {
   direct<svc_direct_kind::FORWARD_CHILD_EXIT>(e, p, core);
 }
 [[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void get_current(uint32_t e, uintptr_t p, ARCH::core_num core) {
@@ -230,6 +230,14 @@ template <svc_direct_kind Kind>
 }
 
 } // namespace shizuku::armv8m_svc_detail
+
+// Thin asm entries defined in arch/armv8m/armv8m_ctx.S. They call the C++ bodies
+// above, and after the compiler epilogue restores r4-r11, they zero r4-r11 and
+// execute exception return (bx r12) so callee values never leak to caller.
+extern "C" SHIZUKU_SVC_RAM void shizuku_armv8m_exit_entry(
+    uint32_t exc_return, uintptr_t psp, shizuku::ARCH::core_num core);
+extern "C" SHIZUKU_SVC_RAM void shizuku_armv8m_forward_child_exit_entry(
+    uint32_t exc_return, uintptr_t psp, shizuku::ARCH::core_num core);
 
 // The API number is in r0 of the stacked frame (`svc 0` carries no immediate), so the
 // dispatch is one load and a jump table on the number; every path below is a tail call.
@@ -272,8 +280,8 @@ extern "C" SHIZUKU_SVC_RAM void shizuku_armv8m_svc_handler() {
 #if defined(SHIZUKU_DIAG_FP)
     shizuku::diag_fp::on_k3(diag_entry_ts);
 #endif
-    return exit_method(exc_return, psp, core);
-  case (uint32_t)object_api::FORWARD_CHILD_EXIT: return forward_child_exit(exc_return, psp, core);
+    return shizuku_armv8m_exit_entry(exc_return, psp, core);
+  case (uint32_t)object_api::FORWARD_CHILD_EXIT: return shizuku_armv8m_forward_child_exit_entry(exc_return, psp, core);
   case (uint32_t)object_api::GET_CURRENT_OBJECT: return get_current(exc_return, psp, core);
   case (uint32_t)object_api::GET_CALLER_OBJECT: return get_caller(exc_return, psp, core);
   case (uint32_t)object_api::SET_BUDGET: return set_budget(exc_return, psp, core);

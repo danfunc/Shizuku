@@ -154,6 +154,42 @@ shizuku_armv8m_svc_entry:
 .size shizuku_armv8m_svc_entry, .-shizuku_armv8m_svc_entry
 
 // ---------------------------------------------------------------------------
+// EXIT_METHOD / FORWARD_CHILD_EXIT 専用の薄い asm 入口。
+// C++ ハンドラのエピローグが r4-r11 を復元した後、r4-r11 を 0 クリアしてから
+// 例外復帰 (bx r12) することで、Callee の機密値が Caller へ漏洩するのを防ぐ。
+// ---------------------------------------------------------------------------
+.thumb_func
+.global shizuku_armv8m_exit_entry
+.align 2
+.type shizuku_armv8m_exit_entry, %function
+shizuku_armv8m_exit_entry:
+    push {r0, lr}
+    bl   shizuku_armv8m_exit_method_body
+    b    .Lshizuku_armv8m_exit_clear_and_return
+.size shizuku_armv8m_exit_entry, .-shizuku_armv8m_exit_entry
+
+.thumb_func
+.global shizuku_armv8m_forward_child_exit_entry
+.align 2
+.type shizuku_armv8m_forward_child_exit_entry, %function
+shizuku_armv8m_forward_child_exit_entry:
+    push {r0, lr}
+    bl   shizuku_armv8m_forward_child_exit_body
+
+.Lshizuku_armv8m_exit_clear_and_return:
+    pop  {r12, lr}
+    movs r4, #0
+    movs r5, #0
+    movs r6, #0
+    movs r7, #0
+    mov  r8, r4
+    mov  r9, r4
+    mov  r10, r4
+    mov  r11, r4
+    bx   r12
+.size shizuku_armv8m_forward_child_exit_entry, .-shizuku_armv8m_forward_child_exit_entry
+
+// ---------------------------------------------------------------------------
 // PendSV 入口 (時限実行権の期限回収 = 最低優先度の遅延切替例外)。退避/復元は
 // SVC と完全同型 (遅延 FPU 退避含む)。
 // ---------------------------------------------------------------------------

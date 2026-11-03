@@ -24,6 +24,7 @@
 #include "shizuku/object_api.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/selftest.hpp"
+#include "shizuku/register_isolation_contract.hpp"
 #include "chips/esp32_c6/selftest_record.h"
 #include "chips/esp32_c6/pmp_c6.hpp"
 
@@ -2180,6 +2181,8 @@ void c6_stage1_safety() {
                cap_a1, 0x42u);
 
   // (2) 他の全レジスタ (ra, t0-t6, a2-a7, s0-s11) が 0
+  // 共通契約 rv32_return_contract の SCRUBBED_ZERO (x0 を除く 26 レジスタ) と件数が一致することを縛る
+  static_assert(44 - 18 == shizuku::abi::count_scrubbed_zero(shizuku::abi::rv32_return_contract) - 1);
   bool other_regs_zero = true;
   uintptr_t non_zero_val = 0;
   for (size_t i = 18; i < 44; ++i) {

@@ -7,6 +7,7 @@
 #include "shizuku/selftest.hpp"
 #include "shizuku/armv8m_abi.hpp"
 #include "shizuku/method_entry.hpp"
+#include "shizuku/register_isolation_contract.hpp"
 
 alignas(32) uint8_t leak_caller_data[256];
 alignas(32) uint8_t leak_callee_data[256];
@@ -64,6 +65,16 @@ extern "C" __attribute__((noinline, used)) uintptr_t leak_callee_body(
               "s24", "s25", "s26", "s27", "s28", "s29", "s30", "s31", "memory");
     // 直接 EXIT_METHOD の正しい呼び方: a1 に戻り先深さ target=0 (深さ 1 の callee から深さ 0 の caller への復帰)、
     // a2 に戻り値 42、a3 にエラー 0 を渡す (marker なしの直接 EXIT)。
+    (void)shizuku::armv8m_abi::syscall(static_cast<uintptr_t>(shizuku::object_api::EXIT_METHOD), 0, 42, 0);
+    return 99;
+  }
+  if (command == 89) {
+    // Return stub を迂回し、r4-r11 を汚した状態で直接 EXIT_METHOD (2) を打つ
+    asm volatile(
+        "movw r4, #0xbeef\n movt r4, #0xdead\n"
+        "mov r5, r4\n mov r6, r4\n mov r7, r4\n"
+        "mov r8, r4\n mov r9, r4\n mov r10, r4\n mov r11, r4\n"
+        : : : "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "memory");
     (void)shizuku::armv8m_abi::syscall(static_cast<uintptr_t>(shizuku::object_api::EXIT_METHOD), 0, 42, 0);
     return 99;
   }
@@ -212,6 +223,37 @@ uintptr_t leak_caller_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
   } else if (cmd == 7) {
     const auto r = shizuku::armv8m_abi::syscall(4, data[0], 0, 10);
     data[9] = r.error; data[10] = r.value;
+  } else if (cmd == 8) {
+    // 整数版直接 EXIT 迂回: callee (command=89) を呼び、復帰直後の r4-r11 を data[1..8] に記録する
+    register uintptr_t r0 asm("r0") = 4;
+    register uintptr_t r1 asm("r1") = data[0];
+    register uintptr_t r2 asm("r2") = 0;
+    register uintptr_t r3 asm("r3") = 89;
+    register uintptr_t r4_out asm("r4");
+    register uintptr_t r5_out asm("r5");
+    register uintptr_t r6_out asm("r6");
+    register uintptr_t r7_out asm("r7");
+    register uintptr_t r8_out asm("r8");
+    register uintptr_t r9_out asm("r9");
+    register uintptr_t r10_out asm("r10");
+    register uintptr_t r11_out asm("r11");
+    asm volatile(
+        "svc 0\n"
+        : "+r"(r0), "+r"(r1),
+          "=r"(r4_out), "=r"(r5_out), "=r"(r6_out), "=r"(r7_out),
+          "=r"(r8_out), "=r"(r9_out), "=r"(r10_out), "=r"(r11_out)
+        : "r"(r2), "r"(r3)
+        : "r2", "r3", "r12", "lr", "cc", "memory");
+    data[1] = r4_out;
+    data[2] = r5_out;
+    data[3] = r6_out;
+    data[4] = r7_out;
+    data[5] = r8_out;
+    data[6] = r9_out;
+    data[7] = r10_out;
+    data[8] = r11_out;
+    data[9] = r0;
+    data[10] = r1;
   } else {
     (void)leak_active_call(data[0]);
   }
@@ -320,11 +362,10 @@ void register_leak_test() {
 
   for (unsigned i = 0; i < 64; ++i) d[i] = 0xffffffffu;
   auto active = ARCH::syscall(static_cast<uintptr_t>(object_api::CALL_METHOD), caller, 0, 2);
-  bool gp_zero = true, gp_restored = true;
+  bool gp_restored = true;
   bool fp_entry_caller_visible = true, fpscr_caller_visible = (d[11] == 0x00400000u);
   bool fp_lower_zero = true, fp_upper_restored = true;
   for (unsigned i = 0; i < 8; ++i) {
-    gp_zero &= d[i] == 0;
     gp_restored &= c[i + 1] == 0xdead0004u + i;
   }
   for (unsigned i = 0; i < 32; ++i) fp_entry_caller_visible &= d[16 + i] == (0x3f800100u + i);
@@ -334,7 +375,7 @@ void register_leak_test() {
   }
   record_check("leak A callee entry", active.error == 0 && active.value == 42 &&
                c[9] == 0 && c[10] == 42 && d[9] == 0xcafebeefu &&
-               (d[10] & 4u) && gp_zero && fp_entry_caller_visible && fpscr_caller_visible, d[9], 0xcafebeefu);
+               (d[10] & 4u) && fp_entry_caller_visible && fpscr_caller_visible, d[9], 0xcafebeefu);
   record_check("leak B caller registers restored", gp_restored && fp_upper_restored,
                gp_restored | (fp_upper_restored << 1), 3);
   record_check("leak B return scratch zero", c[54] == 0 && c[55] == 0 &&
@@ -364,6 +405,22 @@ void register_leak_test() {
   if (!direct_fpscr_clean) got_direct |= 1u << 7;  // fpscr non-zero
   record_check("leak direct EXIT bypass FP clean",
                got_direct == 0, got_direct, 0);
+
+  // Callee が return stub を通らず EXIT_METHOD を直接打って戻る整数漏洩試験
+  // カーネル消去により、復帰直後の r4-r11 (c[1..8]) がすべて 0 であることを検証する。
+  const auto direct_int_exit = run_fresh(8);
+  bool direct_int_clean = true;
+  for (unsigned i = 0; i < 8; ++i) {
+    direct_int_clean &= (c[i + 1] == 0);
+  }
+  uint32_t got_int_direct = 0;
+  if (direct_int_exit.error != 0) got_int_direct |= 1u << 0;
+  if (direct_int_exit.value != (uintptr_t)grant_end::YIELDED) got_int_direct |= 1u << 1;
+  if (c[9] != 0) got_int_direct |= 1u << 2;  // caller error
+  if (c[10] != 42) got_int_direct |= 1u << 3; // return value 42
+  if (!direct_int_clean) got_int_direct |= 1u << 4; // r4-r11 non-zero
+  record_check("leak direct EXIT bypass int clean",
+               got_int_direct == 0, got_int_direct, 0);
 #endif
 }
 } // namespace shizuku::selftest
