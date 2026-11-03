@@ -745,6 +745,19 @@ SHIZUKU_HOT inline arch::exception_frame_t *ecall_run(arch::exception_frame_t *f
   active_context = context;
   frame_to_context(*frame, *context);
   shizuku_c6_trap_diag[4] = shizuku_c6_trap_diag[4] + 1;
+#if defined(SHIZUKU_C6_UMODE)
+  auto &cur_thread = kernel.current_thread();
+  if (!context->privileged && (cur_thread.stk.cur_win_lo != 0 || cur_thread.stk.cur_win_hi != 0)) {
+    const uintptr_t u_sp = arch::u_stack_pointer(*frame);
+    if (__builtin_expect(!shizuku::window_contains_sp(cur_thread.stk.cur_win_lo, cur_thread.stk.cur_win_hi, u_sp), 0)) {
+      arch::set_result(*frame, static_cast<uintptr_t>(shizuku::object_error::NO_STACK), 0);
+      context_to_frame(*context);
+      auto *result = context->sp;
+      active_mstatus = previous_mstatus;
+      return result;
+    }
+  }
+#endif
   body(kernel, context);
   run_pending_switch();
   context = kernel.current_context();
@@ -849,6 +862,15 @@ SHIZUKU_HOT [[gnu::always_inline]] inline arch::exception_frame_t *ecall_direct(
   // Keep the trapped caller privilege. U-mode ECALL handlers execute in M-mode, but native_call
   // must ledger the caller as U so the return path restores its user SP, PMP window, and U tag.
   arch::set_context_privilege_from_frame(*context, *frame);
+#if defined(SHIZUKU_C6_UMODE)
+  if (!context->privileged && (thread.stk.cur_win_lo != 0 || thread.stk.cur_win_hi != 0)) {
+    const uintptr_t u_sp = arch::u_stack_pointer(*frame);
+    if (__builtin_expect(!shizuku::window_contains_sp(thread.stk.cur_win_lo, thread.stk.cur_win_hi, u_sp), 0)) {
+      arch::set_result(*frame, static_cast<uintptr_t>(shizuku::object_error::NO_STACK), 0);
+      return ecall_finish(context);
+    }
+  }
+#endif
   const shizuku::native::status result = body(kernel, thread, *context);
   if (__builtin_expect(result != shizuku::native::status::DONE, 0)) {
     if (result == shizuku::native::status::CORRUPT) return ecall_fault_corrupt(frame);
@@ -1329,8 +1351,8 @@ bool plic_vector_mode::user_stack_bounds(uint32_t object_id, uintptr_t &base, ui
   auto &thread = shizuku::kernel_instance.current_thread();
   if (thread.stk.stack_lo == 0 || thread.stk.stack_hi <= thread.stk.stack_lo)
     return false;
-  base = thread.stk.stack_lo;
-  limit = thread.stk.stack_hi;
+  base = (thread.stk.cur_win_lo != 0) ? thread.stk.cur_win_lo : thread.stk.stack_lo;
+  limit = (thread.stk.cur_win_hi != 0) ? thread.stk.cur_win_hi : thread.stk.stack_hi;
   return true;
 #else
   (void)object_id; (void)base; (void)limit;

@@ -1266,6 +1266,26 @@ static void test_sp_spoofing_prevented() {
   assert(thread.stk.cur_win_lo == w1.lo && thread.stk.cur_win_hi == w1.hi);
   // caller 枠のセンチネルは無傷
   assert(*caller_sentinel == 0x5EEDCAFEu);
+
+  // (5) U caller が偽装 SP で M callee を呼出し: NO_STACK で拒絶
+  mock_kobj::callee_view view_m{3, 0, 0, shizuku::object_kind::PLAIN, true /* M callee */, 0, 0, 1};
+  context.user_sp = w1.hi + 128u; // w1 の活動窓外 (上方偽装)
+  auto err_m_spoof = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
+      kernel, thread, context, view_m, 0x42002000u, mock_kernel::LEDGER_CALL);
+  assert(err_m_spoof == shizuku::kernel_error::NO_STACK);
+  assert(thread.call_stack.depth == 2);
+  assert(*caller_sentinel == 0x5EEDCAFEu);
+
+  // (6) U caller が正当な SP で M callee を呼出し: 成功 (ただし M なので窓は開かない)
+  context.user_sp = w1.hi - 32u; // w1 の活動窓内
+  auto err_m_valid = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
+      kernel, thread, context, view_m, 0x42002000u, mock_kernel::LEDGER_CALL);
+  assert(err_m_valid == shizuku::kernel_error::OK);
+  assert(thread.call_stack.depth == 3);
+  assert(thread.win_span[2] == 0); // M callee は窓を持たない
+  // cur_win は U の窓 (w1) のまま維持される
+  assert(thread.stk.cur_win_lo == w1.lo && thread.stk.cur_win_hi == w1.hi);
+  assert(*caller_sentinel == 0x5EEDCAFEu);
 }
 
 // 窓なし構成 (HAS_STACK_WINDOW == false) での stream_range_allowed の検査 (純粋ユニットテスト)

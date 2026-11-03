@@ -402,22 +402,26 @@ template <class K, class KObj>
     // 窓は U callee だけが持つ。M callee は win_span を書かず読まない: win_span[depth] は常に 0
     // (U 入場で書いた段は pop で必ず 0 に戻す不変条件。thread 生成時も 0)。
     if constexpr (K::THREAD::HAS_STACK_WINDOW) {
-      if (!view.privileged) {
-        if (depth >= thread.MAX_STACK_WINDOWS) {
-          return kernel_error::NO_STACK;
-        }
-        // caller (M でも U でも) の SP は thread 自身の stack 内に無ければならない。
+      const bool caller_is_u = !A::context_privileged(context);
+      // SP 偽装防止: caller が U のとき、
+      // caller の SP は thread 自身の stack 内かつ現在の活動窓 [cur_win_lo, cur_win_hi] の内側でなければならない。
+      if (caller_is_u) {
         if (thread.stk.stack_lo != 0 || thread.stk.stack_hi != 0) {
           if (ret_sp < thread.stk.stack_lo || ret_sp > thread.stk.stack_hi) {
             return kernel_error::NO_STACK;
           }
         }
-        // SP 偽装防止: caller が U のとき (直前の段が U 窓を持つとき)、
-        // caller の SP は現在の活動窓 [cur_win_lo, cur_win_hi] の内側でなければならない。
-        const bool caller_is_u = (depth > 0 && depth - 1 < thread.MAX_STACK_WINDOWS &&
-                                  thread.win_span[depth - 1] != 0);
-        if (caller_is_u) {
-          if (!window_contains_sp(thread.stk.cur_win_lo, thread.stk.cur_win_hi, ret_sp)) {
+        if (!window_contains_sp(thread.stk.cur_win_lo, thread.stk.cur_win_hi, ret_sp)) {
+          return kernel_error::NO_STACK;
+        }
+      }
+      if (!view.privileged) {
+        if (depth >= thread.MAX_STACK_WINDOWS) {
+          return kernel_error::NO_STACK;
+        }
+        // M caller -> U callee の場合も U callee 窓を開く前に SP が thread stack 内にあることを保証
+        if (!caller_is_u && (thread.stk.stack_lo != 0 || thread.stk.stack_hi != 0)) {
+          if (ret_sp < thread.stk.stack_lo || ret_sp > thread.stk.stack_hi) {
             return kernel_error::NO_STACK;
           }
         }
