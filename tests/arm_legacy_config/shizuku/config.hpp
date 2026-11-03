@@ -58,7 +58,12 @@ struct armv8m_legacy_host : armv8m<8, 4> {
   static uintptr_t stack_limit(const context_t &) { return host_stack_limit; }
   template <class Frame>
   static void switch_callee_protection(context_t &, Frame &, uint32_t, bool) {}
+  template <class Frame, class Core>
+  static void switch_callee_protection(context_t &, Frame &, uint32_t, bool,
+                                       const Core &) {}
   static void switch_caller_protection(uint32_t) {}
+  template <class Core>
+  static void switch_caller_protection(uint32_t, const Core &) {}
 };
 }  // namespace shizuku::archs
 
