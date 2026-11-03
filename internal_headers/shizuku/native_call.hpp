@@ -200,8 +200,10 @@ template <class K, class KObj>
                                                 typename K::CONTEXT &context,
                                                 typename K::FRAME *&frame, bool restore,
                                                 bool scrub,
-                                                core_arg_t<typename K::ARCH> core) {
+                                                core_arg_t<typename K::ARCH> core,
+                                                bool fp_result = false) {
   using A = typename K::ARCH;
+  (void)fp_result;
   if constexpr (arch_call_in_place<A>()) {
     const uint32_t depth = thread.call_stack.depth;
 #if defined(SHIZUKU_LEAN_LEDGER)
@@ -229,8 +231,15 @@ template <class K, class KObj>
       const bool caller_fpca = entry.ret_fpca();
       const uintptr_t clean_sp = entry.caller_sp();
       if constexpr (arch_has_core_num<A>) {
-        frame = A::call_resume_at(context, entry.ret_pc, clean_sp, entry.ret_privileged != 0,
-                                  caller_fpca, 0, 0, scrub, core);
+        // fp_result: EXIT の印が「s0/s1 に FP 戻り値」と宣言したときだけ true (ARMv8-M)。
+        // この形を持たない ARCH (RV32 など) は FP 部が無いので従来の形で呼ぶ。
+        if constexpr (requires { A::call_resume_at(context, entry.ret_pc, clean_sp, entry.ret_privileged != 0, caller_fpca, (uintptr_t)0, (uintptr_t)0, scrub, fp_result, core); }) {
+          frame = A::call_resume_at(context, entry.ret_pc, clean_sp, entry.ret_privileged != 0,
+                                    caller_fpca, 0, 0, scrub, fp_result, core);
+        } else {
+          frame = A::call_resume_at(context, entry.ret_pc, clean_sp, entry.ret_privileged != 0,
+                                    caller_fpca, 0, 0, scrub, core);
+        }
       } else {
         if constexpr (requires { A::call_resume_at(context, entry.ret_pc, clean_sp, entry.ret_privileged != 0, caller_fpca, (uintptr_t)0, (uintptr_t)0, scrub); }) {
           frame = A::call_resume_at(context, entry.ret_pc, clean_sp, entry.ret_privileged != 0,
@@ -292,8 +301,8 @@ requires (!arch_has_core_num<typename K::ARCH>)
 [[gnu::always_inline]] inline bool pop_in_place(KObj &kobj, typename K::THREAD &thread,
                                                 typename K::CONTEXT &context,
                                                 typename K::FRAME *&frame, bool restore,
-                                                bool scrub) {
-  return pop_in_place<K, KObj>(kobj, thread, context, frame, restore, scrub, no_core{});
+                                                bool scrub, bool fp_result = false) {
+  return pop_in_place<K, KObj>(kobj, thread, context, frame, restore, scrub, no_core{}, fp_result);
 }
 
 // 台帳の上から count 段を落とす。最後に落とした段の caller だけが再開する。
@@ -304,10 +313,11 @@ template <class K, class KObj>
                                                    typename K::CONTEXT &context,
                                                    typename K::FRAME *&frame, uintptr_t count,
                                                    bool forced_scrub,
-                                                   core_arg_t<typename K::ARCH> core) {
+                                                   core_arg_t<typename K::ARCH> core,
+                                                   bool fp_result = false) {
   const bool scrub = forced_scrub || count > 1;
   for (uintptr_t index = 0; index < count; ++index)
-    if (!pop_in_place<K, KObj>(kobj, thread, context, frame, index + 1 == count, scrub, core))
+    if (!pop_in_place<K, KObj>(kobj, thread, context, frame, index + 1 == count, scrub, core, fp_result))
       return false;
   return true;
 }
@@ -317,8 +327,8 @@ requires (!arch_has_core_num<typename K::ARCH>)
 [[gnu::always_inline]] inline bool unwind_in_place(KObj &kobj, typename K::THREAD &thread,
                                                    typename K::CONTEXT &context,
                                                    typename K::FRAME *&frame, uintptr_t count,
-                                                   bool forced_scrub) {
-  return unwind_in_place<K, KObj>(kobj, thread, context, frame, count, forced_scrub, no_core{});
+                                                   bool forced_scrub, bool fp_result = false) {
+  return unwind_in_place<K, KObj>(kobj, thread, context, frame, count, forced_scrub, no_core{}, fp_result);
 }
 
 // 呼び先 id (入口 entry_pc) へ入る (enter_call + do_call の後半)。ヘッダ枠方式 ARCH 専用。
@@ -611,8 +621,9 @@ requires (!arch_has_core_num<typename K::ARCH>)
 // EXIT_METHOD (2, Forward == false) / FORWARD_CHILD_EXIT (27, Forward == true): 戻り先の絶対深さ
 // d を検証して current_depth - d 段を落とす。a1 = d, a2 = value, a3 = error。FORWARD = kobj へ回す
 // (スレッドの最外のメソッドが戻る場合 = スレッドの終わり)。
-// 非 KOBJ の return stub (a4 = RETURN_STUB_MARKER、2 のみ) は d を持たないので、台帳の unwind floor
-// (= 呼び先を積む前の深さ) を d とする。27 は専用 HANDLER からだけ (parent_ledger 権限)。
+// 非 KOBJ の return stub (a4 = RETURN_STUB_MARKER / RETURN_STUB_MARKER_FP、2 のみ) は d を持たないので、
+// 台帳の unwind floor (= 呼び先を積む前の深さ) を d とする。_FP の印は s0/s1 の FP 戻り値を caller へ
+// 渡す宣言で、再開フレームへ s0/s1 を写す (印なしは FP 部 18 語すべて 0)。27 は専用 HANDLER からだけ。
 // 検査は primitive RETURN と同じ (validate_return_depth)。弾いたら 1 枚も落とさず
 // UNWIND_REJECTED + kernel_error を返す。
 template <class K, class KObj, bool Forward>
@@ -638,9 +649,14 @@ template <class K, class KObj, bool Forward>
     }
     const uint32_t floor = depth ? thread.ledger[depth - 1].unwind_floor : 0;
     uintptr_t d = A::arg(*frame, 1);
+    // FP 戻り値の印 (RETURN_STUB_MARKER_FP) は再開フレームを作る前 (trap フレームが上書きされる前) に読む。
+    bool fp_result = false;
     if constexpr (!Forward) {
-      if (A::arg(*frame, 4) == RETURN_STUB_MARKER)
+      const uintptr_t marker = A::arg(*frame, 4);
+      if (is_return_stub_marker(marker)) {
         d = (uintptr_t)floor;
+        fp_result = is_fp_result_marker(marker);
+      }
     }
     // スレッドの最外のメソッドが戻ったとき (d == 0 かつ呼出し段なし) は「スレッドの終わり」で、
     // 次のスレッドの選び方に踏み込むので kobj の exit_thread に任せる。
@@ -657,7 +673,7 @@ template <class K, class KObj, bool Forward>
     const uintptr_t value = A::arg(*frame, 2);
     const uintptr_t error = A::arg(*frame, 3);
     // FORWARD_CHILD_EXIT は親ハンドラが子を取り上げて戻す巻き戻しなので、1 段でも消去の目印。
-    if (!unwind_in_place<K, KObj>(kobj, thread, context, frame, count, Forward, core))
+    if (!unwind_in_place<K, KObj>(kobj, thread, context, frame, count, Forward, core, fp_result))
       return status::CORRUPT;
     A::set_result(*frame, error, value);
     return status::DONE;

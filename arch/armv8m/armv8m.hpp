@@ -492,12 +492,20 @@ public:
   [[gnu::always_inline]] static inline exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
       uintptr_t sp, bool privileged, bool caller_fpca, uintptr_t base, uintptr_t limit, bool scrub,
       core_num core) {
-    return call_resume_at<FloatingPointState>(context, pc, sp, privileged, caller_fpca, base, limit, scrub, core.index());
+    return call_resume_at<FloatingPointState>(context, pc, sp, privileged, caller_fpca, base, limit, scrub, false, core.index());
+  }
+  // fp_result: EXIT の印 (RETURN_STUB_MARKER_FP) が s0/s1 の FP 戻り値を宣言したか。
+  //   true のときだけ s0/s1 を再開フレームへ写す。false (印なし・整数/void 戻り・直接 EXIT) は FP 部 18 語すべて 0。
+  template <class FloatingPointState = lazy_fp_state>
+  [[gnu::always_inline]] static inline exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
+      uintptr_t sp, bool privileged, bool caller_fpca, uintptr_t base, uintptr_t limit, bool scrub,
+      bool fp_result, core_num core) {
+    return call_resume_at<FloatingPointState>(context, pc, sp, privileged, caller_fpca, base, limit, scrub, fp_result, core.index());
   }
   template <class FloatingPointState = lazy_fp_state>
   [[gnu::always_inline]] static inline exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
       uintptr_t sp, bool privileged, bool caller_fpca = true, uintptr_t base = 0, uintptr_t limit = 0, bool scrub = false) {
-    return call_resume_at<FloatingPointState>(context, pc, sp, privileged, caller_fpca, base, limit, scrub, 0);
+    return call_resume_at<FloatingPointState>(context, pc, sp, privileged, caller_fpca, base, limit, scrub, false, 0);
   }
 
   // 例外フレーム 8 語を、語ごとのストアで全部ゼロにする (呼び先へ前のスタックの値を漏らさない)。
@@ -776,7 +784,7 @@ private:
   template <class FloatingPointState = lazy_fp_state>
   [[gnu::always_inline]] static inline exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
       uintptr_t sp, bool privileged, bool caller_fpca, uintptr_t base, uintptr_t limit, bool scrub,
-      uint32_t core) {
+      bool fp_result, uint32_t core) {
     const uint32_t bytes = exc_frame_bytes(context);
     auto *next = reinterpret_cast<exception_frame_t *>(sp - bytes);
     if (bytes != sizeof(exception_frame_t)) {
@@ -795,8 +803,11 @@ private:
       if (!caller_fpca) {
         FloatingPointState::clear_upper_fp_registers();
       }
-      const uint32_t s0 = s[0];
-      const uint32_t s1 = s[1];
+      // s0/s1 は FP 戻り値の置き場。EXIT の印が宣言したときだけ写し、それ以外は 0 (分岐なしのマスク)。
+      // d と s は重なりうるので、書く前に両方読む。
+      const uint32_t keep = 0u - static_cast<uint32_t>(fp_result);
+      const uint32_t s0 = s[0] & keep;
+      const uint32_t s1 = s[1] & keep;
       d[0] = s0;
       d[1] = s1;
       d[2] = 0;  d[3] = 0;  d[4] = 0;  d[5] = 0;

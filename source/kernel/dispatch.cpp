@@ -313,7 +313,7 @@ SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::call_frame_push(KERNEL::THREAD &thread,
 template <>
 SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                             KERNEL::FRAME **frame, bool restore, bool scrub,
-                            core_arg_t<ARCH> core) {
+                            core_arg_t<ARCH> core, bool fp_result) {
 #if defined(SHIZUKU_LEAN_LEDGER)
   // 最内ヘッダへのポインタ (top) は持たない。落とす段があるかは深さで見る。
   if (thread.call_stack.depth == 0)
@@ -327,7 +327,7 @@ SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, 
     // 再開フレームを caller の SP の直下に作る (a0/a1 以外は素通し。scrub のときは出口が消す)。
     // frame のコピーも戻しも無い。
     // (call の段の識別の戻しと underflow の検査は trap 内の EXIT_METHOD と共有: native_call.hpp)
-    if (!native::pop_in_place<KERNEL>(kernel_object_instance, thread, *context, *frame, restore, scrub, core))
+    if (!native::pop_in_place<KERNEL>(kernel_object_instance, thread, *context, *frame, restore, scrub, core, fp_result))
       BOARD::panic("call ledger count underflow");
     return true;
   }
@@ -397,12 +397,12 @@ SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, 
 template <>
 SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::call_unwind(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                                      KERNEL::FRAME **frame, uintptr_t count,
-                                     core_arg_t<ARCH> core) {
+                                     core_arg_t<ARCH> core, bool fp_result) {
   // 途中の段は再開しない。最後に落とす段の caller だけが走り出す。2 段以上を一度に落とす
   // 巻き戻しは callee が自分の意思で戻らないので、再開の出口でレジスタを消す (scrub)。
   const bool scrub = count > 1;
   for (uintptr_t index = 0; index < count; ++index)
-    call_frame_pop(thread, context, frame, index + 1 == count, scrub, core);
+    call_frame_pop(thread, context, frame, index + 1 == count, scrub, core, fp_result);
 }
 
 // 通常 CALL と方法記述子の直接 call が共有する前半。台帳段を via (LEDGER_CALL か
@@ -558,7 +558,8 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_primitive(KERNEL::CONTE
     const uintptr_t target_arg = ARCH::arg(*frame, 4);
     const uint32_t floor = current_unwind_floor();
     uint32_t target_depth;
-    if (target_arg == RETURN_STUB_MARKER) {
+    const bool fp_result = is_fp_result_marker(target_arg);
+    if (is_return_stub_marker(target_arg)) {
       const auto request = resolve_return_stub(depth);
       target_depth = request.target_depth;
       count = request.count;
@@ -575,7 +576,7 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_primitive(KERNEL::CONTE
       ARCH::set_result(*frame, (uintptr_t)validation, depth);
       break;
     }
-    call_unwind(thread, context, &frame, count, core);
+    call_unwind(thread, context, &frame, count, core, fp_result);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     shizuku_boot_trace_return_leave((uint32_t)context->sp, (uint32_t)frame);
 #endif
@@ -646,7 +647,7 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_yield(KERNEL::CONTEXT *
 
 // EXIT_METHOD (2) / FORWARD_CHILD_EXIT (27): 戻り先の絶対深さ d を検証して
 //   current_depth - d 段を落とす。27 は専用 HANDLER からだけ (parent_ledger 権限)。
-//   a1 = d, a2 = value, a3 = error。非 KOBJ の return stub (a4 = RETURN_STUB_MARKER、2 のみ) は
+//   a1 = d, a2 = value, a3 = error。非 KOBJ の return stub (a4 = RETURN_STUB_MARKER / _FP、2 のみ) は
 //   d を持たないので、台帳の unwind floor (= 呼び先を積む前の深さ) を d とする。
 //   検査は primitive RETURN と同じ (validate_return_depth)。弾いたら 1 枚も落とさず
 //   UNWIND_REJECTED + kernel_error を呼び出し元へ返す (従来の exit_method の reply と同じ)。
@@ -683,7 +684,8 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_exit(KERNEL::CONTEXT *c
   }
   const uint32_t depth = thread.call_stack.depth;
   const uint32_t floor = current_unwind_floor();
-  const bool from_stub = !forward && ARCH::arg(*frame, 4) == RETURN_STUB_MARKER;
+  const bool from_stub = !forward && is_return_stub_marker(ARCH::arg(*frame, 4));
+  const bool fp_result = !forward && is_fp_result_marker(ARCH::arg(*frame, 4));
   const uintptr_t d = from_stub ? (uintptr_t)floor : ARCH::arg(*frame, 1);
   // スレッドの最外のメソッドが戻ったとき (d == 0 かつ呼出し段なし) は「スレッドの
   // 終わり」で、次のスレッドの選び方に踏み込むので kobj の exit_thread に任せる
@@ -701,7 +703,7 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_exit(KERNEL::CONTEXT *c
   }
   const uintptr_t value = ARCH::arg(*frame, 2);
   const uintptr_t error = ARCH::arg(*frame, 3);
-  call_unwind(thread, context, &frame, count, core);
+  call_unwind(thread, context, &frame, count, core, fp_result);
   ARCH::set_result(*frame, error, value);
   return true;
 }
@@ -874,7 +876,7 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_forward(KERNEL::CONTEXT
   // A return stub cannot know its parent's absolute depth. Its private marker
   // turns the legacy one-pop notification into a return to the actor's floor.
   if (args[0] == (uintptr_t)primitive::RETURN &&
-      ARCH::arg(*frame, 4) == RETURN_STUB_MARKER)
+      is_return_stub_marker(ARCH::arg(*frame, 4)))
     args[1] = unwind_floor;
   args[4] = unwind_floor;
 

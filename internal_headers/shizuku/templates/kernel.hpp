@@ -416,12 +416,13 @@ private:
   // restore == false は「caller の再開フレームを作る」を省く (複数段を落とすとき、途中の段は
   // 再開しないので最後の 1 段だけ true にする。ARM のコピー式は常に文脈を戻す)。
   // scrub は再開フレームの目印 (RV32: 出口でレジスタを消すか。ARM のコピー式は使わない)。
+  // fp_result: 戻りの印が「s0/s1 に FP 戻り値」を宣言したか (RETURN_STUB_MARKER_FP)。再開する段だけで使う。
   bool call_frame_pop(THREAD &thread, CONTEXT *context, FRAME **frame,
-                      bool restore, bool scrub, core_arg_t<ARCH> core);
+                      bool restore, bool scrub, core_arg_t<ARCH> core, bool fp_result = false);
   // 台帳の上から count 段を落とす。最後に落とした段の caller が再開する。
   // 2 段以上を一度に落とす巻き戻しは scrub の再開 (callee が自分の意思で戻らない)。
   void call_unwind(THREAD &thread, CONTEXT *context, FRAME **frame, uintptr_t count,
-                   core_arg_t<ARCH> core);
+                   core_arg_t<ARCH> core, bool fp_result = false);
 
   // 台帳段を 1 つ積んで呼び先の入口へ向ける前半。通常 CALL と方法記述子の直接 call が
   // 共有する (積み方と戻りの床をそろえるため)。
