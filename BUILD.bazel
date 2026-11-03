@@ -190,6 +190,12 @@ cc_test(
 )
 
 cc_test(
+    name = "stack_window_test",
+    srcs = ["tests/stack_window_test.cpp"],
+    deps = [":internal_headers"],
+)
+
+cc_test(
     name = "armv8m_legacy_frame_return_test",
     srcs = [
         "tests/arm_legacy_frame_return_test.cpp",

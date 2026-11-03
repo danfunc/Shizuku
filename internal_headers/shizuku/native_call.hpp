@@ -13,6 +13,7 @@
 #include <cstdint>
 #include "shizuku/kernel_abi.hpp"
 #include "shizuku/object_api.hpp"
+#include "shizuku/stack_window.hpp"
 #include "shizuku/svc_attributes.hpp"
 
 #if defined(SHIZUKU_C6_UMODE) && !defined(SHIZUKU_LEAN_LEDGER)
@@ -190,7 +191,25 @@ template <class K, class KObj>
       thread.call_stack.call_count--;
       thread.call_stack.call_top = entry.prev_call;
     }
+    // Zero the opened stack window of this activation before returning to caller
+    const auto popped_win = (depth - 1 < thread.MAX_STACK_WINDOWS)
+        ? thread.win[depth - 1]
+        : stack_window{};
+    zero_window_of<A>(popped_win);
+    if (depth - 1 < thread.MAX_STACK_WINDOWS) {
+      thread.win[depth - 1] = stack_window{};
+    }
+
+    const auto caller_win = (depth > 1 && depth - 2 < thread.MAX_STACK_WINDOWS)
+        ? thread.win[depth - 2]
+        : stack_window{thread.stack_lo, thread.stack_hi};
+    thread.cur_win_lo = caller_win.lo;
+    thread.cur_win_hi = caller_win.hi;
+
     if (restore) {
+      if constexpr (requires { A::apply_stack_window(context, caller_win.lo, caller_win.hi); }) {
+        A::apply_stack_window(context, caller_win.lo, caller_win.hi);
+      }
       frame = A::call_resume_at(context, entry.ret_pc, entry.ret_sp, entry.ret_privileged != 0,
                                 0, 0, scrub);
       const auto window = resolve_return_region_window(
@@ -274,6 +293,20 @@ template <class K, class KObj>
       return kernel_error::NO_STACK;
     typename K::FRAME &frame = *context.sp;
 #if defined(SHIZUKU_LEAN_LEDGER)
+    const uintptr_t ret_sp = A::call_return_sp(context);
+    const auto win = open_window(ret_sp, thread.stack_lo);
+    if (!win.is_valid()) {
+      return kernel_error::NO_STACK;
+    }
+    if (depth < thread.MAX_STACK_WINDOWS) {
+      thread.win[depth] = win;
+    }
+    thread.cur_win_lo = win.lo;
+    thread.cur_win_hi = win.hi;
+    if constexpr (requires { A::apply_stack_window(context, win.lo, win.hi); }) {
+      A::apply_stack_window(context, win.lo, win.hi);
+    }
+
     // 記帳は台帳の 1 項目だけ: 呼び先の同定 (object・handler・kind・via・floor・世代) と、この段から
     // 戻るときの caller の再開点 (pc・sp・特権) と、ひとつ外側の call 段への鎖 (prev_call)。窓は復帰時に解決する。
     // user stack のヘッダは書かない。current / caller の識別は call 段の列から導く (call_top だけ更新)。
@@ -286,7 +319,7 @@ template <class K, class KObj>
     entry.unwind_floor = (uint16_t)depth;
     entry.generation = view.instance_generation;
     entry.ret_pc = A::frame_pc(frame);
-    entry.ret_sp = A::call_return_sp(context);
+    entry.ret_sp = ret_sp;
     entry.prev_call = (uint16_t)stack.call_top;
     entry.ret_privileged = A::context_privileged(context) ? 1 : 0;
     stack.depth = depth + 1;
