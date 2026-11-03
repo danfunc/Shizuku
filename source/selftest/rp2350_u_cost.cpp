@@ -17,6 +17,9 @@
 #include "shizuku/u_cost_sram_window.hpp"
 #include "shizuku/xip_cost.hpp"
 #include "shizuku/armv8m_abi.hpp"
+#if defined(__ARM_ARCH_8M_MAIN__) || defined(SHIZUKU_RP2350)
+#include "arch/ppb.hpp"
+#endif
 #if defined(SHIZUKU_DIAG_FP)
 #include "shizuku/diag_fp.hpp"
 #endif
@@ -57,10 +60,13 @@ void u_cost_probe_code_access();
 void u_cost_probe_data_access();
 void u_cost_probe_caller_stack_store();
 uintptr_t u_cost_probe_sp_spoof_child(uintptr_t target);
+uintptr_t u_cost_probe_unaligned_sp_child(uintptr_t target);
 uintptr_t u_cost_probe_stream_caller_stack();
 void u_cost_denied_code();
 extern const char u_cost_probe_data_fault_pc[];
 extern const char u_cost_probe_store_fault_pc[];
+extern volatile bool shizuku_cmd8_mpu_diag_b_pending;
+void shizuku_dump_mpu_diag_b(uintptr_t ret_sp, uintptr_t spoof_sp, uintptr_t parent_base, uintptr_t parent_top);
 }
 
 #if defined(__ARM_ARCH_8M_MAIN__)
@@ -110,6 +116,59 @@ SHIZUKU_U_COST_CODE __attribute__((naked)) void u_cost_probe_caller_stack_store(
 
 // Registered only after timing so the measured child worker stays two instructions.
 SHIZUKU_U_COST_CODE __attribute__((naked)) uintptr_t u_cost_probe_sp_spoof_child(uintptr_t target) {
+  asm volatile(
+      ".syntax unified\n"
+      ".thumb\n"
+      // SP 偽装 (add sp, #248) して svc #0 を発行すると、ARM ハードウェア例外エントリが
+      // 現在の SP (SP_p + 104) から下方に 104 バイト (0x68) の例外フレームを自動退避する。
+      // この [SP_p, SP_p + 104) の領域は親の armv8m_abi::syscall 退避領域 [SP_p, SP_p + 32)
+      // (元の親 SP や CONTROL 等) と重複するため、svc 前に安全なスタックへ 104 バイトを退避し、
+      // 復帰後に元の位置へ復元する。親の sentinel (SP_p + 112 以上) には触れない。
+      "push {r4, r5, r6, r7, lr}\n"
+      "sub  sp, sp, #108\n"
+      "mov  r4, r0\n"                  // target object in r4
+      "mov  r5, sp\n"                  // dst = 退避バッファ (sp)
+      "add  r6, sp, #144\n"            // src = 親の SP_p (SP_in + 16 = sp + 128 + 16 = sp + 144)
+      "movs r7, #26\n"                 // 26 words = 104 bytes
+      "0:\n"
+      "ldr  r1, [r6], #4\n"
+      "str  r1, [r5], #4\n"
+      "subs r7, r7, #1\n"
+      "bne  0b\n"
+      "add  sp, sp, #248\n"            // SP 偽装: sp = SP_p + 104 (ceiling を超える caller 枠内)
+      "mov  r1, r4\n"                  // target object in r1
+      "movs r0, #4\n"                  // CALL_METHOD (4)
+      "movs r2, #0\n"                  // method 0
+      "movs r3, #0\n"
+      "movs r12, #0\n"
+      "svc  #0\n"
+      "sub  sp, sp, #248\n"            // SP 復元: sp = SP_in - 128
+      "mov  r4, r0\n"                  // syscall 戻り値 (r0 = 6: NO_STACK) を r4 に退避
+      "mov  r5, sp\n"                  // src = 退避バッファ (sp)
+      "add  r6, sp, #144\n"            // dst = 親の SP_p (sp + 144)
+      "movs r7, #26\n"                 // 26 words = 104 bytes
+      "1:\n"
+      "ldr  r1, [r5], #4\n"
+      "str  r1, [r6], #4\n"
+      "subs r7, r7, #1\n"
+      "bne  1b\n"
+      "add  sp, sp, #108\n"            // 退避バッファ解放
+      "mov  r0, r4\n"                  // r0 = syscall 戻り値
+      "cmp  r0, #6\n"                  // object_error::NO_STACK == 6
+      "bne  2f\n"
+      "movs r0, #0\n"                  // 正常 (NO_STACK で拒絶された)
+      "pop  {r4, r5, r6, r7, pc}\n"
+      "2:\n"
+      "cmp  r0, #0\n"
+      "bne  3f\n"
+      "ldr  r0, =0xDEAD0038\n"
+      "3:\n"
+      "pop  {r4, r5, r6, r7, pc}\n"
+      ".ltorg\n"
+  );
+}
+
+SHIZUKU_U_COST_CODE __attribute__((naked)) uintptr_t u_cost_probe_unaligned_sp_child(uintptr_t target) {
   asm volatile(
       ".syntax unified\n"
       ".thumb\n"
@@ -227,6 +286,7 @@ SHIZUKU_U_COST_CODE uintptr_t u_cost_denied_probe_worker(uintptr_t mode, uintptr
   if (mode == 92) return u_cost_probe_sp_spoof_child(shizuku::object_id::cost_u_parent);
   if (mode == 93) return u_cost_probe_stream_caller_stack();
   if (mode == 94) u_cost_probe_caller_stack_store();
+  if (mode == 95) return u_cost_probe_unaligned_sp_child(shizuku::object_id::cost_u_parent);
   return 0;
 }
 
@@ -274,11 +334,80 @@ SHIZUKU_U_COST_CODE uintptr_t u_cost_parent_worker(uintptr_t cmd, uintptr_t arg1
       return syscall(static_cast<uintptr_t>(shizuku::object_api::EXPORT_METHOD), 1,
                      reinterpret_cast<uintptr_t>(&u_cost_denied_probe_worker)).error;
     if (cmd == 8) {
-      volatile uint32_t sentinel = 0x5F01CAFE;
+      data[60] = 0xAAAAAAAAu;
+      volatile uint32_t sentinel = 0x5F01CAFEu;
+      data[57] = sentinel;
+      data[58] = 0; // corrupted flag
+#if defined(__ARM_ARCH_8M_MAIN__)
+      register uintptr_t r0 asm("r0") = 4;
+      register uintptr_t r1 asm("r1") = shizuku::object_id::cost_u_parent;
+      register uintptr_t r2 asm("r2") = 1;
+      register uintptr_t r3 asm("r3") = 92;
+      register uintptr_t r12 asm("r12") = 0;
+      uintptr_t ret_err = 0, ret_val = 0;
+      asm volatile(
+          "mov  r4, sp\n"
+          "mov  r6, r7\n"
+          "mrs  r5, control\n"
+          "ldr  r8, =u_cost_p_data_pool\n"
+          "str  r4, [r8, #216]\n"       // data[54] = saved_sp
+          "str  r5, [r8, #220]\n"       // data[55] = saved_control
+          "str  r6, [r8, #224]\n"       // data[56] = saved_r7
+          "mov  lr, sp\n"
+          "bic  lr, lr, #31\n"
+          "sub  lr, lr, #32\n"
+          "mov  sp, lr\n"
+          "str  r4, [sp, #0]\n"
+          "str  r5, [sp, #4]\n"
+          "str  r6, [sp, #12]\n"
+          "svc  0\n"
+          "ldr  r8, =u_cost_p_data_pool\n"
+          "ldr  r4, [sp, #0]\n"
+          "ldr  r5, [sp, #4]\n"
+          "ldr  r6, [sp, #12]\n"
+          "ldr  r9, [r8, #216]\n"
+          "ldr  r10, [r8, #220]\n"
+          "ldr  r11, [r8, #224]\n"
+          "movs r12, #0\n"
+          "cmp  r4, r9\n"
+          "it   ne\n"
+          "movne r12, #1\n"
+          "cmp  r5, r10\n"
+          "it   ne\n"
+          "movne r12, #1\n"
+          "cmp  r6, r11\n"
+          "it   ne\n"
+          "movne r12, #1\n"
+          "str  r12, [r8, #232]\n"      // data[58] = corrupted
+          "cmp  r12, #0\n"
+          "ite  ne\n"
+          "movne r2, r9\n"
+          "moveq r2, r4\n"
+          "ite  ne\n"
+          "movne r7, r11\n"
+          "moveq r7, r6\n"
+          "mov  sp, r2\n"
+          : "+r"(r0), "+r"(r1), "+r"(r2), "+r"(r3), "+r"(r12)
+          :
+          : "r4", "r5", "r6", "r8", "r9", "r10", "r11", "lr", "memory", "cc"
+      );
+      ret_err = r0;
+      ret_val = r1;
+#else
       const auto r = syscall(4, shizuku::object_id::cost_u_parent, 1, 92);
-      if (r.error != 0 || r.value != 0) return r.value != 0 ? r.value : 0xDEAD0038;
-      if (sentinel != 0x5F01CAFE) return 0xDEAD0037;
-      return 0;
+      uintptr_t ret_err = r.error;
+      uintptr_t ret_val = r.value;
+#endif
+      uintptr_t res = 0;
+      if (data[58] != 0 || sentinel != 0x5F01CAFEu) {
+        res = 0xDEAD0037u; // caller 枠破壊 FAIL
+      } else if (ret_err != 0 || ret_val != 0) {
+        res = ret_val != 0 ? ret_val : 0xDEAD0038u;
+      } else {
+        res = 0;
+      }
+      data[60] = res;
+      return res;
     }
     if (cmd == 9) {
       volatile uint32_t sentinel = 0x5F01CAFE;
@@ -391,6 +520,15 @@ extern "C" {
 uintptr_t u_cost_parent_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) { return 0; }
 uintptr_t u_cost_parent_worker_fp(uintptr_t, uintptr_t, uintptr_t, uintptr_t) { return 0; }
 uintptr_t u_cost_child_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) { return 0; }
+uintptr_t u_cost_probe_sp_spoof_child(uintptr_t) { return 0; }
+uintptr_t u_cost_probe_unaligned_sp_child(uintptr_t) { return 0; }
+uintptr_t u_cost_probe_stream_caller_stack() { return 0; }
+void u_cost_probe_code_access() {}
+void u_cost_probe_data_access() {}
+void u_cost_probe_caller_stack_store() {}
+void u_cost_denied_code() {}
+const char u_cost_probe_data_fault_pc[1] = {};
+const char u_cost_probe_store_fault_pc[1] = {};
 void u_cost_code_begin() {}
 void u_cost_code_end_pad() {}
 const char u_cost_code_end[1] = {};
@@ -544,6 +682,92 @@ void record_check(const char *name, bool ok, unsigned long got, unsigned long wa
     BOARD::diag_printf("[COST] FAIL %s: got %lu want %lu\n", name, got, want);
   }
   drain_diag_if_supported<BOARD>();
+}
+
+} // namespace
+
+extern "C" {
+volatile bool shizuku_cmd8_mpu_diag_b_pending = false;
+
+void shizuku_dump_mpu_diag_b(uintptr_t ret_sp, uintptr_t spoof_sp, uintptr_t parent_base, uintptr_t parent_top) {
+#if defined(__ARM_ARCH_8M_MAIN__) || defined(SHIZUKU_RP2350)
+  namespace ppb = shizuku::archs::ppb;
+  using BOARD = shizuku::KERNEL::BOARD;
+  const uint32_t orig_rnr = ppb::mpu->rnr;
+  const uint32_t region_count = (ppb::mpu->type >> 8) & 0xFFu;
+
+  for (uint32_t r = 0; r < region_count; ++r) {
+    ppb::mpu->rnr = r;
+    const uint32_t rbar = ppb::mpu->rbar;
+    const uint32_t rlar = ppb::mpu->rlar;
+    BOARD::diag_printf("[MPU-DIAG] t=B rnr=%lu rbar=0x%08lx rlar=0x%08lx\n",
+                       (unsigned long)r, (unsigned long)rbar, (unsigned long)rlar);
+    drain_diag_if_supported<BOARD>();
+  }
+  ppb::mpu->rnr = orig_rnr;
+
+  const uint32_t mpu_ctrl = ppb::mpu->ctrl;
+  const uint32_t shcsr = *reinterpret_cast<volatile uint32_t *>(0xE000ED24u);
+  uint32_t control = 0;
+  uintptr_t psp = 0;
+  uintptr_t psplim = 0;
+  asm volatile("mrs %0, control" : "=r"(control));
+  asm volatile("mrs %0, psp" : "=r"(psp));
+  asm volatile("mrs %0, psplim" : "=r"(psplim));
+
+  BOARD::diag_printf("[MPU-DIAG] t=B ctrl=0x%08lx shcsr=0x%08lx control=0x%08lx psp=0x%08lx psplim=0x%08lx\n",
+                     (unsigned long)mpu_ctrl, (unsigned long)shcsr,
+                     (unsigned long)control, (unsigned long)psp, (unsigned long)psplim);
+  drain_diag_if_supported<BOARD>();
+
+  BOARD::diag_printf("[MPU-DIAG] t=B ret_sp=0x%08lx spoof_sp=0x%08lx parent_base=0x%08lx parent_top=0x%08lx\n",
+                     (unsigned long)ret_sp, (unsigned long)spoof_sp,
+                     (unsigned long)parent_base, (unsigned long)parent_top);
+  drain_diag_if_supported<BOARD>();
+#else
+  (void)ret_sp; (void)spoof_sp; (void)parent_base; (void)parent_top;
+#endif
+}
+}
+
+namespace {
+void dump_mpu_diag_a(uintptr_t ret_sp, uintptr_t spoof_sp, uintptr_t parent_base, uintptr_t parent_top) {
+#if defined(__ARM_ARCH_8M_MAIN__) || defined(SHIZUKU_RP2350)
+  namespace ppb = shizuku::archs::ppb;
+  const uint32_t orig_rnr = ppb::mpu->rnr;
+  const uint32_t region_count = (ppb::mpu->type >> 8) & 0xFFu;
+
+  for (uint32_t r = 0; r < region_count; ++r) {
+    ppb::mpu->rnr = r;
+    const uint32_t rbar = ppb::mpu->rbar;
+    const uint32_t rlar = ppb::mpu->rlar;
+    BOARD::diag_printf("[MPU-DIAG] t=A rnr=%lu rbar=0x%08lx rlar=0x%08lx\n",
+                       (unsigned long)r, (unsigned long)rbar, (unsigned long)rlar);
+    drain_diag_if_supported<BOARD>();
+  }
+  ppb::mpu->rnr = orig_rnr;
+
+  const uint32_t mpu_ctrl = ppb::mpu->ctrl;
+  const uint32_t shcsr = *reinterpret_cast<volatile uint32_t *>(0xE000ED24u);
+  uint32_t control = 0;
+  uintptr_t psp = 0;
+  uintptr_t psplim = 0;
+  asm volatile("mrs %0, control" : "=r"(control));
+  asm volatile("mrs %0, psp" : "=r"(psp));
+  asm volatile("mrs %0, psplim" : "=r"(psplim));
+
+  BOARD::diag_printf("[MPU-DIAG] t=A ctrl=0x%08lx shcsr=0x%08lx control=0x%08lx psp=0x%08lx psplim=0x%08lx\n",
+                     (unsigned long)mpu_ctrl, (unsigned long)shcsr,
+                     (unsigned long)control, (unsigned long)psp, (unsigned long)psplim);
+  drain_diag_if_supported<BOARD>();
+
+  BOARD::diag_printf("[MPU-DIAG] t=A ret_sp=0x%08lx spoof_sp=0x%08lx parent_base=0x%08lx parent_top=0x%08lx\n",
+                     (unsigned long)ret_sp, (unsigned long)spoof_sp,
+                     (unsigned long)parent_base, (unsigned long)parent_top);
+  drain_diag_if_supported<BOARD>();
+#else
+  (void)ret_sp; (void)spoof_sp; (void)parent_base; (void)parent_top;
+#endif
 }
 
 } // namespace
@@ -939,12 +1163,68 @@ void rp2350_u_cost() {
     run_denied_probe(91, "u_cost SRAM data outside object window faults", false, u_cost_probe_data_fault_pc);
     run_denied_probe(94, "u_cost: callee store to caller stack (>= ret_sp) faults with MemManage", false, u_cost_probe_store_fault_pc);
 
-    // (f) callee SP 偽装防止: callee が SP を stack_ceiling 以上に偽装して再呼出し → NO_STACK で拒絶され caller 枠センチネル無傷
-    const auto spoof_res = ARCH::syscall(
-        static_cast<uintptr_t>(object_api::CALL_METHOD), OBJECT_U_COST_P, 0, 8 /* cmd=8 */);
-    record_check("u_cost: callee SP spoofed above ceiling rejected with NO_STACK and caller sentinel intact",
-                 spoof_res.error == 0 && spoof_res.value == 0,
-                 spoof_res.value, 0);
+    // (f) callee SP 偽装防止: callee が SP を stack_ceiling 以上に偽装して再呼出し
+    //     MPU 診断 (時点 A / B) を出力し、親枠破壊なら FAIL、NO_STACK または fault 停止なら PASS と判定する。
+    const uintptr_t parent_stack_base = reinterpret_cast<uintptr_t>(u_cost_p_stack);
+    const uintptr_t parent_stack_top = parent_stack_base + sizeof(u_cost_p_stack);
+    // 時点 A: cmd=8 直前 (特権側)
+    dump_mpu_diag_a(parent_stack_top, parent_stack_top + 120, parent_stack_base, parent_stack_top);
+
+    // 時点 B 保留フラグをセット
+    shizuku_cmd8_mpu_diag_b_pending = true;
+
+    // 親 P を SPAWN で実行して callee fault 時に特権側がハングするのを防止
+    shared[60] = 0xAAAAAAAAu;
+    const uint32_t faults_before = kernel_instance.faults().count;
+    const auto spoof_spawned = ARCH::syscall(
+        static_cast<uintptr_t>(object_api::SPAWN), OBJECT_U_COST_P, 0, 8 /* cmd=8 */);
+    const bool spawn_ok = (spoof_spawned.error == 0 && spoof_spawned.value != 0);
+
+    bool spoof_faulted = false;
+    bool spoof_finished = false;
+    if (spawn_ok) {
+      for (uint32_t guard = 0; guard < 200; ++guard) {
+        if (kernel_instance.faults().count > faults_before) {
+          spoof_faulted = true;
+          break;
+        }
+        if (shared[60] != 0xAAAAAAAAu) {
+          spoof_finished = true;
+          break;
+        }
+        ARCH::syscall(static_cast<uintptr_t>(object_api::YIELD));
+      }
+    }
+
+    const auto &spoof_fault = kernel_instance.faults();
+    if (spoof_faulted) {
+      // 偽装 stacking が MPU 違反 (MSTKERR / MemManage / HardFault) になりスレッドが止められた場合: PASS
+      const bool fault_thread_match = (spoof_fault.thread == spoof_spawned.value);
+      record_check("u_cost: callee SP spoofed above ceiling stopped with fault",
+                   fault_thread_match, spoof_fault.status, 0x82u);
+    } else if (spoof_finished) {
+      const uint32_t res = shared[60];
+      if (res == 0xDEAD0037u || shared[58] != 0) {
+        // caller 枠が上書き破壊された場合: FAIL
+        record_check("u_cost: callee SP spoofed above ceiling corrupted caller frame (FAIL)",
+                     false, res, 0);
+      } else {
+        // NO_STACK (6) で拒絶され、caller 枠センチネル無傷: PASS
+        record_check("u_cost: callee SP spoofed above ceiling rejected with NO_STACK and caller sentinel intact",
+                     res == 0, res, 0);
+      }
+    } else {
+      // タイムアウトまたは SPAWN 失敗: FAIL
+      record_check("u_cost: callee SP spoof probe timed out or failed to spawn (FAIL)",
+                   false, spawn_ok ? 1 : 0, 0);
+    }
+
+    // 非整列 SP (mode 95): 32B 整列要求違反 SP (sp + 4) での SVC 発行 → NO_STACK (6) で拒絶
+    const auto unalign_res = ARCH::syscall(
+        static_cast<uintptr_t>(object_api::CALL_METHOD), OBJECT_U_COST_P, 1, 95 /* mode=95 */);
+    record_check("u_cost: callee unaligned SP rejected with NO_STACK",
+                 unalign_res.error == 0 && unalign_res.value == 0,
+                 unalign_res.value, 0);
 
     // (g) stream stack 範囲隔離: callee が STREAM_PUSH_N / POP_N で caller 枠を指定 → BAD_STREAM で拒絶
     const auto stream_res = ARCH::syscall(

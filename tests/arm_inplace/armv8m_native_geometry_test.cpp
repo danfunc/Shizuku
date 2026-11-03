@@ -222,4 +222,73 @@ int main() {
       assert(!in_flash);
     }
   }
+
+  // RP2350 cmd=8 (上方偽装 SP と caller 枠の幾何学衝突・非整列 SP・控え復元検証):
+  {
+    constexpr uintptr_t stack_base = 0x2000ef80;
+    constexpr uintptr_t stack_top = 0x2000f380;
+    constexpr uintptr_t ret_sp = 0x2000f300;
+
+    // 1. 上方偽装 SP の幾何学位置関係
+    // callee 入場時 SP = ret_sp。
+    // push {r4..r7, lr} (20B) + sub sp, #108 (108B) で sp = ret_sp - 128
+    // add sp, #248 で偽装 SP = (ret_sp - 128) + 248 = ret_sp + 120
+    constexpr uintptr_t spoof_sp = ret_sp + 120;
+    assert(spoof_sp > ret_sp);
+    assert(spoof_sp < stack_top);
+
+    // FP 拡張フレーム (104B = 26語) がスタックされる領域 [spoof_sp - 104, spoof_sp)
+    constexpr uintptr_t hw_frame_lo = spoof_sp - 104; // ret_sp + 16
+    constexpr uintptr_t hw_frame_hi = spoof_sp;       // ret_sp + 120
+    assert(hw_frame_lo >= ret_sp);
+    assert(hw_frame_hi <= stack_top);
+
+    // 親 P の syscall がレジスタ (sp, control, r7) を退避する領域 [ret_sp, ret_sp + 16)
+    // hw_frame_lo (ret_sp + 16) は親の退避領域の直上 [ret_sp + 16, ret_sp + 120) に積まれ、
+    // 親の局所変数 (sentinel など [ret_sp + 32, ret_sp + 120)) と重複する。
+    assert(hw_frame_lo < ret_sp + 32);
+
+    // 2. call_stack_has_room による上方偽装 SP (sp > ceiling) の拒絶判定
+    assert(!A::call_stack_has_room(spoof_sp, stack_base, ret_sp));
+
+    // 3. 非整列 SP (mode 95: sp + 4) の拒絶判定
+    constexpr uintptr_t unaligned_sp = ret_sp - 128 + 4; // 非整列
+    assert((unaligned_sp & 31u) != 0);
+    assert(!A::call_stack_has_room(unaligned_sp, stack_base, ret_sp));
+
+    // 4. 親 P の控え (saved_sp, saved_control, saved_r7) による caller 枠破壊検出と復元の論理検証
+    uint32_t caller_stack[8] = {
+        0x2000f350, // [sp, #0]: saved_sp
+        0x00000000, // [sp, #4]: saved_control
+        0xDEADBEEF, // [sp, #8]: padding / observe
+        0x2000f320, // [sp, #12]: saved_r7
+    };
+    const uint32_t backup_sp = caller_stack[0];
+    const uint32_t backup_control = caller_stack[1];
+    const uint32_t backup_r7 = caller_stack[3];
+
+    // 正常ケース: スタックが破壊されていない場合
+    {
+      const bool corrupted = (caller_stack[0] != backup_sp) ||
+                             (caller_stack[1] != backup_control) ||
+                             (caller_stack[3] != backup_r7);
+      assert(!corrupted);
+    }
+
+    // 破壊ケース: HW stacking によりスタック上の saved_sp や saved_r7 が上書きされた場合
+    {
+      caller_stack[0] = 0xCAFEBABE; // 例外フレームの r0 等で上書き
+      caller_stack[3] = 0xBAADF00D; // 例外フレームの r1 等で上書き
+      const bool corrupted = (caller_stack[0] != backup_sp) ||
+                             (caller_stack[1] != backup_control) ||
+                             (caller_stack[3] != backup_r7);
+      assert(corrupted);
+
+      // 控えからの復元
+      uint32_t restored_sp = corrupted ? backup_sp : caller_stack[0];
+      uint32_t restored_r7 = corrupted ? backup_r7 : caller_stack[3];
+      assert(restored_sp == 0x2000f350);
+      assert(restored_r7 == 0x2000f320);
+    }
+  }
 }
