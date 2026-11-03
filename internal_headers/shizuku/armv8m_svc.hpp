@@ -71,7 +71,7 @@ template <class Thread>
 // (thread switches, kernel-object callers, dedicated parent handlers, the
 // service gate, unknown numbers) ends up here.
 // core_num は trap 入口で一度だけ構築され以後引き回される。
-[[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void generic(uint32_t exc_return,
+[[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM bool generic(uint32_t exc_return,
                                                                     ARCH::core_num core) {
   uintptr_t psp;
   uint32_t control;
@@ -97,15 +97,16 @@ template <class Thread>
 
   if (ARCH::s_deferred_svc[core.index()] || ARCH::s_resume_scrub[core.index()]) {
     return_pended(context, psp, exc_return, api);
-    return;
+    return false;
   }
   auto &thread = kernel.current_thread_on(core.index());
   if ((uintptr_t)context->sp == psp && context->sp->pc == pc &&
       context->control == control && thread.call_stack.depth == depth) {
     probe_return(exc_return, api);
-    return;
+    return false;
   }
   return_resumed(context, thread, core, exc_return, api);
+  return true;
 }
 
 // Direct path (the counterpart of the C6 ecall_direct): the body of one API is
@@ -118,7 +119,7 @@ template <class Thread>
 // is not on the native route (kernel object itself, dedicated parent handler, the
 // service gate) take the general path; the bodies change nothing before declining.
 template <svc_direct_kind Kind>
-[[gnu::always_inline]] inline void direct(uint32_t exc_return, uintptr_t psp, ARCH::core_num core) {
+[[gnu::always_inline]] inline bool direct(uint32_t exc_return, uintptr_t psp, ARCH::core_num core) {
   constexpr bool is_call = Kind == svc_direct_kind::CALL_METHOD ||
                            Kind == svc_direct_kind::CALL_DESCRIPTOR;
   constexpr bool scrubs = Kind == svc_direct_kind::EXIT_METHOD ||
@@ -173,18 +174,18 @@ template <svc_direct_kind Kind>
       if constexpr (!moves_caller) {
         // Only the reply registers changed: nothing to re-apply.
         probe_return(exc_return, api);
-        return;
+        return false;
       } else {
         if constexpr (scrubs) {
           if (ARCH::s_resume_scrub[core.index()]) {
             return_pended(context, psp, exc_return, api);
-            return;
+            return false;
           }
         }
         if ((uintptr_t)context->sp == psp && frame->pc == pc &&
             context->control == control && thread.call_stack.depth == depth) {
           probe_return(exc_return, api);
-          return;
+          return false;
         }
         return_resumed(context, thread, core, exc_return, api);
 #if defined(SHIZUKU_DIAG_FP)
@@ -195,7 +196,7 @@ template <svc_direct_kind Kind>
           shizuku::diag_fp::commit_round();
         }
 #endif
-        return;
+        return true;
       }
     }
   }
@@ -213,11 +214,14 @@ template <svc_direct_kind Kind>
 [[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void call_descriptor(uint32_t e, uintptr_t p, ARCH::core_num core) {
   direct<svc_direct_kind::CALL_DESCRIPTOR>(e, p, core);
 }
-extern "C" [[gnu::noinline, gnu::noclone]] SHIZUKU_SVC_RAM void shizuku_armv8m_exit_method_body(uint32_t e, uintptr_t p, ARCH::core_num core) {
-  direct<svc_direct_kind::EXIT_METHOD>(e, p, core);
+extern "C" [[gnu::noinline, gnu::noclone]] SHIZUKU_SVC_RAM bool shizuku_armv8m_exit_method_body(uint32_t e, uintptr_t p, ARCH::core_num core) {
+  return direct<svc_direct_kind::EXIT_METHOD>(e, p, core);
 }
-extern "C" [[gnu::noinline, gnu::noclone]] SHIZUKU_SVC_RAM void shizuku_armv8m_forward_child_exit_body(uint32_t e, uintptr_t p, ARCH::core_num core) {
-  direct<svc_direct_kind::FORWARD_CHILD_EXIT>(e, p, core);
+extern "C" [[gnu::noinline, gnu::noclone]] SHIZUKU_SVC_RAM bool shizuku_armv8m_forward_child_exit_body(uint32_t e, uintptr_t p, ARCH::core_num core) {
+  return direct<svc_direct_kind::FORWARD_CHILD_EXIT>(e, p, core);
+}
+extern "C" [[gnu::noinline, gnu::noclone]] SHIZUKU_SVC_RAM bool shizuku_armv8m_generic_body(uint32_t e, uintptr_t, ARCH::core_num core) {
+  return generic(e, core);
 }
 [[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void get_current(uint32_t e, uintptr_t p, ARCH::core_num core) {
   direct<svc_direct_kind::GET_CURRENT>(e, p, core);
@@ -233,10 +237,13 @@ extern "C" [[gnu::noinline, gnu::noclone]] SHIZUKU_SVC_RAM void shizuku_armv8m_f
 
 // Thin asm entries defined in arch/armv8m/armv8m_ctx.S. They call the C++ bodies
 // above, and after the compiler epilogue restores r4-r11, they zero r4-r11 and
-// execute exception return (bx r12) so callee values never leak to caller.
+// execute exception return (bx r12) when unwound to caller, so callee values never
+// leak to caller.
 extern "C" SHIZUKU_SVC_RAM void shizuku_armv8m_exit_entry(
     uint32_t exc_return, uintptr_t psp, shizuku::ARCH::core_num core);
 extern "C" SHIZUKU_SVC_RAM void shizuku_armv8m_forward_child_exit_entry(
+    uint32_t exc_return, uintptr_t psp, shizuku::ARCH::core_num core);
+extern "C" SHIZUKU_SVC_RAM void shizuku_armv8m_generic_entry(
     uint32_t exc_return, uintptr_t psp, shizuku::ARCH::core_num core);
 
 // The API number is in r0 of the stacked frame (`svc 0` carries no immediate), so the
@@ -285,7 +292,7 @@ extern "C" SHIZUKU_SVC_RAM void shizuku_armv8m_svc_handler() {
   case (uint32_t)object_api::GET_CURRENT_OBJECT: return get_current(exc_return, psp, core);
   case (uint32_t)object_api::GET_CALLER_OBJECT: return get_caller(exc_return, psp, core);
   case (uint32_t)object_api::SET_BUDGET: return set_budget(exc_return, psp, core);
-  default: return generic(exc_return, core);
+  default: return shizuku_armv8m_generic_entry(exc_return, psp, core);
   }
 }
 

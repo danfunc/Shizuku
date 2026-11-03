@@ -154,9 +154,10 @@ shizuku_armv8m_svc_entry:
 .size shizuku_armv8m_svc_entry, .-shizuku_armv8m_svc_entry
 
 // ---------------------------------------------------------------------------
-// EXIT_METHOD / FORWARD_CHILD_EXIT 専用の薄い asm 入口。
-// C++ ハンドラのエピローグが r4-r11 を復元した後、r4-r11 を 0 クリアしてから
-// 例外復帰 (bx r12) することで、Callee の機密値が Caller へ漏洩するのを防ぐ。
+// EXIT_METHOD / FORWARD_CHILD_EXIT / GENERIC 専用の薄い asm 入口。
+// C++ ハンドラのエピローグ後、Caller へ復帰した (r0 != 0) 場合のみ r4-r11 を
+// 0 クリアしてから例外復帰 (bx r12) することで、Callee の機密値が Caller へ
+// 漏洩するのを防ぐ。Callee 自身へ失敗を返す経路 (r0 == 0) は値を温存する。
 // ---------------------------------------------------------------------------
 .thumb_func
 .global shizuku_armv8m_exit_entry
@@ -175,9 +176,20 @@ shizuku_armv8m_exit_entry:
 shizuku_armv8m_forward_child_exit_entry:
     push {r0, lr}
     bl   shizuku_armv8m_forward_child_exit_body
+    b    .Lshizuku_armv8m_exit_clear_and_return
+.size shizuku_armv8m_forward_child_exit_entry, .-shizuku_armv8m_forward_child_exit_entry
+
+.thumb_func
+.global shizuku_armv8m_generic_entry
+.align 2
+.type shizuku_armv8m_generic_entry, %function
+shizuku_armv8m_generic_entry:
+    push {r0, lr}
+    bl   shizuku_armv8m_generic_body
 
 .Lshizuku_armv8m_exit_clear_and_return:
     pop  {r12, lr}
+    cbz  r0, 1f
     movs r4, #0
     movs r5, #0
     movs r6, #0
@@ -186,8 +198,9 @@ shizuku_armv8m_forward_child_exit_entry:
     mov  r9, r4
     mov  r10, r4
     mov  r11, r4
+1:
     bx   r12
-.size shizuku_armv8m_forward_child_exit_entry, .-shizuku_armv8m_forward_child_exit_entry
+.size shizuku_armv8m_generic_entry, .-shizuku_armv8m_generic_entry
 
 // ---------------------------------------------------------------------------
 // PendSV 入口 (時限実行権の期限回収 = 最低優先度の遅延切替例外)。退避/復元は

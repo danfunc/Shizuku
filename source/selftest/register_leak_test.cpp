@@ -78,6 +78,89 @@ extern "C" __attribute__((noinline, used)) uintptr_t leak_callee_body(
     (void)shizuku::armv8m_abi::syscall(static_cast<uintptr_t>(shizuku::object_api::EXIT_METHOD), 0, 42, 0);
     return 99;
   }
+  if (command == 90) {
+    // 不正な target_depth (99) で EXIT_METHOD を打つ。UNWIND_REJECTED で callee に失敗が返る。
+    // callee 自身への復帰であるため、r4-r11 は消去されず callee の値が温存されることを確認する。
+    register uintptr_t r0 asm("r0") = static_cast<uintptr_t>(shizuku::object_api::EXIT_METHOD);
+    register uintptr_t r1 asm("r1") = 99;
+    register uintptr_t r2 asm("r2") = 42;
+    register uintptr_t r3 asm("r3") = 0;
+    register uintptr_t r4_val asm("r4") = 0xdeadbeefu;
+    register uintptr_t r5_val asm("r5") = 0xdeadbeefu;
+    register uintptr_t r6_val asm("r6") = 0xdeadbeefu;
+    register uintptr_t r7_val asm("r7") = 0xdeadbeefu;
+    register uintptr_t r8_val asm("r8") = 0xdeadbeefu;
+    register uintptr_t r9_val asm("r9") = 0xdeadbeefu;
+    register uintptr_t r10_val asm("r10") = 0xdeadbeefu;
+    register uintptr_t r11_val asm("r11") = 0xdeadbeefu;
+    asm volatile(
+        "svc 0\n"
+        : "+r"(r0), "+r"(r1),
+          "+r"(r4_val), "+r"(r5_val), "+r"(r6_val), "+r"(r7_val),
+          "+r"(r8_val), "+r"(r9_val), "+r"(r10_val), "+r"(r11_val)
+        : "r"(r2), "r"(r3)
+        : "r12", "lr", "cc", "memory");
+    auto *data = reinterpret_cast<volatile uint32_t *>(leak_callee_data);
+    data[1] = r4_val;
+    data[2] = r5_val;
+    data[3] = r6_val;
+    data[4] = r7_val;
+    data[5] = r8_val;
+    data[6] = r9_val;
+    data[7] = r10_val;
+    data[8] = r11_val;
+    data[9] = r0; // error (UNWIND_REJECTED)
+    data[10] = r1; // validation error code
+    return 42;
+  }
+  if (command == 91) {
+    // Return stub を迂回し、r4-r11 を汚した状態で generic 経由の primitive::RETURN (1) を直接打つ
+    asm volatile(
+        "movw r4, #0xbeef\n movt r4, #0xdead\n"
+        "mov r5, r4\n mov r6, r4\n mov r7, r4\n"
+        "mov r8, r4\n mov r9, r4\n mov r10, r4\n mov r11, r4\n"
+        : : : "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "memory");
+    // primitive::RETURN (1): count=1, value=42, error=0, target_depth=0
+    (void)shizuku::armv8m_abi::syscall(1, 1, 42, 0, 0);
+    return 99;
+  }
+  if (command == 92) {
+    // 不正な target_depth (99) で primitive::RETURN (1) を打つ。
+    // DEPTH_MISMATCH で callee に失敗が返る。
+    // callee 自身への復帰であるため、r4-r11 は消去されず callee の値が温存されることを確認する。
+    register uintptr_t r0 asm("r0") = 1; // primitive::RETURN
+    register uintptr_t r1 asm("r1") = 1; // count
+    register uintptr_t r2 asm("r2") = 42; // value
+    register uintptr_t r3 asm("r3") = 0; // error
+    register uintptr_t r12 asm("r12") = 99; // target_depth
+    register uintptr_t r4_val asm("r4") = 0xdeadbeefu;
+    register uintptr_t r5_val asm("r5") = 0xdeadbeefu;
+    register uintptr_t r6_val asm("r6") = 0xdeadbeefu;
+    register uintptr_t r7_val asm("r7") = 0xdeadbeefu;
+    register uintptr_t r8_val asm("r8") = 0xdeadbeefu;
+    register uintptr_t r9_val asm("r9") = 0xdeadbeefu;
+    register uintptr_t r10_val asm("r10") = 0xdeadbeefu;
+    register uintptr_t r11_val asm("r11") = 0xdeadbeefu;
+    asm volatile(
+        "svc 0\n"
+        : "+r"(r0), "+r"(r1),
+          "+r"(r4_val), "+r"(r5_val), "+r"(r6_val), "+r"(r7_val),
+          "+r"(r8_val), "+r"(r9_val), "+r"(r10_val), "+r"(r11_val)
+        : "r"(r2), "r"(r3), "r"(r12)
+        : "lr", "cc", "memory");
+    auto *data = reinterpret_cast<volatile uint32_t *>(leak_callee_data);
+    data[1] = r4_val;
+    data[2] = r5_val;
+    data[3] = r6_val;
+    data[4] = r7_val;
+    data[5] = r8_val;
+    data[6] = r9_val;
+    data[7] = r10_val;
+    data[8] = r11_val;
+    data[9] = r0; // error (DEPTH_MISMATCH)
+    data[10] = r1;
+    return 42;
+  }
   asm volatile(
       "mrs r3, control\n"
       "tst r3, #4\n"
@@ -223,12 +306,15 @@ uintptr_t leak_caller_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
   } else if (cmd == 7) {
     const auto r = shizuku::armv8m_abi::syscall(4, data[0], 0, 10);
     data[9] = r.error; data[10] = r.value;
-  } else if (cmd == 8) {
-    // 整数版直接 EXIT 迂回: callee (command=89) を呼び、復帰直後の r4-r11 を data[1..8] に記録する
+  } else if (cmd == 8 || cmd == 10) {
+    // 整数版直接 EXIT 迂回 (cmd==8, callee command=89) および
+    // generic RETURN 迂回 (cmd==10, callee command=91):
+    // callee を呼び、復帰直後の r4-r11 を data[1..8] に記録する
+    const uintptr_t target_command = (cmd == 8) ? 89 : 91;
     register uintptr_t r0 asm("r0") = 4;
     register uintptr_t r1 asm("r1") = data[0];
     register uintptr_t r2 asm("r2") = 0;
-    register uintptr_t r3 asm("r3") = 89;
+    register uintptr_t r3 asm("r3") = target_command;
     register uintptr_t r4_out asm("r4");
     register uintptr_t r5_out asm("r5");
     register uintptr_t r6_out asm("r6");
@@ -254,6 +340,14 @@ uintptr_t leak_caller_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
     data[8] = r11_out;
     data[9] = r0;
     data[10] = r1;
+  } else if (cmd == 9) {
+    // command == 90 (EXIT_METHOD callee 失敗経路)
+    const auto r = shizuku::armv8m_abi::syscall(4, data[0], 0, 90);
+    data[9] = r.error; data[10] = r.value;
+  } else if (cmd == 11) {
+    // command == 92 (generic RETURN callee 失敗経路)
+    const auto r = shizuku::armv8m_abi::syscall(4, data[0], 0, 92);
+    data[9] = r.error; data[10] = r.value;
   } else {
     (void)leak_active_call(data[0]);
   }
@@ -421,6 +515,56 @@ void register_leak_test() {
   if (!direct_int_clean) got_int_direct |= 1u << 4; // r4-r11 non-zero
   record_check("leak direct EXIT bypass int clean",
                got_int_direct == 0, got_int_direct, 0);
+
+  // Callee が直接 EXIT_METHOD で不正な target_depth を指定し失敗する試験
+  // callee への返却であるため、callee の r4-r11 (d[1..8]) が消去されず温存されることを検証する。
+  for (unsigned i = 0; i < 64; ++i) d[i] = 0;
+  const auto direct_exit_fail = run_fresh(9);
+  bool callee_int_preserved = (d[9] == (uintptr_t)object_error::UNWIND_REJECTED);
+  for (unsigned i = 0; i < 8; ++i) {
+    callee_int_preserved &= (d[i + 1] == 0xdeadbeefu);
+  }
+  uint32_t got_callee_fail = 0;
+  if (direct_exit_fail.error != 0) got_callee_fail |= 1u << 0;
+  if (direct_exit_fail.value != (uintptr_t)grant_end::YIELDED) got_callee_fail |= 1u << 1;
+  if (c[9] != 0) got_callee_fail |= 1u << 2;  // caller error
+  if (c[10] != 42) got_callee_fail |= 1u << 3; // callee returned 42
+  if (!callee_int_preserved) got_callee_fail |= 1u << 4; // callee r4-r11 was zeroed or corrupted
+  record_check("leak direct EXIT callee failure int preserved",
+               got_callee_fail == 0, got_callee_fail, 0);
+
+  // Callee が generic 経由 (primitive::RETURN) を直接打って caller へ戻る整数漏洩試験
+  // カーネル消去により、復帰直後の r4-r11 (c[1..8]) がすべて 0 であることを検証する。
+  const auto generic_int_exit = run_fresh(10);
+  bool generic_int_clean = true;
+  for (unsigned i = 0; i < 8; ++i) {
+    generic_int_clean &= (c[i + 1] == 0);
+  }
+  uint32_t got_generic_direct = 0;
+  if (generic_int_exit.error != 0) got_generic_direct |= 1u << 0;
+  if (generic_int_exit.value != (uintptr_t)grant_end::YIELDED) got_generic_direct |= 1u << 1;
+  if (c[9] != 0) got_generic_direct |= 1u << 2;  // caller error
+  if (c[10] != 42) got_generic_direct |= 1u << 3; // return value 42
+  if (!generic_int_clean) got_generic_direct |= 1u << 4; // r4-r11 non-zero
+  record_check("leak generic RETURN bypass int clean",
+               got_generic_direct == 0, got_generic_direct, 0);
+
+  // Callee が generic 経由 (primitive::RETURN) で不正な target_depth を指定し失敗する試験
+  // callee への返却であるため、callee の r4-r11 (d[1..8]) が消去されず温存されることを検証する。
+  for (unsigned i = 0; i < 64; ++i) d[i] = 0;
+  const auto generic_exit_fail = run_fresh(11);
+  bool generic_callee_preserved = (d[9] != 0); // DEPTH_MISMATCH 等のエラー
+  for (unsigned i = 0; i < 8; ++i) {
+    generic_callee_preserved &= (d[i + 1] == 0xdeadbeefu);
+  }
+  uint32_t got_generic_fail = 0;
+  if (generic_exit_fail.error != 0) got_generic_fail |= 1u << 0;
+  if (generic_exit_fail.value != (uintptr_t)grant_end::YIELDED) got_generic_fail |= 1u << 1;
+  if (c[9] != 0) got_generic_fail |= 1u << 2;  // caller error
+  if (c[10] != 42) got_generic_fail |= 1u << 3; // callee returned 42
+  if (!generic_callee_preserved) got_generic_fail |= 1u << 4; // callee r4-r11 was zeroed or corrupted
+  record_check("leak generic RETURN callee failure int preserved",
+               got_generic_fail == 0, got_generic_fail, 0);
 #endif
 }
 } // namespace shizuku::selftest
