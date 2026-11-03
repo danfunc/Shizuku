@@ -184,4 +184,42 @@ int main() {
       assert((rlar & ~31u) + 31u == ret - 1);
     }
   }
+
+  // RP2350 cmd=8 (u_cost probe) の具体値による MPU Region 隔離検証:
+  // caller 枠 [ret_sp, stack_top) が callee のどの Region にも入らないことを assert
+  {
+    constexpr uintptr_t stack_base = 0x2000ef80;
+    constexpr uintptr_t stack_top = 0x2000f380;
+    constexpr uintptr_t data_base = 0x2000ee80;
+    constexpr uintptr_t data_limit = 0x2000ef80;
+    constexpr uintptr_t flash_base = 0x10000000;
+    constexpr uintptr_t flash_limit = 0x10026f80;
+
+    const auto orig_stack = A::encode_stack_window(stack_base, stack_top);
+    const auto data_win = A::encode_data_window(data_base, data_limit);
+
+    // 親 P が CALL_METHOD を発行したときの ret_sp (ceiling)
+    constexpr uintptr_t ret_sp = 0x2000f300;
+    const uint32_t shrunk_rlar = A::shrink_stack_limit(orig_stack.rlar, ret_sp);
+
+    // Region 2 の排他的終端アドレス
+    const uintptr_t stack_exclusive_limit = ((shrunk_rlar & ~31u) + 32u);
+    assert(stack_exclusive_limit == ret_sp);
+
+    // caller 枠 [ret_sp, stack_top) 内の任意のアドレス p について:
+    for (uintptr_t p = ret_sp; p < stack_top; p += 4) {
+      // 1. Region 2 (縮小後の callee stack 領域) に入らない
+      const bool in_stack = (p >= (orig_stack.rbar & ~31u)) && (p < stack_exclusive_limit);
+      assert(!in_stack);
+
+      // 2. Region 3 (callee data 領域) に入らない
+      const uintptr_t data_exclusive_limit = ((data_win.rlar & ~31u) + 32u);
+      const bool in_data = (p >= (data_win.rbar & ~31u)) && (p < data_exclusive_limit);
+      assert(!in_data);
+
+      // 3. Region 0 (Flash 領域) に入らない
+      const bool in_flash = (p >= flash_base) && (p < flash_limit);
+      assert(!in_flash);
+    }
+  }
 }
