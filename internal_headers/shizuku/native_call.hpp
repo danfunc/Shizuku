@@ -293,14 +293,15 @@ template <class K, class KObj>
       return kernel_error::NO_STACK;
     typename K::FRAME &frame = *context.sp;
 #if defined(SHIZUKU_LEAN_LEDGER)
+    if (depth >= thread.MAX_STACK_WINDOWS) {
+      return kernel_error::NO_STACK;
+    }
     const uintptr_t ret_sp = A::call_return_sp(context);
     const auto win = open_window(ret_sp, thread.stack_lo);
     if (!win.is_valid()) {
       return kernel_error::NO_STACK;
     }
-    if (depth < thread.MAX_STACK_WINDOWS) {
-      thread.win[depth] = win;
-    }
+    thread.win[depth] = win;
     thread.cur_win_lo = win.lo;
     thread.cur_win_hi = win.hi;
     if constexpr (requires { A::apply_stack_window(context, win.lo, win.hi); }) {

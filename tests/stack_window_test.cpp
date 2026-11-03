@@ -457,6 +457,34 @@ static void test_insufficient_stack_rejection() {
   assert(thread.call_stack.depth == 0); // Ledger entry was NOT written
 }
 
+// ===========================================================================
+// Test depth >= MAX_STACK_WINDOWS rejection (fail-closed, no ledger written)
+// ===========================================================================
+static void test_max_stack_windows_exceeded_rejection() {
+  test_fake_arch::reset();
+  mock_kernel kernel{};
+  mock_kernel::THREAD thread{};
+  mock_context context{};
+
+  constexpr uint32_t cap = mock_kernel::THREAD::MAX_STACK_WINDOWS + 4;
+  std::vector<shizuku::templates::thread<mock_context>::call_ledger_entry> ledger_mem(cap);
+  thread.ledger = ledger_mem.data();
+  thread.ledger_capacity = cap;
+
+  const uintptr_t stack_lo = 0x20000000u;
+  const uintptr_t stack_hi = stack_lo + 0x10000u;
+  thread.set_user_stack(stack_lo, stack_hi);
+
+  thread.call_stack.depth = mock_kernel::THREAD::MAX_STACK_WINDOWS;
+  context.user_sp = stack_hi - 0x100u;
+
+  mock_kobj::callee_view view{2, 0, 0, shizuku::object_kind::PLAIN, false, 0, 0, 1};
+  auto err = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
+      kernel, thread, context, view, 0x1000u, 1);
+  assert(err == shizuku::kernel_error::NO_STACK);
+  assert(thread.call_stack.depth == mock_kernel::THREAD::MAX_STACK_WINDOWS);
+}
+
 int main() {
   test_open_window();
   test_extend_window();
@@ -465,5 +493,6 @@ int main() {
   test_ledger_nesting_a_b_a();
   test_ledger_unwind_in_place();
   test_insufficient_stack_rejection();
+  test_max_stack_windows_exceeded_rejection();
   return 0;
 }
