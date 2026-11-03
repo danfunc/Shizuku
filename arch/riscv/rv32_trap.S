@@ -360,18 +360,13 @@ shizuku_rv32_restore:
   lw sp, RV32_F_RESERVED0(sp)
   mret
 
+// ---- U-mode からの戻り (RV32_TAG_U_ECALL / RV32_TAG_U_SCRUB、レジスタ消去)。
+//   callee と caller は相互不信のため、通常 return (U_ECALL) でも scrub と同様に
+//   a0/a1 以外の caller 可視レジスタ (ra, t1-t6, a2-a7, s0-s11) を 0 に消去する。
+//   gp/tp はカーネルは触らない (callee/caller 側の責任)。
+//   trusted stack cursor を mscratch へ載せるのに t0 を使った後、mret 直前に
+//   t0 を 0 に消去し、カーネル内部領域アドレスの漏洩を防ぐ。
 .Lrv32_umode_exit_ecall:
-  lw t0, RV32_F_MEPC(sp)
-  csrw mepc, t0
-  lw t0, RV32_F_MSTATUS(sp)
-  csrw mstatus, t0
-  lw a0, RV32_F_A0(sp)
-  lw a1, RV32_F_A1(sp)
-  lw t0, RV32_F_RESERVED1(sp)
-  csrw mscratch, t0
-  lw sp, RV32_F_RESERVED0(sp)
-  mret
-
 .Lrv32_umode_exit_scrub:
   lw t0, RV32_F_MEPC(sp)
   csrw mepc, t0
@@ -380,7 +375,6 @@ shizuku_rv32_restore:
   lw a0, RV32_F_A0(sp)
   lw a1, RV32_F_A1(sp)
   mv ra, zero
-  mv t0, zero
   mv t1, zero
   mv t2, zero
   mv t3, zero
@@ -407,6 +401,7 @@ shizuku_rv32_restore:
   mv s11, zero
   lw t0, RV32_F_RESERVED1(sp)
   csrw mscratch, t0
+  mv t0, zero
   lw sp, RV32_F_RESERVED0(sp)
   mret
 #endif

@@ -114,6 +114,14 @@ assert exit_entry.rstrip().endswith('mret')
 u_exit = asm.split('// ---- U-mode 高速出口 (RV32_TAG_U_*)')[1].split('.size shizuku_rv32_trap_entry')[0]
 assert 'csrw mscratch, t0' in u_exit
 assert 'lw sp, RV32_F_RESERVED0(sp)' in u_exit
+# U-mode 戻り出口 (RV32_TAG_U_ECALL / RV32_TAG_U_SCRUB):
+# callee と caller は相互不信のため、通常 return でも a0/a1 以外 (ra, t0-t6, a2-a7, s0-s11) を zero に消去。
+# また mscratch 設定に t0 を使った後、mret 直前に t0 を zero に消去し、kernel 領域アドレスの漏洩を防ぐ。
+for _u_label in ('.Lrv32_umode_exit_ecall:', '.Lrv32_umode_exit_scrub:'):
+    _u_blk = asm.split(_u_label)[1].split('mret')[0]
+    _u_cleared = set(re.findall(r'mv (\w+), zero', _u_blk))
+    assert _u_cleared == expected_cleared, (_u_label, sorted(_u_cleared ^ expected_cleared))
+    assert 'csrw mscratch, t0\n  mv t0, zero\n  lw sp, RV32_F_RESERVED0(sp)' in _u_blk, _u_label
 # 再開フレームを作るのは call_resume_at (ヘッダ版の call_resume も、SHIZUKU_LEAN_LEDGER の台帳版もここへ来る)。
 call_resume = header.split('static exception_frame_t *call_resume_at(')[1].split('\n  }\n')[0]
 assert 'frame->mcause = scrub ? RV32_TAG_ECALL_SCRUB : RV32_TAG_ECALL' in call_resume
