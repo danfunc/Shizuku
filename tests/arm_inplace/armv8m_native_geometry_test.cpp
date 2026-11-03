@@ -113,4 +113,36 @@ int main() {
       assert((rlar & ~31u) + 31u == ret - 1);
     }
   }
+  {
+    alignas(16) uint32_t buf[64];
+    for (int offset = -18; offset <= 18; ++offset) {
+      for (unsigned i = 0; i < 64; ++i) buf[i] = 0xdead0000u + i;
+      const int src_idx = 20;
+      const int dst_idx = src_idx + offset;
+      for (unsigned i = 0; i < 18; ++i) buf[src_idx + i] = 0x11223300u + i;
+      A::copy_fp_frame_72b(&buf[dst_idx], &buf[src_idx]);
+      for (unsigned i = 0; i < 18; ++i) {
+        assert(buf[dst_idx + i] == 0x11223300u + i);
+      }
+    }
+  }
+  {
+    std::memset(storage, 0, sizeof(storage));
+    A::context_t c{};
+    c.exc_return = 0xffffffed;
+    c.sp = reinterpret_cast<Frame *>(base + 512);
+    auto *fp = reinterpret_cast<uint32_t *>(c.sp + 1);
+    for (unsigned i = 0; i < 18; ++i) fp[i] = 0xfeed0000u + i;
+    const uintptr_t target = base + 512 - 32;
+    const uintptr_t ret = target + 104;
+    MockFP::count = 0;
+    auto *result = A::call_resume_at<MockFP>(c, 0x11223345, ret, true,
+                                             0x2000, 0x3000, false, core);
+    assert(reinterpret_cast<uintptr_t>(result) == target && c.sp == result);
+    assert(MockFP::count == 1);
+    const auto *saved = reinterpret_cast<const uint32_t *>(result + 1);
+    for (unsigned i = 0; i < 18; ++i) {
+      assert(saved[i] == 0xfeed0000u + i);
+    }
+  }
 }
