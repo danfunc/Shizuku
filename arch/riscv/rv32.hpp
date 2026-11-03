@@ -7,6 +7,7 @@
 #include "arch/riscv/rv32_frame.h"
 #include "shizuku/concepts/arch.hpp"
 #include "shizuku/rv32_abi.hpp"
+#include "shizuku/stack_window.hpp"
 
 // 共通の RV32 trap 経路 (arch/riscv/rv32_trap.S) の入口・戻り口。
 // dispatch と failure は chips 側の C++ が定義する (shizuku_rv32_trap_dispatch / shizuku_rv32_return_failed)。
@@ -363,6 +364,13 @@ public:
   static constexpr stack_window encode_stack_window(uintptr_t, uintptr_t) { return {}; }
   static constexpr uintptr_t kMaxObjectWindows = UINTPTR_MAX;
   static constexpr uintptr_t STACK_WINDOW_ALIGN = 8;  // 追加の揃えは要らない
+
+  // 窓 [lo, hi) のゼロ化 (戻りのたびに通る hot path)。32B 単位に展開した sw zero
+  // (shizuku/stack_window.hpp の zero_window_unrolled32)。旧は volatile 1 語ずつの sw/addi/bltu
+  // (取る分岐が 1 語ごと)。
+  [[gnu::always_inline]] static inline void zero_stack_window(shizuku::stack_window win) noexcept {
+    shizuku::zero_window_unrolled32(win);
+  }
 
   static void switch_caller_protection(uint32_t caller_object) {
 #if defined(SHIZUKU_C6_UMODE)

@@ -64,6 +64,36 @@ constexpr stack_window extend_window(stack_window win, uintptr_t fault_addr,
   }
 }
 
+// RV32 向けのゼロ化: [lo, hi) を 32B (8 語) 単位に展開した sw zero で埋め、分岐は 32B に 1 回。
+// 端数 (<32B) は 1 語ずつ。lo, hi は 4B 整列 (hi は 16B 切下げ、lo は hi-K か stack_lo か 4B 切下げの伸長先)。
+// asm volatile + memory clobber なので store は消えず並べ替えもされない。RISC-V 以外 (host) は
+// 同じ範囲を volatile 4B store で埋める。
+[[gnu::always_inline]] inline void zero_window_unrolled32(stack_window win) noexcept {
+  if (win.lo >= win.hi) return;
+  uintptr_t p = win.lo;
+  const uintptr_t hi = win.hi;
+#if defined(__riscv)
+  const uintptr_t bulk_end = p + ((hi - p) & ~uintptr_t(31));
+  if (p < bulk_end) {
+    asm volatile(
+        "1:\n"
+        "  sw zero, 0(%0)\n  sw zero, 4(%0)\n  sw zero, 8(%0)\n  sw zero, 12(%0)\n"
+        "  sw zero, 16(%0)\n  sw zero, 20(%0)\n  sw zero, 24(%0)\n  sw zero, 28(%0)\n"
+        "  addi %0, %0, 32\n"
+        "  bltu %0, %1, 1b\n"
+        : "+r"(p)
+        : "r"(bulk_end)
+        : "memory");
+  }
+  while (p < hi) {
+    asm volatile("sw zero, 0(%0)" : : "r"(p) : "memory");
+    p += 4;
+  }
+#else
+  for (; p < hi; p += 4) *reinterpret_cast<volatile uint32_t *>(p) = 0;
+#endif
+}
+
 // Architecture customization hook for zeroing window.
 template <class A>
 [[gnu::always_inline]] inline void zero_window_of(stack_window win) noexcept {

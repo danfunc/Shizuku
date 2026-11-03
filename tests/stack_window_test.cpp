@@ -163,6 +163,29 @@ static void test_zero_window() {
   }
 }
 
+// zero_window_unrolled32 (RV32 の展開ゼロ化) の範囲: 任意の 4B 整列 lo と長さで [lo, hi) ちょうど。
+// host では volatile 4B store の経路で、意味 (どこを 0 にするか) を固定する。asm の展開ループ自体は
+// 実機/QEMU (rv32 virt) で同じ全組合せを実行して確かめた (報告書に実行コマンドを記載)。
+static void test_zero_window_unrolled32() {
+  using namespace shizuku;
+  alignas(16) std::array<uint32_t, 256> buffer;
+  const uintptr_t base = reinterpret_cast<uintptr_t>(buffer.data());
+  for (uint32_t lo = 0; lo < 40; ++lo) {
+    for (uint32_t len = 0; len <= 160; ++len) {
+      buffer.fill(0xFFFFFFFFu);
+      zero_window_unrolled32({base + lo * 4u, base + (lo + len) * 4u});
+      for (uint32_t i = 0; i < buffer.size(); ++i) {
+        const bool in = i >= lo && i < lo + len;
+        assert(buffer[i] == (in ? 0u : 0xFFFFFFFFu));
+      }
+    }
+  }
+  buffer.fill(0xFFFFFFFFu);
+  zero_window_unrolled32({base + 80u, base + 40u});  // lo > hi: 何も書かない
+  zero_window_unrolled32({base + 40u, base + 40u});  // 空
+  for (auto w : buffer) assert(w == 0xFFFFFFFFu);
+}
+
 // ===========================================================================
 // Fake Arch & Mock Kernel for Ledger In-Place Stack Window Tests
 // ===========================================================================
@@ -1109,6 +1132,7 @@ int main() {
   test_open_window();
   test_extend_window();
   test_zero_window();
+  test_zero_window_unrolled32();
   test_ledger_nesting_a_a();
   test_ledger_nesting_a_b_a();
   test_ledger_unwind_in_place();
