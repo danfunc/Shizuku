@@ -57,6 +57,13 @@ static void test_open_window() {
 
   auto win_invalid3 = open_window(0x1FFFF000u, 0x20000000u);
   assert(!win_invalid3.is_valid());
+
+  // ARM default: stack_lo == 0 with typical SRAM caller_sp
+  auto win_arm = open_window(0x20010000u, 0u);
+  assert(win_arm.is_valid());
+  assert(win_arm.hi == 0x20010000u);
+  assert(win_arm.lo == 0x2000FF00u);
+  assert(win_arm.size() == 256u);
 }
 
 static void test_extend_window() {
