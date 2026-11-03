@@ -48,7 +48,7 @@ template <class Thread>
 
 // Windows, privilege and PSP are re-applied only when the body changed the frame.
 [[gnu::always_inline]] inline void return_resumed(KERNEL::CONTEXT *context, KERNEL::THREAD &thread,
-                                                  uint32_t core, uint32_t exc_return, uint32_t api) {
+                                                  ARCH::core_num core, uint32_t exc_return, uint32_t api) {
   probe(3, exc_return, api);
   armv8m_prepare_resume(thread, core);
   probe(4, exc_return, api);
@@ -67,38 +67,36 @@ template <class Thread>
 // General path: every number, every caller. Anything the direct bodies decline
 // (thread switches, kernel-object callers, dedicated parent handlers, the
 // service gate, unknown numbers) ends up here.
-// core is ARCH::core_slot(), read once on SVC entry. An exception handler runs to its end on the core
-// that took it, and core_slot() is that core's own SIO CPUID, so the value cannot change meanwhile
-// (on RP2350 it is also BOARD::core_num(), which current_thread_on() indexes by).
+// core_num は trap 入口で一度だけ構築され以後引き回される。
 [[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void generic(uint32_t exc_return,
-                                                                    uint32_t core) {
+                                                                    ARCH::core_num core) {
   uintptr_t psp;
   uint32_t control;
   asm volatile("mrs %0, psp\nmrs %1, control" : "=r"(psp), "=r"(control) :: "memory");
   auto &kernel = kernel_instance;
-  auto *context = kernel.current_thread_on(core).context;
+  auto *context = kernel.current_thread_on(core.index()).context;
   const uint32_t api = reinterpret_cast<ARCH::exception_frame_t *>(psp)->r0;
   if constexpr (route_cost_probe_enabled)
-    cost_probe::routes<true>::record(core, cost_probe::route::generic, api);
+    cost_probe::routes<true>::record(core.index(), cost_probe::route::generic, api);
   probe(0, exc_return, api);
   profile_span profile;
   context->sp = reinterpret_cast<ARCH::exception_frame_t *>(psp);
   context->exc_return = exc_return;
   context->control = control;
-  context->stack_ceiling = stack_ceiling(kernel.current_thread_on(core));
+  context->stack_ceiling = stack_ceiling(kernel.current_thread_on(core.index()));
   const uintptr_t pc = context->sp->pc;
-  const auto depth = kernel.current_thread_on(core).call_stack.depth;
-  ARCH::s_in_svc[core] = true;
+  const auto depth = kernel.current_thread_on(core.index()).call_stack.depth;
+  ARCH::s_in_svc[core.index()] = true;
   probe(1, exc_return, api);
-  kernel.svc_dispatch(context);
+  kernel.svc_dispatch(context, core);
   probe(2, exc_return, api);
-  ARCH::s_in_svc[core] = false;
+  ARCH::s_in_svc[core.index()] = false;
 
-  if (ARCH::s_deferred_svc[core] || ARCH::s_resume_scrub[core]) {
+  if (ARCH::s_deferred_svc[core.index()] || ARCH::s_resume_scrub[core.index()]) {
     return_pended(context, psp, exc_return, api);
     return;
   }
-  auto &thread = kernel.current_thread_on(core);
+  auto &thread = kernel.current_thread_on(core.index());
   if ((uintptr_t)context->sp == psp && context->sp->pc == pc &&
       context->control == control && thread.call_stack.depth == depth) {
     probe_return(exc_return, api);
@@ -117,17 +115,15 @@ template <class Thread>
 // is not on the native route (kernel object itself, dedicated parent handler, the
 // service gate) take the general path; the bodies change nothing before declining.
 template <svc_direct_kind Kind>
-[[gnu::always_inline]] inline void direct(uint32_t exc_return, uintptr_t psp) {
+[[gnu::always_inline]] inline void direct(uint32_t exc_return, uintptr_t psp, ARCH::core_num core) {
   constexpr bool is_call = Kind == svc_direct_kind::CALL_METHOD ||
                            Kind == svc_direct_kind::CALL_DESCRIPTOR;
   constexpr bool scrubs = Kind == svc_direct_kind::EXIT_METHOD ||
                           Kind == svc_direct_kind::FORWARD_CHILD_EXIT;
   constexpr bool moves_caller = is_call || scrubs;
   auto &kernel = kernel_instance;
-  // The only core_slot() read of this SVC; the same value goes to the thread lookup, the scrub flag
-  // and the window/MPU preparation (see generic for why it cannot change).
-  const uint32_t core = ARCH::core_slot();
-  auto &thread = kernel.current_thread_on(core);
+  // core_num は trap 入口で一度だけ構築され以後引き回される。
+  auto &thread = kernel.current_thread_on(core.index());
   auto *frame = reinterpret_cast<ARCH::exception_frame_t *>(psp);
   const uintptr_t pc = frame->pc;
   if (pc == reinterpret_cast<uintptr_t>(&shizuku_v2_service_resume) ||
@@ -148,36 +144,36 @@ template <svc_direct_kind Kind>
     [[maybe_unused]] const auto depth = thread.call_stack.depth;
     probe(1, exc_return, api);
     if constexpr (Kind == svc_direct_kind::CALL_METHOD) {
-      native::call_method_in_place(kernel, thread, *context, kernel_object_instance);
+      native::call_method_in_place(kernel, thread, *context, kernel_object_instance, core);
       result = native::status::DONE;
     } else if constexpr (Kind == svc_direct_kind::CALL_DESCRIPTOR) {
-      native::call_descriptor_in_place(kernel, thread, *context, kernel_object_instance);
+      native::call_descriptor_in_place(kernel, thread, *context, kernel_object_instance, core);
       result = native::status::DONE;
     } else if constexpr (Kind == svc_direct_kind::EXIT_METHOD) {
       result = native::exit_in_place<KERNEL, KERNEL_OBJECT, false>(
-          kernel, kernel_object_instance, thread, *context);
+          kernel, kernel_object_instance, thread, *context, core);
     } else if constexpr (Kind == svc_direct_kind::FORWARD_CHILD_EXIT) {
       result = native::exit_in_place<KERNEL, KERNEL_OBJECT, true>(
-          kernel, kernel_object_instance, thread, *context);
+          kernel, kernel_object_instance, thread, *context, core);
     } else if constexpr (Kind == svc_direct_kind::GET_CURRENT) {
-      result = kernel.svc_get_current(context) ? native::status::DONE : native::status::FORWARD;
+      result = kernel.svc_get_current(context, core) ? native::status::DONE : native::status::FORWARD;
     } else if constexpr (Kind == svc_direct_kind::GET_CALLER) {
-      result = kernel.svc_get_caller(context) ? native::status::DONE : native::status::FORWARD;
+      result = kernel.svc_get_caller(context, core) ? native::status::DONE : native::status::FORWARD;
     } else {
       static_assert(Kind == svc_direct_kind::SET_BUDGET);
-      result = kernel.svc_set_budget(context) ? native::status::DONE : native::status::FORWARD;
+      result = kernel.svc_set_budget(context, core) ? native::status::DONE : native::status::FORWARD;
     }
     probe(2, exc_return, api);
     if (result == native::status::DONE) {
       if constexpr (route_cost_probe_enabled)
-        cost_probe::routes<true>::record(core, cost_probe::route::direct, api);
+        cost_probe::routes<true>::record(core.index(), cost_probe::route::direct, api);
       if constexpr (!moves_caller) {
         // Only the reply registers changed: nothing to re-apply.
         probe_return(exc_return, api);
         return;
       } else {
         if constexpr (scrubs) {
-          if (ARCH::s_resume_scrub[core]) {
+          if (ARCH::s_resume_scrub[core.index()]) {
             return_pended(context, psp, exc_return, api);
             return;
           }
@@ -200,26 +196,26 @@ template <svc_direct_kind Kind>
 // One function per number. Each is an ordinary C++ exception function that the
 // handler below jumps to with its own EXC_RETURN (passed as an argument, so the
 // result does not depend on the compiler turning the call into a tail call).
-[[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void call_method(uint32_t e, uintptr_t p) {
-  direct<svc_direct_kind::CALL_METHOD>(e, p);
+[[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void call_method(uint32_t e, uintptr_t p, ARCH::core_num core) {
+  direct<svc_direct_kind::CALL_METHOD>(e, p, core);
 }
-[[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void call_descriptor(uint32_t e, uintptr_t p) {
-  direct<svc_direct_kind::CALL_DESCRIPTOR>(e, p);
+[[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void call_descriptor(uint32_t e, uintptr_t p, ARCH::core_num core) {
+  direct<svc_direct_kind::CALL_DESCRIPTOR>(e, p, core);
 }
-[[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void exit_method(uint32_t e, uintptr_t p) {
-  direct<svc_direct_kind::EXIT_METHOD>(e, p);
+[[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void exit_method(uint32_t e, uintptr_t p, ARCH::core_num core) {
+  direct<svc_direct_kind::EXIT_METHOD>(e, p, core);
 }
-[[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void forward_child_exit(uint32_t e, uintptr_t p) {
-  direct<svc_direct_kind::FORWARD_CHILD_EXIT>(e, p);
+[[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void forward_child_exit(uint32_t e, uintptr_t p, ARCH::core_num core) {
+  direct<svc_direct_kind::FORWARD_CHILD_EXIT>(e, p, core);
 }
-[[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void get_current(uint32_t e, uintptr_t p) {
-  direct<svc_direct_kind::GET_CURRENT>(e, p);
+[[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void get_current(uint32_t e, uintptr_t p, ARCH::core_num core) {
+  direct<svc_direct_kind::GET_CURRENT>(e, p, core);
 }
-[[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void get_caller(uint32_t e, uintptr_t p) {
-  direct<svc_direct_kind::GET_CALLER>(e, p);
+[[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void get_caller(uint32_t e, uintptr_t p, ARCH::core_num core) {
+  direct<svc_direct_kind::GET_CALLER>(e, p, core);
 }
-[[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void set_budget(uint32_t e, uintptr_t p) {
-  direct<svc_direct_kind::SET_BUDGET>(e, p);
+[[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void set_budget(uint32_t e, uintptr_t p, ARCH::core_num core) {
+  direct<svc_direct_kind::SET_BUDGET>(e, p, core);
 }
 
 } // namespace shizuku::armv8m_svc_detail
@@ -243,18 +239,19 @@ static_assert(shizuku::svc_direct_of((uintptr_t)shizuku::object_api::SET_BUDGET)
 extern "C" SHIZUKU_SVC_RAM void shizuku_armv8m_svc_handler() {
   using namespace shizuku;
   using namespace shizuku::armv8m_svc_detail;
+  const ARCH::core_num core;
   const uint32_t exc_return = (uint32_t)(uintptr_t)__builtin_return_address(0);
   uintptr_t psp;
   asm volatile("mrs %0, psp" : "=r"(psp));
   switch (reinterpret_cast<ARCH::exception_frame_t *>(psp)->r0) {
-  case (uint32_t)object_api::CALL_METHOD: return call_method(exc_return, psp);
-  case (uint32_t)object_api::CALL_METHOD_DESCRIPTOR: return call_descriptor(exc_return, psp);
-  case (uint32_t)object_api::EXIT_METHOD: return exit_method(exc_return, psp);
-  case (uint32_t)object_api::FORWARD_CHILD_EXIT: return forward_child_exit(exc_return, psp);
-  case (uint32_t)object_api::GET_CURRENT_OBJECT: return get_current(exc_return, psp);
-  case (uint32_t)object_api::GET_CALLER_OBJECT: return get_caller(exc_return, psp);
-  case (uint32_t)object_api::SET_BUDGET: return set_budget(exc_return, psp);
-  default: return generic(exc_return, ARCH::core_slot());
+  case (uint32_t)object_api::CALL_METHOD: return call_method(exc_return, psp, core);
+  case (uint32_t)object_api::CALL_METHOD_DESCRIPTOR: return call_descriptor(exc_return, psp, core);
+  case (uint32_t)object_api::EXIT_METHOD: return exit_method(exc_return, psp, core);
+  case (uint32_t)object_api::FORWARD_CHILD_EXIT: return forward_child_exit(exc_return, psp, core);
+  case (uint32_t)object_api::GET_CURRENT_OBJECT: return get_current(exc_return, psp, core);
+  case (uint32_t)object_api::GET_CALLER_OBJECT: return get_caller(exc_return, psp, core);
+  case (uint32_t)object_api::SET_BUDGET: return set_budget(exc_return, psp, core);
+  default: return generic(exc_return, core);
   }
 }
 

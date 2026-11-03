@@ -3,6 +3,7 @@
 #include <cstdint>
 #include "shizuku/kernel_abi.hpp"
 #include "shizuku/hot.hpp"
+#include "shizuku/core_num.hpp"
 #include "shizuku/templates/thread.hpp"
 
 namespace shizuku {
@@ -199,7 +200,7 @@ public:
 
   // ---- ISA 層 (例外入口) から呼ばれる ----
   CONTEXT *current_context();
-  void svc_dispatch(CONTEXT *context);
+  void svc_dispatch(CONTEXT *context, core_arg_t<ARCH> core);
   // ---- ecall の直接入口 (arch の例外入口が、a0 の番号の表から呼ぶ) ------------------
   //  svc_dispatch の枝を番号ごとに外へ出したもの。svc_dispatch 自身も同じ関数を呼ぶので、
   //  どちらから入っても結果は同じ。巨大な svc_dispatch を通らずに、番号に対応する処理へ入る。
@@ -227,20 +228,62 @@ public:
   uint32_t svc_handler_object() const { return m_object_svc_handler_object; }
   // trap 内で直接処理する native API (svc_attributes の mode == handler)。前提: svc_native_route()。
   // true = 処理した (応答を書いた)。false = kobj へ回す (svc_forward を呼ぶこと)。
-  bool svc_exit_method(CONTEXT *context);
-  bool svc_exit(CONTEXT *context, bool forward); // EXIT_METHOD と FORWARD_CHILD_EXIT の共通部
-  bool svc_call_method(CONTEXT *context);
-  bool svc_get_current(CONTEXT *context);
-  bool svc_get_caller(CONTEXT *context);
-  bool svc_yield(CONTEXT *context);
-  bool svc_run_for(CONTEXT *context);
-  bool svc_set_budget(CONTEXT *context);
-  bool svc_forward_child_exit(CONTEXT *context);
-  bool svc_call_descriptor(CONTEXT *context);
+  bool svc_exit_method(CONTEXT *context, core_arg_t<ARCH> core);
+  bool svc_exit(CONTEXT *context, bool forward, core_arg_t<ARCH> core); // EXIT_METHOD と FORWARD_CHILD_EXIT の共通部
+  bool svc_call_method(CONTEXT *context, core_arg_t<ARCH> core);
+  bool svc_get_current(CONTEXT *context, core_arg_t<ARCH> core);
+  bool svc_get_caller(CONTEXT *context, core_arg_t<ARCH> core);
+  bool svc_yield(CONTEXT *context, core_arg_t<ARCH> core);
+  bool svc_run_for(CONTEXT *context, core_arg_t<ARCH> core);
+  bool svc_set_budget(CONTEXT *context, core_arg_t<ARCH> core);
+  bool svc_forward_child_exit(CONTEXT *context, core_arg_t<ARCH> core);
+  bool svc_call_descriptor(CONTEXT *context, core_arg_t<ARCH> core);
   // 呼び出し元が kobj 本人のときの primitive (CALL / RETURN / SWITCH / GRANT)。
-  void svc_primitive(CONTEXT *context);
+  void svc_primitive(CONTEXT *context, core_arg_t<ARCH> core);
   // 親ハンドラ (root KernelObject か専用ハンドラ) へ dispatch 段を積んで配送する。
-  void svc_forward(CONTEXT *context, bool service_gate);
+  void svc_forward(CONTEXT *context, bool service_gate, core_arg_t<ARCH> core);
+
+  // 非 core ARCH (C5/C6/armv6m/dummy/テスト) 向けの旧シグネチャ互換薄い inline ラッパー
+  void svc_dispatch(CONTEXT *context) requires (!arch_has_core_num<ARCH>) {
+    svc_dispatch(context, no_core{});
+  }
+  bool svc_exit_method(CONTEXT *context) requires (!arch_has_core_num<ARCH>) {
+    return svc_exit_method(context, no_core{});
+  }
+  bool svc_exit(CONTEXT *context, bool forward) requires (!arch_has_core_num<ARCH>) {
+    return svc_exit(context, forward, no_core{});
+  }
+  bool svc_call_method(CONTEXT *context) requires (!arch_has_core_num<ARCH>) {
+    return svc_call_method(context, no_core{});
+  }
+  bool svc_get_current(CONTEXT *context) requires (!arch_has_core_num<ARCH>) {
+    return svc_get_current(context, no_core{});
+  }
+  bool svc_get_caller(CONTEXT *context) requires (!arch_has_core_num<ARCH>) {
+    return svc_get_caller(context, no_core{});
+  }
+  bool svc_yield(CONTEXT *context) requires (!arch_has_core_num<ARCH>) {
+    return svc_yield(context, no_core{});
+  }
+  bool svc_run_for(CONTEXT *context) requires (!arch_has_core_num<ARCH>) {
+    return svc_run_for(context, no_core{});
+  }
+  bool svc_set_budget(CONTEXT *context) requires (!arch_has_core_num<ARCH>) {
+    return svc_set_budget(context, no_core{});
+  }
+  bool svc_forward_child_exit(CONTEXT *context) requires (!arch_has_core_num<ARCH>) {
+    return svc_forward_child_exit(context, no_core{});
+  }
+  bool svc_call_descriptor(CONTEXT *context) requires (!arch_has_core_num<ARCH>) {
+    return svc_call_descriptor(context, no_core{});
+  }
+  void svc_primitive(CONTEXT *context) requires (!arch_has_core_num<ARCH>) {
+    svc_primitive(context, no_core{});
+  }
+  void svc_forward(CONTEXT *context, bool service_gate) requires (!arch_has_core_num<ARCH>) {
+    svc_forward(context, service_gate, no_core{});
+  }
+
   // 番号の表から呼ぶ入口: native の経路に立てていれば Body で処理し、処理しなかった (false) なら
   // kobj へ配送。立てていなければ svc_dispatch。
   template <bool (kernel::*Body)(CONTEXT *)>
@@ -252,7 +295,10 @@ public:
     if (!(this->*Body)(context))
       svc_forward(context, false);
   }
-  void pendsv_dispatch(CONTEXT *context);
+  void pendsv_dispatch(CONTEXT *context, core_arg_t<ARCH> core);
+  void pendsv_dispatch(CONTEXT *context) requires (!arch_has_core_num<ARCH>) {
+    pendsv_dispatch(context, no_core{});
+  }
   // 保護違反やスタック上限違反で落ちたときの受け口。
   // ★**系を止めない**。落ちたのは 1 つのスレッドなので、そのスレッドだけを止めて
   //   他は走り続けさせる (I-9 / DESIGN §11.2.4)。止めても直らないのは
@@ -282,12 +328,15 @@ public:
   //   旗の読みは relaxed で足りる: 予約は arm_step が release で書き、消費は slow 側の
   //   CAS (acquire) が決めるので、ここで古い値を読んでも「予約と競った復帰が 1 回 MON_STEP を
   //   逃す」だけで、以前の CAS 直叩きでも同じ競りは起きた。
-  [[gnu::always_inline]] inline void consume_pending_step() {
+  [[gnu::always_inline]] inline void consume_pending_step() requires (!arch_has_core_num<ARCH>) {
+    consume_pending_step(no_core{});
+  }
+  [[gnu::always_inline]] inline void consume_pending_step(core_arg_t<ARCH> core) {
     if (*static_cast<volatile uint32_t *>(&m_step_target) == NO_STEP_TARGET)
       return;
-    consume_pending_step_slow();
+    consume_pending_step_slow(core);
   }
-  void consume_pending_step_slow();
+  void consume_pending_step_slow(core_arg_t<ARCH> core);
   static constexpr uint32_t NO_STEP_TARGET = 0xFFFFFFFFu;
   // 止まっているスレッドの文脈。デバッガがレジスタを読み書きするための口。
   CONTEXT *thread_context(uint32_t thread) {
@@ -306,6 +355,7 @@ public:
   }
 
   uint32_t current_thread_id() const { return m_current[BOARD::core_num()]; }
+  uint32_t current_thread_id_on(uint32_t core) const { return m_current[core]; }
   // 現在のスレッドは 1 語のキャッシュ (m_current_thread) から引く: id × スレッド記録の大きさの
   // 乗算と表の先頭の読みを ecall のたびに払わない。m_current を書く所は set_current だけ。
   THREAD &current_thread() { return *m_current_thread[BOARD::core_num()]; }
@@ -349,6 +399,7 @@ public:
   }
   // 今このコアで実行権を借りて走っているか (借り手の yield は貸し手への早期復帰)。
   bool grant_active() const { return m_grants[BOARD::core_num()].depth != 0; }
+  bool grant_active_on(uint32_t core) const { return m_grants[core].depth != 0; }
   // いま借り手として走っているときの、直近の貸し手 (grant_active() が真のときだけ有効)。
   // 貸し手へ返すには SWITCH(grant_lender()) を撃つ (SWITCH は GRANT(無制限) なので、
   // 貸し手に当たれば祖先返却として 1 段巻き取られる)。
@@ -366,17 +417,20 @@ private:
   // 再開しないので最後の 1 段だけ true にする。ARM のコピー式は常に文脈を戻す)。
   // scrub は再開フレームの目印 (RV32: 出口でレジスタを消すか。ARM のコピー式は使わない)。
   bool call_frame_pop(THREAD &thread, CONTEXT *context, FRAME **frame,
-                      bool restore = true, bool scrub = false);
+                      bool restore, bool scrub, core_arg_t<ARCH> core);
   // 台帳の上から count 段を落とす。最後に落とした段の caller が再開する。
   // 2 段以上を一度に落とす巻き戻しは scrub の再開 (callee が自分の意思で戻らない)。
-  void call_unwind(THREAD &thread, CONTEXT *context, FRAME **frame, uintptr_t count);
+  void call_unwind(THREAD &thread, CONTEXT *context, FRAME **frame, uintptr_t count,
+                   core_arg_t<ARCH> core);
 
   // 台帳段を 1 つ積んで呼び先の入口へ向ける前半。通常 CALL と方法記述子の直接 call が
   // 共有する (積み方と戻りの床をそろえるため)。
   kernel_error enter_call(THREAD &thread, CONTEXT *context, FRAME **frame,
-                          const call_request &request, uint8_t via);
+                          const call_request &request, uint8_t via,
+                          core_arg_t<ARCH> core);
   kernel_error do_call(THREAD &thread, CONTEXT *context, FRAME **frame,
-                       const call_request &request);
+                       const call_request &request,
+                       core_arg_t<ARCH> core);
 
   kernel_error do_switch(uint32_t target);
   // cycles == GRANT_UNLIMITED は期限なし (SWITCH)。外側に期限があれば外側の残りでクランプされる。
@@ -385,6 +439,7 @@ private:
   void grant_unwind(grant_end reason);
   // 今の刻みで使ったぶんを全段から引く。**貸し借りに触る前に必ず呼ぶ**。
   void grant_charge();
+  void grant_charge_on(uint32_t core);
   // 一番内側の残りをタイマへ装填する (幅が足りなければ刻んで継ぎ足す)。
   void arm_timer();
   bool claim(uint32_t thread, kernel_error &error);

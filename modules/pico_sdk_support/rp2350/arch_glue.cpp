@@ -30,19 +30,23 @@ extern "C" SHIZUKU_SVC_RAM shizuku_armv8m_context *shizuku_current_context() {
 }
 
 extern "C" SHIZUKU_SVC_RAM shizuku_armv8m_context *shizuku_arm_prepare_restore() {
-  return reinterpret_cast<shizuku_armv8m_context *>(shizuku::armv8m_prepare_resume());
+  const shizuku::ARCH::core_num core;
+  auto &thread = shizuku::kernel_instance.current_thread_on(core.index());
+  return reinterpret_cast<shizuku_armv8m_context *>(shizuku::armv8m_prepare_resume(thread, core));
 }
 
 extern "C" SHIZUKU_SVC_RAM void shizuku_svc_dispatch(shizuku_armv8m_context *context) {
+  const shizuku::ARCH::core_num core;
   shizuku::kernel_instance.svc_dispatch(
-      reinterpret_cast<shizuku::KERNEL::CONTEXT *>(context));
+      reinterpret_cast<shizuku::KERNEL::CONTEXT *>(context), core);
 }
 
 extern "C" SHIZUKU_SVC_RAM void shizuku_pendsv_dispatch(shizuku_armv8m_context *context) {
+  const shizuku::ARCH::core_num core;
   if constexpr (shizuku::route_cost_probe_enabled)
-    shizuku::cost_probe::routes<true>::pendsv(shizuku::ARCH::core_slot());
+    shizuku::cost_probe::routes<true>::pendsv(core.index());
   shizuku::kernel_instance.pendsv_dispatch(
-      reinterpret_cast<shizuku::KERNEL::CONTEXT *>(context));
+      reinterpret_cast<shizuku::KERNEL::CONTEXT *>(context), core);
 }
 
 extern "C" void shizuku_debug_dispatch(shizuku_armv8m_context *context) {
@@ -59,7 +63,8 @@ extern "C" void shizuku_fault_dispatch(shizuku_armv8m_context *context) {
 //   の「2 回目以降の continue/stepi が固まる」の直し方)。復帰しようとしている
 //   文脈が GDB stub の予約した相手なら、ここで初めて MON_STEP を立てる。
 extern "C" SHIZUKU_SVC_RAM void shizuku_arm_pending_step() {
-  shizuku::kernel_instance.consume_pending_step();
+  const shizuku::ARCH::core_num core;
+  shizuku::kernel_instance.consume_pending_step(core);
 }
 
 // ★同じく CTX_RESTORE の先頭から毎回呼ばれる (Q8 / DESIGN §11.3)。復帰しようと
@@ -69,17 +74,18 @@ extern "C" SHIZUKU_SVC_RAM void shizuku_arm_pending_step() {
 //   走っていない段階の「呼び出し元の次の命令」に効いてしまう。
 extern "C" SHIZUKU_SVC_RAM void shizuku_restore_region_window() {
   using ARCH = shizuku::archs::armv8m<shizuku::chips::rp2350::chip::kMpuRegionCount,shizuku::chips::rp2350::chip::kNvicPriorityBits>;
+  const ARCH::core_num core;
   const auto *context = shizuku::kernel_instance.current_context();
   // ★PMSAv8 は 32B 粒度。RLAR.LIMIT の取り方は grant_window_entry の注釈を見よ。
-  ARCH::apply_grant_window(context->region_base, context->region_limit);
+  ARCH::apply_grant_window(context->region_base, context->region_limit, core);
   const auto &thread = shizuku::kernel_instance.current_thread();
-  ARCH::apply_stack_window(thread.stack_rbar, thread.stack_rlar);
+  ARCH::apply_stack_window(thread.stack_rbar, thread.stack_rlar, core);
 
   // 非特権へ戻るときだけ、その thread のオブジェクトの窓にそろえる (すでにそうなら書かない)。
   // 特権へ戻るときは窓を触らない: 特権は窓に制限されず、次に非特権へ入るときに張り直す。
   if (ARCH::context_unprivileged(*context))
-    ARCH::switch_caller_protection(thread.identity_object());
-  ARCH::mpu_sync();
+    ARCH::switch_caller_protection(thread.identity_object(), core);
+  ARCH::mpu_sync(core);
 }
 
 // タイマ例外。文脈を触らないので普通の C 関数でよい — ここは期限を見て

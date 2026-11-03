@@ -241,7 +241,7 @@ template<bool Enabled> struct route_windows {
     exception_windows::begin(i); // 例外カウンタは probe 設定と無関係に常時
     if constexpr (Enabled) {
       auto &w = windows[i];
-      w.before_core = A::core_slot();
+      w.before_core = typename A::core_num{}.index();
       w.before = cost_probe::routes<true>::snapshot(w.before_core);
     }
   }
@@ -249,7 +249,7 @@ template<bool Enabled> struct route_windows {
     exception_windows::end(i);
     if constexpr (Enabled) {
       auto &w = windows[i];
-      w.after_core = A::core_slot();
+      w.after_core = typename A::core_num{}.index();
       w.after = cost_probe::routes<true>::snapshot(w.after_core);
     }
   }
