@@ -62,7 +62,9 @@ extern "C" __attribute__((noinline, used)) uintptr_t leak_callee_body(
         "vmov s28, r3\n" "vmov s29, r3\n" "vmov s30, r3\n" "vmov s31, r3\n"
         : : : "r3", "s16", "s17", "s18", "s19", "s20", "s21", "s22", "s23",
               "s24", "s25", "s26", "s27", "s28", "s29", "s30", "s31", "memory");
-    (void)shizuku::armv8m_abi::syscall(static_cast<uintptr_t>(shizuku::object_api::EXIT_METHOD), 1, 42, 0);
+    // 直接 EXIT_METHOD の正しい呼び方: a1 に戻り先深さ target=0 (深さ 1 の callee から深さ 0 の caller への復帰)、
+    // a2 に戻り値 42、a3 にエラー 0 を渡す (marker なしの直接 EXIT)。
+    (void)shizuku::armv8m_abi::syscall(static_cast<uintptr_t>(shizuku::object_api::EXIT_METHOD), 0, 42, 0);
     return 99;
   }
   asm volatile(
