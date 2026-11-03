@@ -412,8 +412,21 @@ template <class K, class KObj>
             return kernel_error::NO_STACK;
           }
         }
+        // SP 偽装防止: caller が U のとき (直前の段が U 窓を持つとき)、
+        // caller の SP は現在の活動窓 [cur_win_lo, cur_win_hi] の内側でなければならない。
+        const bool caller_is_u = (depth > 0 && depth - 1 < thread.MAX_STACK_WINDOWS &&
+                                  thread.win_span[depth - 1] != 0);
+        if (caller_is_u) {
+          if (!window_contains_sp(thread.stk.cur_win_lo, thread.stk.cur_win_hi, ret_sp)) {
+            return kernel_error::NO_STACK;
+          }
+        }
         const auto win = open_window(ret_sp, thread.stk.stack_lo);
         if (!win.is_valid()) {
+          return kernel_error::NO_STACK;
+        }
+        // caller が U のとき、新窓が祖先領域へ上方拡大しない (新窓.hi <= cur_win_hi) こと。
+        if (caller_is_u && win.hi > thread.stk.cur_win_hi) {
           return kernel_error::NO_STACK;
         }
         thread.set_window_at(depth, win);

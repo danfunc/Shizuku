@@ -192,6 +192,12 @@ asm(
     "  beq a0, t0, .Lreentrant_aba_child_a2\n"
     "  li t0, 32\n"
     "  beq a0, t0, .Lprobe_return_sp\n"
+    "  li t0, 36\n"
+    "  beq a0, t0, .Lprobe_sp_spoof_outer\n"
+    "  li t0, 37\n"
+    "  beq a0, t0, .Lprobe_sp_spoof_child\n"
+    "  li t0, 38\n"
+    "  beq a0, t0, .Lprobe_stream_caller_stack\n"
     "  li a0, 0\n"
     "  ret\n"
     "\n"
@@ -925,6 +931,138 @@ asm(
     "  mv a0, sp\n"
     "  ret\n"
     "\n"
+    ".Lprobe_sp_spoof_outer:\n"
+    "  addi sp, sp, -32\n"
+    "  sw ra, 28(sp)\n"
+    "  sw s0, 24(sp)\n"
+    "  sw s1, 20(sp)\n"
+    "  li t0, 0x5F01CAFE\n"
+    "  sw t0, 16(sp)\n"
+    "  la s0, u_mode_stage1_data_pool\n"
+    "  lw s1, 32(s0)\n"
+    "  li a0, 4\n"
+    "  mv a1, s1\n"
+    "  li a2, 0\n"
+    "  li a3, 37\n"
+    "  li a4, 0\n"
+    "  ecall\n"
+    "  bnez a1, .Lsp_spoof_fail_child\n"
+    "  lw t0, 16(sp)\n"
+    "  li t1, 0x5F01CAFE\n"
+    "  bne t0, t1, .Lsp_spoof_fail_stack\n"
+    "  li a0, 0\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Lsp_spoof_fail_child:\n"
+    "  li a0, 0xDEAD0036\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Lsp_spoof_fail_stack:\n"
+    "  li a0, 0xDEAD0037\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    "\n"
+    ".Lprobe_sp_spoof_child:\n"
+    "  addi sp, sp, -32\n"
+    "  sw ra, 28(sp)\n"
+    "  sw s0, 24(sp)\n"
+    "  sw s1, 20(sp)\n"
+    "  addi sp, sp, 128\n"
+    "  la t1, u_mode_stage1_data_pool\n"
+    "  lw s1, 32(t1)\n"
+    "  li a0, 4\n"
+    "  mv a1, s1\n"
+    "  li a2, 0\n"
+    "  li a3, 32\n"
+    "  li a4, 0\n"
+    "  ecall\n"
+    "  addi sp, sp, -128\n"
+    "  li t0, 6\n"
+    "  bne a0, t0, .Lsp_spoof_child_fail\n"
+    "  li a0, 0\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Lsp_spoof_child_fail:\n"
+    "  bnez a0, 1f\n"
+    "  li a0, 0xDEAD0038\n"
+    "1:\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    "\n"
+    ".Lprobe_stream_caller_stack:\n"
+    "  addi sp, sp, -32\n"
+    "  sw ra, 28(sp)\n"
+    "  sw s0, 24(sp)\n"
+    "  sw s1, 20(sp)\n"
+    "  li a0, 29\n"
+    "  li a1, 0\n"
+    "  addi a2, sp, 64\n"
+    "  ecall\n"
+    "  li t0, 15\n"
+    "  bne a0, t0, .Lstream_fail_push_req\n"
+    "  addi t1, sp, 64\n"
+    "  sw t1, 0(sp)\n"
+    "  li t2, 1\n"
+    "  sw t2, 4(sp)\n"
+    "  li a0, 29\n"
+    "  li a1, 0\n"
+    "  mv a2, sp\n"
+    "  ecall\n"
+    "  li t0, 15\n"
+    "  bne a0, t0, .Lstream_fail_push_rec\n"
+    "  addi t1, sp, 64\n"
+    "  sw t1, 0(sp)\n"
+    "  li t2, 1\n"
+    "  sw t2, 4(sp)\n"
+    "  li a0, 30\n"
+    "  li a1, 0\n"
+    "  mv a2, sp\n"
+    "  ecall\n"
+    "  li t0, 15\n"
+    "  bne a0, t0, .Lstream_fail_pop\n"
+    "  li a0, 0\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Lstream_fail_push_req:\n"
+    "  li a0, 0xDEAD003A\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Lstream_fail_push_rec:\n"
+    "  li a0, 0xDEAD003B\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Lstream_fail_pop:\n"
+    "  li a0, 0xDEAD003C\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    "\n"
     ".size u_mode_probe_worker, .-u_mode_probe_worker\n"
     "\n"
     ".balign 4\n"
@@ -1113,7 +1251,8 @@ uintptr_t u_mode_probe_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
     for (int i = 18; i < 44; ++i) data_pool_words[i] = 0;
     return 0;
   }
-  if (cmd == 27 || cmd == 28 || cmd == 29 || cmd == 31 || cmd == 34 || cmd == 35) {
+  if (cmd == 27 || cmd == 28 || cmd == 29 || cmd == 31 || cmd == 34 || cmd == 35 ||
+      cmd == 36 || cmd == 37 || cmd == 38) {
     return 0;
   }
   if (cmd == 30) {
@@ -2138,6 +2277,26 @@ void c6_stage1_safety() {
                shizuku_c6_u_mode_diag[7] == e_load_before + 1u &&
                shizuku_c6_u_mode_diag[9] == e_store_before + 1u,
                (shizuku_c6_u_mode_diag[7] - e_load_before) + (shizuku_c6_u_mode_diag[9] - e_store_before), 2);
+
+  // (f) callee SP 偽装防止: callee が SP を窓の上 (caller 枠内) に偽装して再呼出し → NO_STACK で拒絶され caller 枠センチネル無傷
+  const auto spoof_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      36 /* cmd=36: SP spoofing rejection test */);
+  record_check("stage1: callee SP spoofed above window rejected with NO_STACK and caller sentinel intact",
+               spoof_res.error == 0 && spoof_res.value == 0,
+               spoof_res.value, 0);
+
+  // (g) stream stack 範囲隔離: callee が STREAM_PUSH_N / POP_N で caller 枠を指定 → BAD_STREAM で拒絶
+  const auto stream_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      38 /* cmd=38: stream caller stack rejection test */);
+  record_check("stage1: STREAM_PUSH_N / POP_N to caller stack rejected with BAD_STREAM",
+               stream_res.error == 0 && stream_res.value == 0,
+               stream_res.value, 0);
 #endif
 
   BOARD::diag_printf("[C6_STAGE1] stage 1 verification complete: passed=%lu failed=%lu\n",

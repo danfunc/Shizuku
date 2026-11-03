@@ -290,6 +290,7 @@ static void test_ledger_nesting_a_a() {
   test_fake_arch::reset();
   mock_kernel kernel{};
   mock_kobj kobj{};
+  (void)kobj;
   mock_kernel::THREAD thread{};
   mock_context context{};
 
@@ -398,6 +399,7 @@ static void test_ledger_nesting_a_b_a() {
   test_fake_arch::reset();
   mock_kernel kernel{};
   mock_kobj kobj{};
+  (void)kobj;
   mock_kernel::THREAD thread{};
   mock_context context{};
 
@@ -509,6 +511,7 @@ static void test_ledger_unwind_in_place() {
   test_fake_arch::reset();
   mock_kernel kernel{};
   mock_kobj kobj{};
+  (void)kobj;
   mock_kernel::THREAD thread{};
   mock_context context{};
 
@@ -631,6 +634,7 @@ static void test_pop_in_place_with_dispatch_caller() {
   test_fake_arch::reset();
   mock_kernel kernel{};
   mock_kobj kobj{};
+  (void)kobj;
   mock_kernel::THREAD thread{};
   mock_context context{};
 
@@ -1128,6 +1132,142 @@ static void test_pop_beyond_window_table_is_safe() {
   (void)kernel;
 }
 
+// 純関数 window_contains_sp のテスト
+static void test_window_contains_sp() {
+  // 未初期化 (0, 0)
+  assert(!shizuku::window_contains_sp(0, 0, 0));
+  assert(!shizuku::window_contains_sp(0, 0, 0x20001000u));
+
+  const uintptr_t lo = 0x20001000u;
+  const uintptr_t hi = 0x20002000u;
+
+  // 下端外
+  assert(!shizuku::window_contains_sp(lo, hi, lo - 4u));
+  assert(!shizuku::window_contains_sp(lo, hi, 0x1FFFF000u));
+
+  // 境界および内側
+  assert(shizuku::window_contains_sp(lo, hi, lo));
+  assert(shizuku::window_contains_sp(lo, hi, lo + 16u));
+  assert(shizuku::window_contains_sp(lo, hi, hi - 16u));
+  assert(shizuku::window_contains_sp(lo, hi, hi));
+
+  // 上端外
+  assert(!shizuku::window_contains_sp(lo, hi, hi + 4u));
+  assert(!shizuku::window_contains_sp(lo, hi, hi + 128u));
+  assert(!shizuku::window_contains_sp(lo, hi, 0x30000000u));
+
+  // 不正範囲 (lo > hi)
+  assert(!shizuku::window_contains_sp(hi, lo, lo + 0x100u));
+}
+
+// 純関数 stream_range_in_window のテスト (窓内/窓境界またぎ/窓外/異常系)
+static void test_stream_range_in_window() {
+  const uintptr_t lo = 0x20001000u;
+  const uintptr_t hi = 0x20002000u;
+
+  // 1. 窓内 (成功)
+  assert(shizuku::stream_range_in_window(lo, hi, lo, 64u));
+  assert(shizuku::stream_range_in_window(lo, hi, lo + 0x100u, 128u));
+  assert(shizuku::stream_range_in_window(lo, hi, hi - 64u, 64u));
+  assert(shizuku::stream_range_in_window(lo, hi, lo, hi - lo)); // 窓全体 [lo, hi)
+
+  // 2. 窓境界またぎ (拒否)
+  // 下境界またぎ (address < lo && address + bytes > lo)
+  assert(!shizuku::stream_range_in_window(lo, hi, lo - 16u, 32u));
+  // 上境界またぎ (address < hi && address + bytes > hi)
+  assert(!shizuku::stream_range_in_window(lo, hi, hi - 16u, 32u));
+  assert(!shizuku::stream_range_in_window(lo, hi, lo, (hi - lo) + 16u));
+
+  // 3. 窓外 (拒否)
+  // 窓より下
+  assert(!shizuku::stream_range_in_window(lo, hi, lo - 64u, 32u));
+  assert(!shizuku::stream_range_in_window(lo, hi, 0x10000000u, 16u));
+  // 窓より上
+  assert(!shizuku::stream_range_in_window(lo, hi, hi, 16u)); // address == hi は窓外 ([lo, hi) のため)
+  assert(!shizuku::stream_range_in_window(lo, hi, hi + 16u, 32u));
+  assert(!shizuku::stream_range_in_window(lo, hi, hi + 128u, 16u));
+
+  // 4. 異常系 (拒否)
+  assert(!shizuku::stream_range_in_window(lo, hi, lo + 16u, 0u)); // bytes == 0
+  assert(!shizuku::stream_range_in_window(lo, hi, UINTPTR_MAX - 10u, 20u)); // オーバーフロー
+  assert(!shizuku::stream_range_in_window(hi, lo, lo, 16u)); // 不正な窓 (win_lo >= win_hi)
+  assert(!shizuku::stream_range_in_window(lo, lo, lo, 16u)); // 空の窓 (win_lo == win_hi)
+}
+
+// SP 偽装防止テスト (enter_in_place)
+static void test_sp_spoofing_prevented() {
+  test_fake_arch::zeroed_windows.clear();
+  test_fake_arch::applied_windows.clear();
+
+  mock_kernel kernel{};
+  mock_kobj kobj{};
+  (void)kobj;
+  mock_kernel::THREAD thread{};
+  mock_kernel::THREAD::call_ledger_entry ledger_mem[8]{};
+  thread.ledger = ledger_mem;
+  thread.ledger_capacity = 8;
+
+  alignas(16) static uint8_t stack_mem[4096];
+  const uintptr_t lo = reinterpret_cast<uintptr_t>(stack_mem);
+  const uintptr_t hi = lo + sizeof(stack_mem);
+  thread.set_stack_bounds(lo, hi);
+
+  mock_frame frame{};
+  mock_context context{};
+  context.frame = frame;
+  context.sp = &context.frame;
+
+  mock_kobj::callee_view view_u{2, 0, 0, shizuku::object_kind::PLAIN, false /* U callee */, 0, 0, 1};
+
+  // (1) 初回呼出し (cur_win が stack 全域): 成功
+  context.privileged = false;
+  context.user_sp = hi;
+  auto err0 = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
+      kernel, thread, context, view_u, 0x42001000u, mock_kernel::LEDGER_CALL);
+  assert(err0 == shizuku::kernel_error::OK);
+  assert(thread.call_stack.depth == 1);
+  const auto w0 = thread.window_at(0);
+  assert(w0.is_valid());
+  assert(w0.hi == hi);
+  assert(w0.lo == hi - shizuku::kStackWindowStep);
+  assert(thread.stk.cur_win_lo == w0.lo && thread.stk.cur_win_hi == w0.hi);
+
+  // caller 枠のセンチネルを置く
+  volatile uint32_t *caller_sentinel = reinterpret_cast<volatile uint32_t *>(w0.hi - 16u);
+  *caller_sentinel = 0x5EEDCAFEu;
+
+  // (2) callee が自身の窓の上 (例: h + 128 相当) に SP を偽装して再呼出し: NO_STACK で拒絶
+  context.user_sp = w0.hi + 128u;
+  auto err_above = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
+      kernel, thread, context, view_u, 0x42001000u, mock_kernel::LEDGER_CALL);
+  assert(err_above == shizuku::kernel_error::NO_STACK);
+  // 深さも進まず、センチネルも無傷
+  assert(thread.call_stack.depth == 1);
+  assert(*caller_sentinel == 0x5EEDCAFEu);
+
+  // (3) callee が自身の窓の下 (w0.lo - 16u) に SP を偽装して再呼出し: NO_STACK で拒絶
+  context.user_sp = w0.lo - 16u;
+  auto err_below = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
+      kernel, thread, context, view_u, 0x42001000u, mock_kernel::LEDGER_CALL);
+  assert(err_below == shizuku::kernel_error::NO_STACK);
+  assert(thread.call_stack.depth == 1);
+  assert(*caller_sentinel == 0x5EEDCAFEu);
+
+  // (4) callee が自身の窓内 (w0.hi - 64u) で正当に再呼出し: 成功
+  context.user_sp = w0.hi - 64u;
+  auto err_valid = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
+      kernel, thread, context, view_u, 0x42001000u, mock_kernel::LEDGER_CALL);
+  assert(err_valid == shizuku::kernel_error::OK);
+  assert(thread.call_stack.depth == 2);
+  const auto w1 = thread.window_at(1);
+  assert(w1.is_valid());
+  assert(w1.hi == (w0.hi - 64u));
+  assert(w1.hi <= w0.hi);
+  assert(thread.stk.cur_win_lo == w1.lo && thread.stk.cur_win_hi == w1.hi);
+  // caller 枠のセンチネルは無傷
+  assert(*caller_sentinel == 0x5EEDCAFEu);
+}
+
 int main() {
   test_open_window();
   test_extend_window();
@@ -1146,5 +1286,8 @@ int main() {
   test_gate_false_no_window_no_zero();
   test_m_callee_leaves_window_state_untouched();
   test_pop_beyond_window_table_is_safe();
+  test_window_contains_sp();
+  test_stream_range_in_window();
+  test_sp_spoofing_prevented();
   return 0;
 }

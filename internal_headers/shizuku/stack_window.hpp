@@ -54,6 +54,27 @@ constexpr stack_window extend_window(stack_window win, uintptr_t fault_addr,
   return {new_lo, win.hi};
 }
 
+// Check if caller SP is inside the current active window [cur_lo, cur_hi].
+// Both endpoints are inclusive (cur_lo <= sp <= cur_hi).
+// If cur_lo == 0 and cur_hi == 0, returns false.
+constexpr bool window_contains_sp(uintptr_t cur_lo, uintptr_t cur_hi,
+                                  uintptr_t sp) noexcept {
+  if (cur_lo == 0 && cur_hi == 0) {
+    return false;
+  }
+  return cur_lo <= cur_hi && sp >= cur_lo && sp <= cur_hi;
+}
+
+// Check if stream request [address, address + bytes) is strictly inside stack window [win_lo, win_hi).
+// Address space overflow, empty window, and bytes == 0 are safely rejected.
+constexpr bool stream_range_in_window(uintptr_t win_lo, uintptr_t win_hi,
+                                      uintptr_t address, uintptr_t bytes) noexcept {
+  if (bytes == 0 || address > UINTPTR_MAX - bytes || win_lo >= win_hi) {
+    return false;
+  }
+  return address >= win_lo && (address + bytes) <= win_hi;
+}
+
 // Zero window memory with volatile 4-byte stores from lo to hi.
 [[gnu::always_inline]] inline void zero_window(stack_window win) noexcept {
   if (win.lo >= win.hi) return;

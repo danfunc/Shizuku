@@ -365,6 +365,8 @@ public:
   // 呼び出し側が自コアの番号 (BOARD::core_num() と同じ値) をすでに持っているとき用。番号を引き直さない。
   //   core が実行中の core と違う値だと他 core のスレッドを返す。例外ハンドラが入口で 1 度読んだ値を渡すこと。
   THREAD &current_thread_on(uint32_t core) { return *m_current_thread[core]; }
+  THREAD &thread(uint32_t id) { return m_threads[id].thread; }
+  const THREAD &thread(uint32_t id) const { return m_threads[id].thread; }
   uint32_t current_depth() const { return current_thread().call_stack.depth; }
   uint32_t current_call_count() const {
     return current_thread().call_stack.call_count;

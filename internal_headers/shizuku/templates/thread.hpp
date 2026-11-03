@@ -331,6 +331,17 @@ template <typename CONTEXT> struct thread {
       stk.cur_win_hi = stk.stack_hi;
     }
   }
+
+  // stream 要求範囲 [address, address + bytes) が現在の活動窓に収まっているか。
+  // HAS_STACK_WINDOW == false の arch では常に true。
+  bool stream_range_allowed(uintptr_t address, uintptr_t bytes) const noexcept {
+    if constexpr (HAS_STACK_WINDOW) {
+      if (stk.cur_win_lo != 0 || stk.cur_win_hi != 0) {
+        return stream_range_in_window(stk.cur_win_lo, stk.cur_win_hi, address, bytes);
+      }
+    }
+    return true;
+  }
   call_ledger_entry *ledger = nullptr;
   uint32_t ledger_capacity = 0;
   uint32_t base_object = 0;

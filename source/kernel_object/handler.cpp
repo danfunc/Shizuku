@@ -9,6 +9,7 @@
 //    RETURN count にし、kernel が ledger の floor と照合する。
 #include "shizuku/kernel.hpp"
 #include "shizuku/kernel_object.hpp"
+#include "shizuku/stack_window.hpp"
 #include "shizuku/method_entry.hpp"
 #include "shizuku/svc_attributes.hpp"
 #include "shizuku/hot.hpp"
@@ -1231,8 +1232,12 @@ template <> bool KERNEL_OBJECT::stream_stack_range(uint32_t thread,
   constexpr uintptr_t kStackSlack =
       ARCH::STACK_WINDOW_ALIGN > BLOCK_ALIGN ? ARCH::STACK_WINDOW_ALIGN : 0;
   const uintptr_t size = thread == 0 ? 8192u : THREAD_STACK_BYTES + kStackSlack;
-  return base <= UINTPTR_MAX - size && address >= base &&
-         address + bytes <= base + size;
+  if (base > UINTPTR_MAX - size || address < base ||
+      address + bytes > base + size) {
+    return false;
+  }
+  const auto &t = kernel_instance.thread(thread);
+  return t.stream_range_allowed(address, bytes);
 }
 
 template <>
