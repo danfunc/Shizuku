@@ -239,20 +239,21 @@ void register_leak_test() {
 
   for (unsigned i = 0; i < 64; ++i) d[i] = 0xffffffffu;
   auto active = ARCH::syscall(static_cast<uintptr_t>(object_api::CALL_METHOD), caller, 0, 2);
-  bool gp_zero = true, gp_restored = true, fp_entry_zero = true;
+  bool gp_zero = true, gp_restored = true;
+  bool fp_entry_caller_visible = true, fpscr_caller_visible = (d[11] == 0x00400000u);
   bool fp_lower_zero = true, fp_upper_restored = true;
   for (unsigned i = 0; i < 8; ++i) {
     gp_zero &= d[i] == 0;
     gp_restored &= c[i + 1] == 0xdead0004u + i;
   }
-  for (unsigned i = 0; i < 32; ++i) fp_entry_zero &= d[16 + i] == 0;
+  for (unsigned i = 0; i < 32; ++i) fp_entry_caller_visible &= d[16 + i] == (0x3f800100u + i);
   for (unsigned i = 0; i < 16; ++i) {
     fp_lower_zero &= c[20 + i] == 0;
     fp_upper_restored &= c[36 + i] == 0x3f800110u + i;
   }
   record_check("leak A callee entry", active.error == 0 && active.value == 42 &&
                c[9] == 0 && c[10] == 42 && d[9] == 0xcafebeefu &&
-               (d[10] & 4u) && gp_zero && fp_entry_zero && d[11] == 0, d[9], 0xcafebeefu);
+               (d[10] & 4u) && gp_zero && fp_entry_caller_visible && fpscr_caller_visible, d[9], 0xcafebeefu);
   record_check("leak B caller registers restored", gp_restored && fp_upper_restored,
                gp_restored | (fp_upper_restored << 1), 3);
   record_check("leak B return scratch zero", c[54] == 0 && c[55] == 0 &&
