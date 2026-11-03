@@ -486,7 +486,7 @@ public:
   }
 
   [[gnu::always_inline]] static inline bool context_fpca(const context_t &context) {
-    return (context.control & 4u) != 0;
+    return (context.exc_return & 0x10u) == 0;
   }
 
   template <bool IsReturn = true, class FloatingPointState = lazy_fp_state>
