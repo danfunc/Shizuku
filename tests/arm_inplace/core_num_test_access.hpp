@@ -15,7 +15,7 @@ struct core_num_test_access<basic_core_num<Reader>> {
 
 } // namespace shizuku
 
-#if __has_include("arch/armv8m/armv8m.hpp")
+#if __has_include("arch/armv8m/armv8m.hpp") && !defined(SHIZUKU_TEST_ARMV6M)
 #include "arch/armv8m/armv8m.hpp"
 
 namespace shizuku {

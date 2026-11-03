@@ -68,7 +68,17 @@ template <class A, class Thread, class Context, class Frame>
     auto &entry = thread.ledger[thread.call_stack.depth];
     entry.generation = 0;
     entry.ret_pc = A::frame_pc(frame);
-    entry.ret_sp = A::call_return_sp(context);
+    const uintptr_t ret_sp = A::call_return_sp(context);
+    bool caller_fpca = false;
+    if constexpr (requires { A::context_fpca(context); }) {
+      caller_fpca = A::context_fpca(context);
+    }
+    if constexpr (requires { entry.ret_fpca_val; }) {
+      entry.ret_sp = ret_sp;
+      entry.ret_fpca_val = caller_fpca ? 1 : 0;
+    } else {
+      entry.ret_sp = (ret_sp & ~static_cast<uintptr_t>(1)) | (caller_fpca ? 1u : 0u);
+    }
     entry.prev_call = (uint16_t)thread.call_stack.call_top;
     entry.ret_privileged = A::context_privileged(context) ? 1 : 0;
     thread.call_stack.depth++;
@@ -216,8 +226,8 @@ template <class K, class KObj>
       thread.call_stack.call_top = entry.prev_call;
     }
     if (restore) {
-      const bool caller_fpca = (entry.ret_sp & 1u) != 0;
-      const uintptr_t clean_sp = entry.ret_sp & ~1u;
+      const bool caller_fpca = entry.ret_fpca();
+      const uintptr_t clean_sp = entry.caller_sp();
       if constexpr (arch_has_core_num<A>) {
         frame = A::call_resume_at(context, entry.ret_pc, clean_sp, entry.ret_privileged != 0,
                                   caller_fpca, 0, 0, scrub, core);
@@ -356,7 +366,12 @@ template <class K, class KObj>
     if constexpr (requires { A::context_fpca(context); }) {
       caller_fpca = A::context_fpca(context);
     }
-    entry.ret_sp = ret_sp | (caller_fpca ? 1u : 0u);
+    if constexpr (requires { entry.ret_fpca_val; }) {
+      entry.ret_sp = ret_sp;
+      entry.ret_fpca_val = caller_fpca ? 1 : 0;
+    } else {
+      entry.ret_sp = (ret_sp & ~static_cast<uintptr_t>(1)) | (caller_fpca ? 1u : 0u);
+    }
     entry.prev_call = (uint16_t)stack.call_top;
     entry.ret_privileged = A::context_privileged(context) ? 1 : 0;
     stack.depth = depth + 1;

@@ -49,9 +49,9 @@ struct call_ledger_entry_32bit_empty_lean {
   uint32_t ret_sp;
   uint16_t prev_call;
   uint8_t ret_privileged;
-  uint8_t reserved;
-  constexpr bool ret_fpca() const { return (ret_sp & 1u) != 0; }
-  constexpr uintptr_t caller_sp() const { return ret_sp & ~1u; }
+  uint8_t ret_fpca_val;
+  constexpr bool ret_fpca() const { return ret_fpca_val != 0; }
+  constexpr uintptr_t caller_sp() const { return ret_sp; }
   [[no_unique_address]] shizuku::empty_ledger_payload payload{};
 };
 static_assert(sizeof(call_ledger_entry_32bit_empty_lean) == 32,
@@ -69,9 +69,9 @@ struct call_ledger_entry_32bit_with_payload_lean {
   uint32_t ret_sp;
   uint16_t prev_call;
   uint8_t ret_privileged;
-  uint8_t reserved;
-  constexpr bool ret_fpca() const { return (ret_sp & 1u) != 0; }
-  constexpr uintptr_t caller_sp() const { return ret_sp & ~1u; }
+  uint8_t ret_fpca_val;
+  constexpr bool ret_fpca() const { return ret_fpca_val != 0; }
+  constexpr uintptr_t caller_sp() const { return ret_sp; }
   [[no_unique_address]] test_arm_callee_saved_payload payload{};
 };
 static_assert(sizeof(call_ledger_entry_32bit_with_payload_lean) == 64,

@@ -88,6 +88,7 @@ fp_body(uintptr_t a0, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4) {
 // call_entry has already placed argument five at [sp]. This leaf changes no
 // arguments or callee-saved registers and passes control to a normal body.
 template <auto F>
+#if defined(__ARM_ARCH_8M_MAIN__)
 __attribute__((naked, used)) void fp_entry() {
   using R = typename fp_entry_traits<decltype(F)>::result_type;
   static_assert(fp_entry_traits<decltype(F)>::supported);
@@ -101,6 +102,9 @@ __attribute__((naked, used)) void fp_entry() {
                  "bx r12\n" : : "i" (&fp_body<F>));
   }
 }
+#else
+void fp_entry() {}
+#endif
 
 template <auto F> inline uintptr_t entry_address() {
   if constexpr (fp_entry_traits<decltype(F)>::supported)
@@ -122,6 +126,7 @@ template <bool Service = false, bool ObserveScratch = false, bool ObserveFP = fa
 [[gnu::always_inline]] inline result syscall(uintptr_t number, uintptr_t a1 = 0,
                                              uintptr_t a2 = 0, uintptr_t a3 = 0,
                                              uintptr_t a4 = 0) {
+#if defined(__ARM_ARCH_8M_MAIN__)
   static_assert(!(ObserveScratch && ObserveFP));
   register uintptr_t r0 asm("r0") = number;
   register uintptr_t r1 asm("r1") = a1;
@@ -196,6 +201,10 @@ template <bool Service = false, bool ObserveScratch = false, bool ObserveFP = fa
         "s8", "s9", "s10", "s11", "s12", "s13", "s14", "s15",
         "vfpcc", "cc", "memory");
   return {r0, r1};
+#else
+  (void)number; (void)a1; (void)a2; (void)a3; (void)a4;
+  return {0, 0};
+#endif
 }
 
 } // namespace shizuku::armv8m_abi
