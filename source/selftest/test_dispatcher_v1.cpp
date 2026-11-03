@@ -1454,6 +1454,20 @@ static void run_dispatcher_tests() {
   const auto spawned = kernel_instance.spawn(borrower_request);
   assert(spawned.error == kernel_error::OK && spawned.thread == 1);
   using thread_state = KERNEL::THREAD::state_t;
+  // spawn は thread の本物の stack 領域を登録する (窓機構を持つ arch のみ。M thread でも同じ)。
+#if defined(SHIZUKU_C6_UMODE)
+  static_assert(KERNEL::THREAD::HAS_STACK_WINDOW);
+  {
+    const auto &spawned_thread =
+        reinterpret_cast<const KERNEL::thread_record *>(thread_storage)[spawned.thread].thread;
+    assert(spawned_thread.stk.stack_lo == (((uintptr_t)borrower_stack + 7) & ~(uintptr_t)7));
+    assert(spawned_thread.stk.stack_hi == (((uintptr_t)borrower_stack + sizeof(borrower_stack)) & ~(uintptr_t)7));
+    assert(spawned_thread.stk.cur_win_lo == spawned_thread.stk.stack_lo);
+    assert(spawned_thread.stk.cur_win_hi == spawned_thread.stk.stack_hi);
+  }
+#else
+  static_assert(!KERNEL::THREAD::HAS_STACK_WINDOW);
+#endif
 
   // 9a. 貸せない (持ち分が最小未満): NO_TIME。相手は claim されず READY のまま。
   for (bool privileged : {true, false}) {
