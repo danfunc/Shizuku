@@ -60,6 +60,10 @@ extern "C" __attribute__((noinline, used)) uintptr_t leak_callee_body(
       "vmov s4, r3\n" "vmov s5, r3\n" "vmov s6, r3\n" "vmov s7, r3\n"
       "vmov s8, r3\n" "vmov s9, r3\n" "vmov s10, r3\n" "vmov s11, r3\n"
       "vmov s12, r3\n" "vmov s13, r3\n" "vmov s14, r3\n" "vmov s15, r3\n"
+      "vmov s16, r3\n" "vmov s17, r3\n" "vmov s18, r3\n" "vmov s19, r3\n"
+      "vmov s20, r3\n" "vmov s21, r3\n" "vmov s22, r3\n" "vmov s23, r3\n"
+      "vmov s24, r3\n" "vmov s25, r3\n" "vmov s26, r3\n" "vmov s27, r3\n"
+      "vmov s28, r3\n" "vmov s29, r3\n" "vmov s30, r3\n" "vmov s31, r3\n"
       "mov.w r3, #0x400000\n"
       "vmsr fpscr, r3\n"
       "1:\n"
@@ -68,7 +72,9 @@ extern "C" __attribute__((noinline, used)) uintptr_t leak_callee_body(
       "movw r3, #3\n" "movt r3, #0xcafe\n"
       "movw r12, #12\n" "movt r12, #0xcafe\n"
       : : : "r1", "r2", "r3", "r12", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7",
-              "s8", "s9", "s10", "s11", "s12", "s13", "s14", "s15", "vfpcc", "memory");
+              "s8", "s9", "s10", "s11", "s12", "s13", "s14", "s15",
+              "s16", "s17", "s18", "s19", "s20", "s21", "s22", "s23",
+              "s24", "s25", "s26", "s27", "s28", "s29", "s30", "s31", "vfpcc", "memory");
   return 42;
 }
 
