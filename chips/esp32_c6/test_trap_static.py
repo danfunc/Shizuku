@@ -131,12 +131,22 @@ for _u_label in ('.Lrv32_umode_exit_ecall:', '.Lrv32_umode_exit_scrub:'):
 # U 出口での frame 各語のゼロ化 (sw zero, OFF(sp)) の存在と順序を検証
 for _u_label, _expected_zero_order in (
     ('.Lrv32_umode_exit_entry:', ['MEPC', 'MSTATUS', 'RA', 'A0', 'A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7', 'RESERVED1', 'RESERVED0']),
-    ('.Lrv32_umode_exit_ecall:', ['MEPC', 'MSTATUS', 'A0', 'A1', 'RESERVED1', 'RESERVED0']),
-    ('.Lrv32_umode_exit_scrub:', ['MEPC', 'MSTATUS', 'A0', 'A1', 'RESERVED1', 'RESERVED0']),
+    ('.Lrv32_umode_exit_ecall:', ['MEPC', 'MSTATUS', 'MCAUSE', 'A0', 'A1', 'RESERVED1', 'RESERVED0']),
+    ('.Lrv32_umode_exit_scrub:', ['MEPC', 'MSTATUS', 'MCAUSE', 'A0', 'A1', 'RESERVED1', 'RESERVED0']),
 ):
     _blk = asm.split(_u_label)[1].split('mret')[0]
     _zeroed = re.findall(r'sw\s+zero,\s+RV32_F_(\w+)\(sp\)', _blk)
     assert _zeroed == _expected_zero_order, (_u_label, _zeroed, _expected_zero_order)
+# U caller の再開フレームは user stack (caller の ret_sp - 144) 上に作られ、callee の窓 [sp-256, sp) に入る。
+# call_resume_at / set_unprivileged_resume_metadata が書く語 (+ 戻り値 a0/a1) は、U 出口 (ecall / scrub) が
+# 全部 sw zero で消さなければならない (残ると caller に非 0 の語が見える。目印 mcause=0x111 が残った実機不具合の再発防止)。
+_resume_src = header.split('static exception_frame_t *call_resume_at(')[1].split('\n  }\n')[0] + \
+    header.split('static void set_unprivileged_resume_metadata(')[1].split('\n  }\n')[0]
+_written = {m.upper() for m in re.findall(r'frame(?:->|\.)(\w+)\s*(?:=|&=|\|=)[^=]', _resume_src)} | {'A0', 'A1'}
+assert {'MEPC', 'MSTATUS', 'MCAUSE', 'RESERVED0', 'RESERVED1'} <= _written, _written
+for _u_label in ('.Lrv32_umode_exit_ecall:', '.Lrv32_umode_exit_scrub:'):
+    _zeroed_set = set(re.findall(r'sw\s+zero,\s+RV32_F_(\w+)\(sp\)', asm.split(_u_label)[1].split('mret')[0]))
+    assert _written <= _zeroed_set, (_u_label, sorted(_written - _zeroed_set))
 # 再開フレームを作るのは call_resume_at (ヘッダ版の call_resume も、SHIZUKU_LEAN_LEDGER の台帳版もここへ来る)。
 call_resume = header.split('static exception_frame_t *call_resume_at(')[1].split('\n  }\n')[0]
 assert 'frame->mcause = scrub ? RV32_TAG_ECALL_SCRUB : RV32_TAG_ECALL' in call_resume

@@ -184,6 +184,12 @@ asm(
     "  beq a0, t0, .Lprobe_write_below_stack_lo\n"
     "  li t0, 31\n"
     "  beq a0, t0, .Lprobe_callee_stack_residue\n"
+    // CALL_METHOD の呼び先に届く引数は a0 だけ (a1 は caller の入力の素通し)。再入の「外側」と「内側」は
+    // 引数 (cmd) で分ける: 27/28 = 外側、34 = A→A の内側、35 = A→B→A の内側 (A の 2 回目の入場)。
+    "  li t0, 34\n"
+    "  beq a0, t0, .Lreentrant_a_child\n"
+    "  li t0, 35\n"
+    "  beq a0, t0, .Lreentrant_aba_child_a2\n"
     "  li t0, 32\n"
     "  beq a0, t0, .Lprobe_return_sp\n"
     "  li a0, 0\n"
@@ -741,7 +747,6 @@ asm(
     "  sw ra, 28(sp)\n"
     "  sw s0, 24(sp)\n"
     "  sw s1, 20(sp)\n"
-    "  bnez a1, .Lreentrant_a_child\n"
     "  li t0, 0xAA01CAFE\n"
     "  sw t0, 16(sp)\n"
     "  la s0, u_mode_stage1_data_pool\n"
@@ -749,8 +754,8 @@ asm(
     "  li a0, 4\n"
     "  mv a1, s1\n"
     "  li a2, 0\n"
-    "  li a3, 27\n"
-    "  li a4, 1\n"
+    "  li a3, 34\n"
+    "  li a4, 0\n"
     "  ecall\n"
     "  li t2, 0x42\n"
     "  bne a1, t2, .Lreentrant_a_fail_child\n"
@@ -792,7 +797,6 @@ asm(
     "  sw ra, 28(sp)\n"
     "  sw s0, 24(sp)\n"
     "  sw s1, 20(sp)\n"
-    "  bnez a1, .Lreentrant_aba_child_a2\n"
     "  li t0, 0xABA1CAFE\n"
     "  sw t0, 16(sp)\n"
     "  la s0, u_mode_stage1_data_pool\n"
@@ -1004,8 +1008,8 @@ asm(
     "  li a0, 4\n"
     "  mv a1, s1\n"
     "  li a2, 0\n"
-    "  li a3, 28\n"
-    "  li a4, 2\n"
+    "  li a3, 35\n"
+    "  li a4, 0\n"
     "  ecall\n"
     "  li t2, 0x42\n"
     "  bne a1, t2, .Ldriver_aba_fail_a2\n"
@@ -1106,7 +1110,7 @@ uintptr_t u_mode_probe_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
     for (int i = 18; i < 44; ++i) data_pool_words[i] = 0;
     return 0;
   }
-  if (cmd == 27 || cmd == 28 || cmd == 29 || cmd == 31) {
+  if (cmd == 27 || cmd == 28 || cmd == 29 || cmd == 31 || cmd == 34 || cmd == 35) {
     return 0;
   }
   if (cmd == 30) {

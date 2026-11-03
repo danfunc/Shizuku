@@ -390,6 +390,10 @@ shizuku_rv32_restore:
   lw t0, RV32_F_MSTATUS(sp)
   sw zero, RV32_F_MSTATUS(sp)
   csrw mstatus, t0
+  // 目印 (U_ECALL / U_SCRUB) は restore で読み終えている。call_resume_at が書いた語は
+  // mepc / mstatus / mcause / a0 / a1 / reserved0 / reserved1 の 7 語で、ここで全部消す
+  // (mcause を残すと caller の窓 [sp-256, sp) に非 0 が残り、残り値不可視の不変条件が破れる)。
+  sw zero, RV32_F_MCAUSE(sp)
   lw a0, RV32_F_A0(sp)
   sw zero, RV32_F_A0(sp)
   lw a1, RV32_F_A1(sp)
