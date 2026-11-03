@@ -35,7 +35,7 @@ struct profile_span {
 template <class Thread>
 [[gnu::always_inline]] inline uint32_t stack_ceiling(const Thread &activation) {
   return activation.call_stack.depth != 0
-      ? (uint32_t)activation.ledger[activation.call_stack.depth - 1].ret_sp
+      ? (uint32_t)activation.ledger[activation.call_stack.depth - 1].caller_sp()
       : (activation.stack_rlar & ~31u) + 32u;
 }
 

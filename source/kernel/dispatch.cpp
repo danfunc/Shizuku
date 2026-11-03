@@ -263,13 +263,18 @@ SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::call_frame_push(KERNEL::THREAD &thread,
   // in-place 経路を持つ arch (RISC-V) は native_call.hpp 側の台帳が権威なので触らない。
   if constexpr (ARCH::HAS_OBJECT_PROTECTION && !arch_call_in_place<ARCH>()) {
     const uintptr_t caller_pc = (context->sp != nullptr) ? ARCH::frame_pc(*context->sp) : 0;
+    bool caller_fpca = true;
+    if constexpr (requires { ARCH::context_fpca(*context); }) {
+      caller_fpca = ARCH::context_fpca(*context);
+    }
     if (!THREAD::ledger_accessor::record_caller_return_authority(
             thread, thread.call_stack.depth,
             caller_pc,
             (uintptr_t)context->sp,
             !is_context_unprivileged(context) ? 1 : 0,
             (uint16_t)thread.call_stack.call_count,
-            0))
+            0,
+            caller_fpca))
       return false;
   }
 

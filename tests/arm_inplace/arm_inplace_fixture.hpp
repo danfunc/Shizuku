@@ -50,6 +50,8 @@ struct call_ledger_entry_32bit_empty_lean {
   uint16_t prev_call;
   uint8_t ret_privileged;
   uint8_t reserved;
+  constexpr bool ret_fpca() const { return (ret_sp & 1u) != 0; }
+  constexpr uintptr_t caller_sp() const { return ret_sp & ~1u; }
   [[no_unique_address]] shizuku::empty_ledger_payload payload{};
 };
 static_assert(sizeof(call_ledger_entry_32bit_empty_lean) == 32,
@@ -68,6 +70,8 @@ struct call_ledger_entry_32bit_with_payload_lean {
   uint16_t prev_call;
   uint8_t ret_privileged;
   uint8_t reserved;
+  constexpr bool ret_fpca() const { return (ret_sp & 1u) != 0; }
+  constexpr uintptr_t caller_sp() const { return ret_sp & ~1u; }
   [[no_unique_address]] test_arm_callee_saved_payload payload{};
 };
 static_assert(sizeof(call_ledger_entry_32bit_with_payload_lean) == 64,
@@ -606,7 +610,7 @@ void run_inplace_lean_push_pop(const char *tag) {
 
 #if defined(SHIZUKU_LEAN_LEDGER)
   assert(ledger[0].ret_pc == 0x10004000u);
-  assert(ledger[0].ret_sp == reinterpret_cast<uintptr_t>(&frame) + sizeof(typename mock_kernel<Adapter>::FRAME));
+  assert(ledger[0].caller_sp() == reinterpret_cast<uintptr_t>(&frame) + sizeof(typename mock_kernel<Adapter>::FRAME));
   assert(ledger[0].ret_privileged == 0);
   mock_kobj kobj;
   kobj.m_region_base[1] = 0x20000000u;

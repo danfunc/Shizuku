@@ -122,8 +122,8 @@ template <typename CONTEXT> struct thread {
     uintptr_t ret_sp;         // caller の例外時 SP (再開フレームはこの直下、bit 0 は caller の FPCA フラグ)
     uint16_t prev_call;       // この段を積む前の call_stack.call_top
     uint8_t ret_privileged;   // caller の特権
-    uint8_t reserved;
-    constexpr bool ret_fpca() const { return (ret_sp & 1u) != 0; }
+    uint8_t ret_fpca_val;     // caller の FPCA 状態 (旧 reserved)
+    constexpr bool ret_fpca() const { return (ret_sp & 1u) != 0 || ret_fpca_val != 0; }
     constexpr uintptr_t caller_sp() const { return ret_sp & ~1u; }
 #else
     static constexpr bool compact_allowed = false;
@@ -172,12 +172,16 @@ template <typename CONTEXT> struct thread {
         thread &t, uint32_t depth,
         uintptr_t ret_pc, uintptr_t ret_sp,
         uint8_t ret_privileged,
-        uint16_t prev_call, uint32_t generation) {
+        uint16_t prev_call, uint32_t generation,
+        bool caller_fpca = true) {
 #if defined(SHIZUKU_LEAN_LEDGER)
       if (t.ledger == nullptr || depth >= t.ledger_capacity) return false;
       auto &entry = t.ledger[depth];
       entry.ret_pc = ret_pc;
-      entry.ret_sp = ret_sp;
+      entry.ret_sp = (ret_sp & ~uintptr_t(1)) | (caller_fpca ? 1u : 0u);
+      if constexpr (requires { entry.ret_fpca_val; }) {
+        entry.ret_fpca_val = caller_fpca ? 1 : 0;
+      }
       entry.ret_privileged = ret_privileged;
       entry.prev_call = prev_call;
       entry.generation = generation;
@@ -186,7 +190,7 @@ template <typename CONTEXT> struct thread {
       if (t.return_records == nullptr || depth >= 34) return false;
       auto &rec = t.return_records[depth];
       rec.ret_pc = ret_pc;
-      rec.ret_sp = ret_sp;
+      rec.ret_sp = (ret_sp & ~uintptr_t(1)) | (caller_fpca ? 1u : 0u);
       rec.ret_privileged = ret_privileged;
       rec.prev_call = prev_call;
       rec.generation = generation;
@@ -200,20 +204,23 @@ template <typename CONTEXT> struct thread {
     static bool restore_caller_return_authority(
         const thread &t, uint32_t depth,
         uintptr_t &ret_pc, uintptr_t &ret_sp,
-        bool &ret_privileged) {
+        bool &ret_privileged,
+        bool *ret_fpca = nullptr) {
 #if defined(SHIZUKU_LEAN_LEDGER)
       if (t.ledger == nullptr || depth >= t.ledger_capacity) return false;
       const auto &entry = t.ledger[depth];
       ret_pc = entry.ret_pc;
-      ret_sp = entry.ret_sp;
+      ret_sp = entry.caller_sp();
       ret_privileged = (entry.ret_privileged != 0);
+      if (ret_fpca) *ret_fpca = entry.ret_fpca();
       return true;
 #else
       if (t.return_records == nullptr || depth >= 34) return false;
       const auto &rec = t.return_records[depth];
       ret_pc = rec.ret_pc;
-      ret_sp = rec.ret_sp;
+      ret_sp = rec.ret_sp & ~uintptr_t(1);
       ret_privileged = (rec.ret_privileged != 0);
+      if (ret_fpca) *ret_fpca = (rec.ret_sp & 1u) != 0;
       return true;
 #endif
     }

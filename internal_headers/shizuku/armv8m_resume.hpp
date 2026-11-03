@@ -16,7 +16,7 @@ namespace shizuku {
   ARCH::apply_grant_window(context->region_base, context->region_limit, core);
   uint32_t stack_limit = thread.stack_rlar;
   if (thread.call_stack.depth != 0) {
-    const uintptr_t ceiling = thread.ledger[thread.call_stack.depth - 1].ret_sp;
+    const uintptr_t ceiling = thread.ledger[thread.call_stack.depth - 1].caller_sp();
     const uintptr_t full_ceiling = (thread.stack_rlar & ~uintptr_t(31)) + 32;
     if ((ceiling & 31u) != 0 || ceiling > full_ceiling ||
         ceiling <= (thread.stack_rbar & ~uintptr_t(31)))
