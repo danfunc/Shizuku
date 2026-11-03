@@ -10,7 +10,12 @@
 
 using A = shizuku::archs::armv8m<8, 4>;
 using Frame = A::exception_frame_t;
-struct MockFP { static inline unsigned count = 0; static void materialize() { ++count; } };
+struct MockFP {
+  static inline unsigned count = 0;
+  static inline bool lazy_active = false;
+  static void materialize() { ++count; }
+  static bool is_lazy_active() { return lazy_active; }
+};
 
 int main() {
   const auto core = shizuku::core_num_test_access<typename A::core_num>::make(0);
@@ -143,6 +148,36 @@ int main() {
     const auto *saved = reinterpret_cast<const uint32_t *>(result + 1);
     for (unsigned i = 0; i < 18; ++i) {
       assert(saved[i] == 0xfeed0000u + i);
+    }
+  }
+  {
+    std::memset(storage, 0, sizeof(storage));
+    A::context_t c{};
+    c.exc_return = 0xffffffed;
+    c.sp = reinterpret_cast<Frame *>(base + 512);
+    auto *fp = reinterpret_cast<uint32_t *>(c.sp + 1);
+    for (unsigned i = 0; i < 18; ++i) fp[i] = 0xface0000u + i;
+    const uintptr_t target = base + 512 - 32;
+    const uintptr_t ret = target + 104;
+
+    // (1) lazy_active = true のとき: materialize とコピーが省かれる
+    MockFP::count = 0;
+    MockFP::lazy_active = true;
+    auto *result = A::call_resume_at<MockFP>(c, 0x11223345, ret, true,
+                                             0x2000, 0x3000, false, core);
+    assert(reinterpret_cast<uintptr_t>(result) == target && c.sp == result);
+    assert(MockFP::count == 0);
+
+    // (2) lazy_active = false のとき: materialize とコピーが実行される
+    MockFP::count = 0;
+    MockFP::lazy_active = false;
+    result = A::call_resume_at<MockFP>(c, 0x11223345, ret, true,
+                                       0x2000, 0x3000, false, core);
+    assert(reinterpret_cast<uintptr_t>(result) == target && c.sp == result);
+    assert(MockFP::count == 1);
+    const auto *saved = reinterpret_cast<const uint32_t *>(result + 1);
+    for (unsigned i = 0; i < 18; ++i) {
+      assert(saved[i] == 0xface0000u + i);
     }
   }
 }
