@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <type_traits>
 #include "shizuku/kernel_abi.hpp"
+#include "shizuku/stack_window.hpp"
 namespace shizuku {
 
 // SHIZUKU_LEAN_LEDGER 未定義時でも、user stack 上の header を権威とせず、
@@ -216,6 +217,25 @@ template <typename CONTEXT> struct thread {
 
   uint32_t stack_rbar = 0;
   uint32_t stack_rlar = 0;
+  // Stack window tracking (thread-owned, stacked per depth).
+  // Kept in a dedicated array rather than call_ledger_entry because
+  // sizeof(call_ledger_entry) is constrained to 32B by static_assert in
+  // tests/arm_inplace/armv8m_inplace_test.cpp and arm_inplace_fixture.hpp.
+  static constexpr uint32_t MAX_STACK_WINDOWS = 34;
+  stack_window win[MAX_STACK_WINDOWS]{};
+  uintptr_t stack_lo = 0;
+  uintptr_t stack_hi = 0;
+  uintptr_t cur_win_lo = 0;
+  uintptr_t cur_win_hi = 0;
+
+  void set_user_stack(uintptr_t lo, uintptr_t hi) noexcept {
+    stack_lo = lo;
+    stack_hi = hi;
+  }
+  void set_stack_bounds(uintptr_t lo, uintptr_t hi) noexcept {
+    stack_lo = lo;
+    stack_hi = hi;
+  }
   call_ledger_entry *ledger = nullptr;
   uint32_t ledger_capacity = 0;
   uint32_t base_object = 0;
