@@ -105,8 +105,13 @@ uintptr_t shizuku_c6_kstack_limit(void) {
 }
 uintptr_t shizuku_c6_get_m_handler_stack(uintptr_t current_sp, uintptr_t frame_sp) {
   auto &thread = shizuku::kernel_instance.current_thread();
-  const uintptr_t s_base = thread.stack_lo;
-  const uintptr_t s_limit = thread.stack_hi;
+#if defined(SHIZUKU_C6_UMODE)
+  const uintptr_t s_base = thread.stk.stack_lo;
+  const uintptr_t s_limit = thread.stk.stack_hi;
+#else
+  const uintptr_t s_base = 0;  // 窓機構なし (thread に stack 範囲を持たない)
+  const uintptr_t s_limit = 0;
+#endif
   return shizuku::chips::esp32_c6::get_m_handler_stack(
       current_sp,
       s_base,
@@ -442,11 +447,11 @@ __attribute__((noinline)) static bool bounds_static_ok(const c6_stage1_object_bo
   if (b.u_return_trampoline < b.code_base || b.u_return_trampoline >= b.code_limit) return false;
   // スタック境界 (thread stack)
   const auto &thread = shizuku::kernel_instance.current_thread();
-  if (thread.stack_lo == 0 || thread.stack_hi <= thread.stack_lo) return false;
+  if (thread.stk.stack_lo == 0 || thread.stk.stack_hi <= thread.stk.stack_lo) return false;
   const uintptr_t mk_lo = reinterpret_cast<uintptr_t>(&shizuku_c6_stage1_pma_ready);
   const uintptr_t mk_hi = mk_lo + sizeof(shizuku_c6_stage1_pma_ready);
   if (pmp::pmp_controller::ranges_overlap(b.code_base, b.code_limit, mk_lo, mk_hi) ||
-      pmp::pmp_controller::ranges_overlap(thread.stack_lo, thread.stack_hi, mk_lo, mk_hi) ||
+      pmp::pmp_controller::ranges_overlap(thread.stk.stack_lo, thread.stk.stack_hi, mk_lo, mk_hi) ||
       (b.data_limit != 0 && pmp::pmp_controller::ranges_overlap(b.data_base, b.data_limit, mk_lo, mk_hi)) ||
       (b.mmio_limit != 0 && pmp::pmp_controller::ranges_overlap(b.mmio_base, b.mmio_limit, mk_lo, mk_hi))) {
     return false;
@@ -458,6 +463,10 @@ __attribute__((noinline)) static bool bounds_static_ok(const c6_stage1_object_bo
 // M-mode への復帰。PMP の全読出し (disable) が大きな枠を要るので、U へ入る側 (U→U の往復で
 // 2 回通る) の枠・退避を太らせないよう別関数にしてある。
 __attribute__((noinline)) static void context_to_frame_to_m(arch::context_t &c, arch::exception_frame_t &f) {
+  // U 由来の frame (U の trap frame をそのまま M callee へ入れた場合) だけ reserved1 に信頼 stack cursor
+  // (非 0) が残っている。M の trap frame・M への resume frame (call_resume_at) は reserved1 == 0。
+  // thread stack 全域が M の stack でもあるため、SP の範囲だけでは U の SP と M の SP を区別できない。
+  const bool entered_from_u = f.reserved1 != 0;
   f.reserved1 = 0;
 #if defined(SHIZUKU_C6_UMODE)
   if (!shizuku::chips::esp32_c6::pmp_controller::disable()) {
@@ -471,7 +480,10 @@ __attribute__((noinline)) static void context_to_frame_to_m(arch::context_t &c, 
   const uintptr_t current_sp = f.reserved0 != 0
       ? static_cast<uintptr_t>(f.reserved0)
       : reinterpret_cast<uintptr_t>(c.sp) + RV32_FRAME_BYTES;
-  const uintptr_t new_sp = shizuku_c6_get_m_handler_stack(current_sp, reinterpret_cast<uintptr_t>(c.sp));
+  // M 由来 (M→M、M caller への resume) の SP は thread stack 内にあっても kernel stack へ移さない。
+  const uintptr_t new_sp = entered_from_u
+      ? shizuku_c6_get_m_handler_stack(current_sp, reinterpret_cast<uintptr_t>(c.sp))
+      : current_sp;
   if (new_sp == 0) {
     active_context = &c;
     active_frame = c.sp;
@@ -557,7 +569,7 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
 
     // active SP (f.reserved0) の設定および検証:
     auto &cur_thread = kernel.current_thread();
-    if (f.reserved0 < cur_thread.stack_lo || f.reserved0 > cur_thread.stack_hi) {
+    if (f.reserved0 < cur_thread.stk.stack_lo || f.reserved0 > cur_thread.stk.stack_hi) {
       active_context = &c;
       active_frame = c.sp;
       active_stop_phase = 0xE004u;
@@ -605,8 +617,8 @@ SHIZUKU_HOT void context_to_frame(arch::context_t &c) {
     }
 
     // スタック窓の適用 (pmpaddr4/5: TOR)。shadow と比べ、違うときだけ書く。
-    const uintptr_t cur_win_lo = cur_thread.cur_win_lo;
-    const uintptr_t cur_win_hi = cur_thread.cur_win_hi;
+    const uintptr_t cur_win_lo = cur_thread.stk.cur_win_lo;
+    const uintptr_t cur_win_hi = cur_thread.stk.cur_win_hi;
     if (__builtin_expect(shadow.win_lo != cur_win_lo || shadow.win_hi != cur_win_hi, 1)) {
       shizuku::chips::esp32_c6::pmp_controller::apply_stack_window(cur_win_lo, cur_win_hi);
       shadow.win_lo = cur_win_lo;
@@ -924,12 +936,12 @@ bool shizuku_c6_handle_fault(arch::exception_frame_t *frame) {
       const auto win = thread.window_at(depth - 1);
       if (win.is_valid()) {
         const uintptr_t fault_addr = frame->mtval;
-        if (fault_addr >= thread.stack_lo && fault_addr < win.lo) {
-          const auto new_win = shizuku::extend_window(win, fault_addr, thread.stack_lo);
+        if (fault_addr >= thread.stk.stack_lo && fault_addr < win.lo) {
+          const auto new_win = shizuku::extend_window(win, fault_addr, thread.stk.stack_lo);
           if (new_win.is_valid()) {
             thread.set_window_at(depth - 1, new_win);
-            thread.cur_win_lo = new_win.lo;
-            thread.cur_win_hi = new_win.hi;
+            thread.stk.cur_win_lo = new_win.lo;
+            thread.stk.cur_win_hi = new_win.hi;
             shizuku::chips::esp32_c6::pmp_controller::apply_stack_window(new_win.lo, new_win.hi);
             s_pmp_shadow.win_lo = new_win.lo;
             s_pmp_shadow.win_hi = new_win.hi;
@@ -1300,10 +1312,10 @@ bool plic_vector_mode::user_stack_bounds(uint32_t object_id, uintptr_t &base, ui
   if (bounds == nullptr)
     return false;
   auto &thread = shizuku::kernel_instance.current_thread();
-  if (thread.stack_lo == 0 || thread.stack_hi <= thread.stack_lo)
+  if (thread.stk.stack_lo == 0 || thread.stk.stack_hi <= thread.stk.stack_lo)
     return false;
-  base = thread.stack_lo;
-  limit = thread.stack_hi;
+  base = thread.stk.stack_lo;
+  limit = thread.stk.stack_hi;
   return true;
 #else
   (void)object_id; (void)base; (void)limit;
@@ -1339,7 +1351,7 @@ void plic_vector_mode::enter_u_object(Context &context, Frame &frame, uint32_t c
   if (bounds != nullptr) {
     // 固有 PMP は書かない: U へ戻る直前の context_to_frame が current_object() (= callee) の bounds で書く。
     frame.ra = bounds->u_return_trampoline;
-    frame.reserved0 = shizuku::kernel_instance.current_thread().cur_win_hi;
+    frame.reserved0 = shizuku::kernel_instance.current_thread().stk.cur_win_hi;
     frame.reserved1 = reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack + sizeof(shizuku_c6_kernel_stack));
     frame.mcause = RV32_TAG_U_ENTRY;
     frame.mstatus = (frame.mstatus & ~0x1800u); // MPP = 0 (U-mode)

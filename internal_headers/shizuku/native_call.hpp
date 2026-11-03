@@ -191,28 +191,31 @@ template <class K, class KObj>
       thread.call_stack.call_count--;
       thread.call_stack.call_top = entry.prev_call;
     }
-    // Zero the opened stack window of this activation before returning to caller
-    const auto popped_win = thread.window_at(depth - 1);
-    if (popped_win.is_valid()) {
-      zero_window_of<A>(popped_win);
-    }
-    thread.clear_window_at(depth - 1);
-
-    if (entry.ret_privileged == 0) {
-      stack_window caller_win{thread.stack_lo, thread.stack_hi};
-      for (int32_t d = static_cast<int32_t>(depth) - 2; d >= 0; --d) {
-        const auto w = thread.window_at(d);
-        if (w.is_valid()) {
-          caller_win = w;
-          break;
-        }
+    // 窓機構を持つ arch (HAS_STACK_WINDOW) だけ: この段が開いた窓をゼロ化してから caller の窓へ戻す。
+    // 持たない arch (ARM) は記帳もゼロ化もしない。
+    if constexpr (K::THREAD::HAS_STACK_WINDOW) {
+      const auto popped_win = thread.window_at(depth - 1);
+      if (popped_win.is_valid()) {
+        zero_window_of<A>(popped_win);
       }
-      thread.cur_win_lo = caller_win.lo;
-      thread.cur_win_hi = caller_win.hi;
+      thread.clear_window_at(depth - 1);
 
-      if (restore) {
-        if constexpr (requires { A::apply_stack_window(context, caller_win.lo, caller_win.hi); }) {
-          A::apply_stack_window(context, caller_win.lo, caller_win.hi);
+      if (entry.ret_privileged == 0) {
+        stack_window caller_win{thread.stk.stack_lo, thread.stk.stack_hi};
+        for (int32_t d = static_cast<int32_t>(depth) - 2; d >= 0; --d) {
+          const auto w = thread.window_at(d);
+          if (w.is_valid()) {
+            caller_win = w;
+            break;
+          }
+        }
+        thread.stk.cur_win_lo = caller_win.lo;
+        thread.stk.cur_win_hi = caller_win.hi;
+
+        if (restore) {
+          if constexpr (requires { A::apply_stack_window(context, caller_win.lo, caller_win.hi); }) {
+            A::apply_stack_window(context, caller_win.lo, caller_win.hi);
+          }
         }
       }
     }
@@ -301,30 +304,34 @@ template <class K, class KObj>
       return kernel_error::NO_STACK;
     typename K::FRAME &frame = *context.sp;
 #if defined(SHIZUKU_LEAN_LEDGER)
-    if (depth >= thread.MAX_STACK_WINDOWS) {
-      return kernel_error::NO_STACK;
-    }
     const uintptr_t ret_sp = A::call_return_sp(context);
     auto &entry = thread.ledger[depth];
     entry.ret_sp = ret_sp;
-    if (!view.privileged) {
-      if (thread.stack_lo != 0 || thread.stack_hi != 0) {
-        if (ret_sp < thread.stack_lo || ret_sp > thread.stack_hi) {
-          return kernel_error::NO_STACK;
-        }
-      }
-      const auto win = open_window(ret_sp, thread.stack_lo);
-      if (!win.is_valid()) {
+    // 窓機構を持つ arch (HAS_STACK_WINDOW) だけ範囲検査・窓の記帳をする。ARM は何もしない。
+    if constexpr (K::THREAD::HAS_STACK_WINDOW) {
+      if (depth >= thread.MAX_STACK_WINDOWS) {
         return kernel_error::NO_STACK;
       }
-      thread.set_window_at(depth, win);
-      thread.cur_win_lo = win.lo;
-      thread.cur_win_hi = win.hi;
-      if constexpr (requires { A::apply_stack_window(context, win.lo, win.hi); }) {
-        A::apply_stack_window(context, win.lo, win.hi);
+      if (!view.privileged) {
+        // caller (M でも U でも) の SP は thread 自身の stack 内に無ければならない。
+        if (thread.stk.stack_lo != 0 || thread.stk.stack_hi != 0) {
+          if (ret_sp < thread.stk.stack_lo || ret_sp > thread.stk.stack_hi) {
+            return kernel_error::NO_STACK;
+          }
+        }
+        const auto win = open_window(ret_sp, thread.stk.stack_lo);
+        if (!win.is_valid()) {
+          return kernel_error::NO_STACK;
+        }
+        thread.set_window_at(depth, win);
+        thread.stk.cur_win_lo = win.lo;
+        thread.stk.cur_win_hi = win.hi;
+        if constexpr (requires { A::apply_stack_window(context, win.lo, win.hi); }) {
+          A::apply_stack_window(context, win.lo, win.hi);
+        }
+      } else {
+        thread.clear_window_at(depth);
       }
-    } else {
-      thread.clear_window_at(depth);
     }
 
     // 記帳は台帳の 1 項目だけ: 呼び先の同定 (object・handler・kind・via・floor・世代) と、この段から

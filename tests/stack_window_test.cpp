@@ -5,6 +5,7 @@
 #include <cassert>
 #include <cstdint>
 #include <array>
+#include <type_traits>
 #include <vector>
 
 #include "shizuku/kernel_abi.hpp"
@@ -174,6 +175,7 @@ struct mock_frame {
 
 struct mock_context {
   static constexpr bool CALL_HEADER_ON_STACK = true;
+  static constexpr bool HAS_STACK_WINDOW = true;
   mock_frame frame{};
   mock_frame *sp = &frame;
   uintptr_t user_sp = 0;
@@ -299,8 +301,8 @@ static void test_ledger_nesting_a_a() {
   const auto outer_win = thread.window_at(0);
   assert(outer_win.hi == (context.user_sp & ~uintptr_t(15)));
   assert(outer_win.lo == outer_win.hi - shizuku::kStackWindowStep);
-  assert(thread.cur_win_lo == outer_win.lo);
-  assert(thread.cur_win_hi == outer_win.hi);
+  assert(thread.stk.cur_win_lo == outer_win.lo);
+  assert(thread.stk.cur_win_hi == outer_win.hi);
 
   // Callee A writes patterns into its window and consumes 128B stack frame
   *reinterpret_cast<volatile uint32_t *>(outer_win.hi - 32u) = 0xA1A1A1A1u; // In A1 frame
@@ -321,8 +323,8 @@ static void test_ledger_nesting_a_a() {
   // strictly below outer window top, leaving outer activation frame intact
   assert(inner_win.hi < outer_win.hi);
   assert(inner_win.hi <= outer_win.hi - 128u);
-  assert(thread.cur_win_lo == inner_win.lo);
-  assert(thread.cur_win_hi == inner_win.hi);
+  assert(thread.stk.cur_win_lo == inner_win.lo);
+  assert(thread.stk.cur_win_hi == inner_win.hi);
 
   // Inner A writes patterns into its own window
   *reinterpret_cast<volatile uint32_t *>(inner_win.hi - 16u) = 0xA2A2A2A2u;
@@ -344,8 +346,8 @@ static void test_ledger_nesting_a_a() {
   // Caller A1 frame words outside inner window are preserved intact
   assert(*reinterpret_cast<const volatile uint32_t *>(outer_win.hi - 32u) == 0xA1A1A1A1u);
   // Resumed to outer A's window
-  assert(thread.cur_win_lo == outer_win.lo);
-  assert(thread.cur_win_hi == outer_win.hi);
+  assert(thread.stk.cur_win_lo == outer_win.lo);
+  assert(thread.stk.cur_win_hi == outer_win.hi);
 
   // 4. Return from outer A (pop_in_place)
   bool ok_pop2 = shizuku::native::pop_in_place<mock_kernel, mock_kobj>(
@@ -363,7 +365,7 @@ static void test_ledger_nesting_a_a() {
   assert(*reinterpret_cast<const volatile uint32_t *>(stack_lo + 0x3000u) == 0xC001CAFEu);
   assert(*reinterpret_cast<const volatile uint32_t *>(stack_lo + 0x3010u) == 0xC001BEEFu);
   // Restored to thread base stack
-  assert(thread.cur_win_lo == stack_lo && thread.cur_win_hi == stack_hi);
+  assert(thread.stk.cur_win_lo == stack_lo && thread.stk.cur_win_hi == stack_hi);
 }
 
 // ===========================================================================
@@ -430,7 +432,7 @@ static void test_ledger_nesting_a_b_a() {
   assert(extended.is_valid());
   assert(extended.lo < win2.lo);
   thread.set_window_at(2, extended);
-  thread.cur_win_lo = extended.lo;
+  thread.stk.cur_win_lo = extended.lo;
 
   // Inner A writes patterns into the extended range and window
   *reinterpret_cast<volatile uint32_t *>(extended.lo + 4u) = 0xE7E7E7E7u;
@@ -542,8 +544,8 @@ static void test_ledger_unwind_in_place() {
   assert(*reinterpret_cast<const volatile uint32_t *>(stack_lo + 0x3000u) == 0xC001CAFEu);
 
   // Caller window restored to activation 0
-  assert(thread.cur_win_lo == win0.lo);
-  assert(thread.cur_win_hi == win0.hi);
+  assert(thread.stk.cur_win_lo == win0.lo);
+  assert(thread.stk.cur_win_hi == win0.hi);
 }
 
 // ===========================================================================
@@ -640,8 +642,8 @@ static void test_pop_in_place_with_dispatch_caller() {
   assert(ok_pop);
   assert(thread.call_stack.depth == 1);
   // cur_win must NOT be {0, 0}; it must fall back to base thread stack [stack_lo, stack_hi)
-  assert(thread.cur_win_lo == stack_lo);
-  assert(thread.cur_win_hi == stack_hi);
+  assert(thread.stk.cur_win_lo == stack_lo);
+  assert(thread.stk.cur_win_hi == stack_hi);
 
   // Case 2: Call A (depth 1) -> Dispatch (depth 2, win={}) -> Call B (depth 3)
   thread.call_stack.depth = 0;
@@ -667,8 +669,8 @@ static void test_pop_in_place_with_dispatch_caller() {
   assert(ok_pop);
   assert(thread.call_stack.depth == 2);
   // cur_win must recover outer Call A window rather than {0, 0}
-  assert(thread.cur_win_lo == win_call_a.lo);
-  assert(thread.cur_win_hi == win_call_a.hi);
+  assert(thread.stk.cur_win_lo == win_call_a.lo);
+  assert(thread.stk.cur_win_hi == win_call_a.hi);
 }
 
 // ===========================================================================
@@ -691,8 +693,8 @@ static void test_window_extension_fault_semantics() {
 
   // depth == 0 (base): cannot extend window
   assert(thread.call_stack.depth == 0);
-  assert(thread.cur_win_lo == stack_lo);
-  assert(thread.cur_win_hi == stack_hi);
+  assert(thread.stk.cur_win_lo == stack_lo);
+  assert(thread.stk.cur_win_hi == stack_hi);
 
   // Enter Call activation: win = [0x20003E00, 0x20003F00)
   context.user_sp = stack_hi - 0x100u;
@@ -793,6 +795,188 @@ void test_m_mode_callee_no_window_and_frame_protected() {
   assert(thread.call_stack.depth == 0);
 }
 
+// thread の stack 登録 (spawn / bootstrap が set_stack_bounds を呼ぶ): lo は 8B 切上げ、hi は 8B 切下げ、
+// 窓は全域に戻る。
+static void test_set_stack_bounds_alignment() {
+  mock_kernel::THREAD thread{};
+  thread.set_stack_bounds(0x20000003u, 0x20001005u);
+  assert(thread.stk.stack_lo == 0x20000008u);
+  assert(thread.stk.stack_hi == 0x20001000u);
+  assert(thread.stk.cur_win_lo == thread.stk.stack_lo);
+  assert(thread.stk.cur_win_hi == thread.stk.stack_hi);
+  // 8B 整列済みならそのまま
+  thread.set_stack_bounds(0x20002000u, 0x20003000u);
+  assert(thread.stk.stack_lo == 0x20002000u && thread.stk.stack_hi == 0x20003000u);
+  // 狭すぎて整列後に hi < lo なら空 (hi = lo)
+  thread.set_stack_bounds(0x20004001u, 0x20004006u);
+  assert(thread.stk.stack_hi >= thread.stk.stack_lo);
+}
+
+// M caller が U callee を呼ぶ (M→U)。thread の stack = M が実際に走る stack そのもの。
+// 窓は [ret_sp-256, ret_sp) で開き、return でゼロ化され、ret_sp 以上の語は保存される。
+// 範囲外の ret_sp は NO_STACK。
+static void test_m_caller_u_callee_window() {
+  test_fake_arch::reset();
+  mock_kernel kernel{};
+  mock_kobj kobj{};
+  mock_context context{};
+  mock_kernel::THREAD thread{};
+  mock_kernel::THREAD::call_ledger_entry ledger_mem[8]{};
+  thread.ledger = ledger_mem;
+  thread.ledger_capacity = 8;
+  thread.base_object = 1;
+
+  alignas(16) static uint8_t m_thread_stack[0x1000];
+  const uintptr_t lo = reinterpret_cast<uintptr_t>(m_thread_stack);
+  const uintptr_t hi = lo + sizeof(m_thread_stack);
+  thread.set_stack_bounds(lo, hi);
+  assert(thread.stk.stack_lo == lo && thread.stk.stack_hi == hi);
+
+  // M caller の sp は thread stack の内側 (trap frame 等がこの直上に載る)
+  const uintptr_t ret_sp = lo + 0xC00u;
+  context.privileged = true;
+  context.user_sp = ret_sp;
+  volatile uint32_t *live_above = reinterpret_cast<volatile uint32_t *>(ret_sp);
+  volatile uint32_t *live_top = reinterpret_cast<volatile uint32_t *>(ret_sp + 0x20u);
+  *live_above = 0x4D43414Cu;
+  *live_top = 0x4D544F50u;
+  // 窓になる位置には「前の利用者の残り」を置き、return でゼロ化されることを見る
+  for (uintptr_t p = ret_sp - 256u; p < ret_sp; p += 4)
+    *reinterpret_cast<volatile uint32_t *>(p) = 0xDEADBEEFu;
+  // 窓の外 (窓の下) は触られない
+  *reinterpret_cast<volatile uint32_t *>(ret_sp - 256u - 4u) = 0xBADBAD01u;
+
+  mock_kobj::callee_view view_u{3, 0, 0, shizuku::object_kind::PLAIN, false, 0, 0, 1};
+  auto err = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
+      kernel, thread, context, view_u, 0x42003000u, mock_kernel::LEDGER_CALL);
+  assert(err == shizuku::kernel_error::OK);
+  assert(thread.call_stack.depth == 1);
+  const auto win = thread.window_at(0);
+  assert(win.is_valid());
+  assert(win.hi == ret_sp);
+  assert(win.lo == ret_sp - shizuku::kStackWindowStep);
+  assert(thread.stk.cur_win_lo == win.lo && thread.stk.cur_win_hi == win.hi);
+  assert(test_fake_arch::applied_windows.size() == 1);
+  assert(test_fake_arch::applied_windows[0].lo == win.lo);
+  assert(test_fake_arch::applied_windows[0].hi == win.hi);
+
+  mock_frame *frame_ptr = nullptr;
+  bool pop_ok = shizuku::native::pop_in_place<mock_kernel, mock_kobj>(
+      kobj, thread, context, frame_ptr, true, false);
+  assert(pop_ok);
+  assert(thread.call_stack.depth == 0);
+  // 開いた窓だけがゼロ化された
+  assert(test_fake_arch::zeroed_windows.size() == 1);
+  assert(test_fake_arch::zeroed_windows[0].lo == win.lo);
+  assert(test_fake_arch::zeroed_windows[0].hi == win.hi);
+  for (uintptr_t p = win.lo; p < win.hi; p += 4)
+    assert(*reinterpret_cast<const volatile uint32_t *>(p) == 0);
+  // ret_sp 以上の M の語は保存され、窓の下は触られていない
+  assert(*live_above == 0x4D43414Cu);
+  assert(*live_top == 0x4D544F50u);
+  assert(*reinterpret_cast<const volatile uint32_t *>(ret_sp - 256u - 4u) == 0xBADBAD01u);
+
+  // 範囲外の ret_sp (thread stack の外) は NO_STACK。台帳は書かれない。
+  context.privileged = true;
+  context.user_sp = lo - 16u;
+  auto below = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
+      kernel, thread, context, view_u, 0x42003000u, mock_kernel::LEDGER_CALL);
+  assert(below == shizuku::kernel_error::NO_STACK);
+  context.user_sp = hi + 16u;
+  auto above = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
+      kernel, thread, context, view_u, 0x42003000u, mock_kernel::LEDGER_CALL);
+  assert(above == shizuku::kernel_error::NO_STACK);
+  assert(thread.call_stack.depth == 0);
+  // 境界ちょうど hi は範囲内 (sp = 領域の上端)
+  context.user_sp = hi;
+  auto at_hi = shizuku::native::enter_in_place<mock_kernel, mock_kobj>(
+      kernel, thread, context, view_u, 0x42003000u, mock_kernel::LEDGER_CALL);
+  assert(at_hi == shizuku::kernel_error::OK);
+}
+
+// 窓機構を持たない arch (HAS_STACK_WINDOW を宣言しない = ARM 相当): 窓の記帳・範囲検査・ゼロ化・
+// 適用を一切しない。stack が thread 外でも NO_STACK にならず、thread の大きさも増えない。
+struct nowin_frame { uintptr_t pc = 0; uintptr_t ra = 0; };
+struct nowin_context {
+  static constexpr bool CALL_HEADER_ON_STACK = true; // HAS_STACK_WINDOW は宣言しない
+  nowin_frame frame{};
+  nowin_frame *sp = &frame;
+  uintptr_t user_sp = 0;
+  bool privileged = false;
+};
+struct nowin_arch {
+  static constexpr bool CALL_IN_PLACE = true;
+  static inline int zero_calls = 0;
+  static inline int apply_calls = 0;
+  static void zero_stack_window(shizuku::stack_window) { ++zero_calls; }
+  static void apply_stack_window(nowin_context &, uintptr_t, uintptr_t) { ++apply_calls; }
+  static bool call_header_has_room(const nowin_context &, uint32_t) { return true; }
+  static uintptr_t frame_pc(const nowin_frame &f) { return f.pc; }
+  static uintptr_t call_return_sp(const nowin_context &c) { return c.user_sp; }
+  static bool context_privileged(const nowin_context &c) { return c.privileged; }
+  static void set_entry(nowin_frame &f, uintptr_t pc, uintptr_t ra) { f.pc = pc; f.ra = ra; }
+  static uintptr_t return_stub() { return 0x1000u; }
+  static void set_priv(nowin_context &c, bool p) { c.privileged = p; }
+  static void set_region_window(nowin_context &, uintptr_t, uintptr_t) {}
+  static void switch_callee_protection(nowin_context &, nowin_frame &, uint32_t, bool) {}
+  static nowin_frame *call_resume_at(nowin_context &c, uintptr_t pc, uintptr_t sp, bool priv,
+                                     uintptr_t, uintptr_t, bool) {
+    c.frame.pc = pc; c.user_sp = sp; c.privileged = priv; return &c.frame;
+  }
+};
+struct nowin_kernel {
+  using ARCH = nowin_arch;
+  using CONTEXT = nowin_context;
+  using FRAME = nowin_frame;
+  using THREAD = shizuku::templates::thread<nowin_context>;
+  static constexpr uint8_t LEDGER_CALL = 1;
+  static constexpr uint8_t LEDGER_DISPATCH = 2;
+  static constexpr uint8_t LEDGER_DESCRIPTOR_CALL = 3;
+  uint32_t svc_handler_object() const { return 0xFFFFu; }
+};
+
+static void test_gate_false_no_window_no_zero() {
+  static_assert(!nowin_kernel::THREAD::HAS_STACK_WINDOW);
+  static_assert(nowin_kernel::THREAD::MAX_STACK_WINDOWS == 0);
+  static_assert(mock_kernel::THREAD::HAS_STACK_WINDOW);
+  // thread のメモリ増分: gate=false は窓の記帳領域 (34 x u16) と stack 範囲 (4 語) を持たない。
+  static_assert(sizeof(mock_kernel::THREAD) >=
+                sizeof(nowin_kernel::THREAD) + 34u * sizeof(uint16_t) + 4u * sizeof(uintptr_t));
+  static_assert(std::is_empty_v<decltype(nowin_kernel::THREAD{}.stk)>);
+  static_assert(std::is_empty_v<decltype(nowin_kernel::THREAD{}.win_span)>);
+
+  nowin_arch::zero_calls = nowin_arch::apply_calls = 0;
+  nowin_kernel kernel{};
+  mock_kobj kobj{};
+  nowin_context context{};
+  nowin_kernel::THREAD thread{};
+  nowin_kernel::THREAD::call_ledger_entry ledger_mem[8]{};
+  thread.ledger = ledger_mem;
+  thread.ledger_capacity = 8;
+  thread.base_object = 1;
+  thread.set_stack_bounds(0x20000000u, 0x20001000u); // gate=false では何もしない
+
+  // 深さが 34 を超えても (MAX_STACK_WINDOWS == 0 でも) NO_STACK にならず、ret_sp が任意の値でも通る
+  context.user_sp = 0x10u; // 窓機構があれば open_window が失敗する値
+  mock_kobj::callee_view view{2, 0, 0, shizuku::object_kind::PLAIN, false, 0, 0, 1};
+  auto err = shizuku::native::enter_in_place<nowin_kernel, mock_kobj>(
+      kernel, thread, context, view, 0x1000u, 1);
+  assert(err == shizuku::kernel_error::OK);
+  assert(thread.call_stack.depth == 1);
+  assert(!thread.window_at(0).is_valid());
+  assert(nowin_arch::apply_calls == 0);
+
+  nowin_frame *frame_ptr = nullptr;
+  mock_kobj kobj2{};
+  bool pop_ok = shizuku::native::pop_in_place<nowin_kernel, mock_kobj>(
+      kobj2, thread, context, frame_ptr, true, false);
+  assert(pop_ok);
+  assert(thread.call_stack.depth == 0);
+  assert(nowin_arch::zero_calls == 0);
+  assert(nowin_arch::apply_calls == 0);
+  (void)kobj;
+}
+
 int main() {
   test_open_window();
   test_extend_window();
@@ -805,5 +989,8 @@ int main() {
   test_pop_in_place_with_dispatch_caller();
   test_window_extension_fault_semantics();
   test_m_mode_callee_no_window_and_frame_protected();
+  test_set_stack_bounds_alignment();
+  test_m_caller_u_callee_window();
+  test_gate_false_no_window_no_zero();
   return 0;
 }

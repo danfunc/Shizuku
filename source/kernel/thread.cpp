@@ -150,6 +150,9 @@ KERNEL::spawn_result KERNEL::spawn(const KERNEL::spawn_request &request) {
                         : request.affinity;
   ARCH::stack_limit_set(*thread.context,
                         (request.stack_base + 7) & ~(uintptr_t)7);
+  // thread が実際に走る stack 領域 (M でも U でも同じ)。U callee の窓はこの中の caller SP の下から切り出す。
+  // 窓機構を持たない arch (ARM など) では何もしない。
+  thread.set_stack_bounds(request.stack_base, request.stack_base + request.stack_bytes);
   if constexpr (ARCH::HAS_OBJECT_PROTECTION) {
     const auto stack_win = ARCH::encode_stack_window(request.stack_base, request.stack_base + request.stack_bytes);
     thread.stack_rbar = stack_win.rbar;

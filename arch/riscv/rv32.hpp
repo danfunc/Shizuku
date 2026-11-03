@@ -86,6 +86,13 @@ public:
   struct context_t {
     // 呼出しの記録は user stack 上のヘッダ枠にある (thread.hpp: identity 配列を縮める目印)。
     static constexpr bool CALL_HEADER_ON_STACK = true;
+    // thread が U callee 用の stack 窓 (open/extend/zero) を持つか。C6 U-mode 構成だけ true。
+    // (PMP が無い M-only 構成では窓は意味を持たない。)
+#if defined(SHIZUKU_C6_UMODE)
+    static constexpr bool HAS_STACK_WINDOW = true;
+#else
+    static constexpr bool HAS_STACK_WINDOW = false;
+#endif
     exception_frame_t *sp = nullptr;
     uintptr_t s0 = 0, s1 = 0, s2 = 0, s3 = 0;
     uintptr_t s4 = 0, s5 = 0, s6 = 0, s7 = 0;

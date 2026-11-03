@@ -58,6 +58,15 @@ struct ledger_payload_trait<CONTEXT, std::void_t<typename CONTEXT::ledger_payloa
 template <typename CONTEXT>
 using ledger_payload_of = typename ledger_payload_trait<CONTEXT>::type;
 
+// stack 窓機構 (open/extend/zero) を持つ文脈か。context_t が HAS_STACK_WINDOW = true を宣言した
+// arch だけ (C6 U-mode)。既定は false で、ARM など他 arch に新メンバを要求しない。
+template <typename CONTEXT> constexpr bool stack_window_enabled() {
+  if constexpr (requires { CONTEXT::HAS_STACK_WINDOW; })
+    return CONTEXT::HAS_STACK_WINDOW;
+  else
+    return false;
+}
+
 template <typename CONTEXT> constexpr bool compact_ledger_enabled() {
   if constexpr (requires { CONTEXT::COMPACT_LEDGER; }) return CONTEXT::COMPACT_LEDGER;
   return false;
@@ -221,7 +230,10 @@ template <typename CONTEXT> struct thread {
   // Compacted: stores 16-bit span (hi - lo) per depth; hi is derived from ledger[d].ret_sp & ~15.
   // span == 0 indicates an invalid / un-opened window (M callee or dispatch activation).
   // On ARM (no in-place stack windows), win_span is eliminated via empty_ledger_payload.
-  static constexpr uint32_t MAX_STACK_WINDOWS = (requires { CONTEXT::CALL_HEADER_ON_STACK; }) ? 34 : 0;
+  // 窓機構は arch の能力 (CONTEXT::HAS_STACK_WINDOW) で有効になる。既定 (宣言なし) は false で、
+  // そのとき win_span / stk は空 ([[no_unique_address]]) で thread の大きさを増やさない。
+  static constexpr bool HAS_STACK_WINDOW = stack_window_enabled<CONTEXT>();
+  static constexpr uint32_t MAX_STACK_WINDOWS = HAS_STACK_WINDOW ? 34 : 0;
   struct window_span_array {
     uint16_t data[34]{};
     constexpr uint16_t &operator[](uint32_t i) noexcept { return data[i]; }
@@ -229,10 +241,16 @@ template <typename CONTEXT> struct thread {
   };
   [[no_unique_address]] std::conditional_t<MAX_STACK_WINDOWS != 0,
       window_span_array, empty_ledger_payload> win_span{};
-  uintptr_t stack_lo = 0;
-  uintptr_t stack_hi = 0;
-  uintptr_t cur_win_lo = 0;
-  uintptr_t cur_win_hi = 0;
+  // thread 自身の stack 全域 [stack_lo, stack_hi) と、いまの窓 [cur_win_lo, cur_win_hi)。
+  // HAS_STACK_WINDOW == false の thread では空で、メンバへのアクセスは if constexpr の中だけ。
+  struct stack_extent {
+    uintptr_t stack_lo = 0;
+    uintptr_t stack_hi = 0;
+    uintptr_t cur_win_lo = 0;
+    uintptr_t cur_win_hi = 0;
+  };
+  [[no_unique_address]] std::conditional_t<HAS_STACK_WINDOW, stack_extent,
+                                           empty_ledger_payload> stk{};
 
   stack_window window_at(uint32_t d) const noexcept {
     if constexpr (MAX_STACK_WINDOWS == 0) {
@@ -274,18 +292,22 @@ template <typename CONTEXT> struct thread {
     }
   }
 
-  void set_user_stack(uintptr_t lo, uintptr_t hi) noexcept {
-    stack_lo = lo;
-    stack_hi = hi;
-    cur_win_lo = lo;
-    cur_win_hi = hi;
-  }
+  // thread が実際に走る stack 領域を登録する。lo は 8B 切上げ、hi は 8B 切下げ。cur_win は全域に戻す。
+  // HAS_STACK_WINDOW == false の arch では何もしない。
   void set_stack_bounds(uintptr_t lo, uintptr_t hi) noexcept {
-    stack_lo = lo;
-    stack_hi = hi;
-    cur_win_lo = lo;
-    cur_win_hi = hi;
+    if constexpr (HAS_STACK_WINDOW) {
+      lo = (lo + 7u) & ~uintptr_t(7);
+      hi = hi & ~uintptr_t(7);
+      if (hi < lo) hi = lo;
+      stk.stack_lo = lo;
+      stk.stack_hi = hi;
+      stk.cur_win_lo = lo;
+      stk.cur_win_hi = hi;
+    } else {
+      (void)lo; (void)hi;
+    }
   }
+  void set_user_stack(uintptr_t lo, uintptr_t hi) noexcept { set_stack_bounds(lo, hi); }
   call_ledger_entry *ledger = nullptr;
   uint32_t ledger_capacity = 0;
   uint32_t base_object = 0;
