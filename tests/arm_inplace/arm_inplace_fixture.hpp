@@ -119,16 +119,26 @@ struct test_inplace_adapter : public BaseArch {
       frame->r1 = 0;
       frame->r2 = 0;
       frame->r3 = 0;
-      frame->r12 = 0;
+      if constexpr (requires { frame->r12; }) frame->r12 = 0;
+      if constexpr (requires { frame->lr; }) frame->lr = 0;
     } else {
+      frame->r0 = 0;
+      frame->r1 = 0;
       if constexpr (requires { frame->r12; }) {
         const auto *prev = ctx.sp;
+        uint32_t r2 = prev ? prev->r2 : 0;
+        uint32_t r3 = prev ? prev->r3 : 0;
         uint32_t r12 = prev ? prev->r12 : 0;
         if (shizuku::is_return_stub_marker(r12)) {
+          r2 = 0;
+          r3 = 0;
           r12 = 0;
         }
+        frame->r2 = r2;
+        frame->r3 = r3;
         frame->r12 = r12;
       }
+      if constexpr (requires { frame->lr; }) frame->lr = 0;
     }
     ctx.sp = frame;
     BaseArch::set_priv(ctx, privileged);
@@ -612,9 +622,12 @@ void run_inplace_descriptor_failures_ledger_invariant(const char *tag) {
 
 template <typename Adapter>
 void run_inplace_lean_push_pop(const char *tag) {
+  alignas(8) unsigned char storage[512]{};
+  auto *frame_ptr = reinterpret_cast<typename mock_kernel<Adapter>::FRAME *>(storage + 256);
+  auto &frame = *frame_ptr;
   typename mock_kernel<Adapter>::CONTEXT ctx{};
-  typename mock_kernel<Adapter>::FRAME frame{};
   ctx.sp = &frame;
+  ctx.exc_return = 0xfffffffdu;
   ctx.control = Adapter::CONTROL_UNPRIV_PSP;
   ctx.region_base = 0x20000000u;
   ctx.region_limit = 0x20001000u;
@@ -910,6 +923,58 @@ void run_inplace_exit_fp_marker(const char *tag) {
   (void)tag;
 #endif
   printf("  [%s] PASS: exit_fp_marker\n", tag);
+}
+
+// FORWARD_CHILD_EXIT (Forward == true) forces scrub = true, which zeroes registers.
+template <typename Adapter>
+void run_inplace_forward_child_exit_scrub(const char *tag) {
+#if defined(SHIZUKU_LEAN_LEDGER)
+  using K = mock_kernel<Adapter>;
+  using Frame = typename K::FRAME;
+  const auto core0 = make_test_core<Adapter>(0);
+  K kernel;
+  mock_kobj kobj;
+  alignas(8) unsigned char storage[512]{};
+  auto *outer_frame = reinterpret_cast<Frame *>(storage + 128);
+  typename K::CONTEXT ctx{};
+  ctx.sp = outer_frame;
+  ctx.control = Adapter::CONTROL_UNPRIV_PSP;
+  ctx.region_base = 0x20001000u;
+  ctx.region_limit = 0x20002000u;
+  typename K::THREAD thread;
+  typename K::THREAD::call_ledger_entry ledger[16]{};
+  thread.ledger = ledger;
+  thread.ledger_capacity = 16;
+  thread.base_object = 1;
+  kobj.m_region_base[1] = 0x20001000u;
+  kobj.m_region_limit[1] = 0x20002000u;
+  kobj.m_row_valid[5][0] = true;
+  kobj.m_rows[5][0] = {5, 1, 0, shizuku::object_kind::PLAIN, false, 0, 0, 1, 0x10005000u};
+  outer_frame->pc = 0x10001100u;
+  outer_frame->r0 = 4;
+  outer_frame->r1 = 5;
+  outer_frame->r2 = 0;
+  outer_frame->r3 = 0x34;
+  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core0);
+  assert(thread.call_stack.depth == 1 && thread.call_stack.call_count == 1);
+  // Mark the activation as coming from a dedicated HANDLER so FORWARD_CHILD_EXIT is permitted
+  thread.ledger[0].kind = static_cast<uint8_t>(shizuku::object_kind::HANDLER);
+  thread.ledger[0].object = 5; // not svc_handler_object
+  outer_frame->r0 = static_cast<uintptr_t>(shizuku::object_api::FORWARD_CHILD_EXIT);
+  outer_frame->r1 = 0; // target_depth (unwind floor = 0)
+  outer_frame->r2 = 42; // value
+  outer_frame->r3 = 0; // error
+  outer_frame->r12 = 0x12345678u; // dirty value to verify scrubbing
+  const auto st = shizuku::native::exit_in_place<K, mock_kobj, /*Forward=*/true>(kernel, kobj, thread, ctx, core0);
+  assert(st == shizuku::native::status::DONE);
+  assert(thread.call_stack.depth == 0);
+  if constexpr (requires { outer_frame->r12; }) {
+    assert(outer_frame->r12 == 0); // Must be scrubbed to 0 on forced rewind (FORWARD_CHILD_EXIT)
+  }
+#else
+  (void)tag;
+#endif
+  printf("  [%s] PASS: forward_child_exit_scrub\n", tag);
 }
 
 template <typename Adapter>

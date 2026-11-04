@@ -115,6 +115,7 @@ int main() {
   run_inplace_lean_push_pop<adapter>("ARMv8-M");
   run_inplace_return_window_current_row<adapter>("ARMv8-M");
   run_inplace_exit_fp_marker<adapter>("ARMv8-M");
+  run_inplace_forward_child_exit_scrub<adapter>("ARMv8-M");
   run_inplace_exit_validation<adapter>("ARMv8-M");
 
   printf("All ARMv8-M in-place host tests PASSED successfully!\n");

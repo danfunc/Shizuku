@@ -815,10 +815,12 @@ private:
     if (scrub) {
       zero_exception_frame(*next);
     } else {
-      // 通常戻り: callee の r2, r3, r12 を素通しする。ただし return stub marker の場合は r12 を 0 にする
+      // 通常戻り: callee の r2, r3, r12 を素通しする。ただし return stub marker の場合は r2, r3, r12 を 0 にする
       const auto *prev = context.sp;
       uint32_t r2 = prev->r2, r3 = prev->r3, r12 = prev->r12;
       if (is_return_stub_marker(r12)) {
+        r2 = 0;
+        r3 = 0;
         r12 = 0;
       }
       next->r0 = 0;

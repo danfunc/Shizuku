@@ -20,12 +20,12 @@ uintptr_t leak_callee_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 #if defined(__ARM_ARCH_8M_MAIN__)
 [[gnu::always_inline]] static inline void leak_dirty_fp() {
   asm volatile(
-      "movw r3, #0xbeef\n" "movt r3, #0xcafe\n"
+      "movw r3, #0xbabe\n" "movt r3, #0xcafe\n"
       "vmov s0, r3\n" "vmov s1, r3\n" "vmov s2, r3\n" "vmov s3, r3\n"
       "vmov s4, r3\n" "vmov s5, r3\n" "vmov s6, r3\n" "vmov s7, r3\n"
       "vmov s8, r3\n" "vmov s9, r3\n" "vmov s10, r3\n" "vmov s11, r3\n"
       "vmov s12, r3\n" "vmov s13, r3\n" "vmov s14, r3\n" "vmov s15, r3\n"
-      "mov.w r3, #0x400000\n" "vmsr fpscr, r3\n"
+      "mov.w r3, #0xc00000\n" "vmsr fpscr, r3\n"
       : : : "r3", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7",
               "s8", "s9", "s10", "s11", "s12", "s13", "s14", "s15", "vfpcc", "memory");
 }
@@ -55,7 +55,7 @@ extern "C" __attribute__((noinline, used)) uintptr_t leak_callee_body(
     // Return stub を迂回し、s0-s31/FPSCR を汚した状態で直接 EXIT_METHOD (2) を打つ
     leak_dirty_fp();
     asm volatile(
-        "movw r3, #0xbeef\n"
+        "movw r3, #0xbabe\n"
         "movt r3, #0xcafe\n"
         "vmov s16, r3\n" "vmov s17, r3\n" "vmov s18, r3\n" "vmov s19, r3\n"
         "vmov s20, r3\n" "vmov s21, r3\n" "vmov s22, r3\n" "vmov s23, r3\n"
@@ -63,19 +63,36 @@ extern "C" __attribute__((noinline, used)) uintptr_t leak_callee_body(
         "vmov s28, r3\n" "vmov s29, r3\n" "vmov s30, r3\n" "vmov s31, r3\n"
         : : : "r3", "s16", "s17", "s18", "s19", "s20", "s21", "s22", "s23",
               "s24", "s25", "s26", "s27", "s28", "s29", "s30", "s31", "memory");
-    // 直接 EXIT_METHOD の正しい呼び方: a1 に戻り先深さ target=0 (深さ 1 の callee から深さ 0 の caller への復帰)、
-    // a2 に戻り値 42、a3 にエラー 0 を渡す (marker なしの直接 EXIT)。
-    (void)shizuku::armv8m_abi::syscall(static_cast<uintptr_t>(shizuku::object_api::EXIT_METHOD), 0, 42, 0);
+    register uintptr_t r0 asm("r0") = static_cast<uintptr_t>(shizuku::object_api::EXIT_METHOD);
+    register uintptr_t r1 asm("r1") = 0; // target=0
+    register uintptr_t r2 asm("r2") = 42; // value
+    register uintptr_t r3 asm("r3") = 0; // error
+    asm volatile("svc 0\n" : "+r"(r0), "+r"(r1) : "r"(r2), "r"(r3) : "r12", "lr", "cc", "memory");
     return 99;
   }
   if (command == 89) {
-    // Return stub を迂回し、r4-r11 を汚した状態で直接 EXIT_METHOD (2) を打つ
+    // Return stub を迂回し、r4-r11, r12, s0-s15 を汚した状態で直接 EXIT_METHOD (2) を打つ
+    leak_dirty_fp();
+    register uintptr_t r0 asm("r0") = static_cast<uintptr_t>(shizuku::object_api::EXIT_METHOD);
+    register uintptr_t r1 asm("r1") = 0; // target_depth=0
+    register uintptr_t r2 asm("r2") = 42; // value
+    register uintptr_t r3 asm("r3") = 0; // error
+    register uintptr_t r12_val asm("r12") = 0x12345678u;
+    register uintptr_t r4_val asm("r4") = 0xdead0004u;
+    register uintptr_t r5_val asm("r5") = 0xdead0005u;
+    register uintptr_t r6_val asm("r6") = 0xdead0006u;
+    register uintptr_t r7_val asm("r7") = 0xdead0007u;
+    register uintptr_t r8_val asm("r8") = 0xdead0008u;
+    register uintptr_t r9_val asm("r9") = 0xdead0009u;
+    register uintptr_t r10_val asm("r10") = 0xdead000au;
+    register uintptr_t r11_val asm("r11") = 0xdead000bu;
     asm volatile(
-        "movw r4, #0xbeef\n movt r4, #0xdead\n"
-        "mov r5, r4\n mov r6, r4\n mov r7, r4\n"
-        "mov r8, r4\n mov r9, r4\n mov r10, r4\n mov r11, r4\n"
-        : : : "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "memory");
-    (void)shizuku::armv8m_abi::syscall(static_cast<uintptr_t>(shizuku::object_api::EXIT_METHOD), 0, 42, 0);
+        "svc 0\n"
+        : "+r"(r0), "+r"(r1),
+          "+r"(r4_val), "+r"(r5_val), "+r"(r6_val), "+r"(r7_val),
+          "+r"(r8_val), "+r"(r9_val), "+r"(r10_val), "+r"(r11_val)
+        : "r"(r2), "r"(r3), "r"(r12_val)
+        : "lr", "cc", "memory");
     return 99;
   }
   if (command == 90) {
@@ -115,13 +132,26 @@ extern "C" __attribute__((noinline, used)) uintptr_t leak_callee_body(
   }
   if (command == 91) {
     // Return stub を迂回し、r4-r11 を汚した状態で generic 経由の primitive::RETURN (1) を直接打つ
+    register uintptr_t r0 asm("r0") = 1; // primitive::RETURN
+    register uintptr_t r1 asm("r1") = 1; // count
+    register uintptr_t r2 asm("r2") = 42; // value
+    register uintptr_t r3 asm("r3") = 0; // error
+    register uintptr_t r12_val asm("r12") = 0; // target_depth
+    register uintptr_t r4_val asm("r4") = 0xdead0004u;
+    register uintptr_t r5_val asm("r5") = 0xdead0005u;
+    register uintptr_t r6_val asm("r6") = 0xdead0006u;
+    register uintptr_t r7_val asm("r7") = 0xdead0007u;
+    register uintptr_t r8_val asm("r8") = 0xdead0008u;
+    register uintptr_t r9_val asm("r9") = 0xdead0009u;
+    register uintptr_t r10_val asm("r10") = 0xdead000au;
+    register uintptr_t r11_val asm("r11") = 0xdead000bu;
     asm volatile(
-        "movw r4, #0xbeef\n movt r4, #0xdead\n"
-        "mov r5, r4\n mov r6, r4\n mov r7, r4\n"
-        "mov r8, r4\n mov r9, r4\n mov r10, r4\n mov r11, r4\n"
-        : : : "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "memory");
-    // primitive::RETURN (1): count=1, value=42, error=0, target_depth=0
-    (void)shizuku::armv8m_abi::syscall(1, 1, 42, 0, 0);
+        "svc 0\n"
+        : "+r"(r0), "+r"(r1),
+          "+r"(r4_val), "+r"(r5_val), "+r"(r6_val), "+r"(r7_val),
+          "+r"(r8_val), "+r"(r9_val), "+r"(r10_val), "+r"(r11_val)
+        : "r"(r2), "r"(r3), "r"(r12_val)
+        : "lr", "cc", "memory");
     return 99;
   }
   if (command == 92) {
@@ -165,7 +195,7 @@ extern "C" __attribute__((noinline, used)) uintptr_t leak_callee_body(
       "mrs r3, control\n"
       "tst r3, #4\n"
       "beq 1f\n"
-      "movw r3, #0xbeef\n"
+      "movw r3, #0xbabe\n"
       "movt r3, #0xcafe\n"
       "vmov s0, r3\n" "vmov s1, r3\n" "vmov s2, r3\n" "vmov s3, r3\n"
       "vmov s4, r3\n" "vmov s5, r3\n" "vmov s6, r3\n" "vmov s7, r3\n"
@@ -175,7 +205,7 @@ extern "C" __attribute__((noinline, used)) uintptr_t leak_callee_body(
       "vmov s20, r3\n" "vmov s21, r3\n" "vmov s22, r3\n" "vmov s23, r3\n"
       "vmov s24, r3\n" "vmov s25, r3\n" "vmov s26, r3\n" "vmov s27, r3\n"
       "vmov s28, r3\n" "vmov s29, r3\n" "vmov s30, r3\n" "vmov s31, r3\n"
-      "mov.w r3, #0x400000\n"
+      "mov.w r3, #0xc00000\n"
       "vmsr fpscr, r3\n"
       "1:\n"
       "movw r1, #1\n" "movt r1, #0xcafe\n"
@@ -289,6 +319,8 @@ uintptr_t leak_caller_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
     data[10] = r.value;
     asm volatile("mrs %0, control" : "=r"(control_after));
     data[12] = control_after;
+    uint32_t *out_lower = reinterpret_cast<uint32_t *>(leak_caller_data) + 20;
+    asm volatile("vstmia %0, {s0-s15}" : : "r"(out_lower) : "memory");
     uint32_t *out_upper = reinterpret_cast<uint32_t *>(leak_caller_data) + 37;
     asm volatile("vstmia %0, {s16-s31}" : : "r"(out_upper) : "memory");
     return r.value;
@@ -309,7 +341,7 @@ uintptr_t leak_caller_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
   } else if (cmd == 8 || cmd == 10) {
     // 整数版直接 EXIT 迂回 (cmd==8, callee command=89) および
     // generic RETURN 迂回 (cmd==10, callee command=91):
-    // callee を呼び、復帰直後の r4-r11 を data[1..8] に記録する
+    // callee を呼び、復帰直後の r4-r11, r12, s0-s15 を記録する
     const uintptr_t target_command = (cmd == 8) ? 89 : 91;
     register uintptr_t r0 asm("r0") = 4;
     register uintptr_t r1 asm("r1") = data[0];
@@ -323,6 +355,7 @@ uintptr_t leak_caller_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
     register uintptr_t r9_out asm("r9");
     register uintptr_t r10_out asm("r10");
     register uintptr_t r11_out asm("r11");
+    register uintptr_t r12_out asm("r12");
     asm volatile(
         "mov r12, sp\n"
         "bic r12, r12, #31\n"
@@ -330,13 +363,15 @@ uintptr_t leak_caller_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
         "str sp, [r12, #0]\n"
         "mov sp, r12\n"
         "svc 0\n"
+        "mov %[r12_out], r12\n"
         "ldr r12, [sp, #0]\n"
         "mov sp, r12\n"
         : "+r"(r0), "+r"(r1),
           "=r"(r4_out), "=r"(r5_out), "=r"(r6_out), "=r"(r7_out),
-          "=r"(r8_out), "=r"(r9_out), "=r"(r10_out), "=r"(r11_out)
+          "=r"(r8_out), "=r"(r9_out), "=r"(r10_out), "=r"(r11_out),
+          [r12_out] "=r"(r12_out)
         : "r"(r2), "r"(r3)
-        : "r12", "lr", "cc", "memory");
+        : "lr", "cc", "memory");
     data[1] = r4_out;
     data[2] = r5_out;
     data[3] = r6_out;
@@ -347,6 +382,9 @@ uintptr_t leak_caller_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
     data[8] = r11_out;
     data[9] = r0;
     data[10] = r1;
+    data[14] = r12_out;
+    uint32_t *out_s = reinterpret_cast<uint32_t *>(leak_caller_data) + 20;
+    asm volatile("vstmia %0, {s0-s15}" : : "r"(out_s) : "memory");
   } else if (cmd == 9) {
     // command == 90 (EXIT_METHOD callee 失敗経路)
     const auto r = shizuku::armv8m_abi::syscall(4, data[0], 0, 90);
@@ -481,46 +519,50 @@ void register_leak_test() {
                gp_restored | (fp_upper_restored << 1), 3);
   record_check("leak B return scratch zero", c[54] == 0 && c[55] == 0 &&
                c[56] == 0 && c[57] == 0, c[54] | c[55] | c[56] | c[57], 0);
-  record_check("leak B return lower FP zero", fp_lower_zero && c[13] == 0,
-               c[13], 0);
+  const bool fpscr_clean = ((c[13] & 0x07C00000u) == 0x00400000u) && ((c[13] & ~0x07C00000u) == 0);
+  record_check("leak B return lower FP zero", fp_lower_zero && fpscr_clean,
+               c[13], 0x00400000u);
 
-  // Callee が return stub を通らず EXIT_METHOD を直接打って戻る漏洩試験
+  // Callee が return stub を通らず EXIT_METHOD を直接打って戻る試験 (新契約: 素通し)
   const auto direct_exit = run_fresh(6);
-  // 語単位の切り分け: s0/s1 (FP 戻り値の置き場)、s2-s15、FPSCR を別々に見る。
-  // 印なしの直接 EXIT では、カーネルが s0/s1 も含めて FP 部 18 語すべてを 0 にする。
-  const bool direct_s01_clean = (c[20] == 0) && (c[21] == 0);
-  bool direct_s2_15_clean = true;
-  for (unsigned i = 2; i < 16; ++i) direct_s2_15_clean &= (c[20 + i] == 0);
-  const bool direct_fpscr_clean = (c[36] == 0);
-  bool direct_upper_clean = true;
-  for (unsigned i = 0; i < 16; ++i) direct_upper_clean &= (c[37 + i] == 0);
+  // 新契約 (素通し): direct EXIT 迂回時、callee の FP 値 (s0-s31) がそのまま届くこと
+  bool direct_fp_lower_passed = true;
+  for (unsigned i = 0; i < 16; ++i) direct_fp_lower_passed &= (c[20 + i] == 0xcafebabeu);
+  bool direct_fp_upper_passed = true;
+  for (unsigned i = 0; i < 16; ++i) direct_fp_upper_passed &= (c[37 + i] == 0xcafebabeu);
 
   uint32_t got_direct = 0;
   if (direct_exit.error != 0) got_direct |= 1u << 0;
   if (direct_exit.value != (uintptr_t)grant_end::YIELDED) got_direct |= 1u << 1;
   if (c[9] != 0) got_direct |= 1u << 2;  // caller error
   if (c[10] != 42) got_direct |= 1u << 3; // return value 42
-  if (!direct_s01_clean) got_direct |= 1u << 4;    // s0 or s1 non-zero
-  if (!direct_upper_clean) got_direct |= 1u << 5;  // s16-s31 non-zero
-  if (!direct_s2_15_clean) got_direct |= 1u << 6;  // s2-s15 non-zero
-  if (!direct_fpscr_clean) got_direct |= 1u << 7;  // fpscr non-zero
-  record_check("leak direct EXIT bypass FP clean",
+  if (!direct_fp_lower_passed) got_direct |= 1u << 4; // s0-s15 not passed through
+  if (!direct_fp_upper_passed) got_direct |= 1u << 5; // s16-s31 not passed through
+  record_check("leak direct EXIT bypass FP passthrough",
                got_direct == 0, got_direct, 0);
 
-  // Callee が return stub を通らず EXIT_METHOD を直接打って戻る整数漏洩試験
-  // カーネル消去により、復帰直後の r4-r11 (c[1..8]) がすべて 0 であることを検証する。
+  // Callee が return stub を通らず EXIT_METHOD を直接打って戻る整数・FP 漏洩試験 (新契約: 素通し)
+  // カーネル消去を行わず素通しするため、callee が設定した r4-r11 (c[1..8]), r12 (c[14]), s0-s15 (c[20..35])
+  // がそのまま届くこと、およびカーネルの値が混じらないことを検証する。
   const auto direct_int_exit = run_fresh(8);
-  bool direct_int_clean = true;
+  bool direct_int_passed = true;
   for (unsigned i = 0; i < 8; ++i) {
-    direct_int_clean &= (c[i + 1] == 0);
+    direct_int_passed &= (c[i + 1] == 0xdead0004u + i);
+  }
+  const bool direct_r12_passed = (c[14] == 0x12345678u);
+  bool direct_s_passed = true;
+  for (unsigned i = 0; i < 16; ++i) {
+    direct_s_passed &= (c[20 + i] == 0xcafebabeu);
   }
   uint32_t got_int_direct = 0;
   if (direct_int_exit.error != 0) got_int_direct |= 1u << 0;
   if (direct_int_exit.value != (uintptr_t)grant_end::YIELDED) got_int_direct |= 1u << 1;
   if (c[9] != 0) got_int_direct |= 1u << 2;  // caller error
   if (c[10] != 42) got_int_direct |= 1u << 3; // return value 42
-  if (!direct_int_clean) got_int_direct |= 1u << 4; // r4-r11 non-zero
-  record_check("leak direct EXIT bypass int clean",
+  if (!direct_int_passed) got_int_direct |= 1u << 4; // r4-r11 corrupted
+  if (!direct_r12_passed) got_int_direct |= 1u << 5; // r12 corrupted
+  if (!direct_s_passed) got_int_direct |= 1u << 6;   // s0-s15 corrupted
+  record_check("leak direct EXIT bypass passthrough",
                got_int_direct == 0, got_int_direct, 0);
 
   // Callee が直接 EXIT_METHOD で不正な target_depth を指定し失敗する試験
@@ -540,20 +582,19 @@ void register_leak_test() {
   record_check("leak direct EXIT callee failure int preserved",
                got_callee_fail == 0, got_callee_fail, 0);
 
-  // Callee が generic 経由 (primitive::RETURN) を直接打って caller へ戻る整数漏洩試験
-  // カーネル消去により、復帰直後の r4-r11 (c[1..8]) がすべて 0 であることを検証する。
+  // Callee が generic 経由 (primitive::RETURN) を直接打って caller へ戻る整数漏洩試験 (新契約: 素通し)
   const auto generic_int_exit = run_fresh(10);
-  bool generic_int_clean = true;
+  bool generic_int_passed = true;
   for (unsigned i = 0; i < 8; ++i) {
-    generic_int_clean &= (c[i + 1] == 0);
+    generic_int_passed &= (c[i + 1] == 0xdead0004u + i);
   }
   uint32_t got_generic_direct = 0;
   if (generic_int_exit.error != 0) got_generic_direct |= 1u << 0;
   if (generic_int_exit.value != (uintptr_t)grant_end::YIELDED) got_generic_direct |= 1u << 1;
   if (c[9] != 0) got_generic_direct |= 1u << 2;  // caller error
   if (c[10] != 42) got_generic_direct |= 1u << 3; // return value 42
-  if (!generic_int_clean) got_generic_direct |= 1u << 4; // r4-r11 non-zero
-  record_check("leak generic RETURN bypass int clean",
+  if (!generic_int_passed) got_generic_direct |= 1u << 4; // r4-r11 corrupted
+  record_check("leak generic RETURN bypass passthrough",
                got_generic_direct == 0, got_generic_direct, 0);
 
   // Callee が generic 経由 (primitive::RETURN) で不正な target_depth を指定し失敗する試験

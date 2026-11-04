@@ -19,6 +19,8 @@ enum class reg_role : uint8_t {
   RETURN_ERROR,   // r0 / a0
   RETURN_VALUE,   // r1 / a1
   SCRUBBED_ZERO,  // Must be scrubbed to 0 on IPC return
+  PASSTHROUGH,    // Scratch registers passed through by kernel (scrubbed by callee in return stub)
+  CALLEE_SAVED,   // Preserved by callee across C calls; passed through by kernel on normal return
   PRESERVED_SP,   // Stack pointer (restored to caller's stack)
   PRESERVED_SYS,  // Architecture-reserved base pointers (gp, tp)
   RESTORED_PC,    // Program counter (caller resumption address)
@@ -32,22 +34,24 @@ struct reg_contract {
 
 // ARMv8-M return register contract:
 // Hardware exception return restores r0-r3, r12, lr, pc, xPSR from PSP.
-// Kernel ensures r0 = error, r1 = value, and zeroes r2, r3, r12, lr in the frame.
-// Kernel exit entry (shizuku_armv8m_exit_entry) zeroes r4-r11 before bx lr.
+// Kernel ensures r0 = error, r1 = value, and zeroes lr in the frame.
+// On normal return, r2, r3, r12 and FP registers pass through (callee return stub zeroes
+// scratch r2, r3, r12, s0-s15 and FPSCR flags before EXIT_METHOD, and caller restores FPSCR mode).
+// Callee-saved r4-r11 pass through untouched (zeroed only on forced unwind like FORWARD_CHILD_EXIT).
 inline constexpr reg_contract armv8m_return_contract[] = {
     {"r0",  reg_role::RETURN_ERROR},
     {"r1",  reg_role::RETURN_VALUE},
-    {"r2",  reg_role::SCRUBBED_ZERO},
-    {"r3",  reg_role::SCRUBBED_ZERO},
-    {"r4",  reg_role::SCRUBBED_ZERO},
-    {"r5",  reg_role::SCRUBBED_ZERO},
-    {"r6",  reg_role::SCRUBBED_ZERO},
-    {"r7",  reg_role::SCRUBBED_ZERO},
-    {"r8",  reg_role::SCRUBBED_ZERO},
-    {"r9",  reg_role::SCRUBBED_ZERO},
-    {"r10", reg_role::SCRUBBED_ZERO},
-    {"r11", reg_role::SCRUBBED_ZERO},
-    {"r12", reg_role::SCRUBBED_ZERO},
+    {"r2",  reg_role::PASSTHROUGH},
+    {"r3",  reg_role::PASSTHROUGH},
+    {"r4",  reg_role::CALLEE_SAVED},
+    {"r5",  reg_role::CALLEE_SAVED},
+    {"r6",  reg_role::CALLEE_SAVED},
+    {"r7",  reg_role::CALLEE_SAVED},
+    {"r8",  reg_role::CALLEE_SAVED},
+    {"r9",  reg_role::CALLEE_SAVED},
+    {"r10", reg_role::CALLEE_SAVED},
+    {"r11", reg_role::CALLEE_SAVED},
+    {"r12", reg_role::PASSTHROUGH},
     {"sp",  reg_role::PRESERVED_SP},
     {"lr",  reg_role::SCRUBBED_ZERO},
     {"pc",  reg_role::RESTORED_PC},
@@ -112,8 +116,28 @@ constexpr size_t count_return_payload(const reg_contract (&regs)[N]) {
   return count;
 }
 
-static_assert(count_scrubbed_zero(armv8m_return_contract) == 12);
+template <size_t N>
+constexpr size_t count_passthrough(const reg_contract (&regs)[N]) {
+  size_t count = 0;
+  for (size_t i = 0; i < N; ++i) {
+    if (regs[i].role == reg_role::PASSTHROUGH) ++count;
+  }
+  return count;
+}
+
+template <size_t N>
+constexpr size_t count_callee_saved(const reg_contract (&regs)[N]) {
+  size_t count = 0;
+  for (size_t i = 0; i < N; ++i) {
+    if (regs[i].role == reg_role::CALLEE_SAVED) ++count;
+  }
+  return count;
+}
+
+static_assert(count_scrubbed_zero(armv8m_return_contract) == 1);
 static_assert(count_return_payload(armv8m_return_contract) == 2);
+static_assert(count_passthrough(armv8m_return_contract) == 3);
+static_assert(count_callee_saved(armv8m_return_contract) == 8);
 static_assert(count_scrubbed_zero(rv32_return_contract) == 27);
 static_assert(count_return_payload(rv32_return_contract) == 2);
 
