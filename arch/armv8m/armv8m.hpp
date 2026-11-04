@@ -779,6 +779,19 @@ public:
   }
 
 private:
+  // 直接 EXIT 迂回の FP 部 (s0-s15 + fpscr = 18 語) 素通し。領域が重なりうるので 9 語ずつ 2 回に分け、
+  // 重なりの向きに合わせて先に読む側を選ぶ (d < s なら低い半分から、d > s なら高い半分から)。
+  // 呼出し側 (exit_method の全展開) のレジスタ圧と XIP 配置を悪化させないよう、別関数にして外す。
+  [[gnu::noinline, gnu::cold]] static void copy_fp_frame_passthrough(uint32_t *d, const uint32_t *s) {
+    uint32_t t[9];
+    const unsigned first = d < s ? 0u : 9u;
+    const unsigned second = 9u - first;
+    for (unsigned i = 0; i < 9; ++i) t[i] = s[first + i];
+    for (unsigned i = 0; i < 9; ++i) d[first + i] = t[i];
+    for (unsigned i = 0; i < 9; ++i) t[i] = s[second + i];
+    for (unsigned i = 0; i < 9; ++i) d[second + i] = t[i];
+  }
+
   template <class FloatingPointState = lazy_fp_state>
   [[gnu::always_inline]] static inline exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
       uintptr_t sp, bool privileged, bool caller_fpca, uintptr_t base, uintptr_t limit, bool scrub,
@@ -786,6 +799,10 @@ private:
     (void)fp_result;
     const uint32_t bytes = exc_frame_bytes(context);
     auto *next = reinterpret_cast<exception_frame_t *>(sp - bytes);
+    // callee の r2, r3, r12 は FP 部の書込みで潰れうる (next と callee の枠は重なりうる) ので先に読む。
+    const auto *prev = context.sp;
+    const uint32_t prev_r2 = prev->r2, prev_r3 = prev->r3, prev_r12 = prev->r12;
+    const bool stub = !scrub && is_return_stub_marker(prev_r12);
     if (bytes != sizeof(exception_frame_t)) {
       // Materialize any lazy FP frame before relocating its return-value slots.
 #if defined(SHIZUKU_DIAG_FP)
@@ -802,17 +819,18 @@ private:
       if (scrub) {
         FloatingPointState::clear_upper_fp_registers();
         for (unsigned i = 0; i < 18; ++i) d[i] = 0;
+      } else if (stub) {
+        // return stub 経由の通常戻り: stub が s2-s15 と FPSCR を消してから EXIT を撃つので、
+        // 運ぶ意味があるのは FP 戻り値 s0/s1 だけ。残り 16 語は 0 で埋める
+        // (caller 側の d[] は callee の stack 跡なので、触らずに残すと callee の値が漏れる)。
+        // s0/s1 を先に読む: d と s は重なりうる。印が偽装されても callee 自身が自分の値を失うだけ。
+        const uint32_t s0 = s[0], s1 = s[1];
+        d[0] = s0;
+        d[1] = s1;
+        for (unsigned i = 2; i < 18; ++i) d[i] = 0;
       } else if (d != s) {
-        // 通常戻り: callee の FP レジスタ (s0-s15, fpscr) を素通しでコピーする
-        // 領域が重なりうるので、9 語ずつ 2 回に分け、重なりの向きに合わせて先に読む側を選ぶ
-        // (d < s なら低い半分から、d > s なら高い半分から。memmove の関数呼出しを避ける)。
-        uint32_t t[9];
-        const unsigned first = d < s ? 0u : 9u;
-        const unsigned second = 9u - first;
-        for (unsigned i = 0; i < 9; ++i) t[i] = s[first + i];
-        for (unsigned i = 0; i < 9; ++i) d[first + i] = t[i];
-        for (unsigned i = 0; i < 9; ++i) t[i] = s[second + i];
-        for (unsigned i = 0; i < 9; ++i) d[second + i] = t[i];
+        // stub を経ない直接 EXIT: callee の s0-s15, fpscr を素通しでコピーする (ホットではない)。
+        copy_fp_frame_passthrough(d, s);
       }
 #if defined(SHIZUKU_DIAG_FP)
       shizuku::diag_fp::record_point(shizuku::diag_fp::point::K3C_AFTER);
@@ -824,9 +842,8 @@ private:
       context.r8 = context.r9 = context.r10 = context.r11 = 0;
     } else {
       // 通常戻り: callee の r2, r3, r12 を素通しする。ただし return stub marker の場合は r2, r3, r12 を 0 にする
-      const auto *prev = context.sp;
-      uint32_t r2 = prev->r2, r3 = prev->r3, r12 = prev->r12;
-      if (is_return_stub_marker(r12)) {
+      uint32_t r2 = prev_r2, r3 = prev_r3, r12 = prev_r12;
+      if (stub) {
         r2 = 0;
         r3 = 0;
         r12 = 0;

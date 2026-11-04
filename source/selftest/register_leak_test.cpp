@@ -197,7 +197,8 @@ extern "C" __attribute__((noinline, used)) uintptr_t leak_callee_body(
   }
   if (command == 93) {
     auto *data = reinterpret_cast<volatile uint32_t *>(leak_callee_data);
-    const uintptr_t my_id = data[0];
+    // data[0] は leak_callee_worker の入口 stmia (r4 を data[0] へ) で毎回潰れるので、自分の ID は data[15] から読む。
+    const uintptr_t my_id = data[15];
     const auto r = shizuku::armv8m_abi::syscall(4, my_id, 0, 94);
     return r.value;
   }
@@ -668,6 +669,7 @@ void register_leak_test() {
   // callee の r4-r11 は消去されず温存され、93 を経て caller へは通常の 42 が返ることを検証する。
   for (unsigned i = 0; i < 64; ++i) d[i] = 0;
   d[0] = callee;
+  d[15] = callee; // cmd 93 が読む自 ID (data[0] は入口の stmia で潰れる)
   const auto multi_exit = run_fresh(12);
   bool multi_callee_preserved = (d[9] == (uintptr_t)object_error::UNWIND_REJECTED) &&
                                 (d[10] == (uintptr_t)kernel_error::DEPTH_MISMATCH);
@@ -680,8 +682,10 @@ void register_leak_test() {
   if (c[9] != 0) got_multi |= 1u << 2;  // caller error
   if (c[10] != 42) got_multi |= 1u << 3; // return value 42
   if (!multi_callee_preserved) got_multi |= 1u << 4; // 失敗コードまたは callee の r4-r11 が違う
+  // 失敗時の診断: got = bit | d[9] << 8 | d[10] << 16 (UNWIND_REJECTED / DEPTH_MISMATCH の実値)
   record_check("leak EXIT below floor rejected callee preserved",
-               got_multi == 0, got_multi, 0);
+               got_multi == 0,
+               got_multi | ((uint32_t)(d[9] & 0xffu) << 8) | ((uint32_t)(d[10] & 0xffu) << 16), 0);
 #endif
 }
 } // namespace shizuku::selftest

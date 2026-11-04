@@ -132,6 +132,40 @@ int main() {
     for (unsigned i = 2; i < 18; ++i) assert(saved[i] == (0xbeef0000u + i));
     assert(resumed->r0 == 0 && resumed->r1 == 0 && A::call_return_sp(c) == ret);
   }
+  // return stub 経由 (callee 枠の r12 == 0xA55A): s0/s1 (FP 戻り値) だけを caller へ運び、
+  // s2-s15・FPSCR の 16 語は 0 (caller の d[] に残った callee の stack 跡を漏らさない)。
+  // r2/r3/r12 も 0。重ならない配置と重なる配置 (d > s) の両方を縛る。
+  for (bool is_double : {false, true}) for (bool overlap : {false, true}) {
+    std::memset(storage, 0, sizeof(storage));
+    A::context_t c{};
+    c.exc_return = 0xffffffed;
+    c.sp = reinterpret_cast<Frame *>(base + 512);
+    c.sp->r2 = 0x22222222u;
+    c.sp->r3 = 0x33333333u;
+    c.sp->r12 = shizuku::RETURN_STUB_MARKER;
+    auto *fp = reinterpret_cast<uint32_t *>(c.sp + 1);
+    fp[0] = is_double ? 0x11110000u : 0x3fc00000u;
+    fp[1] = is_double ? 0x3ff80000u : 0u;
+    for (unsigned i = 2; i < 18; ++i) fp[i] = 0xbeef0000u + i;  // stub が消し損ねた想定でも運ばない
+    const uintptr_t target = base + (overlap ? 512 : 832) + 24;
+    const uintptr_t ret = target + 104;
+    if (!overlap) {  // caller 側 d[] に callee の stack 跡を置く
+      auto *dd = reinterpret_cast<uint32_t *>(target + 32);
+      for (unsigned i = 0; i < 18; ++i) dd[i] = 0xc0de0000u + i;
+    }
+    MockFP::count = 0;
+    auto *resumed = A::call_resume_at<MockFP>(c, 0x12345679, ret, true, /*caller_fpca=*/true, 0, 0, false,
+                                              /*fp_result=*/false, core);
+    assert(reinterpret_cast<uintptr_t>(resumed) == target);
+    const auto *saved = reinterpret_cast<const uint32_t *>(resumed + 1);
+    assert(MockFP::count == 1);
+    assert(saved[0] == (is_double ? 0x11110000u : 0x3fc00000u));
+    assert(saved[1] == (is_double ? 0x3ff80000u : 0u));
+    for (unsigned i = 2; i < 18; ++i) assert(saved[i] == 0);
+    assert(resumed->r0 == 0 && resumed->r1 == 0 && resumed->r2 == 0 &&
+           resumed->r3 == 0 && resumed->r12 == 0 && resumed->lr == 0);
+    assert(A::call_return_sp(c) == ret);
+  }
   // 2. 強制巻戻し (scrub=true) 時の clear_upper_fp_registers の縛り
   // (a) 拡張フレーム (104B) + scrub=true -> materialize 1 回, clear_upper 1 回
   {
