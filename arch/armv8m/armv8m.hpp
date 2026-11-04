@@ -814,6 +814,8 @@ private:
     }
     if (scrub) {
       zero_exception_frame(*next);
+      context.r4 = context.r5 = context.r6 = context.r7 = 0;
+      context.r8 = context.r9 = context.r10 = context.r11 = 0;
     } else {
       // 通常戻り: callee の r2, r3, r12 を素通しする。ただし return stub marker の場合は r2, r3, r12 を 0 にする
       const auto *prev = context.sp;

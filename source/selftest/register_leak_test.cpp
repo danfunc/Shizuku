@@ -31,10 +31,12 @@ uintptr_t leak_callee_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t);
 }
 static float leak_float_result(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   leak_dirty_fp();
+  asm volatile("movw r1, #0x9999\n movt r1, #0x1234\n" : : : "r1");
   return 1.5f;
 }
 static double leak_double_result(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   leak_dirty_fp();
+  asm volatile("movw r1, #0x8888\n movt r1, #0x5678\n" : : : "r1");
   return 1.5;
 }
 // The test-only veneer records registers before any compiler prologue. It
@@ -191,6 +193,36 @@ extern "C" __attribute__((noinline, used)) uintptr_t leak_callee_body(
     data[10] = r1;
     return 42;
   }
+  if (command == 93) {
+    auto *data = reinterpret_cast<volatile uint32_t *>(leak_callee_data);
+    const uintptr_t my_id = data[0];
+    const auto r = shizuku::armv8m_abi::syscall(4, my_id, 0, 94);
+    return r.value;
+  }
+  if (command == 94) {
+    // 2 段以上を一度に落とす EXIT_METHOD (depth 2 -> 0)
+    // r4-r11 を汚した状態で target_depth = 0 の EXIT_METHOD (2) を打つ
+    register uintptr_t r0 asm("r0") = static_cast<uintptr_t>(shizuku::object_api::EXIT_METHOD);
+    register uintptr_t r1 asm("r1") = 0; // target_depth = 0 (unwind 2 frames at once)
+    register uintptr_t r2 asm("r2") = 42; // value
+    register uintptr_t r3 asm("r3") = 0; // error
+    register uintptr_t r4_val asm("r4") = 0xdead0004u;
+    register uintptr_t r5_val asm("r5") = 0xdead0005u;
+    register uintptr_t r6_val asm("r6") = 0xdead0006u;
+    register uintptr_t r7_val asm("r7") = 0xdead0007u;
+    register uintptr_t r8_val asm("r8") = 0xdead0008u;
+    register uintptr_t r9_val asm("r9") = 0xdead0009u;
+    register uintptr_t r10_val asm("r10") = 0xdead000au;
+    register uintptr_t r11_val asm("r11") = 0xdead000bu;
+    asm volatile(
+        "svc 0\n"
+        : "+r"(r0), "+r"(r1),
+          "+r"(r4_val), "+r"(r5_val), "+r"(r6_val), "+r"(r7_val),
+          "+r"(r8_val), "+r"(r9_val), "+r"(r10_val), "+r"(r11_val)
+        : "r"(r2), "r"(r3)
+        : "r12", "lr", "cc", "memory");
+    return 99;
+  }
   asm volatile(
       "mrs r3, control\n"
       "tst r3, #4\n"
@@ -338,11 +370,12 @@ uintptr_t leak_caller_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
   } else if (cmd == 7) {
     const auto r = shizuku::armv8m_abi::syscall(4, data[0], 0, 10);
     data[9] = r.error; data[10] = r.value;
-  } else if (cmd == 8 || cmd == 10) {
-    // 整数版直接 EXIT 迂回 (cmd==8, callee command=89) および
-    // generic RETURN 迂回 (cmd==10, callee command=91):
+  } else if (cmd == 8 || cmd == 10 || cmd == 12) {
+    // 整数版直接 EXIT 迂回 (cmd==8, callee command=89)、
+    // generic RETURN 迂回 (cmd==10, callee command=91)、および
+    // 2 段以上強制巻戻し (cmd==12, callee command=93 -> 94 multi-frame EXIT):
     // callee を呼び、復帰直後の r4-r11, r12, s0-s15 を記録する
-    const uintptr_t target_command = (cmd == 8) ? 89 : 91;
+    const uintptr_t target_command = (cmd == 8) ? 89 : ((cmd == 10) ? 91 : 93);
     register uintptr_t r0 asm("r0") = 4;
     register uintptr_t r1 asm("r1") = data[0];
     register uintptr_t r2 asm("r2") = 0;
@@ -432,6 +465,7 @@ void register_leak_test() {
   auto *d = reinterpret_cast<volatile uint32_t *>(leak_callee_data);
   for (unsigned i = 0; i < 64; ++i) { c[i] = 0; d[i] = 0; }
   c[0] = callee;
+  d[0] = callee;
   c[16] = reinterpret_cast<uintptr_t>(&leak_callee_worker);
   auto created = ARCH::syscall(static_cast<uintptr_t>(object_api::CREATE_OBJECT), caller,
                                reinterpret_cast<uintptr_t>(&leak_caller_worker), OBJECT_UNPRIVILEGED);
@@ -613,6 +647,25 @@ void register_leak_test() {
   if (!generic_callee_preserved) got_generic_fail |= 1u << 4; // callee r4-r11 was zeroed or corrupted
   record_check("leak generic RETURN callee failure int preserved",
                got_generic_fail == 0, got_generic_fail, 0);
+
+  // Callee が 2 段以上を一度に落とす強制巻戻し (multi-frame EXIT) を打って戻る試験
+  // 強制巻戻し (scrub) であるため、callee が設定した r4-r11 が caller に漏洩せず、
+  // 0 クリア (または caller 自身の値) されていることを検証する。
+  for (unsigned i = 0; i < 64; ++i) d[i] = 0;
+  d[0] = callee;
+  const auto multi_exit = run_fresh(12);
+  bool multi_scrub_passed = true;
+  for (unsigned i = 0; i < 8; ++i) {
+    multi_scrub_passed &= (c[i + 1] == 0);
+  }
+  uint32_t got_multi = 0;
+  if (multi_exit.error != 0) got_multi |= 1u << 0;
+  if (multi_exit.value != (uintptr_t)grant_end::YIELDED) got_multi |= 1u << 1;
+  if (c[9] != 0) got_multi |= 1u << 2;  // caller error
+  if (c[10] != 42) got_multi |= 1u << 3; // return value 42
+  if (!multi_scrub_passed) got_multi |= 1u << 4; // r4-r11 leaked
+  record_check("leak multi-frame EXIT r4-r11 scrubbed zero",
+               got_multi == 0, got_multi, 0);
 #endif
 }
 } // namespace shizuku::selftest

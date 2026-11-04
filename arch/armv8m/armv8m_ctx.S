@@ -195,7 +195,6 @@ shizuku_armv8m_call_entry:
 .type shizuku_armv8m_return_stub, %function
 shizuku_armv8m_return_stub:
     mov   r2, r0        // a2 = 戻り値
-    movs  r1, #1        // legacy one-pop notification
     mrs   r3, control
     tst   r3, #4
     beq   .Lreturn_no_fp
@@ -226,6 +225,7 @@ shizuku_armv8m_return_stub:
     lsls  r3, r3, #8
     adds  r3, #0x5A
     mov   r12, r3
+    movs  r1, #1          // legacy one-pop notification
     movs  r3, #0
     movs  r0, #2
     svc   0

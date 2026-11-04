@@ -121,6 +121,10 @@ struct test_inplace_adapter : public BaseArch {
       frame->r3 = 0;
       if constexpr (requires { frame->r12; }) frame->r12 = 0;
       if constexpr (requires { frame->lr; }) frame->lr = 0;
+      if constexpr (requires { ctx.r4; }) {
+        ctx.r4 = ctx.r5 = ctx.r6 = ctx.r7 = 0;
+        ctx.r8 = ctx.r9 = ctx.r10 = ctx.r11 = 0;
+      }
     } else {
       frame->r0 = 0;
       frame->r1 = 0;
@@ -965,11 +969,25 @@ void run_inplace_forward_child_exit_scrub(const char *tag) {
   outer_frame->r2 = 42; // value
   outer_frame->r3 = 0; // error
   outer_frame->r12 = 0x12345678u; // dirty value to verify scrubbing
+  if constexpr (requires { ctx.r4; }) {
+    ctx.r4 = 0xdead0004u;
+    ctx.r5 = 0xdead0005u;
+    ctx.r6 = 0xdead0006u;
+    ctx.r7 = 0xdead0007u;
+    ctx.r8 = 0xdead0008u;
+    ctx.r9 = 0xdead0009u;
+    ctx.r10 = 0xdead000au;
+    ctx.r11 = 0xdead000bu;
+  }
   const auto st = shizuku::native::exit_in_place<K, mock_kobj, /*Forward=*/true>(kernel, kobj, thread, ctx, core0);
   assert(st == shizuku::native::status::DONE);
   assert(thread.call_stack.depth == 0);
   if constexpr (requires { outer_frame->r12; }) {
     assert(outer_frame->r12 == 0); // Must be scrubbed to 0 on forced rewind (FORWARD_CHILD_EXIT)
+  }
+  if constexpr (requires { ctx.r4; }) {
+    assert(ctx.r4 == 0 && ctx.r5 == 0 && ctx.r6 == 0 && ctx.r7 == 0 &&
+           ctx.r8 == 0 && ctx.r9 == 0 && ctx.r10 == 0 && ctx.r11 == 0);
   }
 #else
   (void)tag;
