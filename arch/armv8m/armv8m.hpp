@@ -802,11 +802,17 @@ private:
       if (scrub) {
         FloatingPointState::clear_upper_fp_registers();
         for (unsigned i = 0; i < 18; ++i) d[i] = 0;
-      } else {
+      } else if (d != s) {
         // 通常戻り: callee の FP レジスタ (s0-s15, fpscr) を素通しでコピーする
-        uint32_t tmp[18];
-        for (unsigned i = 0; i < 18; ++i) tmp[i] = s[i];
-        for (unsigned i = 0; i < 18; ++i) d[i] = tmp[i];
+        // 領域が重なりうるので、9 語ずつ 2 回に分け、重なりの向きに合わせて先に読む側を選ぶ
+        // (d < s なら低い半分から、d > s なら高い半分から。memmove の関数呼出しを避ける)。
+        uint32_t t[9];
+        const unsigned first = d < s ? 0u : 9u;
+        const unsigned second = 9u - first;
+        for (unsigned i = 0; i < 9; ++i) t[i] = s[first + i];
+        for (unsigned i = 0; i < 9; ++i) d[first + i] = t[i];
+        for (unsigned i = 0; i < 9; ++i) t[i] = s[second + i];
+        for (unsigned i = 0; i < 9; ++i) d[second + i] = t[i];
       }
 #if defined(SHIZUKU_DIAG_FP)
       shizuku::diag_fp::record_point(shizuku::diag_fp::point::K3C_AFTER);

@@ -195,26 +195,19 @@ shizuku_armv8m_call_entry:
 .type shizuku_armv8m_return_stub, %function
 shizuku_armv8m_return_stub:
     mov   r2, r0        // a2 = 戻り値
+    movs  r1, #1        // legacy one-pop notification
     mrs   r3, control
     tst   r3, #4
     beq   .Lreturn_no_fp
     movs  r3, #0
-    vmov  s0, r3
-    vmov  s1, r3
-    vmov  s2, r3
-    vmov  s3, r3
-    vmov  s4, r3
-    vmov  s5, r3
-    vmov  s6, r3
-    vmov  s7, r3
-    vmov  s8, r3
-    vmov  s9, r3
-    vmov  s10, r3
-    vmov  s11, r3
-    vmov  s12, r3
-    vmov  s13, r3
-    vmov  s14, r3
-    vmov  s15, r3
+    vmov  s0, s1, r3, r3
+    vmov  s2, s3, r3, r3
+    vmov  s4, s5, r3, r3
+    vmov  s6, s7, r3, r3
+    vmov  s8, s9, r3, r3
+    vmov  s10, s11, r3, r3
+    vmov  s12, s13, r3, r3
+    vmov  s14, s15, r3, r3
     vmsr  fpscr, r3
 .Lreturn_no_fp:
 .Lreturn_exit:
@@ -225,7 +218,6 @@ shizuku_armv8m_return_stub:
     lsls  r3, r3, #8
     adds  r3, #0x5A
     mov   r12, r3
-    movs  r1, #1          // legacy one-pop notification
     movs  r3, #0
     movs  r0, #2
     svc   0
@@ -254,22 +246,16 @@ shizuku_armv8m_return_double_stub:
     beq   .Lreturn_fp_exit
     movs  r3, #0
 .Lreturn_fp_scrub_s2:
-    vmov  s2, r3
-    vmov  s3, r3
-    vmov  s4, r3
-    vmov  s5, r3
-    vmov  s6, r3
-    vmov  s7, r3
-    vmov  s8, r3
-    vmov  s9, r3
-    vmov  s10, r3
-    vmov  s11, r3
-    vmov  s12, r3
-    vmov  s13, r3
-    vmov  s14, r3
-    vmov  s15, r3
+    vmov  s2, s3, r3, r3
+    vmov  s4, s5, r3, r3
+    vmov  s6, s7, r3, r3
+    vmov  s8, s9, r3, r3
+    vmov  s10, s11, r3, r3
+    vmov  s12, s13, r3, r3
+    vmov  s14, s15, r3, r3
     vmsr  fpscr, r3
 .Lreturn_fp_exit:
+    movs  r1, #1
     movs  r2, #0
     b     .Lreturn_exit
 .size shizuku_armv8m_return_double_stub, .-shizuku_armv8m_return_double_stub

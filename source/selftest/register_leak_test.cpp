@@ -133,77 +133,11 @@ extern "C" __attribute__((noinline, used)) uintptr_t leak_callee_body(
     return 42;
   }
   if (command == 91) {
-    // Return stub を迂回し、r4-r11 を汚した状態で generic 経由の primitive::RETURN (1) を直接打つ
-    register uintptr_t r0 asm("r0") = 1; // primitive::RETURN
-    register uintptr_t r1 asm("r1") = 1; // count
-    register uintptr_t r2 asm("r2") = 42; // value
-    register uintptr_t r3 asm("r3") = 0; // error
-    register uintptr_t r12_val asm("r12") = 0; // target_depth
-    register uintptr_t r4_val asm("r4") = 0xdead0004u;
-    register uintptr_t r5_val asm("r5") = 0xdead0005u;
-    register uintptr_t r6_val asm("r6") = 0xdead0006u;
-    register uintptr_t r7_val asm("r7") = 0xdead0007u;
-    register uintptr_t r8_val asm("r8") = 0xdead0008u;
-    register uintptr_t r9_val asm("r9") = 0xdead0009u;
-    register uintptr_t r10_val asm("r10") = 0xdead000au;
-    register uintptr_t r11_val asm("r11") = 0xdead000bu;
-    asm volatile(
-        "svc 0\n"
-        : "+r"(r0), "+r"(r1),
-          "+r"(r4_val), "+r"(r5_val), "+r"(r6_val), "+r"(r7_val),
-          "+r"(r8_val), "+r"(r9_val), "+r"(r10_val), "+r"(r11_val)
-        : "r"(r2), "r"(r3), "r"(r12_val)
-        : "lr", "cc", "memory");
-    return 99;
-  }
-  if (command == 92) {
-    // 不正な target_depth (99) で primitive::RETURN (1) を打つ。
-    // DEPTH_MISMATCH で callee に失敗が返る。
-    // callee 自身への復帰であるため、r4-r11 は消去されず callee の値が温存されることを確認する。
-    register uintptr_t r0 asm("r0") = 1; // primitive::RETURN
-    register uintptr_t r1 asm("r1") = 1; // count
-    register uintptr_t r2 asm("r2") = 42; // value
-    register uintptr_t r3 asm("r3") = 0; // error
-    register uintptr_t r12 asm("r12") = 99; // target_depth
-    register uintptr_t r4_val asm("r4") = 0xdeadbeefu;
-    register uintptr_t r5_val asm("r5") = 0xdeadbeefu;
-    register uintptr_t r6_val asm("r6") = 0xdeadbeefu;
-    register uintptr_t r7_val asm("r7") = 0xdeadbeefu;
-    register uintptr_t r8_val asm("r8") = 0xdeadbeefu;
-    register uintptr_t r9_val asm("r9") = 0xdeadbeefu;
-    register uintptr_t r10_val asm("r10") = 0xdeadbeefu;
-    register uintptr_t r11_val asm("r11") = 0xdeadbeefu;
-    asm volatile(
-        "svc 0\n"
-        : "+r"(r0), "+r"(r1),
-          "+r"(r4_val), "+r"(r5_val), "+r"(r6_val), "+r"(r7_val),
-          "+r"(r8_val), "+r"(r9_val), "+r"(r10_val), "+r"(r11_val)
-        : "r"(r2), "r"(r3), "r"(r12)
-        : "lr", "cc", "memory");
-    auto *data = reinterpret_cast<volatile uint32_t *>(leak_callee_data);
-    data[1] = r4_val;
-    data[2] = r5_val;
-    data[3] = r6_val;
-    data[4] = r7_val;
-    data[5] = r8_val;
-    data[6] = r9_val;
-    data[7] = r10_val;
-    data[8] = r11_val;
-    data[9] = r0; // error (DEPTH_MISMATCH)
-    data[10] = r1;
-    return 42;
-  }
-  if (command == 93) {
-    auto *data = reinterpret_cast<volatile uint32_t *>(leak_callee_data);
-    const uintptr_t my_id = data[0];
-    const auto r = shizuku::armv8m_abi::syscall(4, my_id, 0, 94);
-    return r.value;
-  }
-  if (command == 94) {
-    // 2 段以上を一度に落とす EXIT_METHOD (depth 2 -> 0)
-    // r4-r11 を汚した状態で target_depth = 0 の EXIT_METHOD (2) を打つ
+    // Return stub を迂回し、r4-r11 を汚した状態で EXIT_METHOD (2) を直接打つ (target_depth=0)。
+    // cmd 89 と違い FP を使わない (FPCA=0、FP なし 32B 例外フレーム) 経路を縛る。
+    // 注: primitive::RETURN (1) は object からは CREATE_OBJECT (object_api 1) に当たるので使えない。
     register uintptr_t r0 asm("r0") = static_cast<uintptr_t>(shizuku::object_api::EXIT_METHOD);
-    register uintptr_t r1 asm("r1") = 0; // target_depth = 0 (unwind 2 frames at once)
+    register uintptr_t r1 asm("r1") = 0; // target_depth=0
     register uintptr_t r2 asm("r2") = 42; // value
     register uintptr_t r3 asm("r3") = 0; // error
     register uintptr_t r4_val asm("r4") = 0xdead0004u;
@@ -222,6 +156,86 @@ extern "C" __attribute__((noinline, used)) uintptr_t leak_callee_body(
         : "r"(r2), "r"(r3)
         : "r12", "lr", "cc", "memory");
     return 99;
+  }
+  if (command == 92) {
+    // 不正な target_depth (99) で EXIT_METHOD (2) を打つ。
+    // UNWIND_REJECTED で callee に失敗が返る。
+    // callee 自身への復帰であるため、r4-r11 は消去されず callee の値が温存されることを確認する。
+    // cmd 90 と違い FP を使った後 (FPCA=1、FP 付き例外フレーム) の失敗返却を縛る。
+    leak_dirty_fp();
+    register uintptr_t r0 asm("r0") = static_cast<uintptr_t>(shizuku::object_api::EXIT_METHOD);
+    register uintptr_t r1 asm("r1") = 99; // target_depth=99 (invalid)
+    register uintptr_t r2 asm("r2") = 42; // value
+    register uintptr_t r3 asm("r3") = 0; // error
+    register uintptr_t r4_val asm("r4") = 0xdeadbeefu;
+    register uintptr_t r5_val asm("r5") = 0xdeadbeefu;
+    register uintptr_t r6_val asm("r6") = 0xdeadbeefu;
+    register uintptr_t r7_val asm("r7") = 0xdeadbeefu;
+    register uintptr_t r8_val asm("r8") = 0xdeadbeefu;
+    register uintptr_t r9_val asm("r9") = 0xdeadbeefu;
+    register uintptr_t r10_val asm("r10") = 0xdeadbeefu;
+    register uintptr_t r11_val asm("r11") = 0xdeadbeefu;
+    asm volatile(
+        "svc 0\n"
+        : "+r"(r0), "+r"(r1),
+          "+r"(r4_val), "+r"(r5_val), "+r"(r6_val), "+r"(r7_val),
+          "+r"(r8_val), "+r"(r9_val), "+r"(r10_val), "+r"(r11_val)
+        : "r"(r2), "r"(r3)
+        : "r12", "lr", "cc", "memory");
+    auto *data = reinterpret_cast<volatile uint32_t *>(leak_callee_data);
+    data[1] = r4_val;
+    data[2] = r5_val;
+    data[3] = r6_val;
+    data[4] = r7_val;
+    data[5] = r8_val;
+    data[6] = r9_val;
+    data[7] = r10_val;
+    data[8] = r11_val;
+    data[9] = r0; // error (UNWIND_REJECTED)
+    data[10] = r1; // validation error code
+    return 42;
+  }
+  if (command == 93) {
+    auto *data = reinterpret_cast<volatile uint32_t *>(leak_callee_data);
+    const uintptr_t my_id = data[0];
+    const auto r = shizuku::armv8m_abi::syscall(4, my_id, 0, 94);
+    return r.value;
+  }
+  if (command == 94) {
+    // 2 段の呼出し鎖 (caller -> cmd 93 -> cmd 94) で、自分の floor (= 1) より下の
+    // target_depth = 0 へ落とそうとする。EXIT_METHOD は自分の段より下へ落とせないので
+    // DEPTH_MISMATCH 付きの UNWIND_REJECTED で弾かれ、1 枚も落ちず callee 自身へ失敗が返る。
+    register uintptr_t r0 asm("r0") = static_cast<uintptr_t>(shizuku::object_api::EXIT_METHOD);
+    register uintptr_t r1 asm("r1") = 0; // target_depth = 0 (floor 未満)
+    register uintptr_t r2 asm("r2") = 42; // value
+    register uintptr_t r3 asm("r3") = 0; // error
+    register uintptr_t r4_val asm("r4") = 0xdead0004u;
+    register uintptr_t r5_val asm("r5") = 0xdead0005u;
+    register uintptr_t r6_val asm("r6") = 0xdead0006u;
+    register uintptr_t r7_val asm("r7") = 0xdead0007u;
+    register uintptr_t r8_val asm("r8") = 0xdead0008u;
+    register uintptr_t r9_val asm("r9") = 0xdead0009u;
+    register uintptr_t r10_val asm("r10") = 0xdead000au;
+    register uintptr_t r11_val asm("r11") = 0xdead000bu;
+    asm volatile(
+        "svc 0\n"
+        : "+r"(r0), "+r"(r1),
+          "+r"(r4_val), "+r"(r5_val), "+r"(r6_val), "+r"(r7_val),
+          "+r"(r8_val), "+r"(r9_val), "+r"(r10_val), "+r"(r11_val)
+        : "r"(r2), "r"(r3)
+        : "r12", "lr", "cc", "memory");
+    auto *data = reinterpret_cast<volatile uint32_t *>(leak_callee_data);
+    data[1] = r4_val;
+    data[2] = r5_val;
+    data[3] = r6_val;
+    data[4] = r7_val;
+    data[5] = r8_val;
+    data[6] = r9_val;
+    data[7] = r10_val;
+    data[8] = r11_val;
+    data[9] = r0;  // error (UNWIND_REJECTED)
+    data[10] = r1; // validation error code (DEPTH_MISMATCH)
+    return 42;
   }
   asm volatile(
       "mrs r3, control\n"
@@ -397,8 +411,7 @@ uintptr_t leak_caller_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
         "mov sp, r12\n"
         "svc 0\n"
         "mov %[r12_out], r12\n"
-        "ldr r12, [sp, #0]\n"
-        "mov sp, r12\n"
+        "ldr sp, [sp, #0]\n"
         : "+r"(r0), "+r"(r1),
           "=r"(r4_out), "=r"(r5_out), "=r"(r6_out), "=r"(r7_out),
           "=r"(r8_out), "=r"(r9_out), "=r"(r10_out), "=r"(r11_out),
@@ -616,7 +629,7 @@ void register_leak_test() {
   record_check("leak direct EXIT callee failure int preserved",
                got_callee_fail == 0, got_callee_fail, 0);
 
-  // Callee が generic 経由 (primitive::RETURN) を直接打って caller へ戻る整数漏洩試験 (新契約: 素通し)
+  // Callee が FP を使わず (FPCA=0、FP なし 32B フレーム) EXIT_METHOD を直接打って戻る整数試験 (新契約: 素通し)
   const auto generic_int_exit = run_fresh(10);
   bool generic_int_passed = true;
   for (unsigned i = 0; i < 8; ++i) {
@@ -628,14 +641,14 @@ void register_leak_test() {
   if (c[9] != 0) got_generic_direct |= 1u << 2;  // caller error
   if (c[10] != 42) got_generic_direct |= 1u << 3; // return value 42
   if (!generic_int_passed) got_generic_direct |= 1u << 4; // r4-r11 corrupted
-  record_check("leak generic RETURN bypass passthrough",
+  record_check("leak direct EXIT FPCA=0 frame passthrough",
                got_generic_direct == 0, got_generic_direct, 0);
 
-  // Callee が generic 経由 (primitive::RETURN) で不正な target_depth を指定し失敗する試験
+  // Callee が FP を使った後 (FPCA=1、FP 付きフレーム) に EXIT_METHOD で不正な target_depth を指定し失敗する試験
   // callee への返却であるため、callee の r4-r11 (d[1..8]) が消去されず温存されることを検証する。
   for (unsigned i = 0; i < 64; ++i) d[i] = 0;
   const auto generic_exit_fail = run_fresh(11);
-  bool generic_callee_preserved = (d[9] != 0); // DEPTH_MISMATCH 等のエラー
+  bool generic_callee_preserved = (d[9] == (uintptr_t)object_error::UNWIND_REJECTED);
   for (unsigned i = 0; i < 8; ++i) {
     generic_callee_preserved &= (d[i + 1] == 0xdeadbeefu);
   }
@@ -645,26 +658,29 @@ void register_leak_test() {
   if (c[9] != 0) got_generic_fail |= 1u << 2;  // caller error
   if (c[10] != 42) got_generic_fail |= 1u << 3; // callee returned 42
   if (!generic_callee_preserved) got_generic_fail |= 1u << 4; // callee r4-r11 was zeroed or corrupted
-  record_check("leak generic RETURN callee failure int preserved",
+  record_check("leak direct EXIT FPCA=1 callee failure int preserved",
                got_generic_fail == 0, got_generic_fail, 0);
 
-  // Callee が 2 段以上を一度に落とす強制巻戻し (multi-frame EXIT) を打って戻る試験
-  // 強制巻戻し (scrub) であるため、callee が設定した r4-r11 が caller に漏洩せず、
-  // 0 クリア (または caller 自身の値) されていることを検証する。
+  // 2 段の呼出し鎖 (caller -> 93 -> 94) で 94 が floor より下 (target_depth = 0) へ落とそうとする試験。
+  // EXIT_METHOD は自分の段より下へ落とせない (2 段以上の強制巻戻しは FORWARD_CHILD_EXIT / fault だけで、
+  // 実機 selftest からは出せない。その消去は host の run_inplace_forward_child_exit_scrub が縛る)。
+  // 弾かれたとき 1 枚も落ちず、失敗は callee 自身へ返り (UNWIND_REJECTED + DEPTH_MISMATCH)、
+  // callee の r4-r11 は消去されず温存され、93 を経て caller へは通常の 42 が返ることを検証する。
   for (unsigned i = 0; i < 64; ++i) d[i] = 0;
   d[0] = callee;
   const auto multi_exit = run_fresh(12);
-  bool multi_scrub_passed = true;
+  bool multi_callee_preserved = (d[9] == (uintptr_t)object_error::UNWIND_REJECTED) &&
+                                (d[10] == (uintptr_t)kernel_error::DEPTH_MISMATCH);
   for (unsigned i = 0; i < 8; ++i) {
-    multi_scrub_passed &= (c[i + 1] == 0);
+    multi_callee_preserved &= (d[i + 1] == 0xdead0004u + i);
   }
   uint32_t got_multi = 0;
   if (multi_exit.error != 0) got_multi |= 1u << 0;
   if (multi_exit.value != (uintptr_t)grant_end::YIELDED) got_multi |= 1u << 1;
   if (c[9] != 0) got_multi |= 1u << 2;  // caller error
   if (c[10] != 42) got_multi |= 1u << 3; // return value 42
-  if (!multi_scrub_passed) got_multi |= 1u << 4; // r4-r11 leaked
-  record_check("leak multi-frame EXIT r4-r11 scrubbed zero",
+  if (!multi_callee_preserved) got_multi |= 1u << 4; // 失敗コードまたは callee の r4-r11 が違う
+  record_check("leak EXIT below floor rejected callee preserved",
                got_multi == 0, got_multi, 0);
 #endif
 }

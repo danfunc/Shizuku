@@ -185,6 +185,7 @@ template <bool Service = false, bool ObserveScratch = false, bool ObserveFP = fa
       "beq .Lshizuku_no_fp_restore_%=\n"
       "ldr r8, [sp, #16]\n"
       "vmrs r4, fpscr\n"
+      "ubfx r8, r8, #22, #5\n"
       "bfi r4, r8, #22, #5\n"
       "vmsr fpscr, r4\n"
       "sub r12, r2, #64\n"
