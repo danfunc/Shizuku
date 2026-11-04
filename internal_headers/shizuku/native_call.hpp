@@ -753,13 +753,10 @@ template <class K, class KObj, bool Forward>
     }
     const uint32_t floor = depth ? thread.ledger[depth - 1].unwind_floor : 0;
     uintptr_t d = A::arg(*frame, 1);
-    // FP 戻り値の印 (RETURN_STUB_MARKER_FP) は再開フレームを作る前 (trap フレームが上書きされる前) に読む。
-    bool fp_result = false;
     if constexpr (!Forward) {
       const uintptr_t marker = A::arg(*frame, 4);
       if (is_return_stub_marker(marker)) {
         d = (uintptr_t)floor;
-        fp_result = is_fp_result_marker(marker);
       }
     }
     // スレッドの最外のメソッドが戻ったとき (d == 0 かつ呼出し段なし) は「スレッドの終わり」で、
@@ -777,7 +774,7 @@ template <class K, class KObj, bool Forward>
     const uintptr_t value = A::arg(*frame, 2);
     const uintptr_t error = A::arg(*frame, 3);
     // FORWARD_CHILD_EXIT は親ハンドラが子を取り上げて戻す巻き戻しなので、1 段でも消去の目印。
-    if (!unwind_in_place<K, KObj>(kobj, thread, context, frame, count, Forward, core, fp_result))
+    if (!unwind_in_place<K, KObj>(kobj, thread, context, frame, count, Forward, core))
       return status::CORRUPT;
     A::set_result(*frame, error, value);
     return status::DONE;

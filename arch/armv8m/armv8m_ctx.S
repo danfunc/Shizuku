@@ -153,54 +153,6 @@ shizuku_armv8m_svc_entry:
     b    shizuku_armv8m_svc_handler
 .size shizuku_armv8m_svc_entry, .-shizuku_armv8m_svc_entry
 
-// ---------------------------------------------------------------------------
-// EXIT_METHOD / FORWARD_CHILD_EXIT / GENERIC 専用の薄い asm 入口。
-// C++ ハンドラのエピローグ後、Caller へ復帰した (r0 != 0) 場合のみ r4-r11 を
-// 0 クリアしてから例外復帰 (bx r12) することで、Callee の機密値が Caller へ
-// 漏洩するのを防ぐ。Callee 自身へ失敗を返す経路 (r0 == 0) は値を温存する。
-// ---------------------------------------------------------------------------
-.thumb_func
-.global shizuku_armv8m_exit_entry
-.align 2
-.type shizuku_armv8m_exit_entry, %function
-shizuku_armv8m_exit_entry:
-    push {r0, lr}
-    bl   shizuku_armv8m_exit_method_body
-    b    .Lshizuku_armv8m_exit_clear_and_return
-.size shizuku_armv8m_exit_entry, .-shizuku_armv8m_exit_entry
-
-.thumb_func
-.global shizuku_armv8m_forward_child_exit_entry
-.align 2
-.type shizuku_armv8m_forward_child_exit_entry, %function
-shizuku_armv8m_forward_child_exit_entry:
-    push {r0, lr}
-    bl   shizuku_armv8m_forward_child_exit_body
-    b    .Lshizuku_armv8m_exit_clear_and_return
-.size shizuku_armv8m_forward_child_exit_entry, .-shizuku_armv8m_forward_child_exit_entry
-
-.thumb_func
-.global shizuku_armv8m_generic_entry
-.align 2
-.type shizuku_armv8m_generic_entry, %function
-shizuku_armv8m_generic_entry:
-    push {r0, lr}
-    bl   shizuku_armv8m_generic_body
-
-.Lshizuku_armv8m_exit_clear_and_return:
-    pop  {r12, lr}
-    cbz  r0, 1f
-    movs r4, #0
-    movs r5, #0
-    movs r6, #0
-    movs r7, #0
-    mov  r8, r4
-    mov  r9, r4
-    mov  r10, r4
-    mov  r11, r4
-1:
-    bx   r12
-.size shizuku_armv8m_generic_entry, .-shizuku_armv8m_generic_entry
 
 // ---------------------------------------------------------------------------
 // PendSV 入口 (時限実行権の期限回収 = 最低優先度の遅延切替例外)。退避/復元は
@@ -243,6 +195,7 @@ shizuku_armv8m_call_entry:
 .type shizuku_armv8m_return_stub, %function
 shizuku_armv8m_return_stub:
     mov   r2, r0        // a2 = 戻り値
+    movs  r1, #1        // legacy one-pop notification
     mrs   r3, control
     tst   r3, #4
     beq   .Lreturn_no_fp
@@ -266,18 +219,15 @@ shizuku_armv8m_return_stub:
     vmsr  fpscr, r3
 .Lreturn_no_fp:
 .Lreturn_exit:
-    movs  r1, #0x5A     // r1 = RETURN_STUB_MARKER の下位バイト (通常 stub)
-.Lreturn_exit_marker:
     mov   r3, sp
     bic   r3, r3, #31
     mov   sp, r3          // EXIT does not return to this stack
     movs  r3, #0xA5
     lsls  r3, r3, #8
-    adds  r3, r1        // r3 = 0xA55A (通常) / 0xA55B (FP 戻り値あり)
-    mov   r12, r3       // RETURN_STUB_MARKER / RETURN_STUB_MARKER_FP
-    movs  r1, #1        // legacy one-pop notification
-    movs  r3, #0        // keep the RETURN error argument clear; marker lives in r12
-    movs  r0, #2        // a0 = RETURN (kernel_abi.hpp と static_assert で両縛り)
+    adds  r3, #0x5A
+    mov   r12, r3
+    movs  r3, #0
+    movs  r0, #2
     svc   0
     b     shizuku_return_stub_failed // 戻ってきた = 巻き戻しが弾かれた
 
@@ -321,8 +271,7 @@ shizuku_armv8m_return_double_stub:
     vmsr  fpscr, r3
 .Lreturn_fp_exit:
     movs  r2, #0
-    movs  r1, #0x5B     // r1 = RETURN_STUB_MARKER_FP の下位バイト (s0/s1 に FP 戻り値)
-    b     .Lreturn_exit_marker
+    b     .Lreturn_exit
 .size shizuku_armv8m_return_double_stub, .-shizuku_armv8m_return_double_stub
 
 // ---------------------------------------------------------------------------

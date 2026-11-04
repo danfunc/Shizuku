@@ -558,7 +558,6 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_primitive(KERNEL::CONTE
     const uintptr_t target_arg = ARCH::arg(*frame, 4);
     const uint32_t floor = current_unwind_floor();
     uint32_t target_depth;
-    const bool fp_result = is_fp_result_marker(target_arg);
     if (is_return_stub_marker(target_arg)) {
       const auto request = resolve_return_stub(depth);
       target_depth = request.target_depth;
@@ -576,7 +575,7 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_primitive(KERNEL::CONTE
       ARCH::set_result(*frame, (uintptr_t)validation, depth);
       break;
     }
-    call_unwind(thread, context, &frame, count, core, fp_result);
+    call_unwind(thread, context, &frame, count, core);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_BOOT_STAGE_TRACE) && SHIZUKU_BOOT_STAGE_TRACE > 0
     shizuku_boot_trace_return_leave((uint32_t)context->sp, (uint32_t)frame);
 #endif
@@ -685,7 +684,6 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_exit(KERNEL::CONTEXT *c
   const uint32_t depth = thread.call_stack.depth;
   const uint32_t floor = current_unwind_floor();
   const bool from_stub = !forward && is_return_stub_marker(ARCH::arg(*frame, 4));
-  const bool fp_result = !forward && is_fp_result_marker(ARCH::arg(*frame, 4));
   const uintptr_t d = from_stub ? (uintptr_t)floor : ARCH::arg(*frame, 1);
   // スレッドの最外のメソッドが戻ったとき (d == 0 かつ呼出し段なし) は「スレッドの
   // 終わり」で、次のスレッドの選び方に踏み込むので kobj の exit_thread に任せる
@@ -703,7 +701,7 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_exit(KERNEL::CONTEXT *c
   }
   const uintptr_t value = ARCH::arg(*frame, 2);
   const uintptr_t error = ARCH::arg(*frame, 3);
-  call_unwind(thread, context, &frame, count, core, fp_result);
+  call_unwind(thread, context, &frame, count, core);
   ARCH::set_result(*frame, error, value);
   return true;
 }

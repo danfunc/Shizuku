@@ -45,16 +45,8 @@ enum struct primitive : uintptr_t {
 // RETURN stubs mark their trap so KOBJ can translate the single-pop
 // notification into the absolute depth immediately below its own dispatch frame.
 constexpr uintptr_t RETURN_STUB_MARKER = 0xA55Au;
-// ARMv8-M の float/double return stub だけが載せる印。「return stub から来た」(上と同じ扱い)に加えて
-// 「s0/s1 に FP 戻り値がある」ことを宣言する。カーネルは、この印があるときだけ RETURN の再開フレームへ
-// s0/s1 を写し、それ以外の EXIT (印なし・通常 stub・直接 EXIT) では FP 部 18 語をすべて 0 にする。
-// 印を偽っても渡せるのは callee 自身の s0/s1 だけ (入口で caller の値が callee に見えるのと対称)。
-constexpr uintptr_t RETURN_STUB_MARKER_FP = 0xA55Bu;
 constexpr bool is_return_stub_marker(uintptr_t value) {
-  return value == RETURN_STUB_MARKER || value == RETURN_STUB_MARKER_FP;
-}
-constexpr bool is_fp_result_marker(uintptr_t value) {
-  return value == RETURN_STUB_MARKER_FP;
+  return value == RETURN_STUB_MARKER;
 }
 
 // ===========================================================================

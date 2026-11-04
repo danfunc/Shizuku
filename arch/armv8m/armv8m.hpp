@@ -494,8 +494,6 @@ public:
       core_num core) {
     return call_resume_at<FloatingPointState>(context, pc, sp, privileged, caller_fpca, base, limit, scrub, false, core.index());
   }
-  // fp_result: EXIT の印 (RETURN_STUB_MARKER_FP) が s0/s1 の FP 戻り値を宣言したか。
-  //   true のときだけ s0/s1 を再開フレームへ写す。false (印なし・整数/void 戻り・直接 EXIT) は FP 部 18 語すべて 0。
   template <class FloatingPointState = lazy_fp_state>
   [[gnu::always_inline]] static inline exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
       uintptr_t sp, bool privileged, bool caller_fpca, uintptr_t base, uintptr_t limit, bool scrub,
@@ -785,6 +783,7 @@ private:
   [[gnu::always_inline]] static inline exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
       uintptr_t sp, bool privileged, bool caller_fpca, uintptr_t base, uintptr_t limit, bool scrub,
       bool fp_result, uint32_t core) {
+    (void)fp_result;
     const uint32_t bytes = exc_frame_bytes(context);
     auto *next = reinterpret_cast<exception_frame_t *>(sp - bytes);
     if (bytes != sizeof(exception_frame_t)) {
@@ -800,25 +799,35 @@ private:
 #endif
       auto *d = reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(next) + sizeof(exception_frame_t));
       const auto *s = reinterpret_cast<const uint32_t *>(reinterpret_cast<const uint8_t *>(context.sp) + sizeof(exception_frame_t));
-      if (!caller_fpca) {
+      if (scrub) {
         FloatingPointState::clear_upper_fp_registers();
+        for (unsigned i = 0; i < 18; ++i) d[i] = 0;
+      } else {
+        // 通常戻り: callee の FP レジスタ (s0-s15, fpscr) を素通しでコピーする
+        uint32_t tmp[18];
+        for (unsigned i = 0; i < 18; ++i) tmp[i] = s[i];
+        for (unsigned i = 0; i < 18; ++i) d[i] = tmp[i];
       }
-      // s0/s1 は FP 戻り値の置き場。EXIT の印が宣言したときだけ写し、それ以外は 0 (分岐なしのマスク)。
-      // d と s は重なりうるので、書く前に両方読む。
-      const uint32_t keep = 0u - static_cast<uint32_t>(fp_result);
-      const uint32_t s0 = s[0] & keep;
-      const uint32_t s1 = s[1] & keep;
-      d[0] = s0;
-      d[1] = s1;
-      d[2] = 0;  d[3] = 0;  d[4] = 0;  d[5] = 0;
-      d[6] = 0;  d[7] = 0;  d[8] = 0;  d[9] = 0;
-      d[10] = 0; d[11] = 0; d[12] = 0; d[13] = 0;
-      d[14] = 0; d[15] = 0; d[16] = 0; d[17] = 0;
 #if defined(SHIZUKU_DIAG_FP)
       shizuku::diag_fp::record_point(shizuku::diag_fp::point::K3C_AFTER);
 #endif
     }
-    zero_exception_frame(*next);
+    if (scrub) {
+      zero_exception_frame(*next);
+    } else {
+      // 通常戻り: callee の r2, r3, r12 を素通しする。ただし return stub marker の場合は r12 を 0 にする
+      const auto *prev = context.sp;
+      uint32_t r2 = prev->r2, r3 = prev->r3, r12 = prev->r12;
+      if (is_return_stub_marker(r12)) {
+        r12 = 0;
+      }
+      next->r0 = 0;
+      next->r1 = 0;
+      next->r2 = r2;
+      next->r3 = r3;
+      next->r12 = r12;
+      next->lr = 0;
+    }
     next->pc = (uint32_t)pc;
     next->xPSR = 1u << 24;
     context.sp = next;

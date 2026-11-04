@@ -120,6 +120,15 @@ struct test_inplace_adapter : public BaseArch {
       frame->r2 = 0;
       frame->r3 = 0;
       frame->r12 = 0;
+    } else {
+      if constexpr (requires { frame->r12; }) {
+        const auto *prev = ctx.sp;
+        uint32_t r12 = prev ? prev->r12 : 0;
+        if (shizuku::is_return_stub_marker(r12)) {
+          r12 = 0;
+        }
+        frame->r12 = r12;
+      }
     }
     ctx.sp = frame;
     BaseArch::set_priv(ctx, privileged);
@@ -841,28 +850,22 @@ void run_inplace_return_window_current_row(const char *tag) {
   printf("  [%s] PASS: three_a_return_window_current_row\n", tag);
 }
 
-// EXIT の印 (a4 = r12) が call_resume_at の fp_result へ正しく渡ることの縛り。
-//   0xA55A (通常 stub) / 印なし (直接 EXIT、a1 = 明示深さ) / 未知の値 = false、
-//   0xA55B (float/double stub) = true。印が付くと a1 は無視されて unwind floor が使われる。
+// EXIT の印 (a4 = r12) が return stub からの復帰を識別し、unwind floor が使われることの縛り。
+//   0xA55A (通常 stub): 印が付くと a1 は無視されて unwind floor が使われ、r12 は 0 に消去される。
+//   印なし (直接 EXIT): a1 の明示深さが使われ、r12 は素通しされる。
 template <typename Adapter>
 void run_inplace_exit_fp_marker(const char *tag) {
   using K = mock_kernel<Adapter>;
   using Frame = typename K::FRAME;
-  // fp_result が call_resume_at へ渡るのは LEAN 台帳の pop_in_place 経由だけなので、その構成でだけ検証する。
 #if defined(SHIZUKU_LEAN_LEDGER)
   static_assert(shizuku::is_return_stub_marker(shizuku::RETURN_STUB_MARKER));
-  static_assert(shizuku::is_return_stub_marker(shizuku::RETURN_STUB_MARKER_FP));
   static_assert(!shizuku::is_return_stub_marker(0) && !shizuku::is_return_stub_marker(0xA55Cu));
-  static_assert(!shizuku::is_fp_result_marker(shizuku::RETURN_STUB_MARKER));
-  static_assert(shizuku::is_fp_result_marker(shizuku::RETURN_STUB_MARKER_FP));
-  static_assert(shizuku::RETURN_STUB_MARKER != shizuku::RETURN_STUB_MARKER_FP);
   const auto core0 = make_test_core<Adapter>(0);
-  struct row { uintptr_t marker; uintptr_t a1; bool want_fp; };
+  struct row { uintptr_t marker; uintptr_t a1; uintptr_t want_r12; };
   const row rows[] = {
-      {shizuku::RETURN_STUB_MARKER, 1, false},     // 通常 stub: a1 (legacy 1) は無視され floor=0
-      {shizuku::RETURN_STUB_MARKER_FP, 1, true},   // float/double stub
-      {0, 0, false},                               // 印なしの直接 EXIT (明示深さ 0)
-      {0xA55Cu, 0, false},                         // 未知の印は印として扱わない
+      {shizuku::RETURN_STUB_MARKER, 1, 0},         // 通常 stub: floor=0 へ戻り、r12 は消去 (0)
+      {0, 0, 0},                                   // 印なしの直接 EXIT (明示深さ 0, r12=0)
+      {0x12345678u, 0, 0x12345678u},               // 任意値を戻り値として直接 EXIT (素通し)
   };
   for (const row &r : rows) {
     K kernel;
@@ -895,19 +898,13 @@ void run_inplace_exit_fp_marker(const char *tag) {
     outer_frame->r2 = 0xA1;
     outer_frame->r3 = 0;
     outer_frame->r12 = r.marker;
-    Adapter::last_fp_result = !r.want_fp; // 書かれなかった場合を検出する
-    const unsigned before = Adapter::fp_resume_calls;
     const auto st = shizuku::native::exit_in_place<K, mock_kobj, false>(kernel, kobj, thread, ctx, core0);
     assert(st == shizuku::native::status::DONE);
     assert(thread.call_stack.depth == 0);
-    if constexpr (shizuku::arch_has_core_num<Adapter>) {
-      assert(Adapter::fp_resume_calls == before + 1);   // 最後の 1 段で 1 回だけ再開する
-      assert(Adapter::last_fp_result == r.want_fp);
-    } else {
-      // FP 部を持たない ARCH (ARMv6-M) は従来の形で再開し、fp_result は渡らない。
-      assert(Adapter::fp_resume_calls == before);
-    }
     assert(outer_frame->pc == 0x10001100u && outer_frame->r1 == 0xA1);
+    if constexpr (requires { outer_frame->r12; }) {
+      assert(outer_frame->r12 == r.want_r12);
+    }
   }
 #else
   (void)tag;
