@@ -15,6 +15,7 @@
 #include "shizuku/native_call.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/templates/thread.hpp"
+#include "core_num_test_access.hpp"
 
 // ---------------------------------------------------------------------------
 // 1. Shared Payload Trait & Size Definitions
@@ -122,11 +123,28 @@ struct test_inplace_adapter : public BaseArch {
     return frame;
   }
 
+  template <class Core>
+  static typename BaseArch::exception_frame_t *call_resume_at(
+      typename BaseArch::context_t &ctx, uintptr_t pc, uintptr_t sp,
+      bool privileged, uintptr_t rbase, uintptr_t rlimit, bool scrub,
+      const Core &) {
+    return call_resume_at(ctx, pc, sp, privileged, rbase, rlimit, scrub);
+  }
+
   static typename BaseArch::exception_frame_t *call_resume(
       typename BaseArch::context_t &ctx, const call_header_t *header, bool scrub) {
     uintptr_t sp = reinterpret_cast<uintptr_t>(header);
     return call_resume_at(ctx, header->pc, sp, header->privileged != 0,
                           header->region_base, header->region_limit, scrub);
+  }
+
+  template <class Core>
+  static typename BaseArch::exception_frame_t *call_resume(
+      typename BaseArch::context_t &ctx, const call_header_t *header, bool scrub,
+      const Core &core) {
+    uintptr_t sp = reinterpret_cast<uintptr_t>(header);
+    return call_resume_at(ctx, header->pc, sp, header->privileged != 0,
+                          header->region_base, header->region_limit, scrub, core);
   }
 
   static void set_entry(typename BaseArch::exception_frame_t &frame, uintptr_t pc, uintptr_t lr) {
@@ -148,7 +166,16 @@ struct test_inplace_adapter : public BaseArch {
     BaseArch::set_priv(ctx, priv);
   }
 
+  template <class Frame, class Core>
+  static void switch_callee_protection(typename BaseArch::context_t &ctx, Frame &, uint32_t, bool priv,
+                                       const Core &) {
+    BaseArch::set_priv(ctx, priv);
+  }
+
   static void switch_caller_protection(uint32_t) {}
+
+  template <class Core>
+  static void switch_caller_protection(uint32_t, const Core &) {}
 
   static uintptr_t arg(const typename BaseArch::exception_frame_t &f, unsigned index) {
     switch (index) {
@@ -297,11 +324,21 @@ struct mock_kobj {
   }
 };
 
+template <typename Adapter>
+auto make_test_core([[maybe_unused]] uint32_t val = 0) {
+  if constexpr (shizuku::arch_has_core_num<Adapter>) {
+    return shizuku::core_num_test_access<typename Adapter::core_num>::make(val);
+  } else {
+    return shizuku::no_core{};
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 4. Templated Test Suite for Both ARMv8-M and ARMv6-M
 // ---------------------------------------------------------------------------
 template <typename Adapter>
 void run_inplace_method_call_success(const char *tag) {
+  const auto core = make_test_core<Adapter>(0);
   mock_kernel<Adapter> kernel;
   mock_kobj kobj;
   typename mock_kernel<Adapter>::CONTEXT ctx{};
@@ -326,7 +363,7 @@ void run_inplace_method_call_success(const char *tag) {
   frame.r3 = 0xCAFEBABEu; // Argument
   frame.r12 = 0x12121212u; // Passthrough canary
 
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj);
+  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core);
 
   assert(frame.r0 == 0xCAFEBABEu);
   assert(frame.pc == 0x10002000u);
@@ -345,6 +382,7 @@ void run_inplace_method_call_success(const char *tag) {
 
 template <typename Adapter>
 void run_inplace_descriptor_call_success(const char *tag) {
+  const auto core = make_test_core<Adapter>(0);
   mock_kernel<Adapter> kernel;
   mock_kobj kobj;
   typename mock_kernel<Adapter>::CONTEXT ctx{};
@@ -378,7 +416,7 @@ void run_inplace_descriptor_call_success(const char *tag) {
   frame.r3 = 0x33333333u; // Passthrough canary
   frame.r12 = 0x12121212u; // Passthrough canary
 
-  shizuku::native::call_descriptor_in_place(kernel, thread, ctx, kobj);
+  shizuku::native::call_descriptor_in_place(kernel, thread, ctx, kobj, core);
 
   // D2(a): 1 argument moved from r2 to r0
   assert(frame.r0 == 0xDEADBEEFu);
@@ -395,6 +433,7 @@ void run_inplace_descriptor_call_success(const char *tag) {
 
 template <typename Adapter>
 void run_inplace_method_failures_ledger_invariant(const char *tag) {
+  const auto core = make_test_core<Adapter>(0);
   mock_kernel<Adapter> kernel;
   mock_kobj kobj;
   typename mock_kernel<Adapter>::CONTEXT ctx{};
@@ -412,7 +451,7 @@ void run_inplace_method_failures_ledger_invariant(const char *tag) {
   frame.r1 = mock_kobj::OBJECT_COUNT + 1;
   frame.r2 = 0;
   frame.r3 = 42;
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj);
+  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core);
   assert(frame.r0 == (uint32_t)shizuku::object_error::BAD_OBJECT);
   assert(thread.call_stack.depth == 0);
   assert(thread.call_stack.call_count == 0);
@@ -422,7 +461,7 @@ void run_inplace_method_failures_ledger_invariant(const char *tag) {
   frame.r1 = 5;
   frame.r2 = 0;
   frame.r3 = 42;
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj);
+  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core);
   assert(frame.r0 == (uint32_t)shizuku::object_error::NOT_PRIVILEGED);
   assert(thread.call_stack.depth == 0);
   assert(thread.call_stack.call_count == 0);
@@ -433,7 +472,7 @@ void run_inplace_method_failures_ledger_invariant(const char *tag) {
   frame.r1 = 5;
   frame.r2 = 99;
   frame.r3 = 42;
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj);
+  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core);
   assert(frame.r0 == (uint32_t)shizuku::object_error::BAD_METHOD);
   assert(thread.call_stack.depth == 0);
 
@@ -442,7 +481,7 @@ void run_inplace_method_failures_ledger_invariant(const char *tag) {
   frame.r1 = 5;
   frame.r2 = 7;
   frame.r3 = 42;
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj);
+  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core);
   assert(frame.r0 == (uint32_t)shizuku::object_error::UNDECLARED_METHOD);
   assert(thread.call_stack.depth == 0);
 
@@ -460,7 +499,7 @@ void run_inplace_method_failures_ledger_invariant(const char *tag) {
   frame.r1 = 5;
   frame.r2 = 0;
   frame.r3 = 42;
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj);
+  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core);
   assert(frame.r0 == (uint32_t)shizuku::object_error::NO_STACK);
   assert(thread.call_stack.depth == 0);
   assert(thread.call_stack.call_count == mock_kobj::MAX_DEPTH);
@@ -472,7 +511,7 @@ void run_inplace_method_failures_ledger_invariant(const char *tag) {
   frame.r1 = 5;
   frame.r2 = 0;
   frame.r3 = 42;
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj);
+  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core);
   assert(frame.r0 == (uint32_t)shizuku::object_error::NO_STACK);
   assert(thread.call_stack.depth == thread.ledger_capacity - 1);
   assert(thread.call_stack.call_count == 1);
@@ -482,6 +521,7 @@ void run_inplace_method_failures_ledger_invariant(const char *tag) {
 
 template <typename Adapter>
 void run_inplace_descriptor_failures_ledger_invariant(const char *tag) {
+  const auto core = make_test_core<Adapter>(0);
   mock_kernel<Adapter> kernel;
   mock_kobj kobj;
   typename mock_kernel<Adapter>::CONTEXT ctx{};
@@ -497,7 +537,7 @@ void run_inplace_descriptor_failures_ledger_invariant(const char *tag) {
   // 1. Bad Index
   frame.r0 = 33;
   frame.r1 = mock_kobj::METHOD_DESCRIPTOR_CAPACITY + 1;
-  shizuku::native::call_descriptor_in_place(kernel, thread, ctx, kobj);
+  shizuku::native::call_descriptor_in_place(kernel, thread, ctx, kobj, core);
   assert(frame.r0 == (uint32_t)shizuku::object_error::BAD_DESCRIPTOR);
   assert(thread.call_stack.depth == 0);
 
@@ -505,7 +545,7 @@ void run_inplace_descriptor_failures_ledger_invariant(const char *tag) {
   kobj.m_descriptors[2][1].seq = 1;
   frame.r0 = 33;
   frame.r1 = 1;
-  shizuku::native::call_descriptor_in_place(kernel, thread, ctx, kobj);
+  shizuku::native::call_descriptor_in_place(kernel, thread, ctx, kobj, core);
   assert(frame.r0 == (uint32_t)shizuku::object_error::STALE_DESCRIPTOR);
   assert(thread.call_stack.depth == 0);
 
@@ -514,7 +554,7 @@ void run_inplace_descriptor_failures_ledger_invariant(const char *tag) {
   kobj.m_descriptors[2][2].callee = mock_kobj::DESCRIPTOR_NONE;
   frame.r0 = 33;
   frame.r1 = 2;
-  shizuku::native::call_descriptor_in_place(kernel, thread, ctx, kobj);
+  shizuku::native::call_descriptor_in_place(kernel, thread, ctx, kobj, core);
   assert(frame.r0 == (uint32_t)shizuku::object_error::BAD_DESCRIPTOR);
   assert(thread.call_stack.depth == 0);
 
@@ -524,7 +564,7 @@ void run_inplace_descriptor_failures_ledger_invariant(const char *tag) {
   kobj.m_descriptors[2][3].owner_generation = 99;
   frame.r0 = 33;
   frame.r1 = 3;
-  shizuku::native::call_descriptor_in_place(kernel, thread, ctx, kobj);
+  shizuku::native::call_descriptor_in_place(kernel, thread, ctx, kobj, core);
   assert(frame.r0 == (uint32_t)shizuku::object_error::STALE_DESCRIPTOR);
   assert(thread.call_stack.depth == 0);
 
@@ -536,7 +576,7 @@ void run_inplace_descriptor_failures_ledger_invariant(const char *tag) {
   kobj.m_object_versions[5] = 2;
   frame.r0 = 33;
   frame.r1 = 4;
-  shizuku::native::call_descriptor_in_place(kernel, thread, ctx, kobj);
+  shizuku::native::call_descriptor_in_place(kernel, thread, ctx, kobj, core);
   assert(frame.r0 == (uint32_t)shizuku::object_error::STALE_DESCRIPTOR);
   assert(thread.call_stack.depth == 0);
 
@@ -577,9 +617,10 @@ void run_inplace_lean_push_pop(const char *tag) {
   thread.call_stack.call_count = 1;
   thread.call_stack.call_top = 1;
 
+  const auto core = make_test_core<Adapter>(0);
   typename mock_kernel<Adapter>::FRAME *restored_frame = nullptr;
   bool popped = shizuku::native::pop_in_place<mock_kernel<Adapter>>(
-      kobj, thread, ctx, restored_frame, true, false);
+      kobj, thread, ctx, restored_frame, true, false, core);
   assert(popped);
   assert(thread.call_stack.depth == 0);
   assert(thread.call_stack.call_count == 0);
@@ -593,6 +634,8 @@ void run_inplace_lean_push_pop(const char *tag) {
 
 template <typename Adapter>
 void run_inplace_return_window_current_row(const char *tag) {
+  const auto core0 = make_test_core<Adapter>(0);
+  const auto core1 = make_test_core<Adapter>(1);
   using K = mock_kernel<Adapter>;
   using Frame = typename K::FRAME;
   K kernel;
@@ -632,7 +675,7 @@ void run_inplace_return_window_current_row(const char *tag) {
   outer_frame->r1 = 6;
   outer_frame->r2 = 0;
   outer_frame->r3 = 0x31;
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj);
+  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core0);
   assert(thread.call_stack.depth == 1 && thread.call_stack.call_count == 1);
   assert(ledger[0].via == K::LEDGER_CALL && ledger[0].object == 6);
 
@@ -642,7 +685,7 @@ void run_inplace_return_window_current_row(const char *tag) {
   inner_frame->r1 = 6;
   inner_frame->r2 = 0;
   inner_frame->r3 = 0x32;
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj);
+  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core0);
   assert(thread.call_stack.depth == 2 && thread.call_stack.call_count == 2);
   assert(ledger[1].via == K::LEDGER_CALL && ledger[1].object == 6);
 #if defined(SHIZUKU_LEAN_LEDGER)
@@ -657,7 +700,7 @@ void run_inplace_return_window_current_row(const char *tag) {
   inner_frame->r2 = 0xA6;
   inner_frame->r3 = 0;
   inner_frame->r12 = shizuku::RETURN_STUB_MARKER;
-  const auto revoked = shizuku::native::exit_in_place<K, mock_kobj, false>(kernel, kobj, thread, ctx);
+  const auto revoked = shizuku::native::exit_in_place<K, mock_kobj, false>(kernel, kobj, thread, ctx, core0);
   assert(revoked == shizuku::native::status::DONE);
   assert(thread.call_stack.depth == 1 && thread.call_stack.call_count == 1);
   assert(ctx.sp == inner_frame && inner_frame->pc == 0x10006100u);
@@ -684,7 +727,7 @@ void run_inplace_return_window_current_row(const char *tag) {
   inner_frame->r1 = 1;
   inner_frame->r2 = 0x51;
   inner_frame->r3 = 0;
-  shizuku::native::call_descriptor_in_place(kernel, thread, ctx, kobj);
+  shizuku::native::call_descriptor_in_place(kernel, thread, ctx, kobj, core0);
   assert(thread.call_stack.depth == 2 && thread.call_stack.call_count == 2);
   assert(ledger[1].via == K::LEDGER_DESCRIPTOR_CALL);
   inner_frame->r0 = 2;
@@ -693,7 +736,7 @@ void run_inplace_return_window_current_row(const char *tag) {
   inner_frame->r3 = 0;
   inner_frame->r12 = shizuku::RETURN_STUB_MARKER;
   const auto descriptor_return = shizuku::native::exit_in_place<K, mock_kobj, false>(
-      kernel, kobj, thread, ctx);
+      kernel, kobj, thread, ctx, core0);
   assert(descriptor_return == shizuku::native::status::DONE);
   assert(thread.call_stack.depth == 1 && thread.call_stack.call_count == 1);
   assert(ctx.sp == inner_frame && inner_frame->pc == 0x10006200u);
@@ -727,7 +770,7 @@ void run_inplace_return_window_current_row(const char *tag) {
   inner_frame->r1 = 7;
   inner_frame->r2 = 0;
   inner_frame->r3 = 0x33;
-  shizuku::native::call_method_in_place(kernel, dispatch_thread, dispatch_ctx, kobj);
+  shizuku::native::call_method_in_place(kernel, dispatch_thread, dispatch_ctx, kobj, core1);
   assert(dispatch_thread.call_stack.depth == 2 && dispatch_thread.call_stack.call_count == 1);
   assert(dispatch_ledger[0].via == K::LEDGER_DISPATCH &&
          dispatch_ledger[1].via == K::LEDGER_CALL);
@@ -737,7 +780,7 @@ void run_inplace_return_window_current_row(const char *tag) {
   inner_frame->r3 = 0;
   inner_frame->r12 = shizuku::RETURN_STUB_MARKER;
   const auto from_dispatch = shizuku::native::exit_in_place<K, mock_kobj, false>(
-      kernel, kobj, dispatch_thread, dispatch_ctx);
+      kernel, kobj, dispatch_thread, dispatch_ctx, core1);
   assert(from_dispatch == shizuku::native::status::DONE);
   assert(dispatch_thread.call_stack.depth == 1 && dispatch_thread.call_stack.call_count == 0);
   assert(dispatch_ctx.sp == inner_frame && inner_frame->pc == 0x10007100u);
@@ -761,7 +804,7 @@ void run_inplace_return_window_current_row(const char *tag) {
   outer_frame->r1 = 5;
   outer_frame->r2 = 0;
   outer_frame->r3 = 0x34;
-  shizuku::native::call_method_in_place(kernel, base_thread, base_ctx, kobj);
+  shizuku::native::call_method_in_place(kernel, base_thread, base_ctx, kobj, core0);
   assert(base_thread.call_stack.depth == 1 && base_thread.call_stack.call_count == 1);
   outer_frame->r0 = 2;
   outer_frame->r1 = 0;
@@ -769,7 +812,7 @@ void run_inplace_return_window_current_row(const char *tag) {
   outer_frame->r3 = 0;
   outer_frame->r12 = shizuku::RETURN_STUB_MARKER;
   const auto ordinary = shizuku::native::exit_in_place<K, mock_kobj, false>(
-      kernel, kobj, base_thread, base_ctx);
+      kernel, kobj, base_thread, base_ctx, core0);
   assert(ordinary == shizuku::native::status::DONE);
   assert(base_thread.call_stack.depth == 0 && base_thread.call_stack.call_count == 0);
   assert(base_ctx.sp == outer_frame && outer_frame->pc == 0x10001100u);
@@ -782,6 +825,7 @@ void run_inplace_return_window_current_row(const char *tag) {
 
 template <typename Adapter>
 void run_inplace_exit_validation(const char *tag) {
+  const auto core = make_test_core<Adapter>(0);
   mock_kernel<Adapter> kernel;
   typename mock_kernel<Adapter>::CONTEXT ctx{};
 
@@ -843,7 +887,7 @@ void run_inplace_exit_validation(const char *tag) {
 
   mock_kobj kobj;
   auto st_rejected = shizuku::native::exit_in_place<mock_kernel<Adapter>, mock_kobj, false>(
-      kernel, kobj, thread, ctx);
+      kernel, kobj, thread, ctx, core);
   assert(st_rejected == shizuku::native::status::DONE);
   assert(slots[1].frame.r0 == (uint32_t)shizuku::object_error::UNWIND_REJECTED);
   assert(slots[1].frame.r1 == (uint32_t)shizuku::kernel_error::DEPTH_MISMATCH);
@@ -857,7 +901,7 @@ void run_inplace_exit_validation(const char *tag) {
   slots[1].frame.r3 = (uint32_t)shizuku::object_error::OK;
 
   auto st1 = shizuku::native::exit_in_place<mock_kernel<Adapter>, mock_kobj, false>(
-      kernel, kobj, thread, ctx);
+      kernel, kobj, thread, ctx, core);
   assert(st1 == shizuku::native::status::DONE);
   assert(thread.call_stack.depth == 1);
   assert(thread.call_stack.call_count == 1);
@@ -871,7 +915,7 @@ void run_inplace_exit_validation(const char *tag) {
   ctx.sp->r3 = (uint32_t)shizuku::object_error::OK;
 
   auto st0 = shizuku::native::exit_in_place<mock_kernel<Adapter>, mock_kobj, false>(
-      kernel, kobj, thread, ctx);
+      kernel, kobj, thread, ctx, core);
   assert(st0 == shizuku::native::status::DONE);
   assert(thread.call_stack.depth == 0);
   assert(thread.call_stack.call_count == 0);

@@ -2,6 +2,15 @@ load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
+cc_library(
+    name = "core_num_test_access",
+    hdrs = ["core_num_test_access.hpp"],
+    deps = [
+        "//:internal_headers",
+        "//arch/armv8m:headers",
+    ],
+)
+
 cc_test(
     name = "cost_probe_test",
     srcs = ["cost_probe_test.cpp"],
@@ -82,6 +91,7 @@ cc_test(
     srcs = [
         "arm_inplace_fixture.hpp",
         "armv8m_inplace_test.cpp",
+        "core_num_test_access.hpp",
     ],
     copts = ["-std=c++20"],
     deps = [
@@ -97,6 +107,7 @@ cc_test(
     srcs = [
         "arm_inplace_fixture.hpp",
         "armv8m_inplace_test.cpp",
+        "core_num_test_access.hpp",
     ],
     copts = ["-std=c++20"],
     defines = ["SHIZUKU_LEAN_LEDGER=1"],
@@ -113,6 +124,7 @@ cc_test(
     srcs = [
         "arm_inplace_fixture.hpp",
         "armv6m_inplace_test.cpp",
+        "core_num_test_access.hpp",
     ],
     copts = ["-std=c++20"],
     deps = [
@@ -127,11 +139,37 @@ cc_test(
     srcs = [
         "arm_inplace_fixture.hpp",
         "armv6m_inplace_test.cpp",
+        "core_num_test_access.hpp",
     ],
     copts = ["-std=c++20"],
     defines = ["SHIZUKU_LEAN_LEDGER=1"],
     deps = [
         "//:internal_headers",
         "//arch/armv6m:headers",
+    ],
+)
+
+cc_test(
+    name = "core_num_test",
+    srcs = [
+        "core_num_test.cpp",
+    ],
+    copts = ["-std=c++20"],
+    deps = [
+        "//:internal_headers",
+    ],
+)
+
+cc_test(
+    name = "core_num_armv8m_test",
+    srcs = [
+        "arm_inplace_fixture.hpp",
+        "core_num_armv8m_test.cpp",
+        "core_num_test_access.hpp",
+    ],
+    copts = ["-std=c++20"],
+    deps = [
+        "//:internal_headers",
+        "//arch/armv8m:headers",
     ],
 )

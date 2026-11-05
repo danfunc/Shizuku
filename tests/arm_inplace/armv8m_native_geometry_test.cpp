@@ -6,12 +6,14 @@
 #error "This test requires assert()"
 #endif
 #include "arch/armv8m/armv8m.hpp"
+#include "core_num_test_access.hpp"
 
 using A = shizuku::archs::armv8m<8, 4>;
 using Frame = A::exception_frame_t;
 struct MockFP { static inline unsigned count = 0; static void materialize() { ++count; } };
 
 int main() {
+  const auto core = shizuku::core_num_test_access<typename A::core_num>::make(0);
   {
     struct guarded_frame {
       uint32_t before;
@@ -70,7 +72,7 @@ int main() {
     const uintptr_t ret = target + (extended ? 104 : 32);
     MockFP::count = 0;
     auto *result = A::call_resume_at<MockFP>(c, 0x12345679, ret, overlap,
-                                             0x2000, 0x3000, false);
+                                             0x2000, 0x3000, false, core);
     assert(reinterpret_cast<uintptr_t>(result) == target && c.sp == result);
     assert(result->pc == 0x12345679 && result->xPSR == (1u << 24));
     assert(result->r0 == 0 && result->r1 == 0 && result->r2 == 0 &&
@@ -94,7 +96,7 @@ int main() {
     fp[1] = is_double ? 0x3ff80000u : 0u;
     const uintptr_t ret = base + 512 + 24 + 104;
     MockFP::count = 0;
-    auto *resumed = A::call_resume_at<MockFP>(c, 0x12345679, ret, true, 0, 0, false);
+    auto *resumed = A::call_resume_at<MockFP>(c, 0x12345679, ret, true, 0, 0, false, core);
     const auto *saved = reinterpret_cast<const uint32_t *>(resumed + 1);
     assert(MockFP::count == 1 && saved[0] == (is_double ? 0u : 0x3fc00000u));
     assert(saved[1] == (is_double ? 0x3ff80000u : 0u));

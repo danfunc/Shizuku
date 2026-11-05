@@ -1,4 +1,5 @@
 #include "shizuku/config.hpp"
+#include "tests/arm_inplace/core_num_test_access.hpp"
 
 #include <cassert>
 #include <cstdio>
@@ -53,6 +54,7 @@ static_assert(ARCH::LEGACY_FRAME_HOST_TEST,
               "legacy frame test must compile with its host MPU adapter");
 
 int main() {
+  const auto core = core_num_test_access<ARCH::core_num>::make(0);
   alignas(16) static uint8_t stack[8192]{};
   alignas(8) static uint8_t thread_storage[KERNEL::thread_record_bytes()];
   alignas(8) static KERNEL::call_ledger_entry ledger[8]{};
@@ -85,7 +87,7 @@ int main() {
     caller->r1 = 2;
     caller->r2 = 0;
     caller->r3 = 0x51u;
-    kernel_instance.svc_call_method(context);
+    kernel_instance.svc_call_method(context, core);
     assert(kernel_instance.current_depth() == 1);
     assert(kernel_instance.current_call_count() == 1);
     assert(context->sp != caller && ARCH::frame_pc(*context->sp) == 0x42002000u);
@@ -102,7 +104,7 @@ int main() {
   callee->r2 = 0x61u;
   callee->r3 = 0;
   callee->r12 = (uint32_t)RETURN_STUB_MARKER;
-  kernel_instance.svc_exit_method(context);
+  kernel_instance.svc_exit_method(context, core);
   assert(kernel_instance.current_depth() == 0 && kernel_instance.current_call_count() == 0);
   assert(context->sp == caller && ARCH::frame_pc(*caller) == 0x42000100u);
   assert(ARCH::context_privileged(*context));
@@ -120,7 +122,7 @@ int main() {
   callee->r2 = 0x62u;
   callee->r3 = 0;
   callee->r12 = (uint32_t)RETURN_STUB_MARKER;
-  kernel_instance.svc_exit_method(context);
+  kernel_instance.svc_exit_method(context, core);
   assert(kernel_instance.current_depth() == 0 && kernel_instance.current_call_count() == 0);
   assert(context->sp == caller && ARCH::frame_pc(*caller) == 0x42000100u);
   assert(ARCH::context_privileged(*context));
@@ -137,7 +139,7 @@ int main() {
   callee->r1 = 2;
   callee->r2 = 0;
   callee->r3 = 0;
-  kernel_instance.svc_dispatch(context);
+  kernel_instance.svc_dispatch(context, core);
   assert(kernel_instance.current_depth() == 2);
   assert(ledger[1].via == KERNEL::LEDGER_DISPATCH);
   assert(context->region_base == 0 && context->region_limit == 0);
@@ -147,7 +149,7 @@ int main() {
   handler_frame->r1 = 3;
   handler_frame->r2 = 0;
   handler_frame->r3 = 0x63u;
-  kernel_instance.svc_call_method(context);
+  kernel_instance.svc_call_method(context, core);
   assert(kernel_instance.current_depth() == 3 && kernel_instance.current_call_count() == 2);
   auto *nested = context->sp;
   nested->r0 = (uint32_t)primitive::RETURN;
@@ -155,7 +157,7 @@ int main() {
   nested->r2 = 0x64u;
   nested->r3 = 0;
   nested->r12 = (uint32_t)RETURN_STUB_MARKER;
-  kernel_instance.svc_exit_method(context);
+  kernel_instance.svc_exit_method(context, core);
   assert(kernel_instance.current_depth() == 2 && kernel_instance.current_call_count() == 1);
   assert(context->sp == handler_frame && ARCH::frame_pc(*handler_frame) == 0x42010040u);
   assert(ARCH::context_privileged(*context));

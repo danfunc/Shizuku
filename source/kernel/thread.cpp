@@ -35,6 +35,7 @@ alignas(8) caller_return_record s_thread_returns[kMaxReturnThreads][kMaxReturnDe
 template <> void KERNEL::grant_unwind(grant_end);
 template <> void KERNEL::arm_timer();
 template <> void KERNEL::grant_charge();
+template <> void KERNEL::grant_charge_on(uint32_t);
 template <> bool KERNEL::claim(uint32_t, kernel_error &);
 template <> kernel_error KERNEL::do_grant(uint32_t, uint64_t);
 template <> void KERNEL::set_recovery_thread(uint32_t);
@@ -47,7 +48,7 @@ template <> void KERNEL::debug_dispatch(KERNEL::CONTEXT *);
 template <> void KERNEL::suspend(uint32_t);
 template <> void KERNEL::resume(uint32_t);
 template <> void KERNEL::arm_step(uint32_t);
-template <> void KERNEL::consume_pending_step_slow();
+template <> void KERNEL::consume_pending_step_slow(core_arg_t<ARCH>);
 
 // ---- 貸してもらった記憶をスレッド表として据える ----------------------------
 // ★所有はオブジェクトランド、保護はここで検査する。カーネルの簿記が非特権から
@@ -345,7 +346,10 @@ template <> SHIZUKU_SVC_RAM void KERNEL::grant_unwind(grant_end reason) {
 // ★何度呼んでも壊れない: 引いたあと m_armed を「まだ引いていない残り」に
 //   更新するので、続けて呼べば 2 回目は 0 を引く。
 template <> SHIZUKU_SVC_RAM void KERNEL::grant_charge() {
-  const uint32_t core = BOARD::core_num();
+  grant_charge_on(BOARD::core_num());
+}
+
+template <> SHIZUKU_SVC_RAM void KERNEL::grant_charge_on(uint32_t core) {
   grant_stack &grants = m_grants[core];
   if (grants.depth == 0 || m_armed[core] == 0) {
     m_armed[core] = 0;
@@ -503,13 +507,25 @@ template <> void KERNEL::arm_step(uint32_t thread) {
   ARCH::store_release32(&m_step_target, thread);
 }
 
+namespace {
+template <class A, class B, class Core>
+[[gnu::always_inline]] inline uint32_t step_core_index(Core core) {
+  if constexpr (arch_has_core_num<A>) {
+    return core.index();
+  } else {
+    (void)core;
+    return B::core_num();
+  }
+}
+} // namespace
+
 // ISA 層の CTX_RESTORE から**あらゆる復帰経路**で毎回呼ばれる。復帰しようと
 // している文脈がちょうど予約した相手のときだけ、ここで初めて MON_STEP を
 // 立てる — こうすると「次の 1 命令」が確実に対象自身の命令になる。
 // ★CAS で消費する: 2 コアが同時に別の文脈を復帰させても、この予約を
 //   誤って 2 回消費したり、無関係な文脈へ誤爆したりしない。
-template <> SHIZUKU_SVC_RAM void KERNEL::consume_pending_step_slow() {
-  const uint32_t thread = m_current[BOARD::core_num()];
+template <> SHIZUKU_SVC_RAM void KERNEL::consume_pending_step_slow(core_arg_t<ARCH> core) {
+  const uint32_t thread = m_current[step_core_index<ARCH, BOARD>(core)];
   if (ARCH::cas32(&m_step_target, thread, NO_STEP_TARGET))
     ARCH::debug_step(true);
 }

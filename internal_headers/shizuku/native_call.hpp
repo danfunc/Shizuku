@@ -11,6 +11,8 @@
 //  巻き戻し (2 段以上の EXIT_METHOD、FORWARD_CHILD_EXIT) だけで、普通の 1 段の戻りは消さない。
 //  ヘッダ枠方式でない ARCH (ARM) ではこの本体は使わない (if constexpr で落ちる)。
 #include <cstdint>
+#include <type_traits>
+#include "shizuku/core_num.hpp"
 #include "shizuku/kernel_abi.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/svc_attributes.hpp"
@@ -96,7 +98,7 @@ template <class A, class Thread, class Context, class Frame>
 // 消すか): callee が自分の意思で戻らない巻き戻しのときだけ true。
 template <class A, class Thread, class Context, class Frame>
 [[gnu::always_inline]] inline void header_pop_of(Thread &thread, Context &context, Frame *&frame, bool is_call, bool restore,
-                                                 bool scrub) {
+                                                 bool scrub, core_arg_t<A> core) {
   if constexpr (arch_call_in_place<A>()) {
     auto *header = reinterpret_cast<typename A::call_header_t *>(thread.call_stack.top);
     if (is_call) {
@@ -107,18 +109,40 @@ template <class A, class Thread, class Context, class Frame>
       thread.call_stack.caller_generation = header->caller_generation;
     }
     thread.call_stack.top = header->prev;
-    if (restore)
-      frame = A::call_resume(context, header, scrub);
+    if (restore) {
+      if constexpr (arch_has_core_num<A>) {
+        frame = A::call_resume(context, header, scrub, core);
+      } else {
+        frame = A::call_resume(context, header, scrub);
+      }
+    }
   }
+}
+
+template <class A, class Thread, class Context, class Frame>
+requires (!arch_has_core_num<A>)
+[[gnu::always_inline]] inline void header_pop_of(Thread &thread, Context &context, Frame *&frame, bool is_call, bool restore,
+                                                 bool scrub) {
+  header_pop_of<A>(thread, context, frame, is_call, restore, scrub, no_core{});
 }
 
 namespace native {
 
 template <class A>
+[[gnu::always_inline]] inline bool defer_thread_switch(core_arg_t<A> core) {
+  if constexpr (arch_has_core_num<A>) {
+    return A::defer_svc_switch(core);
+  } else {
+    if constexpr (requires { A::defer_svc_switch(); })
+      return A::defer_svc_switch();
+    return false;
+  }
+}
+
+template <class A>
+requires (!arch_has_core_num<A>)
 [[gnu::always_inline]] inline bool defer_thread_switch() {
-  if constexpr (requires { A::defer_svc_switch(); })
-    return A::defer_svc_switch();
-  return false;
+  return defer_thread_switch<A>(no_core{});
 }
 
 template <class Objects, class Method>
@@ -165,7 +189,8 @@ template <class K, class KObj>
 [[gnu::always_inline]] inline bool pop_in_place(KObj &kobj, typename K::THREAD &thread,
                                                 typename K::CONTEXT &context,
                                                 typename K::FRAME *&frame, bool restore,
-                                                bool scrub) {
+                                                bool scrub,
+                                                core_arg_t<typename K::ARCH> core) {
   using A = typename K::ARCH;
   if constexpr (arch_call_in_place<A>()) {
     const uint32_t depth = thread.call_stack.depth;
@@ -191,8 +216,13 @@ template <class K, class KObj>
       thread.call_stack.call_top = entry.prev_call;
     }
     if (restore) {
-      frame = A::call_resume_at(context, entry.ret_pc, entry.ret_sp, entry.ret_privileged != 0,
-                                0, 0, scrub);
+      if constexpr (arch_has_core_num<A>) {
+        frame = A::call_resume_at(context, entry.ret_pc, entry.ret_sp, entry.ret_privileged != 0,
+                                  0, 0, scrub, core);
+      } else {
+        frame = A::call_resume_at(context, entry.ret_pc, entry.ret_sp, entry.ret_privileged != 0,
+                                  0, 0, scrub);
+      }
       const auto window = resolve_return_region_window(
           kobj, caller_via, K::LEDGER_DISPATCH, caller_object);
       A::set_region_window(context, window.base, window.limit);
@@ -200,8 +230,12 @@ template <class K, class KObj>
         if constexpr (requires { A::set_unprivileged_resume_metadata(*frame, entry.ret_sp, A::trusted_stack_top(), scrub); }) {
           A::set_unprivileged_resume_metadata(*frame, entry.ret_sp, A::trusted_stack_top(), scrub);
         }
-        if constexpr (requires { A::switch_caller_protection(caller_object); }) {
-          A::switch_caller_protection(caller_object);
+        if constexpr (arch_has_core_num<A>) {
+          A::switch_caller_protection(caller_object, core);
+        } else {
+          if constexpr (requires { A::switch_caller_protection(caller_object); }) {
+            A::switch_caller_protection(caller_object);
+          }
         }
       }
     }
@@ -213,7 +247,7 @@ template <class K, class KObj>
     const bool is_call = via == K::LEDGER_CALL || via == K::LEDGER_DESCRIPTOR_CALL;
     if (is_call && thread.call_stack.call_count == 0)
       return false;
-    header_pop_of<A>(thread, context, frame, is_call, restore, scrub);
+    header_pop_of<A>(thread, context, frame, is_call, restore, scrub, core);
     if (restore) {
       const uint32_t caller_object = thread.call_stack.call_count != 0
           ? thread.call_stack.current_call_object
@@ -222,14 +256,27 @@ template <class K, class KObj>
           kobj, caller_via, K::LEDGER_DISPATCH, caller_object);
       A::set_region_window(context, window.base, window.limit);
       if (!caller_is_dispatch && !A::context_privileged(context)) {
-        if constexpr (requires { A::switch_caller_protection(caller_object); })
-          A::switch_caller_protection(caller_object);
+        if constexpr (arch_has_core_num<A>) {
+          A::switch_caller_protection(caller_object, core);
+        } else {
+          if constexpr (requires { A::switch_caller_protection(caller_object); })
+            A::switch_caller_protection(caller_object);
+        }
       }
     }
     thread.call_stack.depth = depth - 1;
 #endif
   }
   return true;
+}
+
+template <class K, class KObj>
+requires (!arch_has_core_num<typename K::ARCH>)
+[[gnu::always_inline]] inline bool pop_in_place(KObj &kobj, typename K::THREAD &thread,
+                                                typename K::CONTEXT &context,
+                                                typename K::FRAME *&frame, bool restore,
+                                                bool scrub) {
+  return pop_in_place<K, KObj>(kobj, thread, context, frame, restore, scrub, no_core{});
 }
 
 // 台帳の上から count 段を落とす。最後に落とした段の caller だけが再開する。
@@ -239,12 +286,22 @@ template <class K, class KObj>
 [[gnu::always_inline]] inline bool unwind_in_place(KObj &kobj, typename K::THREAD &thread,
                                                    typename K::CONTEXT &context,
                                                    typename K::FRAME *&frame, uintptr_t count,
-                                                   bool forced_scrub) {
+                                                   bool forced_scrub,
+                                                   core_arg_t<typename K::ARCH> core) {
   const bool scrub = forced_scrub || count > 1;
   for (uintptr_t index = 0; index < count; ++index)
-    if (!pop_in_place<K>(kobj, thread, context, frame, index + 1 == count, scrub))
+    if (!pop_in_place<K, KObj>(kobj, thread, context, frame, index + 1 == count, scrub, core))
       return false;
   return true;
+}
+
+template <class K, class KObj>
+requires (!arch_has_core_num<typename K::ARCH>)
+[[gnu::always_inline]] inline bool unwind_in_place(KObj &kobj, typename K::THREAD &thread,
+                                                   typename K::CONTEXT &context,
+                                                   typename K::FRAME *&frame, uintptr_t count,
+                                                   bool forced_scrub) {
+  return unwind_in_place<K, KObj>(kobj, thread, context, frame, count, forced_scrub, no_core{});
 }
 
 // 呼び先 id (入口 entry_pc) へ入る (enter_call + do_call の後半)。ヘッダ枠方式 ARCH 専用。
@@ -258,7 +315,8 @@ template <class K, class KObj>
 template <class K, class KObj>
 [[gnu::always_inline]] inline kernel_error enter_in_place(
     K &kernel, typename K::THREAD &thread, typename K::CONTEXT &context,
-    const typename KObj::callee_view &view, uintptr_t entry_pc, uint8_t via) {
+    const typename KObj::callee_view &view, uintptr_t entry_pc, uint8_t via,
+    core_arg_t<typename K::ARCH> core) {
   using A = typename K::ARCH;
   if constexpr (arch_call_in_place<A>()) {
     auto &stack = thread.call_stack;
@@ -321,11 +379,23 @@ template <class K, class KObj>
 #endif
     A::set_priv(context, view.privileged);
     A::set_region_window(context, view.region_base, view.region_limit);
-    A::switch_callee_protection(context, frame, view.id, view.privileged);
+    if constexpr (arch_has_core_num<A>) {
+      A::switch_callee_protection(context, frame, view.id, view.privileged, core);
+    } else {
+      A::switch_callee_protection(context, frame, view.id, view.privileged);
+    }
     return kernel_error::OK;
   } else {
     return kernel_error::BAD_REQUEST;
   }
+}
+
+template <class K, class KObj>
+requires (!arch_has_core_num<typename K::ARCH>)
+[[gnu::always_inline]] inline kernel_error enter_in_place(
+    K &kernel, typename K::THREAD &thread, typename K::CONTEXT &context,
+    const typename KObj::callee_view &view, uintptr_t entry_pc, uint8_t via) {
+  return enter_in_place<K, KObj>(kernel, thread, context, view, entry_pc, via, no_core{});
 }
 
 // CALL_METHOD (4): a1 = オブジェクト ID, a2 = メソッド番号, a3 = 引数。応答は (error, 0)。
@@ -334,7 +404,8 @@ template <class K, class KObj>
 [[gnu::always_inline]] inline void call_method_in_place(K &kernel,
                                                         typename K::THREAD &thread,
                                                         typename K::CONTEXT &context,
-                                                        KObj &kobj) {
+                                                        KObj &kobj,
+                                                        core_arg_t<typename K::ARCH> core) {
   using A = typename K::ARCH;
   if constexpr (arch_call_in_place<A>()) {
     if constexpr (K::CORE_COUNT == 1) {
@@ -356,7 +427,7 @@ template <class K, class KObj>
       const uintptr_t argument = A::arg(frame, 3);
       const kernel_error entered = enter_in_place<K, KObj>(
           kernel, thread, context, kobj.view_of_row((uint32_t)id, *row), (uintptr_t)entry,
-          K::LEDGER_CALL);
+          K::LEDGER_CALL, core);
       if (entered != kernel_error::OK) {
         A::set_result(frame, (uintptr_t)(entered == kernel_error::NO_STACK
                                              ? object_error::NO_STACK
@@ -365,37 +436,46 @@ template <class K, class KObj>
       }
       A::set_method_argument(frame, argument);
     } else {
-    typename K::FRAME &frame = *context.sp;
-    const uintptr_t id = A::arg(frame, 1);
-    const uint32_t caller_id = thread.identity_object();
-    object_error error;
-    typename KObj::method_t entry;
-    const auto resolved = resolve_method_view(kobj, id, A::arg(frame, 2), caller_id, error, entry);
-    if (!resolved.found) {
-      A::set_result(frame, (uintptr_t)error, 0);
-      return;
-    }
-    // 従来は呼び先を引いたあと、台帳に入る前にここで深さを断っていた (入口の BAD_REQUEST より先)。
-    if (thread.call_stack.call_count >= KObj::MAX_DEPTH) {
-      A::set_result(frame, (uintptr_t)object_error::NO_STACK, 0);
-      return;
-    }
-    const uintptr_t argument = A::arg(frame, 3);
-    const kernel_error entered = enter_in_place<K, KObj>(
-        kernel, thread, context, resolved.view, (uintptr_t)entry,
-        K::LEDGER_CALL);
-    if (entered != kernel_error::OK) {
-      A::set_result(frame, (uintptr_t)(entered == kernel_error::NO_STACK
-                                           ? object_error::NO_STACK
-                                           : object_error::BAD_OBJECT),
-                    0);
-      return;
-    }
-    // 呼び先の引数は a0 (ARM では r0) = argument だけ。a1 以降は書かない (caller の入力のまま素通し。
-    // 呼び先は宣言した引数以外を信用しない)。
-    A::set_method_argument(frame, argument);
+      typename K::FRAME &frame = *context.sp;
+      const uintptr_t id = A::arg(frame, 1);
+      const uint32_t caller_id = thread.identity_object();
+      object_error error;
+      typename KObj::method_t entry;
+      const auto resolved = resolve_method_view(kobj, id, A::arg(frame, 2), caller_id, error, entry);
+      if (!resolved.found) {
+        A::set_result(frame, (uintptr_t)error, 0);
+        return;
+      }
+      // 従来は呼び先を引いたあと、台帳に入る前にここで深さを断っていた (入口の BAD_REQUEST より先)。
+      if (thread.call_stack.call_count >= KObj::MAX_DEPTH) {
+        A::set_result(frame, (uintptr_t)object_error::NO_STACK, 0);
+        return;
+      }
+      const uintptr_t argument = A::arg(frame, 3);
+      const kernel_error entered = enter_in_place<K, KObj>(
+          kernel, thread, context, resolved.view, (uintptr_t)entry,
+          K::LEDGER_CALL, core);
+      if (entered != kernel_error::OK) {
+        A::set_result(frame, (uintptr_t)(entered == kernel_error::NO_STACK
+                                             ? object_error::NO_STACK
+                                             : object_error::BAD_OBJECT),
+                      0);
+        return;
+      }
+      // 呼び先の引数は a0 (ARM では r0) = argument だけ。a1 以降は書かない (caller の入力のまま素通し。
+      // 呼び先は宣言した引数以外を信用しない)。
+      A::set_method_argument(frame, argument);
     }
   }
+}
+
+template <class K, class KObj>
+requires (!arch_has_core_num<typename K::ARCH>)
+[[gnu::always_inline]] inline void call_method_in_place(K &kernel,
+                                                        typename K::THREAD &thread,
+                                                        typename K::CONTEXT &context,
+                                                        KObj &kobj) {
+  call_method_in_place<K, KObj>(kernel, thread, context, kobj, no_core{});
 }
 
 // CALL_METHOD_DESCRIPTOR (33): a1 = 記述子の index, a2..a7 = 呼び先の引数 6 個 (a0..a5 へ渡る)。
@@ -407,7 +487,8 @@ template <class K, class KObj>
 [[gnu::always_inline]] inline void call_descriptor_in_place(K &kernel,
                                                             typename K::THREAD &thread,
                                                             typename K::CONTEXT &context,
-                                                            KObj &kobj) {
+                                                            KObj &kobj,
+                                                            core_arg_t<typename K::ARCH> core) {
   using A = typename K::ARCH;
   if constexpr (arch_call_in_place<A>()) {
     typename K::FRAME &frame = *context.sp;
@@ -475,7 +556,7 @@ template <class K, class KObj>
 
     // 5. 読んだ値から入場の形を作る (呼び先の行を引かない)。
     const kernel_error entered = enter_in_place<K, KObj>(
-        kernel, thread, context, view, entry_pc, K::LEDGER_DESCRIPTOR_CALL);
+        kernel, thread, context, view, entry_pc, K::LEDGER_DESCRIPTOR_CALL, core);
 
     if (entered != kernel_error::OK) {
       A::set_result(frame, (uintptr_t)(entered == kernel_error::NO_STACK
@@ -491,6 +572,15 @@ template <class K, class KObj>
   }
 }
 
+template <class K, class KObj>
+requires (!arch_has_core_num<typename K::ARCH>)
+[[gnu::always_inline]] inline void call_descriptor_in_place(K &kernel,
+                                                            typename K::THREAD &thread,
+                                                            typename K::CONTEXT &context,
+                                                            KObj &kobj) {
+  call_descriptor_in_place<K, KObj>(kernel, thread, context, kobj, no_core{});
+}
+
 // EXIT_METHOD (2, Forward == false) / FORWARD_CHILD_EXIT (27, Forward == true): 戻り先の絶対深さ
 // d を検証して current_depth - d 段を落とす。a1 = d, a2 = value, a3 = error。FORWARD = kobj へ回す
 // (スレッドの最外のメソッドが戻る場合 = スレッドの終わり)。
@@ -500,7 +590,8 @@ template <class K, class KObj>
 // UNWIND_REJECTED + kernel_error を返す。
 template <class K, class KObj, bool Forward>
 [[gnu::always_inline]] inline status exit_in_place(K &kernel, KObj &kobj, typename K::THREAD &thread,
-                                                   typename K::CONTEXT &context) {
+                                                   typename K::CONTEXT &context,
+                                                   core_arg_t<typename K::ARCH> core) {
   using A = typename K::ARCH;
   if constexpr (arch_call_in_place<A>()) {
     typename K::FRAME *frame = context.sp;
@@ -539,13 +630,20 @@ template <class K, class KObj, bool Forward>
     const uintptr_t value = A::arg(*frame, 2);
     const uintptr_t error = A::arg(*frame, 3);
     // FORWARD_CHILD_EXIT は親ハンドラが子を取り上げて戻す巻き戻しなので、1 段でも消去の目印。
-    if (!unwind_in_place<K, KObj>(kobj, thread, context, frame, count, Forward))
+    if (!unwind_in_place<K, KObj>(kobj, thread, context, frame, count, Forward, core))
       return status::CORRUPT;
     A::set_result(*frame, error, value);
     return status::DONE;
   } else {
     return status::FORWARD;
   }
+}
+
+template <class K, class KObj, bool Forward>
+requires (!arch_has_core_num<typename K::ARCH>)
+[[gnu::always_inline]] inline status exit_in_place(K &kernel, KObj &kobj, typename K::THREAD &thread,
+                                                   typename K::CONTEXT &context) {
+  return exit_in_place<K, KObj, Forward>(kernel, kobj, thread, context, no_core{});
 }
 
 } // namespace native
