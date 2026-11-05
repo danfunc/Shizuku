@@ -12,6 +12,12 @@
 #define SHIZUKU_HOT
 #endif
 
+// ★ARMv8-M (RP2350) は SVC 経路を SRAM に置くのが既定。外すときは -DSHIZUKU_SVC_IN_RAM=0。
+//   (armv8m_ctx.S にも同じ既定がある。確認: .handoff/svc-boundary-20261103/svc-sram-20261105/check_svc_in_sram.py)
+#if defined(__ARM_ARCH_8M_MAIN__) && !defined(SHIZUKU_SVC_IN_RAM)
+#define SHIZUKU_SVC_IN_RAM 1
+#endif
+
 #if defined(SHIZUKU_SVC_IN_RAM) && SHIZUKU_SVC_IN_RAM && defined(__ARM_ARCH_8M_MAIN__)
 #define SHIZUKU_SVC_RAM __attribute__((section(".time_critical.shizuku_svc")))
 #else

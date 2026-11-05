@@ -6,6 +6,7 @@
 #include "shizuku/concepts/arch.hpp"
 #include "shizuku/kernel_abi.hpp"
 #include "shizuku/hot.hpp"
+#include "shizuku/freestanding_mem.hpp"
 #include "shizuku/armv8m_abi.hpp"
 #include "shizuku/core_num.hpp"
 
@@ -755,9 +756,10 @@ private:
     if (bytes != sizeof(exception_frame_t)) {
       // Materialize any lazy FP frame before relocating its return-value slots.
       FloatingPointState::materialize();
-      __builtin_memmove(reinterpret_cast<uint8_t *>(next) + sizeof(exception_frame_t),
-                        reinterpret_cast<uint8_t *>(context.sp) + sizeof(exception_frame_t),
-                        bytes - sizeof(exception_frame_t));
+      // libc の memmove (flash) を SVC 経路から呼ばない。インラインの重なり可複写を使う。
+      shizuku_memmove(reinterpret_cast<uint8_t *>(next) + sizeof(exception_frame_t),
+                      reinterpret_cast<uint8_t *>(context.sp) + sizeof(exception_frame_t),
+                      bytes - sizeof(exception_frame_t));
     }
     zero_exception_frame(*next);
     next->pc = (uint32_t)pc;

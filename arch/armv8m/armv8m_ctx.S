@@ -7,6 +7,10 @@
 .fpu fpv5-sp-d16   // .cpu 指定は FPU を含まないため、vstmia/vldmia 用に明示する
 #endif
 .thumb
+// ARMv8-M は SVC 経路を SRAM に置くのが既定 (internal_headers/shizuku/hot.hpp と同じ規則)。
+#if defined(__ARM_ARCH_8M_MAIN__) && !defined(SHIZUKU_SVC_IN_RAM)
+#define SHIZUKU_SVC_IN_RAM 1
+#endif
 #ifndef SHIZUKU_RP2350_SVC_BREAKDOWN
 #define SHIZUKU_RP2350_SVC_BREAKDOWN 0
 #endif

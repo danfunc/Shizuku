@@ -994,10 +994,12 @@ template <> SHIZUKU_SVC_RAM void KERNEL::pendsv_dispatch(KERNEL::CONTEXT *contex
         A::s_resume_scrub[core_idx] = false;
         context->r4 = context->r5 = context->r6 = context->r7 = 0;
         context->r8 = context->r9 = context->r10 = context->r11 = 0;
-        for (auto &word : context->fp) word = 0;
+        // ★空 asm は、GCC がこの零詰めループを libc の memset (flash) 呼出しへ書き戻すのを止める。
+        //   PendSV は SVC 経路なので SRAM で閉じる必要がある。消さないこと (freestanding_mem.hpp と同じ)。
+        for (auto &word : context->fp) { word = 0; __asm__ volatile("" ::: "memory"); }
         if ((context->exc_return & 0x10u) == 0) {
           auto *fp = reinterpret_cast<uint32_t *>(context->sp + 1);
-          for (unsigned i = 0; i < 18; ++i) fp[i] = 0;
+          for (unsigned i = 0; i < 18; ++i) { fp[i] = 0; __asm__ volatile("" ::: "memory"); }
         }
         return true;
       }
