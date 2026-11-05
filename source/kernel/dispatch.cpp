@@ -496,7 +496,7 @@ SHIZUKU_SVC_RAM kernel_error KERNEL::do_call(KERNEL::THREAD &thread, KERNEL::CON
   // 戻り口は常にカーネルの 1 本。撃つ svc は同じでも、そこから出たときの**種別**で
   // 「プリミティブとしての巻き戻し」か「メソッドが戻った知らせ」かが決まる
   // (発行側が戻り口を選ぶ必要は無い)。
-  ARCH::set_entry(**frame, request.entry_pc, ARCH::return_stub());
+  native::set_callee_entry<ARCH>(**frame, request.entry_pc, request.callee_object);
   ARCH::set_args(**frame, request.args);
   ARCH::set_priv(*context, (request.protection & PROTECTION_UNPRIVILEGED) == 0);
   ARCH::set_region_window(*context, request.region_base, request.region_limit);

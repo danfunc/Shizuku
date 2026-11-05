@@ -179,16 +179,28 @@ shizuku_armv8m_pendsv_entry:
 //   r0 = 呼び先の戻り値 (C の return 値がそのまま乗っている)
 // ★ここでは callee-saved を信用しない。a4 の marker は syscall frame に退避され、
 //   dispatch が ledger の unwind floor へ置き換える。
+//
+// ★stub image (shizuku_armv8m_stub_image_begin..end): call_entry / return_stub / float / double と、
+//   失敗口の literal を 1 本の連続領域にした位置独立のコード。外へ出る参照は
+//   (a) image 内の pc 相対 (adr.w / b / ldr literal) と (b) literal の絶対アドレス (カーネルの
+//   shizuku_return_stub_failed、コピーしても変わらない) だけ。だから SRAM へそのままコピーして
+//   「そのオブジェクト専用の stub」にできる (ARCH::install_object_stubs)。flash 上の本体は
+//   従来どおり静的オブジェクトの既定の stub。コピー先は呼び先が U で実行する窓の中 (W^X) に置くこと。
 // ---------------------------------------------------------------------------
+.balign 4
+.global shizuku_armv8m_stub_image_begin
+.type shizuku_armv8m_stub_image_begin, %object
+shizuku_armv8m_stub_image_begin:
 .thumb_func
 .global shizuku_armv8m_call_entry
-.align 2
 .type shizuku_armv8m_call_entry, %function
 shizuku_armv8m_call_entry:
     sub   sp, sp, #8      // AAPCS fifth argument; keep SP 8-byte aligned
     str   r12, [sp]
     mov   r12, lr         // kernel supplied the actual entry in LR
-    ldr   lr, =shizuku_armv8m_return_stub
+    // 戻り口は同じ image 内の return_stub (pc 相対。+1 は Thumb ビット)。ldr = の literal だと
+    // image の外 (flash) を読んでしまい、コピーした意味がなくなる。
+    adr.w lr, .Lstub_return_stub + 1
     bx    r12
 .size shizuku_armv8m_call_entry, .-shizuku_armv8m_call_entry
 
@@ -197,6 +209,7 @@ shizuku_armv8m_call_entry:
 .align 2
 .type shizuku_armv8m_return_stub, %function
 shizuku_armv8m_return_stub:
+.Lstub_return_stub:
     mov   r2, r0        // a2 = 戻り値
     mrs   r3, control
     tst   r3, #4
@@ -236,7 +249,10 @@ shizuku_armv8m_return_stub:
     movs  r3, #0        // keep the RETURN error argument clear; marker lives in r12
     movs  r0, #2        // a0 = RETURN (kernel_abi.hpp と static_assert で両縛り)
     svc   0
-    b     shizuku_return_stub_failed // 戻ってきた = 巻き戻しが弾かれた
+    // 戻ってきた = 巻き戻しが弾かれた。r0/r1 (error, depth) はそのまま渡す。b だと到達距離の外 (コピー先から
+    // flash のカーネルまで) になり得るので、image 内の literal 経由で絶対アドレスへ飛ぶ (r2 は空いている)。
+    ldr   r2, .Lstub_failed_target
+    bx    r2
 
 // FP results occupy s0 or s0/s1. All other lower registers and FPSCR are
 // cleared after the ordinary C++ body's AAPCS epilogue has completed.
@@ -280,6 +296,13 @@ shizuku_armv8m_return_double_stub:
     movs  r2, #0
     b     .Lreturn_exit
 .size shizuku_armv8m_return_double_stub, .-shizuku_armv8m_return_double_stub
+
+.balign 4
+.Lstub_failed_target:
+    .word shizuku_return_stub_failed
+.global shizuku_armv8m_stub_image_end
+.type shizuku_armv8m_stub_image_end, %object
+shizuku_armv8m_stub_image_end:
 
 // ---------------------------------------------------------------------------
 // DebugMonitor の入口。フォールトとまったく同じ形にしてある —

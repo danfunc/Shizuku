@@ -69,6 +69,46 @@ class scoped_code_window {
   Sync sync_;
 };
 
+// 全 U 共通の flash 実行窓 (region 0) を、レキシカルな計測区間の間だけ外す。外している間に U が flash を
+// 実行/読出しすると MemManage になる (特権は PRIVDEFENA の既定地図で触れ、影響を受けない)。つまり「その区間の
+// U の命令フェッチは SRAM だけ」をハードウェアに強制させ、XIP カウンタと合わせて証拠にする。MPU は core ごと
+// なので、P / C が走る (= この) core にだけ効く。元の (RBAR, RLAR) を覚えて、抜けるときに書き戻す。
+template <class Arch, class Sync>
+class scoped_region_off {
+ public:
+  scoped_region_off(uint32_t index, Sync sync) : index_(index), sync_(sync) {
+    if constexpr (requires(uint32_t &a, uint32_t &b) {
+                    Arch::region_get(0u, a, b);
+                    Arch::region_restore(0u, a, b);
+                    Arch::region_disable(0u);
+                  }) {
+      Arch::region_get(index_, rbar_, rlar_);
+      if ((rlar_ & 1u) != 0) {  // 有効だったときだけ外す
+        Arch::region_disable(index_);
+        sync_();
+        active_ = true;
+      }
+    }
+  }
+  scoped_region_off(const scoped_region_off &) = delete;
+  scoped_region_off &operator=(const scoped_region_off &) = delete;
+  ~scoped_region_off() {
+    if constexpr (requires(uint32_t &a, uint32_t &b) { Arch::region_restore(0u, a, b); }) {
+      if (active_) {
+        Arch::region_restore(index_, rbar_, rlar_);
+        sync_();
+      }
+    }
+  }
+  bool active() const { return active_; }
+
+ private:
+  uint32_t index_;
+  Sync sync_;
+  uint32_t rbar_ = 0, rlar_ = 0;
+  bool active_ = false;
+};
+
 enum class verdict : uint32_t {
   ok = 0,
   empty_window,

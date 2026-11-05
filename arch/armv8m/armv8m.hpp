@@ -29,6 +29,10 @@ struct shizuku_armv8m_context;
 void shizuku_fault_dispatch(shizuku_armv8m_context *context);
 // 呼び先が普通に return したときの戻り口 (RETURN プリミティブを 1 段ぶん発行)。
 void shizuku_armv8m_return_stub();
+// call_entry / return_stub / float / double と失敗口 literal を収めた、位置独立の連続領域
+// (armv8m_ctx.S)。SRAM へコピーするとオブジェクト専用の stub になる。
+extern const unsigned char shizuku_armv8m_stub_image_begin[];
+extern const unsigned char shizuku_armv8m_stub_image_end[];
 // スレッドスタック (PSP) へ移って entry を呼ぶ。戻らない。
 void shizuku_armv8m_debugmon_entry();
 [[noreturn]] void shizuku_armv8m_enter_thread_mode(uintptr_t stack_top,
@@ -357,6 +361,18 @@ public:
     ppb::mpu->rnr = index;
     ppb::mpu->rlar = 0;
   }
+  // region の生の (RBAR, RLAR) を読む / 書き戻す。一時的に region を外して、あとで元の値へ戻す用
+  // (u_cost の SRAM-only 計測が、全 U 共通の flash 実行窓 region 0 を測る間だけ外す)。
+  static void region_get(uint32_t index, uint32_t &rbar, uint32_t &rlar) {
+    ppb::mpu->rnr = index;
+    rbar = ppb::mpu->rbar;
+    rlar = ppb::mpu->rlar;
+  }
+  static void region_restore(uint32_t index, uint32_t rbar, uint32_t rlar) {
+    ppb::mpu->rnr = index;
+    ppb::mpu->rbar = rbar;
+    ppb::mpu->rlar = rlar;
+  }
   // attr0 = 通常メモリ (書き戻し), attr1 = 通常メモリ (キャッシュしない), attr2 = Device-nGnRE
   static void protection_enable() {
     *ppb::mpu_mair0 = 0xFFu | (0x44u << 8) | (0x04u << 16);
@@ -565,6 +581,77 @@ public:
   static constexpr size_t kMaxObjectWindows = 72;  // OBJECT_COUNT (configs/kit.bzl) 以上にする
   static inline object_protection_window s_object_windows[kMaxObjectWindows] = {};
   static inline uint32_t s_object_window_seq[kMaxObjectWindows] = {};
+
+  // ---- オブジェクトごとの U 側 stub (call_entry) --------------------------------
+  // 呼び先オブジェクトが U で実行する call_entry を、既定の flash 版ではなく、そのオブジェクト専用の
+  // SRAM 上の複製へ向けられる。登録のないオブジェクトは従来どおり flash の call_entry (初期値)。
+  // return_stub のアドレスはカーネルは持たない: call_entry が同じ image 内の return_stub を自分で lr に置く
+  // (戻りは RETURN_STUB_MARKER つきの svc で検出する。stub のアドレスでは判定しない)。
+  // 添字は id & (kStubSlots-1): 範囲検査の枝を hot path から外すため 2 の冪。id < kMaxObjectWindows
+  // (= OBJECT_COUNT 以下) が前提で、登録も同じ範囲にしか受け付けないので別名衝突は起きない。
+  // 表はカーネルの SRAM にあり U からは見えない。登録は特権の setup だけが、そのオブジェクトの走る前に行う。
+  static constexpr uint32_t kStubSlots = 128;
+  static_assert(kMaxObjectWindows <= kStubSlots);
+  struct entry_slot {
+    void (*call_entry)() = &shizuku_armv8m_call_entry;
+  };
+  static inline entry_slot s_entry_slots[kStubSlots] = {};
+
+  // set_entry の「lr == return_stub()」枝と同じ書出し (pc = call_entry, lr = 本当の入口) を、呼び先 id の
+  // 専用 call_entry で行う。呼び先を知っている呼び出し側 (enter_in_place / do_call) が使う。
+  template <class Frame>
+  [[gnu::always_inline]] static inline void set_entry_for_object(Frame &frame, uintptr_t pc,
+                                                                 uint32_t callee_id) {
+    frame.pc = (uint32_t)(uintptr_t)s_entry_slots[callee_id & (kStubSlots - 1u)].call_entry;
+    frame.lr = (uint32_t)pc;
+  }
+  static uintptr_t object_call_entry(uint32_t object_id) {
+    return (uintptr_t)s_entry_slots[object_id & (kStubSlots - 1u)].call_entry;
+  }
+  // image の大きさ (コピー先が最低限持つバイト数) と、image 内の call_entry / return_stub の位置。
+  static size_t stub_image_bytes() {
+    return (size_t)(shizuku_armv8m_stub_image_end - shizuku_armv8m_stub_image_begin);
+  }
+  static size_t stub_image_call_entry_offset() {
+    return (size_t)(((uintptr_t)&shizuku_armv8m_call_entry & ~(uintptr_t)1u) -
+                    (uintptr_t)shizuku_armv8m_stub_image_begin);
+  }
+  static size_t stub_image_return_stub_offset() {
+    return (size_t)(((uintptr_t)&shizuku_armv8m_return_stub & ~(uintptr_t)1u) -
+                    (uintptr_t)shizuku_armv8m_stub_image_begin);
+  }
+  // image を dest (4B 整列・bytes >= stub_image_bytes()) へ複製し、object_id の call_entry をそこへ向ける。
+  // ★W^X: 呼び出し側は、dest が U から書けず (RO+X の窓の中)、書込み中はその窓がまだ開いていないことを
+  //   保証する。ここでの書込みは特権で、終わったら dsb; isb で命令フェッチから見えるようにする。
+  //   dest が SRAM であること・U の data/stack 窓と重ならないことも呼び出し側の検査 (selftest は
+  //   u_cost_sram::check_code_window)。成功で true。
+  //   コピー (copy_stub_image) と登録 (register_object_stubs) は分けて呼べる: RO の窓へ移ってからでも
+  //   (コピーは窓を開ける前に済ませておき) 登録だけをあとから切り替えられる。
+  static bool copy_stub_image(void *dest, size_t bytes) {
+    if (dest == nullptr || ((uintptr_t)dest & 3u) != 0 || bytes < stub_image_bytes())
+      return false;
+    auto *out = static_cast<volatile unsigned char *>(dest);
+    const size_t size = stub_image_bytes();
+    for (size_t i = 0; i < size; ++i) out[i] = shizuku_armv8m_stub_image_begin[i];
+    asm volatile("dsb\nisb" ::: "memory");
+    return true;
+  }
+  // dest には copy_stub_image 済みの image が要る。以後、object_id への呼びはその call_entry を使う。
+  static bool register_object_stubs(uint32_t object_id, const void *dest) {
+    if (object_id >= kMaxObjectWindows || dest == nullptr || ((uintptr_t)dest & 3u) != 0)
+      return false;
+    s_entry_slots[object_id].call_entry = reinterpret_cast<void (*)()>(
+        ((uintptr_t)dest + stub_image_call_entry_offset()) | 1u);
+    return true;
+  }
+  static bool install_object_stubs(uint32_t object_id, void *dest, size_t bytes) {
+    if (object_id >= kMaxObjectWindows) return false;
+    return copy_stub_image(dest, bytes) && register_object_stubs(object_id, dest);
+  }
+  static void uninstall_object_stubs(uint32_t object_id) {
+    if (object_id < kMaxObjectWindows)
+      s_entry_slots[object_id].call_entry = &shizuku_armv8m_call_entry;
+  }
   // MPU は core ごとに持つので、「今 region 3/4 に張ってある窓の持ち主」も core ごとに覚える。
   static inline uint32_t s_programmed_object[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
   static inline uint32_t s_programmed_object_seq[2] = {};

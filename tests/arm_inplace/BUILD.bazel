@@ -40,6 +40,14 @@ cc_test(
     deps = ["//:internal_headers", "//arch/armv8m:headers"],
 )
 
+cc_test(
+    name = "armv8m_object_stub_test",
+    srcs = ["armv8m_object_stub_test.cpp"],
+    copts = ["-std=c++20"],
+    defines = ["SHIZUKU_RP2350_SVC_BREAKDOWN=0"],
+    deps = ["//:internal_headers", "//arch/armv8m:headers"],
+)
+
 [
     cc_library(
         name = "r7_frame_probe_" + opt,

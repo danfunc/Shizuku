@@ -424,6 +424,20 @@ requires (!arch_has_core_num<typename K::ARCH>)
   return unwind_in_place<K, KObj>(kobj, thread, context, frame, count, forced_scrub, no_core{});
 }
 
+// 呼び先の入口フレームに「入口 entry_pc へ入り、普通に return すると戻り口へ落ちる」形を書く。
+// ARCH が呼び先オブジェクト専用の U 側 stub を持てる (ARM: SRAM だけで U を走らせるため) ときは
+// それを使い、持たない ARCH は従来どおりカーネルの戻り口 1 本 (return_stub) を使う。
+template <class A, class Frame>
+[[gnu::always_inline]] inline void set_callee_entry(Frame &frame, uintptr_t entry_pc,
+                                                    uint32_t callee_id) {
+  if constexpr (requires { A::set_entry_for_object(frame, entry_pc, callee_id); }) {
+    A::set_entry_for_object(frame, entry_pc, callee_id);
+  } else {
+    (void)callee_id;
+    A::set_entry(frame, entry_pc, A::return_stub());
+  }
+}
+
 // 呼び先 id (入口 entry_pc) へ入る (enter_call + do_call の後半)。ヘッダ枠方式 ARCH 専用。
 //   台帳段を via で積み、戻りの床 (unwind floor) を積む前の深さに置く。呼び先の入口フレームは
 //   caller の trap フレームそのもので、入口・戻り口・特権・窓を書き換える (引数は呼び出し側)。
@@ -479,7 +493,7 @@ template <class K, class KObj>
       record->generation = view.instance_generation;
       stack.call_count = stack.call_count + 1;
       stack.call_top_rec = reinterpret_cast<uintptr_t>(record);
-      A::set_entry(frame, entry_pc, A::return_stub());
+      set_callee_entry<A>(frame, entry_pc, view.id);
     }
 #else
     if (depth + 1u >= thread.ledger_capacity || !call_sp_has_room_of<A>(context, return_sp, thread))
@@ -506,7 +520,7 @@ template <class K, class KObj>
     stack.depth = depth + 1;
     stack.call_count = stack.call_count + 1;
     stack.call_top = depth + 1;
-    A::set_entry(frame, entry_pc, A::return_stub());
+    set_callee_entry<A>(frame, entry_pc, view.id);
 #else
     auto *header = A::call_header_slot(context);
     header->prev = stack.top;
@@ -531,7 +545,7 @@ template <class K, class KObj>
     stack.current_call_object = view.id;
     stack.current_call_generation = view.instance_generation;
     stack.call_count = count + 1;
-    A::set_entry(frame, entry_pc, A::return_stub());
+    set_callee_entry<A>(frame, entry_pc, view.id);
 #endif
     A::set_priv(context, view.privileged);
     A::set_region_window(context, view.region_base, view.region_limit);

@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <cstdio>
 #include "shizuku/kernel.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/object_ids.hpp"
@@ -50,6 +51,9 @@ uintptr_t u_cost_child_worker(uintptr_t arg0, uintptr_t arg1, uintptr_t arg2, ui
 void u_cost_code_begin();
 void u_cost_code_end_pad();
 extern const char u_cost_code_end[];
+// 窓の中のオブジェクト専用 stub 用プール (u_cost_stub_pool_holder が確保する)。
+extern unsigned char u_cost_stub_pool_begin[];
+extern unsigned char u_cost_stub_pool_end[];
 void u_cost_probe_code_access();
 void u_cost_probe_data_access();
 void u_cost_denied_code();
@@ -235,6 +239,22 @@ SHIZUKU_U_COST_CODE uintptr_t u_cost_parent_worker_fp(uintptr_t cmd, uintptr_t, 
   return rounds;
 }
 
+// オブジェクト専用の U 側 stub (call_entry / return_stub の複製) を置く SRAM コード領域のプール。
+// 窓の中に居るので、窓が開いている間は U から RO+X、窓が閉じている setup 中だけ特権が書ける (W^X)。
+// P / C の本体より後ろ (窓の末尾) に置くのは、P / C の配置とループのアラインを従来から動かさないため。
+// 先に literal pool を吐いてから領域を取り、手前の関数の literal の到達距離を伸ばさない。
+SHIZUKU_U_COST_CODE __attribute__((naked)) void u_cost_stub_pool_holder() {
+  asm volatile(
+      ".syntax unified\n.thumb\n"
+      ".ltorg\n"
+      ".balign 32\n"
+      ".global u_cost_stub_pool_begin\n"
+      "u_cost_stub_pool_begin:\n"
+      ".space 512, 0\n"
+      ".global u_cost_stub_pool_end\n"
+      "u_cost_stub_pool_end:\n");
+}
+
 // 最後のliteral poolを窓内にflushしてから32B境界へalignし、window終端を置く。
 SHIZUKU_U_COST_CODE __attribute__((naked)) void u_cost_code_end_pad() {
   asm volatile(".ltorg\n.balign 32\n.global u_cost_code_end\nu_cost_code_end:\n");
@@ -249,6 +269,8 @@ uintptr_t u_cost_child_worker(uintptr_t, uintptr_t, uintptr_t, uintptr_t) { retu
 void u_cost_code_begin() {}
 void u_cost_code_end_pad() {}
 const char u_cost_code_end[1] = {};
+unsigned char u_cost_stub_pool_begin[1] = {};
+unsigned char u_cost_stub_pool_end[1] = {};
 }
 #endif
 
@@ -268,7 +290,7 @@ struct exception_window {
   KERNEL::exception_counts before, after;
 };
 struct exception_windows {
-  static inline exception_window windows[8] = {};
+  static inline exception_window windows[16] = {};  // 0..7 既存の計測、8..15 は [COST-SRAM]
   static void begin(unsigned i) { windows[i].before = kernel_instance.exception_snapshot(); }
   static void end(unsigned i) { windows[i].after = kernel_instance.exception_snapshot(); }
   // 飽和 (UINT32_MAX) や巻き戻りは差を信用しない。
@@ -300,7 +322,7 @@ struct route_window {
   unsigned before_core, after_core;
 };
 template<bool Enabled> struct route_windows {
-  static inline route_window windows[8] = {};
+  static inline route_window windows[16] = {};  // 0..7 既存の計測、8..15 は [COST-SRAM]
   template<class A> static void begin(unsigned i) {
     exception_windows::begin(i); // 例外カウンタは probe 設定と無関係に常時
     if constexpr (Enabled) {
@@ -428,9 +450,51 @@ void rp2350_u_cost() {
     const u_cost_sram::range code_window{
         u_cost_sram::code_address(reinterpret_cast<uintptr_t>(&u_cost_code_begin)),
         reinterpret_cast<uintptr_t>(u_cost_code_end)};
+    // 1a. オブジェクト専用 stub の複製を、窓の中のプールへ実行時に割り当てて書く。書込みは特権で、まだ
+    //     この窓 (RO+X) は開いていない: 書き終えてから窓を開けるので、U から見える間は書換え不能。
+    //     登録 (カーネルがその呼び先に使う call_entry の切替え) は、既存の計測が済んだ後に行う。
+    //     ここでは何も切り替えないので、[COST-CORRECTED] / [COST-FP] は従来の flash の stub のまま測れる。
+    struct stub_pool_t {
+      uintptr_t next, end;
+      void *alloc(size_t bytes) {  // 32B 境界で切る (窓の粒度。P と C が同じ line を共有しない)
+        const uintptr_t size = (bytes + 31u) & ~uintptr_t(31);
+        if (next + size > end) return nullptr;
+        void *out = reinterpret_cast<void *>(next);
+        next += size;
+        return out;
+      }
+    } stub_pool{reinterpret_cast<uintptr_t>(u_cost_stub_pool_begin),
+                reinterpret_cast<uintptr_t>(u_cost_stub_pool_end)};
+    void *stub_image_p = nullptr;
+    void *stub_image_c = nullptr;
+    bool stub_images_ok = false;
+    if constexpr (requires { ARCH::copy_stub_image(nullptr, 0u); }) {
+      stub_image_p = stub_pool.alloc(ARCH::stub_image_bytes());
+      stub_image_c = stub_pool.alloc(ARCH::stub_image_bytes());
+      stub_images_ok = stub_image_p != nullptr && stub_image_c != nullptr &&
+                       ARCH::copy_stub_image(stub_image_p, ARCH::stub_image_bytes()) &&
+                       ARCH::copy_stub_image(stub_image_c, ARCH::stub_image_bytes());
+      BOARD::diag_printf("[UCODE] stub_pool=%08lx..%08lx image_bytes=%lu p=%08lx c=%08lx ok=%u\n",
+                         (unsigned long)reinterpret_cast<uintptr_t>(u_cost_stub_pool_begin),
+                         (unsigned long)reinterpret_cast<uintptr_t>(u_cost_stub_pool_end),
+                         (unsigned long)ARCH::stub_image_bytes(),
+                         (unsigned long)reinterpret_cast<uintptr_t>(stub_image_p),
+                         (unsigned long)reinterpret_cast<uintptr_t>(stub_image_c),
+                         (unsigned)stub_images_ok);
+      drain_diag_if_supported<BOARD>();
+      if (!stub_images_ok) BOARD::panic("rp2350_u_cost: cannot place per-object stub images");
+    }
     {
+      // 窓の中に居なければならない関数/stub。stub の image も entries に入れて窓内を検査する。
       const uintptr_t entries[] = {reinterpret_cast<uintptr_t>(&u_cost_parent_worker),
-                                   reinterpret_cast<uintptr_t>(&u_cost_child_worker)};
+                                   reinterpret_cast<uintptr_t>(&u_cost_child_worker),
+                                   stub_image_p ? reinterpret_cast<uintptr_t>(stub_image_p)
+                                                : reinterpret_cast<uintptr_t>(&u_cost_child_worker),
+                                   stub_image_c ? reinterpret_cast<uintptr_t>(stub_image_c)
+                                                : reinterpret_cast<uintptr_t>(&u_cost_child_worker)};
+      if (stub_images_ok && (stub_pool.end > code_window.end ||
+                             stub_pool.next > stub_pool.end))
+        BOARD::panic("rp2350_u_cost: stub pool is not inside the U code window");
       const u_cost_sram::range protected_ranges[] = {
           {reinterpret_cast<uintptr_t>(u_cost_p_data_pool),
            reinterpret_cast<uintptr_t>(u_cost_p_data_pool) + sizeof(u_cost_p_data_pool)},
@@ -941,7 +1005,19 @@ void rp2350_u_cost() {
 #endif
     };
 
-    auto run_fp_condition = [&](uint32_t want_fpca, uint32_t cmd_base) {
+    // sram=true は [COST-SRAM]: 同じ計測を、P / C が専用の SRAM stub を使い、region 0 (flash 実行窓) を
+    // 外した状態で行う。区間ごとに XIP カウンタと例外カウンタ (systick など) も読む。sram=false の出力・値・
+    // 呼び出し順は従来と同じ ([XIP] 等は出さない)。
+    auto run_fp_condition = [&](uint32_t want_fpca, uint32_t cmd_base, bool sram = false) {
+      const char *const tag = sram ? "COST-SRAM" : "COST-FP";
+      const unsigned rw = 8u + want_fpca * 4u;  // route_measure の窓 (sram 時のみ)
+      xip_snapshot xip_b[4] = {}, xip_a[4] = {};
+      auto xip_begin = [&](unsigned k) {
+        if (sram) { route_measure::begin<ARCH>(rw + k); xip_b[k] = xip_cost_start(); }
+      };
+      auto xip_end = [&](unsigned k) {
+        if (sram) { xip_a[k] = xip_cost_snapshot(); route_measure::end<ARCH>(rw + k); }
+      };
       u_cost_fp_invariants_input_t fp_inv{};
       fp_inv.expected_fpca = want_fpca;
       auto fpca_of = [](uint32_t control) -> uint32_t { return (control >> 2) & 1u; };
@@ -954,15 +1030,19 @@ void rp2350_u_cost() {
       const auto fp_warm_meth_res = call_p(0);
 
       fp_inv.priv_meth_base = set_boot_fpca(want_fpca);
+      xip_begin(0);
       const uint32_t t_base_meth_start = cycles_now<ARCH>();
       const auto fp_base_meth_res = call_p(2);
       const uint32_t t_base_meth_end = cycles_now<ARCH>();
+      xip_end(0);
       const uint32_t fp_base_meth_cycles = t_base_meth_end - t_base_meth_start;
 
       fp_inv.priv_meth_meas = set_boot_fpca(want_fpca);
+      xip_begin(1);
       const uint32_t t_meth_start = cycles_now<ARCH>();
       const auto fp_meth_res = call_p(3);
       const uint32_t t_meth_end = cycles_now<ARCH>();
+      xip_end(1);
       const uint32_t fp_meth_cycles = t_meth_end - t_meth_start;
 
       set_boot_fpca(want_fpca);
@@ -972,15 +1052,19 @@ void rp2350_u_cost() {
       const auto fp_warm_desc_res = call_p(1);
 
       fp_inv.priv_desc_base = set_boot_fpca(want_fpca);
+      xip_begin(2);
       const uint32_t t_base_desc_start = cycles_now<ARCH>();
       const auto fp_base_desc_res = call_p(5);
       const uint32_t t_base_desc_end = cycles_now<ARCH>();
+      xip_end(2);
       const uint32_t fp_base_desc_cycles = t_base_desc_end - t_base_desc_start;
 
       fp_inv.priv_desc_meas = set_boot_fpca(want_fpca);
+      xip_begin(3);
       const uint32_t t_desc_start = cycles_now<ARCH>();
       const auto fp_desc_res = call_p(6);
       const uint32_t t_desc_end = cycles_now<ARCH>();
+      xip_end(3);
       const uint32_t fp_desc_cycles = t_desc_end - t_desc_start;
 
       set_boot_fpca(want_fpca);
@@ -1014,8 +1098,8 @@ void rp2350_u_cost() {
       const uint32_t desc_check_err = shared[53];
 
       BOARD::diag_printf(
-          "[COST-FP] caller CONTROL=0x%08lx (method, fpca=%lu) / 0x%08lx (desc, fpca=%lu) at measure-loop start, want fpca=%lu\n",
-          (unsigned long)meth_meas_ctrl_before, (unsigned long)fpca_of(meth_meas_ctrl_before),
+          "[%s] caller CONTROL=0x%08lx (method, fpca=%lu) / 0x%08lx (desc, fpca=%lu) at measure-loop start, want fpca=%lu\n",
+          tag, (unsigned long)meth_meas_ctrl_before, (unsigned long)fpca_of(meth_meas_ctrl_before),
           (unsigned long)desc_meas_ctrl_before, (unsigned long)fpca_of(desc_meas_ctrl_before),
           (unsigned long)want_fpca);
       drain_diag_if_supported<BOARD>();
@@ -1032,28 +1116,54 @@ void rp2350_u_cost() {
                                             : 0;
 
       BOARD::diag_printf(
-          "[COST-FP] %-24s fpca=%lu net mean %5lu cyc  [raw mean %lu, baseline mean %lu]\n",
-          "U->U method call (1 hop)", (unsigned long)want_fpca,
+          "[%s] %-24s fpca=%lu net mean %5lu cyc  [raw mean %lu, baseline mean %lu]\n",
+          tag, "U->U method call (1 hop)", (unsigned long)want_fpca,
           (unsigned long)fp_net_meth_mean, (unsigned long)fp_meth_raw_mean,
           (unsigned long)fp_base_meth_mean);
       drain_diag_if_supported<BOARD>();
       BOARD::diag_printf(
-          "[COST-FP] %-24s fpca=%lu net mean %5lu cyc  [raw mean %lu, baseline mean %lu]\n",
-          "U->U desc call (1 hop)", (unsigned long)want_fpca,
+          "[%s] %-24s fpca=%lu net mean %5lu cyc  [raw mean %lu, baseline mean %lu]\n",
+          tag, "U->U desc call (1 hop)", (unsigned long)want_fpca,
           (unsigned long)fp_net_desc_mean, (unsigned long)fp_desc_raw_mean,
           (unsigned long)fp_base_desc_mean);
       drain_diag_if_supported<BOARD>();
+      if (sram) {
+        // flash を取っていないことの読み方: access / hit / miss が 0 (または 2048 回のループに依らない
+        // 小さな定数) で、systick が 0 (割込みハンドラが flash を取らなかった) なら、ループ中の命令は SRAM だけ。
+        // XIP カウンタは両コア共有: もう一方のコアの flash アクセスも混ざる (その場合 access が正になる)。
+        const char *const nm = want_fpca == 0 ? "fpca=0" : "fpca=1";
+        char label[64];
+        const char *const kinds[4] = {"U-U method SRAM baseline", "U-U method SRAM",
+                                      "U-U desc SRAM baseline", "U-U desc SRAM"};
+        for (unsigned k = 0; k < 4; ++k) {
+          snprintf(label, sizeof(label), "%s %s", kinds[k], nm);
+          xip_cost_report<BOARD>(label, xip_b[k], xip_a[k]);
+          route_measure::report<BOARD>(rw + k, label);
+        }
+      }
 
       // record_fail は名前のポインタを保持するので、必ず文字列リテラルを渡す。
       const bool f0 = want_fpca == 0;
-      const char *const n_counter = f0 ? "u_cost [FP]: DWT cycle counter progressed and valid (fpca=0)"
-                                       : "u_cost [FP]: DWT cycle counter progressed and valid (fpca=1)";
-      const char *const n_readback = f0 ? "u_cost [FP]: CONTROL.FPCA readback matched 0 (priv & user before/after)"
-                                        : "u_cost [FP]: CONTROL.FPCA readback matched 1 (priv & user before/after)";
-      const char *const n_meth = f0 ? "u_cost [FP]: method call chain & error accumulation (fpca=0)"
-                                    : "u_cost [FP]: method call chain & error accumulation (fpca=1)";
-      const char *const n_desc = f0 ? "u_cost [FP]: descriptor call chain & error accumulation (fpca=0)"
-                                    : "u_cost [FP]: descriptor call chain & error accumulation (fpca=1)";
+      const char *const n_counter =
+          sram ? (f0 ? "u_cost [SRAM]: DWT cycle counter progressed and valid (fpca=0)"
+                     : "u_cost [SRAM]: DWT cycle counter progressed and valid (fpca=1)")
+               : (f0 ? "u_cost [FP]: DWT cycle counter progressed and valid (fpca=0)"
+                     : "u_cost [FP]: DWT cycle counter progressed and valid (fpca=1)");
+      const char *const n_readback =
+          sram ? (f0 ? "u_cost [SRAM]: CONTROL.FPCA readback matched 0 (priv & user before/after)"
+                     : "u_cost [SRAM]: CONTROL.FPCA readback matched 1 (priv & user before/after)")
+               : (f0 ? "u_cost [FP]: CONTROL.FPCA readback matched 0 (priv & user before/after)"
+                     : "u_cost [FP]: CONTROL.FPCA readback matched 1 (priv & user before/after)");
+      const char *const n_meth =
+          sram ? (f0 ? "u_cost [SRAM]: method call chain & error accumulation (fpca=0)"
+                     : "u_cost [SRAM]: method call chain & error accumulation (fpca=1)")
+               : (f0 ? "u_cost [FP]: method call chain & error accumulation (fpca=0)"
+                     : "u_cost [FP]: method call chain & error accumulation (fpca=1)");
+      const char *const n_desc =
+          sram ? (f0 ? "u_cost [SRAM]: descriptor call chain & error accumulation (fpca=0)"
+                     : "u_cost [SRAM]: descriptor call chain & error accumulation (fpca=1)")
+               : (f0 ? "u_cost [FP]: descriptor call chain & error accumulation (fpca=0)"
+                     : "u_cost [FP]: descriptor call chain & error accumulation (fpca=1)");
 
       const bool fp_counter_ok = counter_enabled && fp_base_meth_cycles > 0 &&
                                  fp_meth_cycles > fp_base_meth_cycles && fp_base_desc_cycles > 0 &&
@@ -1129,6 +1239,50 @@ void rp2350_u_cost() {
     shizuku_rp2350_u_cost_stage = 0xC05210u;
     run_fp_condition(1, 30);
     set_boot_fpca(default_fpca);
+
+    // =======================================================================
+    // [COST-SRAM]: 計測ループ中に U が flash から 1 命令も取らない状態の U→U 往復。
+    //   (1) P / C は専用の SRAM stub (1a で窓の中へ複製した call_entry / return_stub) を使う。
+    //   (2) 計測の間だけ region 0 (全 U 共通の flash 実行窓) を外し、U が flash を実行/読出しした
+    //       ら MemManage になるようにする = 「SRAM だけ」をハードウェアに強制させる。
+    //   (3) 区間ごとに XIP カウンタ ([XIP]) と例外カウンタ (systick 等) を読む。
+    // 登録は既存の計測がすべて済んだ後なので、[COST-CORRECTED] / [COST-FP] の値は従来と同じ stub で測れている。
+    // =======================================================================
+    if constexpr (requires { ARCH::register_object_stubs(0u, nullptr); ARCH::object_call_entry(0u); }) {
+      shizuku_rp2350_u_cost_stage = 0xC05300u;
+      const bool registered = ARCH::register_object_stubs(OBJECT_U_COST_P, stub_image_p) &&
+                              ARCH::register_object_stubs(OBJECT_U_COST_C, stub_image_c);
+      const uintptr_t ce_p = ARCH::object_call_entry(OBJECT_U_COST_P);
+      const uintptr_t ce_c = ARCH::object_call_entry(OBJECT_U_COST_C);
+      const bool stubs_in_window = registered && ce_p != ce_c &&
+                                   u_cost_sram::contains(code_window, u_cost_sram::code_address(ce_p)) &&
+                                   u_cost_sram::contains(code_window, u_cost_sram::code_address(ce_c));
+      BOARD::diag_printf("[COST-SRAM] stubs p_call_entry=%08lx c_call_entry=%08lx flash_call_entry=%08lx "
+                         "in_window=%u\n",
+                         (unsigned long)ce_p, (unsigned long)ce_c,
+                         (unsigned long)reinterpret_cast<uintptr_t>(&shizuku_armv8m_call_entry),
+                         (unsigned)stubs_in_window);
+      drain_diag_if_supported<BOARD>();
+      record_check("u_cost [SRAM]: per-object stubs registered inside the U code window",
+                   stubs_in_window, stubs_in_window ? 1 : 0, 1);
+      if (stubs_in_window) {
+        {
+          u_cost_sram::scoped_region_off<ARCH, decltype(sync_mpu)> flash_exec_off(ARCH::REGION_FLASH, sync_mpu);
+          BOARD::diag_printf("[COST-SRAM] region0 (flash execute window) disabled=%u during measurement\n",
+                             (unsigned)flash_exec_off.active());
+          drain_diag_if_supported<BOARD>();
+          record_check("u_cost [SRAM]: flash execute window (region 0) disabled during measurement",
+                       flash_exec_off.active(), flash_exec_off.active() ? 1 : 0, 1);
+          shizuku_rp2350_u_cost_stage = 0xC05310u;
+          run_fp_condition(0, 20, true);
+          shizuku_rp2350_u_cost_stage = 0xC05320u;
+          run_fp_condition(1, 30, true);
+          set_boot_fpca(default_fpca);
+        }  // region 0 を戻す (以後の flash 実行は元どおり)
+        ARCH::uninstall_object_stubs(OBJECT_U_COST_P);
+        ARCH::uninstall_object_stubs(OBJECT_U_COST_C);
+      }
+    }
 
     shizuku_rp2350_u_cost_stage = 0xC050FFu;
   }

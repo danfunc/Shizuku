@@ -34,6 +34,15 @@ struct mock_arch {
   static void region_disable(uint32_t) { ++disable_calls; }
 };
 
+// region 0 (全 U 共通の flash 実行窓) を一時的に外す scope 用。生の (RBAR, RLAR) を覚えて書き戻す。
+struct mock_region_arch {
+  static inline uint32_t rbar[8] = {}, rlar[8] = {};
+  static inline unsigned disable_calls = 0, restore_calls = 0;
+  static void region_get(uint32_t i, uint32_t &b, uint32_t &l) { b = rbar[i]; l = rlar[i]; }
+  static void region_disable(uint32_t i) { ++disable_calls; rlar[i] = 0; }
+  static void region_restore(uint32_t i, uint32_t b, uint32_t l) { ++restore_calls; rbar[i] = b; rlar[i] = l; }
+};
+
 static_assert(check_code_window(code, sram, entries, protected_set) == verdict::ok);
 static_assert(denied_code_entry(code, sram, 0x20000901));
 static_assert(!denied_code_entry(code, sram, 0x20000821));
@@ -95,5 +104,26 @@ int main() {
     assert(!mock_arch::set_xn);
   }
   assert(mock_arch::disable_calls == 1);
+
+  // region 0 を計測の間だけ外し、抜けるときに元の (RBAR, RLAR) へ戻す。
+  mock_region_arch::rbar[0] = 0x10000003;  // flash, RO+X
+  mock_region_arch::rlar[0] = 0x10010021;  // enable
+  {
+    scoped_region_off<mock_region_arch, decltype(noop_sync)> off(0, noop_sync);
+    assert(off.active());
+    assert(mock_region_arch::disable_calls == 1);
+    assert((mock_region_arch::rlar[0] & 1u) == 0);  // 外れている間は無効
+  }
+  assert(mock_region_arch::restore_calls == 1);
+  assert(mock_region_arch::rbar[0] == 0x10000003 && mock_region_arch::rlar[0] == 0x10010021);
+  // もともと無効な region は触らない (書き戻しで有効化してしまわない)。
+  mock_region_arch::rlar[1] = 0;
+  mock_region_arch::disable_calls = mock_region_arch::restore_calls = 0;
+  {
+    scoped_region_off<mock_region_arch, decltype(noop_sync)> off(1, noop_sync);
+    assert(!off.active());
+  }
+  assert(mock_region_arch::disable_calls == 0 && mock_region_arch::restore_calls == 0);
+  assert(mock_region_arch::rlar[1] == 0);
   return 0;
 }
