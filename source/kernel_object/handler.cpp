@@ -673,6 +673,16 @@ uintptr_t KERNEL_OBJECT::create_method_descriptor(uintptr_t target_id,
     error = object_error::BAD_OBJECT;
     return 0;
   }
+  // ★偽装防止 (CALL_METHOD_DESCRIPTOR の入場から移した): KERNEL_OBJECT 種別や root ハンドラの ID は
+  //   一般の呼び先にできない。記述子の呼び先は作成時に前計算して写し (publish_descriptor)、U が書ける値は
+  //   無いので、呼出しのたびに調べず作成で一度だけ拒否する。root ハンドラの ID は起動時に
+  //   set_object_handler で一度決まる前提 (firmware/main.cpp:495,661 ほか)。行の kind が作成後に変わる経路が
+  //   あれば、この前提は崩れる (未確認: 報告参照)。
+  if (object_kind_of(target_id) == object_kind::KERNEL_OBJECT ||
+      target_id == kernel_instance.svc_handler_object()) {
+    error = object_error::BAD_OBJECT;
+    return 0;
+  }
   if (method_index >= METHOD_COUNT) {
     error = object_error::BAD_METHOD;
     return 0;

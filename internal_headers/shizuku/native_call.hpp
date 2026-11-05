@@ -321,7 +321,12 @@ template <class K, class KObj>
   if constexpr (arch_call_in_place<A>()) {
     auto &stack = thread.call_stack;
     // ★偽装防止: 一般の呼び先が KERNEL_OBJECT 種別や root ハンドラの ID を名乗ることは拒否する。
-    if (view.kind == object_kind::KERNEL_OBJECT || view.id == kernel.svc_handler_object())
+    //   CALL_METHOD は「kernel object は native 経路で呼ばせない」振り分けとして、ここで行から作った
+    //   view を調べる。方法記述子の呼出しは、記述子の作成 (create_method_descriptor) が同じ拒否を
+    //   一度だけ済ませてあり、項目はカーネルが書き写した値なので、呼出しのたびには調べない
+    //   (via は呼び出し側で定数なので、展開後は枝ごと消える)。
+    if (via != K::LEDGER_DESCRIPTOR_CALL &&
+        (view.kind == object_kind::KERNEL_OBJECT || view.id == kernel.svc_handler_object()))
       return kernel_error::BAD_REQUEST;
     if (stack.call_count >= KObj::MAX_DEPTH)
       return kernel_error::NO_STACK;

@@ -1039,6 +1039,13 @@ void call_ladder() {
           bad_obj.error == (uintptr_t)object_error::BAD_OBJECT,
           (unsigned long)bad_obj.error, (unsigned long)object_error::BAD_OBJECT);
 
+    // 偽装防止は作成で済ませる (呼出しの入場では調べない): root ハンドラを呼び先にする記述子は作れない。
+    const api_result to_root =
+        api(object_api::CREATE_METHOD_DESCRIPTOR, kernel_instance.svc_handler_object(), 0);
+    check("descriptor: creation rejects the root handler as callee",
+          to_root.error == (uintptr_t)object_error::BAD_OBJECT,
+          (unsigned long)to_root.error, (unsigned long)object_error::BAD_OBJECT);
+
     const api_result bad_mth = api(object_api::CREATE_METHOD_DESCRIPTOR, OBJECT_DESC_TEST, 999);
     check("descriptor: BAD_METHOD on out of bounds method",
           bad_mth.error == (uintptr_t)object_error::BAD_METHOD,

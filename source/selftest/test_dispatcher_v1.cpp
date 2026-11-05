@@ -76,8 +76,11 @@ struct dispatcher_test_access {
     auto &desc = kernel_object_instance.m_descriptors[owner][index];
     // 作成 (create_method_descriptor) と同じ条件・同じ写しで据える。呼び先が created で入口が非 0 の
     // ときだけ公開し、そうでなければ無効のまま (BAD_DESCRIPTOR)。
+    // 呼び先が KERNEL_OBJECT 種別・root ハンドラの ID のものも作成が拒否するので、ここでも据えない。
     const bool creatable = target < KERNEL_OBJECT::OBJECT_COUNT &&
-                           kernel_object_instance.m_objects[target].created && target_entry != 0;
+                           kernel_object_instance.m_objects[target].created && target_entry != 0 &&
+                           kernel_object_instance.m_objects[target].kind != object_kind::KERNEL_OBJECT &&
+                           target != kernel_instance.svc_handler_object();
     if (!creatable) {
       KERNEL_OBJECT::invalidate_descriptor(desc);
       return;
