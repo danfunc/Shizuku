@@ -27,9 +27,9 @@ int main() {
     const auto *words = reinterpret_cast<const uint32_t *>(&guarded.frame);
     for (unsigned i = 0; i < 8; ++i) assert(words[i] == 0);
   }
-  static_assert(shizuku::armv8m_abi::max_reservation_bytes == 128);
+  static_assert(shizuku::armv8m_abi::max_reservation_bytes == 160);
   constexpr uintptr_t reserve = A::EXC_FRAME_MAX_BYTES + A::FAULT_CONTEXT_BYTES +
-      A::CALL_HEADROOM + 128 + A::HANDLER_STACK_ARG_BYTES;
+      A::CALL_HEADROOM + 160 + A::HANDLER_STACK_ARG_BYTES;
   constexpr uintptr_t sp = 0x20002000;
   static_assert(A::call_stack_has_room(sp, sp - reserve, sp));
   static_assert(!A::call_stack_has_room(sp, sp - reserve + 1, sp));
@@ -106,8 +106,8 @@ int main() {
   for (uintptr_t original = 0x10000; original < 0x10020; original += 8) {
     for (bool fp : {false, true}) {
       const auto ret = shizuku::armv8m_abi::trap_sp(original, fp);
-      assert((ret & 31u) == 0 && ret + 32 <= original);
-      if (fp) assert(original - 64 >= ret && original - 64 >= ret + 32);
+      assert((ret & 31u) == 0 && ret + 64 <= original);
+      if (fp) assert(original - 64 >= ret && original - 64 >= ret + 64);
       const uint32_t rlar = A::shrink_stack_limit(0x12340015, ret);
       assert((rlar & 31u) == 0x15);
       assert((rlar & ~31u) + 31u == ret - 1);

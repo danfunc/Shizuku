@@ -34,13 +34,14 @@ int main() {
     const uintptr_t original = base + offset;
     for (bool active : {false, true}) {
       const uintptr_t ret = abi::trap_sp(original, active);
-      assert(ret == (active ? base - 96 : base - 32));
+      assert(ret == (active ? base - 128 : base - 64));
       assert(ret % 32 == 0);
-      assert(ret + abi::scratch_bytes <= original);
+      assert(ret + abi::scratch_bytes + abi::record_bytes <= original);
+      assert(abi::record_offset == abi::scratch_bytes && abi::record_bytes == 32);
       if (active) {
         const uintptr_t fp = abi::fp_saved_begin(original);
         assert(fp + abi::fp_saved_bytes == original);
-        assert(ret + abi::scratch_bytes <= fp);
+        assert(ret + abi::scratch_bytes + abi::record_bytes <= fp);
         assert(ret + 8 <= fp);
       }
     }
