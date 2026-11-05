@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <type_traits>
 #include "shizuku/kernel_abi.hpp"
+#include "shizuku/stack_window.hpp"
 namespace shizuku {
 
 // SHIZUKU_LEAN_LEDGER 未定義時でも、user stack 上の header を権威とせず、
@@ -56,6 +57,15 @@ struct ledger_payload_trait<CONTEXT, std::void_t<typename CONTEXT::ledger_payloa
 
 template <typename CONTEXT>
 using ledger_payload_of = typename ledger_payload_trait<CONTEXT>::type;
+
+// stack 窓機構 (open/extend/zero) を持つ文脈か。context_t が HAS_STACK_WINDOW = true を宣言した
+// arch だけ (C6 U-mode)。既定は false で、ARM など他 arch に新メンバを要求しない。
+template <typename CONTEXT> constexpr bool stack_window_enabled() {
+  if constexpr (requires { CONTEXT::HAS_STACK_WINDOW; })
+    return CONTEXT::HAS_STACK_WINDOW;
+  else
+    return false;
+}
 
 template <typename CONTEXT> constexpr bool compact_ledger_enabled() {
   if constexpr (requires { CONTEXT::COMPACT_LEDGER; }) return CONTEXT::COMPACT_LEDGER;
@@ -245,6 +255,109 @@ template <typename CONTEXT> struct thread {
 
   uint32_t stack_rbar = 0;
   uint32_t stack_rlar = 0;
+  // Stack window tracking (thread-owned, stacked per depth).
+  // Compacted: stores 16-bit span (hi - lo) per depth; hi is derived from ledger[d].ret_sp & ~15.
+  // span == 0 indicates an invalid / un-opened window (M callee or dispatch activation).
+  // On ARM (no in-place stack windows), win_span is eliminated via empty_ledger_payload.
+  // 窓機構は arch の能力 (CONTEXT::HAS_STACK_WINDOW) で有効になる。既定 (宣言なし) は false で、
+  // そのとき win_span / stk は空 ([[no_unique_address]]) で thread の大きさを増やさない。
+  static constexpr bool HAS_STACK_WINDOW = stack_window_enabled<CONTEXT>();
+  // [SHIZUKU_STACK_LEDGER] 窓は thread.stk の cur_win と u_depth だけで持つ (段ごとの win_span は使わない)。
+  // STACK 版では call_ledger_entry に ret_sp が無いので window_at (ledger[d].ret_sp) を参照させない。
+#if defined(SHIZUKU_STACK_LEDGER)
+  static constexpr uint32_t MAX_STACK_WINDOWS = 0;
+#else
+  static constexpr uint32_t MAX_STACK_WINDOWS = HAS_STACK_WINDOW ? 34 : 0;
+#endif
+  struct window_span_array {
+    uint16_t data[34]{};
+    constexpr uint16_t &operator[](uint32_t i) noexcept { return data[i]; }
+    constexpr const uint16_t &operator[](uint32_t i) const noexcept { return data[i]; }
+  };
+  [[no_unique_address]] std::conditional_t<MAX_STACK_WINDOWS != 0,
+      window_span_array, empty_ledger_payload> win_span{};
+  // thread 自身の stack 全域 [stack_lo, stack_hi) と、いまの窓 [cur_win_lo, cur_win_hi)。
+  // HAS_STACK_WINDOW == false の thread では空で、メンバへのアクセスは if constexpr の中だけ。
+  struct stack_extent {
+    uintptr_t stack_lo = 0;
+    uintptr_t stack_hi = 0;
+    uintptr_t cur_win_lo = 0;
+    uintptr_t cur_win_hi = 0;
+    // [SHIZUKU_STACK_LEDGER] いま開いている U callee の窓を持つ段の数 (0 = 外側に U の窓が無い)。
+    uint32_t u_depth = 0;
+  };
+  [[no_unique_address]] std::conditional_t<HAS_STACK_WINDOW, stack_extent,
+                                           empty_ledger_payload> stk{};
+
+  stack_window window_at(uint32_t d) const noexcept {
+    if constexpr (MAX_STACK_WINDOWS == 0) {
+      (void)d;
+      return stack_window{0, 0};
+    } else {
+      if (d >= MAX_STACK_WINDOWS || win_span[d] == 0 || ledger == nullptr || d >= ledger_capacity) {
+        return stack_window{0, 0};
+      }
+      const uintptr_t hi = ledger[d].ret_sp & ~uintptr_t(15);
+      const uintptr_t span = win_span[d];
+      if (hi < span) return stack_window{0, 0};
+      return stack_window{hi - span, hi};
+    }
+  }
+
+  void set_window_at(uint32_t d, stack_window win) noexcept {
+    if constexpr (MAX_STACK_WINDOWS == 0) {
+      (void)d; (void)win;
+    } else {
+      if (d < MAX_STACK_WINDOWS) {
+        if (win.is_valid()) {
+          const uintptr_t span = win.hi - win.lo;
+          win_span[d] = static_cast<uint16_t>(span > 0xFFFFu ? 0xFFFFu : span);
+        } else {
+          win_span[d] = 0;
+        }
+      }
+    }
+  }
+
+  void clear_window_at(uint32_t d) noexcept {
+    if constexpr (MAX_STACK_WINDOWS == 0) {
+      (void)d;
+    } else {
+      if (d < MAX_STACK_WINDOWS) {
+        win_span[d] = 0;
+      }
+    }
+  }
+
+  // thread が実際に走る stack 領域を登録する。lo は 8B 切上げ、hi は 8B 切下げ。cur_win は全域に戻す。
+  // HAS_STACK_WINDOW == false の arch では何もしない。
+  void set_stack_bounds(uintptr_t lo, uintptr_t hi) noexcept {
+    if constexpr (HAS_STACK_WINDOW) {
+      lo = (lo + 7u) & ~uintptr_t(7);
+      hi = hi & ~uintptr_t(7);
+      if (hi < lo) hi = lo;
+      stk.stack_lo = lo;
+      stk.stack_hi = hi;
+      stk.cur_win_lo = lo;
+      stk.cur_win_hi = hi;
+      stk.u_depth = 0;
+    } else {
+      (void)lo; (void)hi;
+    }
+  }
+  void set_user_stack(uintptr_t lo, uintptr_t hi) noexcept { set_stack_bounds(lo, hi); }
+  // 台帳を作り直すとき (thread の再利用) に窓の記帳を空にする。win_span[d] == 0 が
+  // 「M callee / dispatch 段」の不変条件なので、前の利用者の残りを持ち越さない。
+  void reset_windows() noexcept {
+    if constexpr (MAX_STACK_WINDOWS != 0) {
+      for (uint32_t d = 0; d < MAX_STACK_WINDOWS; ++d) win_span[d] = 0;
+    }
+    if constexpr (HAS_STACK_WINDOW) {
+      stk.cur_win_lo = stk.stack_lo;
+      stk.cur_win_hi = stk.stack_hi;
+      stk.u_depth = 0;
+    }
+  }
   call_ledger_entry *ledger = nullptr;
   uint32_t ledger_capacity = 0;
   uint32_t base_object = 0;

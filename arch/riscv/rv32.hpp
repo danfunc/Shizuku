@@ -7,6 +7,7 @@
 #include "arch/riscv/rv32_frame.h"
 #include "shizuku/concepts/arch.hpp"
 #include "shizuku/rv32_abi.hpp"
+#include "shizuku/stack_window.hpp"
 
 // 共通の RV32 trap 経路 (arch/riscv/rv32_trap.S) の入口・戻り口。
 // dispatch と failure は chips 側の C++ が定義する (shizuku_rv32_trap_dispatch / shizuku_rv32_return_failed)。
@@ -86,6 +87,13 @@ public:
   struct context_t {
     // 呼出しの記録は user stack 上のヘッダ枠にある (thread.hpp: identity 配列を縮める目印)。
     static constexpr bool CALL_HEADER_ON_STACK = true;
+    // thread が U callee 用の stack 窓 (open/extend/zero) を持つか。C6 U-mode 構成だけ true。
+    // (PMP が無い M-only 構成では窓は意味を持たない。)
+#if defined(SHIZUKU_C6_UMODE)
+    static constexpr bool HAS_STACK_WINDOW = true;
+#else
+    static constexpr bool HAS_STACK_WINDOW = false;
+#endif
     exception_frame_t *sp = nullptr;
     uintptr_t s0 = 0, s1 = 0, s2 = 0, s3 = 0;
     uintptr_t s4 = 0, s5 = 0, s6 = 0, s7 = 0;
@@ -357,6 +365,13 @@ public:
   static constexpr uintptr_t kMaxObjectWindows = UINTPTR_MAX;
   static constexpr uintptr_t STACK_WINDOW_ALIGN = 8;  // 追加の揃えは要らない
 
+  // 窓 [lo, hi) のゼロ化 (戻りのたびに通る hot path)。32B 単位に展開した sw zero
+  // (shizuku/stack_window.hpp の zero_window_unrolled32)。旧は volatile 1 語ずつの sw/addi/bltu
+  // (取る分岐が 1 語ごと)。
+  [[gnu::always_inline]] static inline void zero_stack_window(shizuku::stack_window win) noexcept {
+    shizuku::zero_window_unrolled32(win);
+  }
+
   static void switch_caller_protection(uint32_t caller_object) {
 #if defined(SHIZUKU_C6_UMODE)
     if constexpr (requires { IntMode::switch_object_pmp(caller_object); })
@@ -365,6 +380,35 @@ public:
     (void)caller_object;
 #endif
   }
+
+#if defined(SHIZUKU_STACK_LEDGER)
+  // [SHIZUKU_STACK_LEDGER] 呼出しの記録は caller の枠 [ret_sp + CALL_RECORD_OFFSET, +32) に置く。
+  // 枠は呼び手 stub が ecall 前に 32B 下げて空ける (ret_sp = その時点の SP)。callee の窓の上端は ret_sp & ~15 なので
+  // 記録は窓の外にある。
+  static constexpr uintptr_t CALL_RECORD_OFFSET = 0;
+  static constexpr uintptr_t CALL_RECORD_BYTES = 32;
+  static constexpr uintptr_t record_return_sp(uintptr_t record) { return record - CALL_RECORD_OFFSET; }
+  // 記録を書く前の検査 1 本 (return_sp で評価する版)。U caller は thread の stack 範囲の内側・整列・
+  // 入口の余白の検査。M caller は call_header_has_room と同じ式を return_sp で評価する。
+  static bool call_record_room_at(const context_t &context, uintptr_t return_sp) {
+    constexpr uintptr_t kRequired = 2u * sizeof(exception_frame_t) + EXC_FRAME_MAX_BYTES +
+                                    FAULT_CONTEXT_BYTES + CALL_HEADROOM;
+#if defined(SHIZUKU_C6_UMODE)
+    if (!context.privileged) {
+      uintptr_t base = 0, limit = 0;
+      if constexpr (requires { IntMode::thread_stack_bounds(base, limit); }) {
+        if (!IntMode::thread_stack_bounds(base, limit)) return false;
+        return (return_sp & 0xFu) == 0u && return_sp >= base && return_sp <= limit &&
+               CALL_RECORD_BYTES <= limit - return_sp && return_sp - base >= kRequired;
+      }
+      return false;
+    }
+#endif
+    const uintptr_t limit = stack_limit(context);
+    if (limit == 0) return true;
+    return return_sp >= limit && return_sp - limit >= kRequired;
+  }
+#endif
 
   // caller の ecall 時点の SP (= 再開フレームの上端。ヘッダ枠方式ではヘッダ枠のアドレスと同じ)。
   static uintptr_t call_return_sp(const context_t &context) {

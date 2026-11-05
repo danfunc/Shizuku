@@ -15,6 +15,7 @@
 #include "shizuku/core_num.hpp"
 #include "shizuku/kernel_abi.hpp"
 #include "shizuku/object_api.hpp"
+#include "shizuku/stack_window.hpp"
 #include "shizuku/svc_attributes.hpp"
 
 #if defined(SHIZUKU_C6_UMODE) && !defined(SHIZUKU_LEAN_LEDGER)
@@ -23,9 +24,6 @@
 
 #if defined(SHIZUKU_STACK_LEDGER) && !defined(SHIZUKU_LEAN_LEDGER)
 #error "SHIZUKU_STACK_LEDGER builds on the in-place entries of SHIZUKU_LEAN_LEDGER"
-#endif
-#if defined(SHIZUKU_STACK_LEDGER) && defined(SHIZUKU_C6_UMODE)
-#error "SHIZUKU_STACK_LEDGER is not wired for C6 U-mode: the callee PMP window covers the whole object stack"
 #endif
 
 namespace shizuku {
@@ -293,6 +291,29 @@ template <class K, class KObj>
       thread.call_stack.call_count--;
       thread.call_stack.call_top_rec = prev_call_address;
     }
+    // [SHIZUKU_STACK_LEDGER] 戻る段が U callee で窓を持っていたなら、その窓をゼロ化して外側の窓へ戻す。
+    // ゼロ化は [cur_win_lo, cur_win_hi) だけ。記録 (ret_sp の上 32B) は窓の上端 (ret_sp & ~15) より上なので壊れない。
+    // 外側に U の窓が無ければ全域、あれば外側の U callee の窓 = [戻り先 SP - K, その callee の入場の ret_sp)。
+    if constexpr (K::THREAD::HAS_STACK_WINDOW) {
+      if (is_call && !kobj.privileged_of(record->object)) {
+        zero_window_of<A>(shizuku::stack_window{thread.stk.cur_win_lo, thread.stk.cur_win_hi});
+        const uint32_t remaining = thread.stk.u_depth - 1u;
+        thread.stk.u_depth = remaining;
+        if (remaining == 0 || prev_address == 0) {
+          thread.stk.u_depth = 0;
+          thread.stk.cur_win_lo = thread.stk.stack_lo;
+          thread.stk.cur_win_hi = thread.stk.stack_hi;
+        } else {
+          const uintptr_t hi = A::record_return_sp(prev_address) & ~uintptr_t(15);
+          const uintptr_t sp = ret_sp & ~uintptr_t(15);
+          const uintptr_t lo = sp > thread.stk.stack_lo + kStackWindowStep
+                                   ? sp - kStackWindowStep
+                                   : thread.stk.stack_lo;
+          thread.stk.cur_win_lo = lo;
+          thread.stk.cur_win_hi = hi;
+        }
+      }
+    }
     if (restore) {
       if constexpr (arch_has_core_num<A>) {
         frame = A::call_resume_at(context, ret_pc, ret_sp, caller_privileged, 0, 0, scrub, core);
@@ -303,6 +324,9 @@ template <class K, class KObj>
           kobj, caller_via, K::LEDGER_DISPATCH, caller_object);
       A::set_region_window(context, window.base, window.limit);
       if (!caller_is_dispatch && !A::context_privileged(context)) {
+        if constexpr (requires { A::set_unprivileged_resume_metadata(*frame, ret_sp, A::trusted_stack_top(), scrub); }) {
+          A::set_unprivileged_resume_metadata(*frame, ret_sp, A::trusted_stack_top(), scrub);
+        }
         if constexpr (arch_has_core_num<A>) {
           A::switch_caller_protection(caller_object, core);
         } else {
@@ -335,6 +359,41 @@ template <class K, class KObj>
       thread.call_stack.call_count--;
       thread.call_stack.call_top = entry.prev_call;
     }
+    // 窓機構を持つ arch (HAS_STACK_WINDOW) だけ。窓を持つのは U callee の段だけなので、win_span を
+    // 1 回読み、0 (M callee / dispatch 段) なら窓関連を一切しない。cur_win は U の入場・戻りでしか
+    // 動かさない不変条件「cur_win = 最内の U 窓 (無ければ stack 全域)」を保つので、M 段を戻るときも
+    // 復元は要らない (M 段の間に U 段が入って戻れば、その pop が最内の U 窓へ戻してある)。
+    // 持たない arch (ARM) は記帳もゼロ化もしない。
+    if constexpr (K::THREAD::HAS_STACK_WINDOW) {
+      const uint32_t popped_index = depth - 1;
+      if (popped_index < thread.MAX_STACK_WINDOWS && thread.win_span[popped_index] != 0) {
+        const auto popped_win = thread.window_at(popped_index);
+        if (popped_win.is_valid()) {
+          zero_window_of<A>(popped_win);
+        }
+        thread.clear_window_at(popped_index);
+
+        // 戻り先が M でも U でも、cur_win を「この段より外側の最内の U 窓」へ戻す
+        // (M caller へ戻る場合も、その M が更に外の U へ戻るときに復元が要らないようにする)。
+        stack_window caller_win{thread.stk.stack_lo, thread.stk.stack_hi};
+        for (int32_t d = static_cast<int32_t>(depth) - 2; d >= 0; --d) {
+          const auto w = thread.window_at(d);
+          if (w.is_valid()) {
+            caller_win = w;
+            break;
+          }
+        }
+        thread.stk.cur_win_lo = caller_win.lo;
+        thread.stk.cur_win_hi = caller_win.hi;
+
+        if (restore && entry.ret_privileged == 0) {
+          if constexpr (requires { A::apply_stack_window(context, caller_win.lo, caller_win.hi); }) {
+            A::apply_stack_window(context, caller_win.lo, caller_win.hi);
+          }
+        }
+      }
+    }
+
     if (restore) {
       if constexpr (arch_has_core_num<A>) {
         frame = A::call_resume_at(context, entry.ret_pc, entry.ret_sp, entry.ret_privileged != 0,
@@ -483,6 +542,23 @@ template <class K, class KObj>
     // 余白がある」の 1 本だけ。depth / unwind_floor は 16 bit: RP2350 の SRAM 520KiB / 64B < 65535 で溢れない。
     if (!A::call_record_room_at(context, return_sp))
       return kernel_error::NO_STACK;
+    // [SHIZUKU_STACK_LEDGER] U callee の窓を開く (窓を持つのは U callee の段だけ)。全検査の後で状態を変える。
+    // 特権 caller が外側の U 窓の中にいる (depth != 0 かつ u_depth != 0) なら、戻りで外側の窓を復元できないので断る。
+    if constexpr (K::THREAD::HAS_STACK_WINDOW) {
+      if (!view.privileged) {
+        if (A::context_privileged(context) && stack.depth != 0 && thread.stk.u_depth != 0)
+          return kernel_error::NO_STACK;
+        if ((thread.stk.stack_lo != 0 || thread.stk.stack_hi != 0) &&
+            (return_sp < thread.stk.stack_lo || return_sp > thread.stk.stack_hi))
+          return kernel_error::NO_STACK;
+        const auto win = open_window(return_sp, thread.stk.stack_lo);
+        if (!win.is_valid())
+          return kernel_error::NO_STACK;
+        thread.stk.cur_win_lo = win.lo;
+        thread.stk.cur_win_hi = win.hi;
+        thread.stk.u_depth = thread.stk.u_depth + 1;
+      }
+    }
     typename K::FRAME &frame = *context.sp;
     {
       auto *record = stack_record_push<A>(thread, context, frame, return_sp, via, depth);
@@ -502,10 +578,39 @@ template <class K, class KObj>
 #endif
 #if defined(SHIZUKU_STACK_LEDGER)
 #elif defined(SHIZUKU_LEAN_LEDGER)
+    const uintptr_t ret_sp = A::call_return_sp(context);
+    auto &entry = thread.ledger[depth];
+    entry.ret_sp = ret_sp;
+    // 窓機構を持つ arch (HAS_STACK_WINDOW) だけ範囲検査・窓の記帳をする。ARM は何もしない。
+    // 窓は U callee だけが持つ。M callee は win_span を書かず読まない: win_span[depth] は常に 0
+    // (U 入場で書いた段は pop で必ず 0 に戻す不変条件。thread 生成時も 0)。
+    if constexpr (K::THREAD::HAS_STACK_WINDOW) {
+      if (!view.privileged) {
+        if (depth >= thread.MAX_STACK_WINDOWS) {
+          return kernel_error::NO_STACK;
+        }
+        // caller (M でも U でも) の SP は thread 自身の stack 内に無ければならない。
+        if (thread.stk.stack_lo != 0 || thread.stk.stack_hi != 0) {
+          if (ret_sp < thread.stk.stack_lo || ret_sp > thread.stk.stack_hi) {
+            return kernel_error::NO_STACK;
+          }
+        }
+        const auto win = open_window(ret_sp, thread.stk.stack_lo);
+        if (!win.is_valid()) {
+          return kernel_error::NO_STACK;
+        }
+        thread.set_window_at(depth, win);
+        thread.stk.cur_win_lo = win.lo;
+        thread.stk.cur_win_hi = win.hi;
+        if constexpr (requires { A::apply_stack_window(context, win.lo, win.hi); }) {
+          A::apply_stack_window(context, win.lo, win.hi);
+        }
+      }
+    }
+
     // 記帳は台帳の 1 項目だけ: 呼び先の同定 (object・handler・kind・via・floor・世代) と、この段から
     // 戻るときの caller の再開点 (pc・sp・特権) と、ひとつ外側の call 段への鎖 (prev_call)。窓は復帰時に解決する。
     // user stack のヘッダは書かない。current / caller の識別は call 段の列から導く (call_top だけ更新)。
-    auto &entry = thread.ledger[depth];
     entry.object = view.id;
     entry.handler_object = view.parent_handler_object;
     entry.handler_entry = view.parent_handler_entry;
@@ -514,7 +619,6 @@ template <class K, class KObj>
     entry.unwind_floor = (uint16_t)depth;
     entry.generation = view.instance_generation;
     entry.ret_pc = A::frame_pc(frame);
-    entry.ret_sp = return_sp;
     entry.prev_call = (uint16_t)stack.call_top;
     entry.ret_privileged = A::context_privileged(context) ? 1 : 0;
     stack.depth = depth + 1;

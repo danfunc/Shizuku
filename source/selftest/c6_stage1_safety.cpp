@@ -45,13 +45,19 @@ extern volatile uintptr_t g_c6_probe_combo_pmp_pc;
 extern volatile uintptr_t g_c6_probe_ustore_kstack_pc;
 extern volatile uintptr_t g_c6_probe_ustore_caller_pc;
 extern volatile uintptr_t g_c6_probe_ustore_code_pc;
-extern volatile uintptr_t g_c6_probe_ufetch_target;
+extern volatile uintptr_t g_c6_probe_ufetch_ra;
+extern volatile uintptr_t g_c6_probe_ufetch_usp;
+extern volatile uintptr_t g_c6_probe_ufetch_win_lo;
+extern volatile uintptr_t g_c6_probe_ufetch_win_hi;
 extern volatile uintptr_t g_c6_probe_upmpcfg_pc;
 extern volatile uintptr_t g_c6_probe_mstore_iram_pc;
 extern volatile uintptr_t g_c6_probe_mfetch_target;
 extern volatile uintptr_t g_c6_probe_app_mmio_fault_pc;
 extern volatile uintptr_t g_c6_probe_app_driver_data_fault_pc;
 extern volatile uintptr_t g_c6_probe_driver_app_data_fault_pc;
+extern volatile uintptr_t g_c6_probe_below_stack_lo_pc;
+extern volatile uint32_t shizuku_c6_stack_extend_count;
+extern volatile uint32_t shizuku_c6_stack_overflow_fault_count;
 extern volatile uint32_t shizuku_c6_m_pma_diag[2];
 extern c6_stage1_object_bounds g_c6_stage1_u_bounds;
 extern c6_stage1_object_bounds g_c6_stage1_driver_bounds;
@@ -60,7 +66,8 @@ extern unsigned char shizuku_c6_dispatch_stack[4096];
 
 // アプリ用データ領域・スタック (16B 整列)
 alignas(16) uint8_t u_mode_stage1_data_pool[256];
-alignas(16) uint8_t u_mode_stage1_stack[1024];
+// U の stack は専用配列ではなく、thread が実際に走る stack (boot thread の stack) の中の
+// caller SP の下 K から切り出す窓 (notes/stack-window-design.md)。
 
 // ドライバ用データ領域・スタック (16B 整列)
 alignas(16) uint8_t u_mode_driver_data_pool[256];
@@ -88,6 +95,7 @@ extern const char c6_stage1_probe_driver_mmio_insn_addr[];
 extern const char c6_stage1_probe_driver_app_data_fault_insn_addr[];
 extern const char c6_stage1_probe_mstore_iram_insn_addr[];
 extern const char c6_stage1_probe_mfetch_insn_addr[];
+extern const char c6_stage1_probe_below_stack_lo_insn_addr[];
 uintptr_t u_mode_probe_worker(uintptr_t cmd, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3);
 uintptr_t u_mode_driver_worker(uintptr_t cmd, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3);
 uintptr_t shizuku_c6_m_store_probe(uintptr_t target, uint32_t value);
@@ -126,6 +134,8 @@ asm(
     "  bltu t0, t1, .Lprobe_cost_dispatch\n"
     "  li t0, 25\n"
     "  beq a0, t0, .Lprobe_reject_priv_child\n"
+    "  li t0, 26\n"
+    "  beq a0, t0, .Lprobe_u_to_u_leak\n"
     "  li t0, 1\n"
     "  beq a0, t0, .Lprobe_0x802\n"
     "  li t0, 2\n"
@@ -164,6 +174,24 @@ asm(
     "  beq a0, t0, .Lprobe_call_driver_mmio\n"
     "  li t0, 19\n"
     "  beq a0, t0, .Lprobe_call_driver_app_data\n"
+    "  li t0, 27\n"
+    "  beq a0, t0, .Lprobe_reentrant_a_to_a\n"
+    "  li t0, 28\n"
+    "  beq a0, t0, .Lprobe_reentrant_a_b_a\n"
+    "  li t0, 29\n"
+    "  beq a0, t0, .Lprobe_stack_extend_below_k\n"
+    "  li t0, 30\n"
+    "  beq a0, t0, .Lprobe_write_below_stack_lo\n"
+    "  li t0, 31\n"
+    "  beq a0, t0, .Lprobe_callee_stack_residue\n"
+    // CALL_METHOD の呼び先に届く引数は a0 だけ (a1 は caller の入力の素通し)。再入の「外側」と「内側」は
+    // 引数 (cmd) で分ける: 27/28 = 外側、34 = A→A の内側、35 = A→B→A の内側 (A の 2 回目の入場)。
+    "  li t0, 34\n"
+    "  beq a0, t0, .Lreentrant_a_child\n"
+    "  li t0, 35\n"
+    "  beq a0, t0, .Lreentrant_aba_child_a2\n"
+    "  li t0, 32\n"
+    "  beq a0, t0, .Lprobe_return_sp\n"
     "  li a0, 0\n"
     "  ret\n"
     "\n"
@@ -253,7 +281,8 @@ asm(
     "\n"
     ".Lprobe_ufetch:\n"
     "  mv t2, ra\n"
-    "  la t1, u_mode_stage1_stack\n"
+    // 命令フェッチ先 = 自分の stack 窓の中 (sp - 16)。stack は RW かつ NX でなければならない。
+    "  addi t1, sp, -16\n"
     ".global c6_stage1_probe_ufetch_insn_addr\n"
     "c6_stage1_probe_ufetch_insn_addr:\n"
     "  jalr ra, 0(t1)\n"
@@ -381,6 +410,7 @@ asm(
     "  li a3, 2\n"
     "  li a4, 0\n"
     "  ecall\n"
+    "  la s0, u_mode_stage1_data_pool\n"
     "  li t0, 0xE012\n"
     "  bne a1, t0, .Lu2u_fail_3\n"
     "\n"
@@ -443,6 +473,74 @@ asm(
     "  lw s2, 32(sp)\n"
     "  addi sp, sp, 48\n"
     "  li a0, 0xDEAD0005\n"
+    "  ret\n"
+    "\n"
+    ".Lprobe_u_to_u_leak:\n"
+    "  addi sp, sp, -48\n"
+    "  sw ra, 44(sp)\n"
+    "  sw s0, 40(sp)\n"
+    "  sw s1, 36(sp)\n"
+    "  sw s2, 32(sp)\n"
+    "  la s0, u_mode_stage1_data_pool\n"
+    "  lw s1, 20(s0)\n"
+    "  lw s2, 24(s0)\n"
+    "\n"
+    "  li a0, 4\n"
+    "  mv a1, s1\n"
+    "  mv a2, s2\n"
+    "  li a3, 4\n"
+    "  li a4, 0\n"
+    "  ecall\n"
+    "\n"
+    "  addi sp, sp, -128\n"
+    "  sw a0, 0(sp)\n"
+    "  sw a1, 4(sp)\n"
+    "  sw a2, 8(sp)\n"
+    "  sw a3, 12(sp)\n"
+    "  sw a4, 16(sp)\n"
+    "  sw a5, 20(sp)\n"
+    "  sw a6, 24(sp)\n"
+    "  sw a7, 28(sp)\n"
+    "  sw t0, 32(sp)\n"
+    "  sw t1, 36(sp)\n"
+    "  sw t2, 40(sp)\n"
+    "  sw t3, 44(sp)\n"
+    "  sw t4, 48(sp)\n"
+    "  sw t5, 52(sp)\n"
+    "  sw t6, 56(sp)\n"
+    "  sw s0, 60(sp)\n"
+    "  sw s1, 64(sp)\n"
+    "  sw s2, 68(sp)\n"
+    "  sw s3, 72(sp)\n"
+    "  sw s4, 76(sp)\n"
+    "  sw s5, 80(sp)\n"
+    "  sw s6, 84(sp)\n"
+    "  sw s7, 88(sp)\n"
+    "  sw s8, 92(sp)\n"
+    "  sw s9, 96(sp)\n"
+    "  sw s10, 100(sp)\n"
+    "  sw s11, 104(sp)\n"
+    "  sw ra, 108(sp)\n"
+    "\n"
+    "  la t0, u_mode_stage1_data_pool\n"
+    "  addi t0, t0, 64\n"
+    "  mv t1, sp\n"
+    "  li t2, 28\n"
+    "1:\n"
+    "  lw t3, 0(t1)\n"
+    "  sw t3, 0(t0)\n"
+    "  addi t1, t1, 4\n"
+    "  addi t0, t0, 4\n"
+    "  addi t2, t2, -1\n"
+    "  bnez t2, 1b\n"
+    "\n"
+    "  addi sp, sp, 128\n"
+    "  lw ra, 44(sp)\n"
+    "  lw s0, 40(sp)\n"
+    "  lw s1, 36(sp)\n"
+    "  lw s2, 32(sp)\n"
+    "  addi sp, sp, 48\n"
+    "  li a0, 0\n"
     "  ret\n"
     "\n"
     ".Lprobe_create_driver:\n"
@@ -644,6 +742,189 @@ asm(
     "  addi sp, sp, 48\n"
     "  ret\n"
     "\n"
+    ".Lprobe_reentrant_a_to_a:\n"
+    "  addi sp, sp, -32\n"
+    "  sw ra, 28(sp)\n"
+    "  sw s0, 24(sp)\n"
+    "  sw s1, 20(sp)\n"
+    "  li t0, 0xAA01CAFE\n"
+    "  sw t0, 16(sp)\n"
+    "  la s0, u_mode_stage1_data_pool\n"
+    "  lw s1, 32(s0)\n"
+    "  li a0, 4\n"
+    "  mv a1, s1\n"
+    "  li a2, 0\n"
+    "  li a3, 34\n"
+    "  li a4, 0\n"
+    "  ecall\n"
+    "  li t2, 0x42\n"
+    "  bne a1, t2, .Lreentrant_a_fail_child\n"
+    "  lw t0, 16(sp)\n"
+    "  li t1, 0xAA01CAFE\n"
+    "  bne t0, t1, .Lreentrant_a_fail_stack\n"
+    "  li a0, 0\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    // 内側の入場 sp は callee 窓の上端 (= 外側の枠の底) で、sp 以上は caller の枠 (アクセス不可)。
+    // 自分の枠を sp から下へ確保し、パターン・ra はその枠の中に置く。外側の 16(sp) は触らない。
+    ".Lreentrant_a_child:\n"
+    "  addi sp, sp, -32\n"
+    "  sw ra, 28(sp)\n"
+    "  li t0, 0xAA02BEEF\n"
+    "  sw t0, 16(sp)\n"
+    "  li a0, 0x42\n"
+    "  lw ra, 28(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Lreentrant_a_fail_child:\n"
+    "  li a0, 0xDEAD0027\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Lreentrant_a_fail_stack:\n"
+    "  li a0, 0xDEAD0028\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    "\n"
+    ".Lprobe_reentrant_a_b_a:\n"
+    "  addi sp, sp, -32\n"
+    "  sw ra, 28(sp)\n"
+    "  sw s0, 24(sp)\n"
+    "  sw s1, 20(sp)\n"
+    "  li t0, 0xABA1CAFE\n"
+    "  sw t0, 16(sp)\n"
+    "  la s0, u_mode_stage1_data_pool\n"
+    "  lw s1, 20(s0)\n"
+    "  li a0, 4\n"
+    "  mv a1, s1\n"
+    "  li a2, 0\n"
+    "  li a3, 5\n"
+    "  li a4, 0\n"
+    "  ecall\n"
+    "  li t2, 0x42\n"
+    "  bne a1, t2, .Lreentrant_aba_fail_driver\n"
+    "  lw t0, 16(sp)\n"
+    "  li t1, 0xABA1CAFE\n"
+    "  bne t0, t1, .Lreentrant_aba_fail_stack_a1\n"
+    "  li a0, 0\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    // A の 2 回目の入場。入場 sp は窓の上端なので、枠は sp から下へ自分で確保する (上の a_child と同じ)。
+    ".Lreentrant_aba_child_a2:\n"
+    "  addi sp, sp, -32\n"
+    "  sw ra, 28(sp)\n"
+    "  li t0, 0xABA2BEEF\n"
+    "  sw t0, 16(sp)\n"
+    "  li a0, 0x42\n"
+    "  lw ra, 28(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Lreentrant_aba_fail_driver:\n"
+    "  li a0, 0xDEAD0029\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Lreentrant_aba_fail_stack_a1:\n"
+    "  li a0, 0xDEAD002A\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    "\n"
+    ".Lprobe_stack_extend_below_k:\n"
+    "  addi sp, sp, -16\n"
+    "  sw ra, 12(sp)\n"
+    "  li t0, 0x57ACEC70\n"
+    "  sw t0, -512(sp)\n"
+    "  lw t1, -512(sp)\n"
+    "  bne t0, t1, .Lextend_fail\n"
+    "  li a0, 0\n"
+    "  lw ra, 12(sp)\n"
+    "  addi sp, sp, 16\n"
+    "  ret\n"
+    ".Lextend_fail:\n"
+    "  li a0, 0xDEAD002D\n"
+    "  lw ra, 12(sp)\n"
+    "  addi sp, sp, 16\n"
+    "  ret\n"
+    "\n"
+    ".Lprobe_write_below_stack_lo:\n"
+    "  addi sp, sp, -16\n"
+    "  sw ra, 12(sp)\n"
+    "  la t1, u_mode_stage1_data_pool\n"
+    "  lw a1, 36(t1)\n"
+    "  li t0, 0x0BAD57AC\n"
+    ".global c6_stage1_probe_below_stack_lo_insn_addr\n"
+    "c6_stage1_probe_below_stack_lo_insn_addr:\n"
+    "  sw t0, 0(a1)\n"
+    "  lw ra, 12(sp)\n"
+    "  addi sp, sp, 16\n"
+    "  ret\n"
+    "\n"
+    ".Lprobe_callee_stack_residue:\n"
+    "  addi sp, sp, -32\n"
+    "  sw ra, 28(sp)\n"
+    "  sw s0, 24(sp)\n"
+    "  sw s1, 20(sp)\n"
+    "  la s0, u_mode_stage1_data_pool\n"
+    "  lw s1, 20(s0)\n"
+    "  li a0, 4\n"
+    "  mv a1, s1\n"
+    "  li a2, 0\n"
+    "  li a3, 6\n"
+    "  li a4, 0\n"
+    "  ecall\n"
+    "  li t2, 0x42\n"
+    "  bne a1, t2, .Lresidue_fail_callee\n"
+    "  mv t0, sp\n"
+    "  addi t0, t0, -256\n"
+    "  mv t1, sp\n"
+    "1:\n"
+    "  lw t2, 0(t0)\n"
+    "  bnez t2, .Lresidue_fail_nonzero\n"
+    "  addi t0, t0, 4\n"
+    "  bltu t0, t1, 1b\n"
+    "  li a0, 0\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Lresidue_fail_callee:\n"
+    "  li a0, 0xDEAD002E\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Lresidue_fail_nonzero:\n"
+    "  mv a0, t2\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    "\n"
+    // cmd 32: 入場時の自分の sp (= callee 窓の上端 win_hi) を返す。M 側が C++ の sp 推測ではなく
+    // 実測値で窓の位置を知るための較正用。
+    ".Lprobe_return_sp:\n"
+    "  mv a0, sp\n"
+    "  ret\n"
+    "\n"
     ".size u_mode_probe_worker, .-u_mode_probe_worker\n"
     "\n"
     ".balign 4\n"
@@ -656,6 +937,12 @@ asm(
     "  beq a0, t0, .Ldriver_probe_app_data\n"
     "  li t0, 3\n"
     "  beq a0, t0, .Ldriver_probe_echo\n"
+    "  li t0, 4\n"
+    "  beq a0, t0, .Ldriver_probe_leak\n"
+    "  li t0, 5\n"
+    "  beq a0, t0, .Ldriver_probe_reentrant_b_to_a\n"
+    "  li t0, 6\n"
+    "  beq a0, t0, .Ldriver_probe_write_stack_pattern\n"
     "  li a0, 0\n"
     "  ret\n"
     "\n"
@@ -664,6 +951,35 @@ asm(
     "  lw t0, 8(t1)\n"
     "  addi t0, t0, 1\n"
     "  sw t0, 8(t1)\n"
+    "  li a0, 0x42\n"
+    "  ret\n"
+    "\n"
+    ".Ldriver_probe_leak:\n"
+    "  li t0, 0xA5A50100\n"
+    "  li t1, 0xA5A50101\n"
+    "  li t2, 0xA5A50102\n"
+    "  li t3, 0xA5A50103\n"
+    "  li t4, 0xA5A50104\n"
+    "  li t5, 0xA5A50105\n"
+    "  li t6, 0xA5A50106\n"
+    "  li a2, 0xA5A50202\n"
+    "  li a3, 0xA5A50203\n"
+    "  li a4, 0xA5A50204\n"
+    "  li a5, 0xA5A50205\n"
+    "  li a6, 0xA5A50206\n"
+    "  li a7, 0xA5A50207\n"
+    "  li s0, 0xA5A50000\n"
+    "  li s1, 0xA5A50001\n"
+    "  li s2, 0xA5A50002\n"
+    "  li s3, 0xA5A50003\n"
+    "  li s4, 0xA5A50004\n"
+    "  li s5, 0xA5A50005\n"
+    "  li s6, 0xA5A50006\n"
+    "  li s7, 0xA5A50007\n"
+    "  li s8, 0xA5A50008\n"
+    "  li s9, 0xA5A50009\n"
+    "  li s10, 0xA5A5000A\n"
+    "  li s11, 0xA5A5000B\n"
     "  li a0, 0x42\n"
     "  ret\n"
     "\n"
@@ -681,6 +997,69 @@ asm(
     ".global c6_stage1_probe_driver_app_data_fault_insn_addr\n"
     "c6_stage1_probe_driver_app_data_fault_insn_addr:\n"
     "  lw a0, 0(a1)\n"
+    "  ret\n"
+    "\n"
+    ".Ldriver_probe_reentrant_b_to_a:\n"
+    "  addi sp, sp, -32\n"
+    "  sw ra, 28(sp)\n"
+    "  sw s0, 24(sp)\n"
+    "  sw s1, 20(sp)\n"
+    "  li t0, 0xABB1F00D\n"
+    "  sw t0, 16(sp)\n"
+    "  la s0, u_mode_driver_data_pool\n"
+    "  lw s1, 12(s0)\n"
+    "  li a0, 4\n"
+    "  mv a1, s1\n"
+    "  li a2, 0\n"
+    "  li a3, 35\n"
+    "  li a4, 0\n"
+    "  ecall\n"
+    "  li t2, 0x42\n"
+    "  bne a1, t2, .Ldriver_aba_fail_a2\n"
+    "  lw t0, 16(sp)\n"
+    "  li t1, 0xABB1F00D\n"
+    "  bne t0, t1, .Ldriver_aba_fail_stack_b\n"
+    "  li a0, 0x42\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Ldriver_aba_fail_a2:\n"
+    "  li a0, 0xDEAD002B\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    ".Ldriver_aba_fail_stack_b:\n"
+    "  li a0, 0xDEAD002C\n"
+    "  lw ra, 28(sp)\n"
+    "  lw s0, 24(sp)\n"
+    "  lw s1, 20(sp)\n"
+    "  addi sp, sp, 32\n"
+    "  ret\n"
+    "\n"
+    ".Ldriver_probe_write_stack_pattern:\n"
+    "  li t0, 0xA5A50004\n"
+    "  sw t0, -4(sp)\n"
+    "  li t0, 0xA5A50020\n"
+    "  sw t0, -32(sp)\n"
+    "  li t0, 0xA5A50040\n"
+    "  sw t0, -64(sp)\n"
+    "  li t0, 0xA5A50060\n"
+    "  sw t0, -96(sp)\n"
+    "  li t0, 0xA5A50080\n"
+    "  sw t0, -128(sp)\n"
+    "  li t0, 0xA5A500A0\n"
+    "  sw t0, -160(sp)\n"
+    "  li t0, 0xA5A500C0\n"
+    "  sw t0, -192(sp)\n"
+    "  li t0, 0xA5A500E0\n"
+    "  sw t0, -224(sp)\n"
+    "  li t0, 0xA5A50100\n"
+    "  sw t0, -256(sp)\n"
+    "  li a0, 0x42\n"
     "  ret\n"
     ".size u_mode_driver_worker, .-u_mode_driver_worker\n"
     "\n"
@@ -711,6 +1090,7 @@ const char c6_stage1_probe_app_mmio_fault_insn_addr[] = "";
 const char c6_stage1_probe_app_driver_data_fault_insn_addr[] = "";
 const char c6_stage1_probe_driver_mmio_insn_addr[] = "";
 const char c6_stage1_probe_driver_app_data_fault_insn_addr[] = "";
+const char c6_stage1_probe_below_stack_lo_insn_addr[] = "";
 uintptr_t u_mode_probe_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
   if (cmd == 17) {
     const auto res = ARCH::syscall(
@@ -725,6 +1105,19 @@ uintptr_t u_mode_probe_worker(uintptr_t cmd, uintptr_t, uintptr_t, uintptr_t) {
   }
   if (cmd == 19) {
     return 0xE012u;
+  }
+  if (cmd == 26) {
+    auto *data_pool_words = reinterpret_cast<volatile uintptr_t *>(u_mode_stage1_data_pool);
+    data_pool_words[16] = 0x42; // a0
+    data_pool_words[17] = 0;    // a1
+    for (int i = 18; i < 44; ++i) data_pool_words[i] = 0;
+    return 0;
+  }
+  if (cmd == 27 || cmd == 28 || cmd == 29 || cmd == 31 || cmd == 34 || cmd == 35) {
+    return 0;
+  }
+  if (cmd == 30) {
+    return 0xE00Fu;
   }
   return 0;
 }
@@ -855,6 +1248,33 @@ void record_check(const char *name, bool ok, unsigned long got, unsigned long wa
     BOARD::diag_printf("[C6_STAGE1] FAIL %s: got %lu want %lu\n", name, got, want);
   }
 }
+
+#if defined(SHIZUKU_STACK_LEDGER) && defined(__riscv)
+// [SHIZUKU_STACK_LEDGER] C6 の呼出しの記録の配置 (on-target の一部)。
+// 実機の stack 上の枠 (16B 整列、512B) に呼び元の SP を置き、記録 [ret_sp + CALL_RECORD_OFFSET, +32) が
+// 呼び先の窓 (open_window) の外、かつ窓の上端より上にあることを確かめる。ret_sp は非整列にして、
+// 窓の上端の切り下げ (ret_sp & ~15) が効く場合も見る。
+// 組めていないもの (足場が要る): PMP の pmpaddr の読みと、U 呼び先から記録へ書いて fault を起こす試験
+// (U 側の呼び先と fault 受けの足場が要る)。記録の鎖の改ざん検出は thread 型が要るため host 試験で代替する。
+alignas(16) uint8_t stack_ledger_frame[512];
+
+void stack_ledger_placement_check() {
+  static_assert(ARCH::CALL_RECORD_OFFSET == 0, "stack record offset must be 0 (record sits at ret_sp)");
+  static_assert(ARCH::CALL_RECORD_BYTES == 32, "stack record slot is 32 bytes");
+  const uintptr_t stack_lo = reinterpret_cast<uintptr_t>(&stack_ledger_frame[0]);
+  const uintptr_t ret_sp = stack_lo + 396u; // 0x18C: 非整列。窓の上端は stack_lo + 384 (= ret_sp & ~15)
+  const shizuku::stack_window win = shizuku::open_window(ret_sp, stack_lo);
+  const uintptr_t record = ARCH::record_return_sp(ret_sp);
+  record_check("stack_ledger.window_valid", win.is_valid(), win.is_valid() ? 1u : 0u, 1u);
+  record_check("stack_ledger.window_hi_aligned", win.hi == stack_lo + 384u,
+               static_cast<unsigned long>(win.hi - stack_lo), 384u);
+  record_check("stack_ledger.record_is_ret_sp", record == ret_sp,
+               static_cast<unsigned long>(record - stack_lo), 396u);
+  record_check("stack_ledger.record_above_window",
+               record >= win.hi && !(record >= win.lo && record < win.hi),
+               static_cast<unsigned long>(record - stack_lo), 384u);
+}
+#endif
 
 // ---- U→U の往復サイクル計測 ------------------------------------------------------------
 constexpr uint32_t U_COST_ROUNDS = 2048;
@@ -1033,6 +1453,9 @@ void u_cost_bench() {
 
 void c6_stage1_safety() {
   BOARD::diag_printf("[C6_STAGE1] starting stage 1 U-mode + PMP safety verification\n");
+#if defined(SHIZUKU_STACK_LEDGER) && defined(__riscv)
+  stack_ledger_placement_check();
+#endif
 
   // 0. 明示的なオブジェクト所有 range (code / data / stack / return trampoline) の登録
   g_c6_stage1_u_bounds.owner_id = OBJECT_STAGE1_PROBE;
@@ -1043,8 +1466,6 @@ void c6_stage1_safety() {
   }
   g_c6_stage1_u_bounds.data_base = reinterpret_cast<uintptr_t>(u_mode_stage1_data_pool);
   g_c6_stage1_u_bounds.data_limit = g_c6_stage1_u_bounds.data_base + sizeof(u_mode_stage1_data_pool);
-  g_c6_stage1_u_bounds.stack_base = reinterpret_cast<uintptr_t>(u_mode_stage1_stack);
-  g_c6_stage1_u_bounds.stack_limit = g_c6_stage1_u_bounds.stack_base + sizeof(u_mode_stage1_stack);
   g_c6_stage1_u_bounds.u_return_trampoline = reinterpret_cast<uintptr_t>(&c6_stage1_u_return_trampoline);
   g_c6_stage1_u_bounds.role = c6_stage1_role::App;
   g_c6_stage1_u_bounds.mmio_base = 0;
@@ -1057,24 +1478,21 @@ void c6_stage1_safety() {
   g_c6_stage1_driver_bounds.code_limit = reinterpret_cast<uintptr_t>(&c6_stage1_u_code_end);
   g_c6_stage1_driver_bounds.data_base = reinterpret_cast<uintptr_t>(u_mode_driver_data_pool);
   g_c6_stage1_driver_bounds.data_limit = g_c6_stage1_driver_bounds.data_base + sizeof(u_mode_driver_data_pool);
-  g_c6_stage1_driver_bounds.stack_base = reinterpret_cast<uintptr_t>(u_mode_driver_stack);
-  g_c6_stage1_driver_bounds.stack_limit = g_c6_stage1_driver_bounds.stack_base + sizeof(u_mode_driver_stack);
   g_c6_stage1_driver_bounds.u_return_trampoline = reinterpret_cast<uintptr_t>(&c6_stage1_u_return_trampoline);
   g_c6_stage1_driver_bounds.role = c6_stage1_role::Driver;
   g_c6_stage1_driver_bounds.mmio_base = 0x60000000u;
   g_c6_stage1_driver_bounds.mmio_limit = 0x60001000u;
   g_c6_stage1_driver_bounds.update_precomputed();
 
-  // U worker スタックのカナリア初期化
+  // 2 つの object (U と driver) が 1 本の thread stack を共有する。thread の stack 範囲は
+  // bootstrap/spawn が登録済み (set_stack_bounds)。ここでは登録しない。
+  auto &thread = shizuku::kernel_instance.current_thread();
+
+  // callee 窓 = ecall 時点の M の sp の下 K。sp はこの関数の中で動かない (ARCH::syscall は always_inline)。
+  uintptr_t stage1_m_sp = 0;
+  asm volatile("mv %0, sp" : "=r"(stage1_m_sp));
+  const uintptr_t stage1_win_hi = stage1_m_sp & ~uintptr_t(15);
   constexpr uint32_t U_STACK_CANARY = 0x5A5A5A5Au;
-  auto *u_stack_words = reinterpret_cast<volatile uint32_t *>(u_mode_stage1_stack);
-  for (size_t i = 0; i < sizeof(u_mode_stage1_stack) / sizeof(uint32_t); ++i) {
-    u_stack_words[i] = U_STACK_CANARY;
-  }
-  auto *drv_stack_words = reinterpret_cast<uint32_t *>(u_mode_driver_stack);
-  for (size_t i = 0; i < sizeof(u_mode_driver_stack) / sizeof(uint32_t); ++i) {
-    drv_stack_words[i] = U_STACK_CANARY;
-  }
 
   // target pointer の設定
   const uintptr_t kstack_addr = reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack) + 16u;
@@ -1089,10 +1507,15 @@ void c6_stage1_safety() {
   data_pool_words[3] = reinterpret_cast<uintptr_t>(u_mode_driver_data_pool);
   data_pool_words[5] = OBJECT_STAGE1_DRIVER;
   data_pool_words[6] = METHOD_STAGE1_PROBE;
+  data_pool_words[8] = OBJECT_STAGE1_PROBE;
+  // cmd=30: thread の stack 領域の 1 語下 (本物の溢れ)。窓の伸長では救われず fault になる。
+  data_pool_words[9] = thread.stk.stack_lo - 4u;
 
   auto *drv_pool_words = reinterpret_cast<volatile uintptr_t *>(u_mode_driver_data_pool);
   drv_pool_words[0] = target_mmio_addr;
   drv_pool_words[1] = reinterpret_cast<uintptr_t>(u_mode_stage1_data_pool);
+  drv_pool_words[3] = OBJECT_STAGE1_PROBE;
+  drv_pool_words[4] = METHOD_STAGE1_PROBE;
 
   // 1. オブジェクト登録
   // PROBE は純粋な非特権 (OBJECT_UNPRIVILEGED) として登録 (kernel_role は付与しない)。
@@ -1127,12 +1550,6 @@ void c6_stage1_safety() {
       denied_create.error == 0 && denied_create.value == (uintptr_t)object_error::NOT_PRIVILEGED,
       denied_create.error != 0 ? denied_create.error : denied_create.value,
       (uintptr_t)object_error::NOT_PRIVILEGED);
-
-  // Exclude earlier legitimate CREATE/permission-probe stack use by starting a
-  // fresh full-stack observation window before commands 1..6. Only their ra
-  // save at stack_limit - 4 is expected to change.
-  for (size_t i = 0; i < sizeof(u_mode_stage1_stack) / sizeof(uint32_t); ++i)
-    u_stack_words[i] = U_STACK_CANARY;
 
   // 2. 0x802 U-mode 読み取り診断
   g_c6_probe_0x802_pc = reinterpret_cast<uintptr_t>(&c6_stage1_probe_0x802_insn_addr);
@@ -1273,18 +1690,52 @@ void c6_stage1_safety() {
   record_check("stage1: multi-trap combo exact fault mtval is kstack address",
                shizuku_c6_u_mode_diag[6] == kstack_addr, shizuku_c6_u_mode_diag[6], kstack_addr);
 
-  // 8. 全域を検査: 最終語は U worker 自身が保存した trampoline と厳密一致。
-  // この区間だけの検査で、CREATE_OBJECT 実行中の stack は対象外。
+  // 8. 窓を閉じた後の検査。callee 窓 [win_hi-K, win_hi) にカナリアを敷き、何もしない U callee
+  // (未定義 cmd=99 は a0=0 で ret) を呼ぶ。戻った直後に (関数呼出しを挟まず) 窓のうち resume frame
+  // (RV32_FRAME_BYTES) より下の語が全部 0 であること = カナリアが残っていない (窓を閉じるとき開いた分が
+  // ゼロ化された) ことを見る。resume frame は M caller の復帰用に窓の最上位へ作られるので対象外。
+  constexpr size_t STAGE1_WIN_WORDS = shizuku::kStackWindowStep / sizeof(uint32_t);
+  constexpr size_t STAGE1_FRAME_WORDS = RV32_FRAME_BYTES / sizeof(uint32_t);
+  // callee 窓の上端は C++ の sp からは推測しない。ARCH::syscall は ecall の前に gp/tp/s0 の退避枠を sp から
+  // 取るため、ecall 時点の sp (= U callee の入場 sp = win_hi) は stage1_win_hi より小さい。U callee 自身に
+  // 入場 sp を返させて (cmd 32) 実測し、窓の位置と caller 枠の位置関係を確かめてから使う。
+  const auto sp_probe_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      32 /* cmd=32: return entry sp */);
+  const uintptr_t stage1_callee_hi = sp_probe_res.value;
+  record_check("stage1: measured callee window top is 16B aligned, below M sp by a small syscall spill, "
+               "inside thread stack, and the M caller frame lies above it",
+               sp_probe_res.error == 0 && (stage1_callee_hi & 15u) == 0u &&
+                   stage1_callee_hi <= stage1_win_hi && stage1_win_hi - stage1_callee_hi <= 0x100u &&
+                   stage1_callee_hi >= thread.stk.stack_lo + shizuku::kStackWindowStep &&
+                   stage1_callee_hi <= thread.stk.stack_hi &&
+                   caller_sentinel_addr >= stage1_callee_hi,
+               stage1_callee_hi, stage1_win_hi);
+  auto *u_stack_words = reinterpret_cast<volatile uint32_t *>(stage1_callee_hi - shizuku::kStackWindowStep);
+  for (size_t i = 0; i < STAGE1_WIN_WORDS; ++i)
+    u_stack_words[i] = U_STACK_CANARY;
+  const auto closed_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      99 /* cmd=99: no-op U callee */);
   bool canary_intact = true;
-  const uint32_t expected_ra = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&c6_stage1_u_return_trampoline));
-  for (size_t i = 0; i < sizeof(u_mode_stage1_stack) / sizeof(uint32_t); ++i) {
-    if (!stage1_stack_word_matches(i, sizeof(u_mode_stage1_stack) / sizeof(uint32_t),
-                                   u_stack_words[i], U_STACK_CANARY, expected_ra)) {
-      canary_intact = false;
-    }
+  for (size_t i = 0; i < STAGE1_WIN_WORDS - STAGE1_FRAME_WORDS; ++i) {
+    if (u_stack_words[i] != 0u) canary_intact = false;
   }
-  record_check("stage1: privileged M handler stack did not spill into U stack canary (full stack)",
-               canary_intact, canary_intact ? 1 : 0, 1);
+  record_check("stage1: closed callee window leaves no canary and M handler did not spill (below resume frame)",
+               closed_res.error == 0 && closed_res.value == 0 && canary_intact,
+               canary_intact ? 1 : 0, 1);
+  const auto sp_probe_res2 = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      32 /* cmd=32: return entry sp */);
+  record_check("stage1: callee entry sp is the same on a second call (window position is stable)",
+               sp_probe_res2.error == 0 && sp_probe_res2.value == stage1_callee_hi,
+               sp_probe_res2.value, stage1_callee_hi);
 
   // 9. 本番判定述語によるオブジェクト ID 束縛・拒否の検証
   const bool auth_probe = shizuku_c6_is_authorized_u_object(OBJECT_STAGE1_PROBE, OBJECT_STAGE1_PROBE);
@@ -1299,14 +1750,14 @@ void c6_stage1_safety() {
   record_check("stage1: production predicate rejects uninitialized 0x0", reject_zero, reject_zero ? 1 : 0, 1);
 
   // 10. 本番スタック切り替え述語の検証
-  const uintptr_t test_u_sp = g_c6_stage1_u_bounds.stack_base + 512u;
+  const uintptr_t test_u_sp = thread.stk.stack_lo + 512u;
   const uintptr_t kstack_valid_frame = reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack) + 3600u;
   const uintptr_t routed_m_sp = shizuku_c6_get_m_handler_stack(test_u_sp, kstack_valid_frame);
   const uintptr_t expected_snapshot = (kstack_valid_frame + 144u);
   const bool routed_inside_kstack = (routed_m_sp >= reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack) &&
                                      routed_m_sp <= reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack + sizeof(shizuku_c6_kernel_stack)));
-  const bool routed_outside_u_stack = (routed_m_sp < g_c6_stage1_u_bounds.stack_base ||
-                                       routed_m_sp > g_c6_stage1_u_bounds.stack_limit);
+  const bool routed_outside_u_stack = (routed_m_sp < thread.stk.stack_lo ||
+                                       routed_m_sp > thread.stk.stack_hi);
   record_check("stage1: M handler stack routed inside trusted kernel stack as valid aligned snapshot",
                routed_inside_kstack && (routed_m_sp == expected_snapshot), routed_m_sp, expected_snapshot);
   record_check("stage1: M handler stack routed strictly outside U stack",
@@ -1393,14 +1844,20 @@ void c6_stage1_safety() {
                code_word_after == code_word_before, code_word_after, code_word_before);
 
   // 11d. U instruction fetch from U stack (cmd 10)
-  const uintptr_t ufetch_target = reinterpret_cast<uintptr_t>(u_mode_stage1_stack);
-  g_c6_probe_ufetch_target = ufetch_target;
+  // 期待アドレスは C++ の sp 推測で作らない。handler が frame (reserved0 = U の sp) から
+  // mepc == U_sp - 16 かつ ra == jalr の戻り先を厳密に確かめて回収し、観測した U の sp と窓を診断変数へ残す。
+  g_c6_probe_ufetch_usp = 0;
+  g_c6_probe_ufetch_win_lo = 0;
+  g_c6_probe_ufetch_win_hi = 0;
+  g_c6_probe_ufetch_ra = reinterpret_cast<uintptr_t>(&c6_stage1_probe_ufetch_insn_addr) + 4u;
   const auto ufetch_res = ARCH::syscall(
       static_cast<uintptr_t>(object_api::CALL_METHOD),
       OBJECT_STAGE1_PROBE,
       METHOD_STAGE1_PROBE,
       10 /* cmd=10 */);
-  g_c6_probe_ufetch_target = 0;
+  g_c6_probe_ufetch_ra = 0;
+  const uintptr_t ufetch_usp = g_c6_probe_ufetch_usp;
+  const uintptr_t ufetch_target = ufetch_usp - 16u;
   record_check("stage1: U instruction fetch from U stack denied (fault trapped)",
                ufetch_res.error == 0 && ufetch_res.value == 0xE00Bu && shizuku_c6_u_mode_diag[11] == 1u,
                shizuku_c6_u_mode_diag[11], 1);
@@ -1410,6 +1867,12 @@ void c6_stage1_safety() {
                shizuku_c6_u_mode_diag[5] == ufetch_target, shizuku_c6_u_mode_diag[5], ufetch_target);
   record_check("stage1: U fetch exact mtval is fetch target (U stack)",
                shizuku_c6_u_mode_diag[6] == ufetch_target, shizuku_c6_u_mode_diag[6], ufetch_target);
+  // フェッチ先は callee の窓の中 [win_hi - K, win_hi) にあり、U の入場 sp は実測した窓の上端と一致する。
+  record_check("stage1: U fetch target lies inside the callee stack window [win_hi-K, win_hi)",
+               ufetch_usp == stage1_callee_hi && g_c6_probe_ufetch_win_hi == ufetch_usp &&
+                   g_c6_probe_ufetch_win_lo == ufetch_usp - shizuku::kStackWindowStep &&
+                   ufetch_target >= g_c6_probe_ufetch_win_lo && ufetch_target < g_c6_probe_ufetch_win_hi,
+               ufetch_target, g_c6_probe_ufetch_win_lo);
 
   // 11e. U csrr pmpcfg0 (0x3A0) (cmd 11)
   g_c6_probe_upmpcfg_pc = reinterpret_cast<uintptr_t>(&c6_stage1_probe_upmpcfg_insn_addr);
@@ -1588,6 +2051,123 @@ void c6_stage1_safety() {
   record_check("stage1: caller restored its own data window successfully",
                data_pool_words[4] == 0xBEEFCAFEu,
                data_pool_words[4], 0xBEEFCAFEu);
+
+  // 16. U→U 通常 return レジスタ漏洩試験 (Task 2)
+  // cmd 26: PROBE が DRIVER (cmd 4) を呼び、DRIVER が全レジスタを既知パターンで汚して通常 return。
+  // caller が戻り直後の全レジスタ (a0-a7, t0-t6, s0-s11, ra) をキャプチャ。
+  // 事前に capture 領域 (word 16..43) を 0xFF で汚しておく。
+  for (size_t i = 16; i < 44; ++i) data_pool_words[i] = 0xFFFFFFFFu;
+  const auto leak_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      26 /* cmd=26: leak test */);
+
+  // (1) a0/a1 は返り値 (a0=error=0, a1=value=0x42。カーネルの exit は a0 に error、a1 に value を載せる)
+  const uintptr_t cap_a0 = data_pool_words[16];
+  const uintptr_t cap_a1 = data_pool_words[17];
+  record_check("stage1: U-to-U return error/value in a0/a1 preserved (a0=0 error, a1=0x42 value)",
+               leak_res.error == 0 && cap_a0 == 0u && cap_a1 == 0x42u,
+               cap_a1, 0x42u);
+
+  // (2) 他の全レジスタ (ra, t0-t6, a2-a7, s0-s11) が 0
+  bool other_regs_zero = true;
+  uintptr_t non_zero_val = 0;
+  for (size_t i = 18; i < 44; ++i) {
+    if (data_pool_words[i] != 0) {
+      other_regs_zero = false;
+      non_zero_val = data_pool_words[i];
+      break;
+    }
+  }
+  record_check("stage1: U-to-U return scrubbed all caller-visible registers (ra, t0-t6, a2-a7, s0-s11 zero)",
+               other_regs_zero, non_zero_val, 0);
+
+  // (3) t0 が kernel 領域アドレス (kernel stack 範囲・trusted stack cursor 値) でない
+  const uintptr_t cap_t0 = data_pool_words[24]; // capture[8]: t0
+  const uintptr_t kstack_begin = reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack);
+  const uintptr_t kstack_end = kstack_begin + sizeof(shizuku_c6_kernel_stack);
+  const bool t0_leaks_kstack = (cap_t0 >= kstack_begin && cap_t0 <= kstack_end);
+  record_check("stage1: U-to-U return t0 does not leak kernel stack address",
+               !t0_leaks_kstack && cap_t0 == 0, cap_t0, 0);
+
+  // 段 C-1: スタック窓の契約検証 (再入・伸長・不可視・隔離)
+  // (a) 再入: A→A (PROBE が自分の method を呼ぶ)
+  const auto reentrant_a_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      27 /* cmd=27: reentrant A-to-A */,
+      0 /* depth=0 */);
+  record_check("stage1: reentrant A-to-A keeps each activation stack intact",
+               reentrant_a_res.error == 0 && reentrant_a_res.value == 0,
+               reentrant_a_res.error == 0 ? reentrant_a_res.value : reentrant_a_res.error, 0);
+
+  // (a) 再入: A→B→A (PROBE → DRIVER → PROBE 戻り呼出し)
+  const auto reentrant_aba_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      28 /* cmd=28: reentrant A-to-B-to-A */,
+      0 /* depth=0 */);
+  record_check("stage1: reentrant A-to-B-to-A keeps each activation stack intact",
+               reentrant_aba_res.error == 0 && reentrant_aba_res.value == 0,
+               reentrant_aba_res.error == 0 ? reentrant_aba_res.value : reentrant_aba_res.error, 0);
+
+  // (b) 窓伸長: callee が窓の下 K を超えて (-512) へ書き正常に戻る
+  const uint32_t extend_cnt_before = shizuku_c6_stack_extend_count;
+  const auto extend_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      29 /* cmd=29: extend below K */);
+  const uint32_t extend_cnt_after = shizuku_c6_stack_extend_count;
+  record_check("stage1: callee stack window extends below K and returns normally",
+               extend_res.error == 0 && extend_res.value == 0 && extend_cnt_after > extend_cnt_before,
+               extend_cnt_after, extend_cnt_before + 1);
+
+  // (b) 窓伸長: thread の stack_lo を越える書込みは genuine overflow fault になる
+  g_c6_probe_below_stack_lo_pc = reinterpret_cast<uintptr_t>(&c6_stage1_probe_below_stack_lo_insn_addr);
+  const auto overflow_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      30 /* cmd=30: write below thread stack_lo */);
+  g_c6_probe_below_stack_lo_pc = 0;
+  record_check("stage1: write below thread stack_lo faults (genuine overflow)",
+               overflow_res.error == 0 && overflow_res.value == 0xE00Fu && shizuku_c6_stack_overflow_fault_count > 0,
+               overflow_res.value, 0xE00Fu);
+
+  // (c) 残り値の不可視: callee が窓全体にパターンを書いて戻った後、base が [sp-256, sp) 全語 0 を確認
+  const auto residue_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE,
+      METHOD_STAGE1_PROBE,
+      31 /* cmd=31: callee stack residue invisible */);
+  record_check("stage1: callee stack residue invisible to caller (window zeroed on return)",
+               residue_res.error == 0 && residue_res.value == 0,
+               residue_res.value, 0);
+
+  // (e) caller 枠不可視: callee が自分の窓の上端 (>= window top) を読む/書くと access fault
+  // 先の試験が立てたカウンタを流用せず、ここで caller 枠への読み (cmd 5)・書き (cmd 8) を再発行し、
+  // それぞれの fault カウンタが 1 ずつ増えたことを見る (窓の上端以上は常に fault)。
+  const uint32_t e_load_before = shizuku_c6_u_mode_diag[7];
+  const uint32_t e_store_before = shizuku_c6_u_mode_diag[9];
+  g_c6_probe_caller_stack_fault_pc = reinterpret_cast<uintptr_t>(&c6_stage1_probe_caller_stack_fault_insn_addr);
+  const auto e_load_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE, METHOD_STAGE1_PROBE, 5 /* cmd=5 */);
+  g_c6_probe_ustore_caller_pc = reinterpret_cast<uintptr_t>(&c6_stage1_probe_ustore_caller_insn_addr);
+  const auto e_store_res = ARCH::syscall(
+      static_cast<uintptr_t>(object_api::CALL_METHOD),
+      OBJECT_STAGE1_PROBE, METHOD_STAGE1_PROBE, 8 /* cmd=8 */);
+  g_c6_probe_ustore_caller_pc = 0;
+  record_check("stage1: callee cannot access caller frame (>= window top)",
+               e_load_res.error == 0 && e_load_res.value == 0xCAFEBABEu &&
+               e_store_res.error == 0 && e_store_res.value == 0xE009u &&
+               shizuku_c6_u_mode_diag[7] == e_load_before + 1u &&
+               shizuku_c6_u_mode_diag[9] == e_store_before + 1u,
+               (shizuku_c6_u_mode_diag[7] - e_load_before) + (shizuku_c6_u_mode_diag[9] - e_store_before), 2);
 #endif
 
   BOARD::diag_printf("[C6_STAGE1] stage 1 verification complete: passed=%lu failed=%lu\n",

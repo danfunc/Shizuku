@@ -71,6 +71,7 @@ cc_library(
     hdrs = glob(["internal_headers/**/*.hpp"]),
     includes = ["internal_headers"],
     defines = select({
+        "//configs:c6_umode_stack_ledger_enabled": ["SHIZUKU_LEAN_LEDGER=1", "SHIZUKU_STACK_LEDGER=1"],
         "//configs:c6_umode_ledger_enabled": ["SHIZUKU_LEAN_LEDGER=1"],
         "//conditions:default": [],
     }),
@@ -187,6 +188,12 @@ cc_test(
 cc_test(
     name = "three_a_return_window_test",
     srcs = ["tests/three_a_return_window_test.cpp"],
+    deps = [":internal_headers"],
+)
+
+cc_test(
+    name = "stack_window_test",
+    srcs = ["tests/stack_window_test.cpp"],
     deps = [":internal_headers"],
 )
 
