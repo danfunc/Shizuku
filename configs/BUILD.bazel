@@ -278,7 +278,7 @@ cc_library(
     hdrs = [":config_hpp"],
     includes = ["internal_headers"],
     defines = select({
-        ":rp2350": ["SHIZUKU_LEAN_LEDGER=1"],
+        ":rp2350": ["SHIZUKU_LEAN_LEDGER=1", "SHIZUKU_STACK_LEDGER=1"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

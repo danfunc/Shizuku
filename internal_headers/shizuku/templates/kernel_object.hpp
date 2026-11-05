@@ -392,6 +392,8 @@ public:
                        desc.instance_generation,    desc.privileged != 0,
                        desc.region_base,            desc.region_limit};
   }
+  // object が特権で走るか (表の flags から。SHIZUKU_STACK_LEDGER の戻りで caller の特権を引く)。
+  bool privileged_of(uint32_t id) const { return (m_objects[id].flags & OBJECT_UNPRIVILEGED) == 0; }
   // 呼び先の行から入場の形を作る (CALL_METHOD と、作成時の写しの元)。
   template <class Row> callee_view view_of_row(uint32_t id, const Row &row) const {
     return callee_view{id,

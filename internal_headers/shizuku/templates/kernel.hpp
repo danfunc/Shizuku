@@ -109,9 +109,17 @@ public:
   }
   const call_ledger_entry *ledger_entry(uint32_t id, uint32_t from_top) const {
     const THREAD &t = m_threads[id].thread;
+#if defined(SHIZUKU_STACK_LEDGER)
+    if (from_top >= t.call_stack.depth) return nullptr;
+    const call_ledger_entry *record = THREAD::record_at(t.call_stack.top);
+    for (uint32_t step = 0; step < from_top; ++step)
+      record = THREAD::record_at(record->prev);
+    return record;
+#else
     return from_top < t.call_stack.depth
                ? &t.ledger[t.call_stack.depth - 1 - from_top]
                : nullptr;
+#endif
   }
 
   CPU_MANAGER cpu_manager;

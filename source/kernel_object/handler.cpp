@@ -150,12 +150,18 @@ template <> uintptr_t KERNEL_OBJECT::handler_entry() {
 // 入場の検査は台帳の枠を depth + 1 < capacity の 1 本で調べ、16 bit の unwind_floor の溢れ検査を持たない。
 static_assert(KERNEL_OBJECT::LEDGER_CAPACITY <= UINT16_MAX,
               "ledger capacity must keep depth within the 16-bit unwind floor");
+#if defined(SHIZUKU_STACK_LEDGER)
+// 記録は caller の stack 枠に置く 32B。1 つにつき 64B 以上の stack を使うので depth は 16 bit に収まる。
+static_assert(sizeof(uintptr_t) != 4 || sizeof(KERNEL::call_ledger_entry) == 32,
+              "stack call record must be 32 bytes");
+#else
 static_assert(sizeof(uintptr_t) != 4 || sizeof(KERNEL::call_ledger_entry) ==
               (templates::compact_ledger_enabled<KERNEL::CONTEXT>() ? 20 : 32),
               "lean call ledger entry size must match its architecture");
 static_assert(!templates::compact_ledger_enabled<KERNEL::CONTEXT>() ||
               (KERNEL_OBJECT::OBJECT_COUNT < 128 && KERNEL_OBJECT::LEDGER_CAPACITY <= 63),
               "compact ledger metadata capacity exceeded");
+#endif
 #else
 static_assert(sizeof(KERNEL::call_ledger_entry) == 16,
               "call ledger entry must be 16 bytes on supported targets");

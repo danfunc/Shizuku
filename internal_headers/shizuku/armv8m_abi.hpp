@@ -13,13 +13,17 @@ namespace shizuku::armv8m_abi {
 // outside a callee's exclusive REGION_STACK upper bound.
 inline constexpr uintptr_t stack_alignment = 32;
 inline constexpr uintptr_t scratch_bytes = 32;
+// [SHIZUKU_STACK_LEDGER] converter が svc の前に空ける枠は 2 枚: ret_sp から上へ、下の 32B は converter の
+// 退避、上の 32B (ret_sp + record_offset) はカーネルの呼出しの記録。どちらも callee の窓 (上端 = ret_sp) の外。
+inline constexpr uintptr_t record_bytes = 32;
+inline constexpr uintptr_t record_offset = scratch_bytes;
 inline constexpr uintptr_t fp_saved_bytes = 16 * sizeof(uint32_t);
 inline constexpr uintptr_t max_reservation_bytes =
-    (fp_saved_bytes + stack_alignment - 1 + scratch_bytes + 7) & ~uintptr_t(7);
+    (fp_saved_bytes + stack_alignment - 1 + scratch_bytes + record_bytes + 7) & ~uintptr_t(7);
 
 constexpr uintptr_t trap_sp(uintptr_t original_sp, bool fp_active) {
   return ((original_sp - (fp_active ? fp_saved_bytes : 0)) &
-          ~(stack_alignment - 1)) - scratch_bytes;
+          ~(stack_alignment - 1)) - scratch_bytes - record_bytes;
 }
 constexpr uintptr_t fp_saved_begin(uintptr_t original_sp) {
   return original_sp - fp_saved_bytes;
@@ -138,7 +142,7 @@ template <bool Service = false, bool ObserveScratch = false, bool ObserveFP = fa
       ".Lshizuku_no_fp_save_%=:\n"
       "mov lr, sp\n"
       "bic lr, lr, #31\n"
-      "sub lr, lr, #32\n"
+      "sub lr, lr, #64\n"
       "mov sp, lr\n"
       "str r4, [sp, #0]\n"
       "str r5, [sp, #4]\n"

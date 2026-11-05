@@ -14,6 +14,7 @@
 #include "shizuku/object_ids.hpp"
 #include "shizuku/object_api.hpp"
 #include "shizuku/method_entry.hpp"
+#include "shizuku/native_call.hpp"
 #include "shizuku/selftest.hpp"
 #if defined(SHIZUKU_DEEP_DIAG) && defined(SHIZUKU_RP2040)
 #include "pico/time.h"
@@ -339,7 +340,60 @@ bool g_desc_export_v2 = false;
 bool g_owner_probe_old_index = false;
 uintptr_t g_owner_old_index_error = (uintptr_t)object_error::UNKNOWN_API;
 
+#if defined(SHIZUKU_STACK_LEDGER)
+// ---- 呼出しの記録 (SHIZUKU_STACK_LEDGER): 呼び先の中から記録を調べる -------------------------------
+// 記録は caller の stack 枠にあり、呼び先の stack 窓の外にある。これを実機で確かめる。
+struct stack_probe_result {
+  bool ran;
+  bool record_present;
+  bool via_is_descriptor_call;
+  bool depth_matches;
+  bool object_is_callee;
+  bool chain_ok_before;
+  bool window_excludes_record;
+  bool tamper_detected;
+  bool restored_ok;
+  bool callee_registers_clear_of_record;
+};
+stack_probe_result g_stack_probe{};
+bool g_stack_probe_armed = false;
+
+[[gnu::noinline]] void stack_ledger_probe() {
+  auto &probe = g_stack_probe;
+  probe = {};
+  probe.ran = true;
+  const uint32_t thread_id = kernel_instance.current_thread_id();
+  auto &thread = kernel_instance.current_thread();
+  const auto *entry = kernel_instance.ledger_entry(thread_id, 0);
+  probe.record_present = entry != nullptr;
+  if (entry == nullptr) return;
+  auto *record = const_cast<std::remove_cv_t<std::remove_pointer_t<decltype(entry)>> *>(entry);
+  probe.via_is_descriptor_call = record->via == KERNEL::LEDGER_DESCRIPTOR_CALL;
+  probe.depth_matches = record->depth == kernel_instance.current_depth();
+  probe.object_is_callee = record->object == OBJECT_DESC_TEST;
+  probe.chain_ok_before = shizuku::stack_record_chain_ok(thread);
+  // 窓の排他的な上端は記録の位置から求めた ret_sp と一致する (記録は窓の外、ret_sp の 32B 上)。
+  shizuku::archs::ppb::mpu->rnr = ARCH::REGION_STACK;
+  const uintptr_t window_end = (uintptr_t)(shizuku::archs::ppb::mpu->rlar & ~0x1Fu) + 32u;
+  probe.window_excludes_record =
+      window_end == ARCH::record_return_sp((uintptr_t)record) &&
+      window_end + ARCH::CALL_RECORD_OFFSET == (uintptr_t)record;
+  // 書き換え (特権の呼び先なら届く) を、先頭ポインタ・深さとの照合が検出する。
+  const uint16_t saved_depth = record->depth;
+  record->depth = (uint16_t)(saved_depth + 1u);
+  probe.tamper_detected = !shizuku::stack_record_chain_ok(thread);
+  record->depth = saved_depth;
+  probe.restored_ok = shizuku::stack_record_chain_ok(thread);
+}
+#endif
+
 uintptr_t desc_target_fn(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f) {
+#if defined(SHIZUKU_STACK_LEDGER)
+  if (g_stack_probe_armed) {
+    g_stack_probe_armed = false;
+    stack_ledger_probe();
+  }
+#endif
   ++g_desc_calls;
   g_desc_a0 = a;
   g_desc_self = api(object_api::GET_CURRENT_OBJECT).value;
@@ -1032,6 +1086,32 @@ void call_ladder() {
             g_desc_calls == calls_before + 1,
             (unsigned long)g_desc_calls, (unsigned long)(calls_before + 1));
     }
+#if defined(SHIZUKU_STACK_LEDGER)
+    // 呼出しの記録は caller の stack 枠にある。呼び先の中で記録・窓・改ざんの検出を調べた結果を読む。
+    {
+      g_stack_probe_armed = true;
+      const api_result probed = api(object_api::CALL_METHOD_DESCRIPTOR, desc_idx, 5);
+      check("stack ledger: probed call returns OK", probed.error == (uintptr_t)object_error::OK,
+            (unsigned long)probed.error, 0);
+      check("stack ledger: probe ran in the callee", g_stack_probe.ran, g_stack_probe.ran, 1);
+      check("stack ledger: top record exists", g_stack_probe.record_present,
+            g_stack_probe.record_present, 1);
+      check("stack ledger: record is a descriptor-call step", g_stack_probe.via_is_descriptor_call,
+            g_stack_probe.via_is_descriptor_call, 1);
+      check("stack ledger: record depth equals the kernel's depth", g_stack_probe.depth_matches,
+            g_stack_probe.depth_matches, 1);
+      check("stack ledger: record names the callee", g_stack_probe.object_is_callee,
+            g_stack_probe.object_is_callee, 1);
+      check("stack ledger: chain is consistent before tampering", g_stack_probe.chain_ok_before,
+            g_stack_probe.chain_ok_before, 1);
+      check("stack ledger: callee stack window ends at ret_sp, 32 bytes below the record",
+            g_stack_probe.window_excludes_record, g_stack_probe.window_excludes_record, 1);
+      check("stack ledger: a rewritten depth is detected by the kernel's head/depth check",
+            g_stack_probe.tamper_detected, g_stack_probe.tamper_detected, 1);
+      check("stack ledger: chain is consistent again after the record is restored",
+            g_stack_probe.restored_ok, g_stack_probe.restored_ok, 1);
+    }
+#endif
 #endif
 
     const api_result bad_obj = api(object_api::CREATE_METHOD_DESCRIPTOR, 9999, 1);

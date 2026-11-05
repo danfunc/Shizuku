@@ -220,6 +220,9 @@ shizuku_armv8m_return_stub:
     mov   r3, sp
     bic   r3, r3, #31
     mov   sp, r3          // EXIT does not return to this stack
+    // 64B の枠 (下半分 = converter 用、上半分 = カーネルの記録) を空けておく。最外の method の戻りは
+    // kobj へ回って dispatch の記録を積むことがあり、記録は ret_sp + 32 に書かれるため。
+    sub   sp, sp, #64
     movs  r1, #1        // legacy one-pop notification
     movs  r3, #0        // a3 = エラーコード 0 (成功)
     movs  r3, #0xA5

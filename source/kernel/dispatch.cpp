@@ -408,8 +408,10 @@ SHIZUKU_HOT SHIZUKU_SVC_RAM kernel_error KERNEL::enter_call(KERNEL::THREAD &thre
       request.callee_object == m_object_svc_handler_object) {
     return kernel_error::BAD_REQUEST;
   }
+#if !defined(SHIZUKU_STACK_LEDGER)
   if (thread.call_stack.call_count >= KERNEL_OBJECT::MAX_DEPTH)
     return kernel_error::NO_STACK;
+#endif
   const uint32_t unwind_floor = thread.call_stack.depth;
   if (!arch_call_in_place<ARCH>()) {
     // 呼び先の普通の return は svc_dispatch 経由でもう 1 枚 call_frame_push する。
@@ -422,16 +424,21 @@ SHIZUKU_HOT SHIZUKU_SVC_RAM kernel_error KERNEL::enter_call(KERNEL::THREAD &thre
       return kernel_error::NO_STACK;
   }
   // 4A: 最後の 1 枠 (ledger_capacity - 1) は return dispatch 専用に先取り予約する。
+#if defined(SHIZUKU_STACK_LEDGER)
+  // 記録は caller の stack 枠: 枠の余白の検査は header_push_of が 1 本で行う。
+  if (!(arch_call_in_place<ARCH>()
+#else
   if (unwind_floor > UINT16_MAX || thread.ledger == nullptr ||
       unwind_floor + 1u >= thread.ledger_capacity ||
       !(arch_call_in_place<ARCH>()
+#endif
             ? header_push_of<ARCH>(thread, *context, **frame, via, unwind_floor)
             : call_frame_push(thread, context, frame)))
     return kernel_error::NO_STACK;
   if (!arch_call_in_place<ARCH>())
     thread.call_stack.identity[thread.call_stack.call_count] = {
         thread.call_stack.caller_object, thread.call_stack.caller_generation};
-  auto &entry = thread.ledger[thread.call_stack.depth - 1];
+  auto &entry = thread.ledger_top_mut();
 #if defined(SHIZUKU_LEAN_LEDGER)
   if (arch_call_in_place<ARCH>()) {
     // header_push_of が戻りの権威 (ret_*・prev_call) を書いた。ここでは同定と世代だけを足し、
@@ -445,6 +452,9 @@ SHIZUKU_HOT SHIZUKU_SVC_RAM kernel_error KERNEL::enter_call(KERNEL::THREAD &thre
     entry.generation = request.callee_generation;
     thread.call_stack.call_count++;
     thread.call_stack.call_top = thread.call_stack.depth;
+#if defined(SHIZUKU_STACK_LEDGER)
+    thread.call_stack.call_top_rec = thread.call_stack.top;
+#endif
     return kernel_error::OK;
   }
 #endif
@@ -844,7 +854,7 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_forward(KERNEL::CONTEXT
   shizuku_boot_trace_phase(413);
 #endif
 
-  auto &entry = thread.ledger[thread.call_stack.depth - 1];
+  auto &entry = thread.ledger_top_mut();
   entry.object = target_object;
   entry.kind = to_root ? (uint8_t)object_kind::KERNEL_OBJECT
                        : (uint8_t)object_kind::HANDLER;

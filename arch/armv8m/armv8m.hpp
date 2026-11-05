@@ -442,6 +442,19 @@ public:
   static bool call_header_has_room(const context_t &context, uint32_t) {
     return call_stack_has_room(call_return_sp(context), context.psplim, context.stack_ceiling);
   }
+  // [SHIZUKU_STACK_LEDGER] 呼出しの記録の位置: converter が空けた枠の上の半分 [ret_sp + 32, +32)。
+  //   ret_sp は svc 時の SP なので callee の窓の上端 (shrink_stack_limit) と一致し、記録は callee から見えない。
+  static constexpr uintptr_t CALL_RECORD_OFFSET = armv8m_abi::record_offset;
+  static constexpr uintptr_t CALL_RECORD_BYTES = armv8m_abi::record_bytes;
+  static constexpr uintptr_t record_return_sp(uintptr_t record) { return record - CALL_RECORD_OFFSET; }
+  // 記録を書く前の検査 1 本: 枠 (ret_sp から 64B) が caller の天井 (信頼できる活動の上限) の内側にあり、
+  // 整列し、PSPLIM との間に余白が残る。カーネルが特権で書くので PSPLIM のハード検査は効かず、この比較が要る。
+  static bool call_record_room_at(const context_t &context, uintptr_t return_sp) {
+    const uintptr_t ceiling = context.stack_ceiling;
+    return ceiling != 0 && return_sp <= ceiling &&
+           ceiling - return_sp >= CALL_RECORD_OFFSET + CALL_RECORD_BYTES &&
+           call_stack_has_room(return_sp, context.psplim, ceiling);
+  }
   // 求めておいた戻り SP (call_return_sp(context)) で調べる版。例外フレームの読みを 1 回にするために使う。
   static bool call_stack_has_room_at(const context_t &context, uintptr_t return_sp) {
     return call_stack_has_room(return_sp, context.psplim, context.stack_ceiling);
