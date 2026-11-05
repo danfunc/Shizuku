@@ -392,8 +392,6 @@ public:
                        desc.instance_generation,    desc.privileged != 0,
                        desc.region_base,            desc.region_limit};
   }
-  // object が特権で走るか (表の flags から。SHIZUKU_STACK_LEDGER の戻りで caller の特権を引く)。
-  bool privileged_of(uint32_t id) const { return (m_objects[id].flags & OBJECT_UNPRIVILEGED) == 0; }
   // 呼び先の行から入場の形を作る (CALL_METHOD と、作成時の写しの元)。
   template <class Row> callee_view view_of_row(uint32_t id, const Row &row) const {
     return callee_view{id,
@@ -405,6 +403,8 @@ public:
                        row.region_base,
                        row.region_limit};
   }
+  // object が特権で走るか (表の flags から。SHIZUKU_STACK_LEDGER の戻りで caller の特権を引く)。
+  bool privileged_of(uint32_t id) const { return (m_objects[id].flags & OBJECT_UNPRIVILEGED) == 0; }
   // 項目に呼び先の前計算を書き、最後に偶数 seq を release で公開する (作成と試験の据付けが共有する)。
   // 書く側は seq を奇数にしてから中身を書き、書き終えたら偶数に進めて store-release で公開。
   // 呼び先は created・入口 0 でないことを呼出し側が確かめてあること。
