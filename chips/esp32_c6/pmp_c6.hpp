@@ -20,8 +20,6 @@ enum class c6_stage1_role : uint8_t {
 };
 
 struct alignas(8) pmp_precomputed_csr {
-  uint32_t pmpaddr4 = 0; // stack base >> 2
-  uint32_t pmpaddr5 = 0; // stack limit >> 2
   uint32_t pmpaddr6 = 0; // data base >> 2
   uint32_t pmpaddr7 = 0; // data limit >> 2
   uint32_t pmpaddr8 = 0; // mmio base >> 2
@@ -31,16 +29,13 @@ struct alignas(8) pmp_precomputed_csr {
 };
 
 inline constexpr pmp_precomputed_csr precompute_object_pmp(
-    uintptr_t stack_base, uintptr_t stack_limit,
     uintptr_t data_base, uintptr_t data_limit,
     c6_stage1_role role, uintptr_t mmio_base, uintptr_t mmio_limit) noexcept {
   pmp_precomputed_csr csr{};
   namespace perm = shizuku::ports::riscv::pmp_perm;
   constexpr uint8_t PMP_MODE_TOR = static_cast<uint8_t>(shizuku::ports::riscv::pmp_mode::TOR) << 3;
 
-  // Entry 4, 5: Stack (TOR, R|W, NX)
-  csr.pmpaddr4 = static_cast<uint32_t>(stack_base >> 2);
-  csr.pmpaddr5 = static_cast<uint32_t>(stack_limit >> 2);
+  // Entry 4, 5: Stack (TOR, R|W, NX) - entry 5 TOR RW, addr4/5 are written dynamically via apply_stack_window
   const uint8_t cfg_stack = PMP_MODE_TOR | perm::R | perm::W;
 
   // Entry 6, 7: Data (TOR, R|W, NX) (optional)
@@ -74,8 +69,6 @@ struct c6_stage1_object_bounds {
   uintptr_t code_limit = 0;
   uintptr_t data_base = 0;
   uintptr_t data_limit = 0;
-  uintptr_t stack_base = 0;
-  uintptr_t stack_limit = 0;
   uintptr_t u_return_trampoline = 0;
   c6_stage1_role role = c6_stage1_role::App;
   uintptr_t mmio_base = 0;
@@ -90,7 +83,7 @@ struct c6_stage1_object_bounds {
 
   constexpr void update_precomputed() noexcept {
     precomputed = precompute_object_pmp(
-        stack_base, stack_limit, data_base, data_limit, role, mmio_base, mmio_limit);
+        data_base, data_limit, role, mmio_base, mmio_limit);
     pmp_epoch = pmp_epoch + 1u;
   }
 };
@@ -442,8 +435,25 @@ public:
   }
 
   // 切替え時の定数縛り (試験で検証)
-  static constexpr uint32_t SWITCH_CSR_COUNT = 8u;
+  static constexpr uint32_t SWITCH_CSR_COUNT = 6u;
+  static constexpr uint32_t STACK_WINDOW_CSR_COUNT = 2u;
   static constexpr uint32_t FIXED_ENTRIES_TOUCHED_ON_SWITCH = 0u;
+
+  // スタック窓の適用 (pmpaddr4, pmpaddr5 の 2 本のみ更新。hi == lo なら空窓)
+  [[gnu::always_inline]] static void apply_stack_window(uintptr_t lo, uintptr_t hi) noexcept {
+    const uint32_t addr4 = static_cast<uint32_t>(lo >> 2);
+    const uint32_t addr5 = static_cast<uint32_t>(hi >> 2);
+#if defined(__riscv)
+    asm volatile(
+        "csrw 0x3B4, %0\n" // pmpaddr4
+        "csrw 0x3B5, %1\n" // pmpaddr5
+        :
+        : "r"(addr4), "r"(addr5)
+        : "memory");
+#else
+    (void)addr4; (void)addr5;
+#endif
+  }
 
   // 起動時の固定エントリ設定 (Entry 0-3: 共有コード・Trampoline, 共有アドレス窓)
   static void init_fixed_entries(uintptr_t code_base, uintptr_t code_limit,
@@ -484,7 +494,7 @@ public:
 #endif
   }
 
-  // オブジェクト切替え (固定エントリに触れず、前計算された固有 8 本の CSR のみ書き込み)
+  // オブジェクト切替え (固定エントリおよびスタック窓に触れず、前計算された固有 6 本の CSR のみ書き込み)
   // fence / fence.i は置かない。C6 は S-mode・仮想メモリが無く、RISC-V 特権仕様 "Physical Memory
   // Protection and Paging" 節は「VM が無ければ PMP は access と同期して検査され、SFENCE.VMA は不要」とする。
   // ESP-IDF 自身の PMP 設定 (esp_cpu_configure_region_protection) も CSR 書込み後に fence を置かない。
@@ -492,17 +502,14 @@ public:
   [[gnu::always_inline]] static void switch_to_precomputed(const pmp_precomputed_csr &csr) noexcept {
 #if defined(__riscv)
     asm volatile(
-        "csrw 0x3B4, %0\n" // pmpaddr4
-        "csrw 0x3B5, %1\n" // pmpaddr5
-        "csrw 0x3B6, %2\n" // pmpaddr6
-        "csrw 0x3B7, %3\n" // pmpaddr7
-        "csrw 0x3B8, %4\n" // pmpaddr8
-        "csrw 0x3B9, %5\n" // pmpaddr9
-        "csrw 0x3A1, %6\n" // pmpcfg1
-        "csrw 0x3A2, %7\n" // pmpcfg2
+        "csrw 0x3B6, %0\n" // pmpaddr6
+        "csrw 0x3B7, %1\n" // pmpaddr7
+        "csrw 0x3B8, %2\n" // pmpaddr8
+        "csrw 0x3B9, %3\n" // pmpaddr9
+        "csrw 0x3A1, %4\n" // pmpcfg1
+        "csrw 0x3A2, %5\n" // pmpcfg2
         :
-        : "r"(csr.pmpaddr4), "r"(csr.pmpaddr5),
-          "r"(csr.pmpaddr6), "r"(csr.pmpaddr7),
+        : "r"(csr.pmpaddr6), "r"(csr.pmpaddr7),
           "r"(csr.pmpaddr8), "r"(csr.pmpaddr9),
           "r"(csr.pmpcfg1), "r"(csr.pmpcfg2)
         : "memory");

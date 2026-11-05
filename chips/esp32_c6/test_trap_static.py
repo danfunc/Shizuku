@@ -113,7 +113,40 @@ assert exit_entry.rstrip().endswith('mret')
 # U-mode 高速出口: 復帰先特権 U-mode 時に mscratch に trusted stack cursor、sp に U-mode sp を復帰
 u_exit = asm.split('// ---- U-mode 高速出口 (RV32_TAG_U_*)')[1].split('.size shizuku_rv32_trap_entry')[0]
 assert 'csrw mscratch, t0' in u_exit
-assert 'lw sp, RV32_F_RESERVED0(sp)' in u_exit
+assert 'lw t0, RV32_F_RESERVED0(sp)' in u_exit
+# U-mode 戻り出口 (RV32_TAG_U_ECALL / RV32_TAG_U_SCRUB):
+# callee と caller は相互不信のため、通常 return でも a0/a1 以外 (ra, t0-t6, a2-a7, s0-s11) を zero に消去。
+# また mscratch 設定に t0 を使った後、mret 直前に t0 を zero に消去し、kernel 領域アドレスの漏洩を防ぐ。
+for _u_label in ('.Lrv32_umode_exit_ecall:', '.Lrv32_umode_exit_scrub:'):
+    _u_blk = asm.split(_u_label)[1].split('mret')[0]
+    _u_cleared = set(re.findall(r'mv (\w+), zero', _u_blk))
+    assert _u_cleared == expected_cleared, (_u_label, sorted(_u_cleared ^ expected_cleared))
+    assert ('csrw mscratch, t0\n'
+            '  sw zero, RV32_F_RESERVED1(sp)\n'
+            '  lw t0, RV32_F_RESERVED0(sp)\n'
+            '  sw zero, RV32_F_RESERVED0(sp)\n'
+            '  mv sp, t0\n'
+            '  mv t0, zero') in _u_blk, _u_label
+
+# U 出口での frame 各語のゼロ化 (sw zero, OFF(sp)) の存在と順序を検証
+for _u_label, _expected_zero_order in (
+    ('.Lrv32_umode_exit_entry:', ['MEPC', 'MSTATUS', 'RA', 'A0', 'A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7', 'RESERVED1', 'RESERVED0']),
+    ('.Lrv32_umode_exit_ecall:', ['MEPC', 'MSTATUS', 'MCAUSE', 'A0', 'A1', 'RESERVED1', 'RESERVED0']),
+    ('.Lrv32_umode_exit_scrub:', ['MEPC', 'MSTATUS', 'MCAUSE', 'A0', 'A1', 'RESERVED1', 'RESERVED0']),
+):
+    _blk = asm.split(_u_label)[1].split('mret')[0]
+    _zeroed = re.findall(r'sw\s+zero,\s+RV32_F_(\w+)\(sp\)', _blk)
+    assert _zeroed == _expected_zero_order, (_u_label, _zeroed, _expected_zero_order)
+# U caller の再開フレームは user stack (caller の ret_sp - 144) 上に作られ、callee の窓 [sp-256, sp) に入る。
+# call_resume_at / set_unprivileged_resume_metadata が書く語 (+ 戻り値 a0/a1) は、U 出口 (ecall / scrub) が
+# 全部 sw zero で消さなければならない (残ると caller に非 0 の語が見える。目印 mcause=0x111 が残った実機不具合の再発防止)。
+_resume_src = header.split('static exception_frame_t *call_resume_at(')[1].split('\n  }\n')[0] + \
+    header.split('static void set_unprivileged_resume_metadata(')[1].split('\n  }\n')[0]
+_written = {m.upper() for m in re.findall(r'frame(?:->|\.)(\w+)\s*(?:=|&=|\|=)[^=]', _resume_src)} | {'A0', 'A1'}
+assert {'MEPC', 'MSTATUS', 'MCAUSE', 'RESERVED0', 'RESERVED1'} <= _written, _written
+for _u_label in ('.Lrv32_umode_exit_ecall:', '.Lrv32_umode_exit_scrub:'):
+    _zeroed_set = set(re.findall(r'sw\s+zero,\s+RV32_F_(\w+)\(sp\)', asm.split(_u_label)[1].split('mret')[0]))
+    assert _written <= _zeroed_set, (_u_label, sorted(_written - _zeroed_set))
 # 再開フレームを作るのは call_resume_at (ヘッダ版の call_resume も、SHIZUKU_LEAN_LEDGER の台帳版もここへ来る)。
 call_resume = header.split('static exception_frame_t *call_resume_at(')[1].split('\n  }\n')[0]
 assert 'frame->mcause = scrub ? RV32_TAG_ECALL_SCRUB : RV32_TAG_ECALL' in call_resume
@@ -182,6 +215,70 @@ for label, next_label in (
     assert block.index('"  sw ra, 12(sp)\\n"') < ecall_pos
     assert block.index('"  lw ra, 12(sp)\\n"', ecall_pos) > ecall_pos
     assert block.index('"  addi sp, sp, 16\\n"', ecall_pos) < block.rindex('"  ret\\n"')
+# U-to-U probe: ecall 通常 return / scrub で s0-s11, ra が消去されるため、
+# .Lprobe_u_to_u_call_fault は ecall 直後に自窓アドレス (u_mode_stage1_data_pool) を再ロードしてから
+# 16(s0) をアクセスすること (40(sp) にあるのは caller の s0 であり自窓アドレスではない)。
+u2u_fault = stage1.split('".Lprobe_u_to_u_call_fault:\\n"', 1)[1].split('".Lprobe_u_to_u_leak:\\n"', 1)[0]
+u2u_ecall = u2u_fault.index('"  ecall\\n"')
+u2u_s0_save = u2u_fault.index('"  sw s0, 40(sp)\\n"')
+u2u_s0_reload = u2u_fault.index('"  la s0, u_mode_stage1_data_pool\\n"', u2u_ecall)
+u2u_s0_use = u2u_fault.index('"  lw t0, 16(s0)\\n"', u2u_ecall)
+assert u2u_s0_save < u2u_ecall < u2u_s0_reload < u2u_s0_use
+# U probe の枠規約 (実機で再入の内側 probe が枠なしに 16(sp) へ書き Store Access Fault した再発防止)。
+# U callee の入場 sp は callee 窓の上端 hi で、sp 以上は caller の枠 (PMP が拒否する)。したがって probe 内の
+# sp 基準の正のオフセットの store/load (N(sp), N >= 0, 4 バイト) は、その probe の中で先に
+# `addi sp, sp, -M` で確保した枠の中 (N + 4 <= M) になければならない。負のオフセット (sp より下 = 自分の窓、
+# 窓伸長) は対象外。許可リスト: 窓の外を意図的に叩く probe (cmd 5 caller 枠の読み・cmd 8 caller 枠への書き) は
+# 「pool から取ったアドレスのレジスタ基準」で叩き sp 基準ではないので、この検査の対象にそもそも入らない。
+# sp 基準で窓の外を意図的に叩く probe が将来できた場合だけ、理由つきで下の表に足す。
+_STACK_FRAME_ALLOW = {}  # {entry ラベル: 理由}
+_asm_region = stage1.split('"u_mode_probe_worker:\\n"', 1)[1].split('".size u_mode_driver_worker', 1)[0]
+
+
+def _u_probe_frame_violations(region, allow=None):
+    allow = allow or {}
+    out, entry, frame, peak, n_checked = [], None, 0, 0, 0
+    for raw in region.splitlines():
+        m = re.match(r'^\s*"\s*(.*?)\\n"\s*$', raw)
+        if not m:
+            continue
+        line = m.group(1).strip()
+        lab = re.match(r'^(\.L\w+|u_mode_\w+_worker):$', line)
+        if lab:
+            name = lab.group(1)
+            if re.search(r'(error|done|fail)', name):  # 同じ probe の出口・失敗枝: 枠は entry の最大値
+                frame = peak
+            else:
+                entry, frame, peak = name, 0, 0
+            continue
+        a = re.match(r'^addi sp, sp, (-?\d+)$', line)
+        if a:
+            frame -= int(a.group(1))
+            peak = max(peak, frame)
+            continue
+        s = re.match(r'^(sw|lw)\s+\w+, (-?\d+)\(sp\)$', line)
+        if s and int(s.group(2)) >= 0 and entry not in allow:
+            n_checked += 1
+            if int(s.group(2)) + 4 > frame:
+                out.append((entry, line, frame))
+    return out, n_checked
+
+
+_viol, _n_checked = _u_probe_frame_violations(_asm_region, _STACK_FRAME_ALLOW)
+assert not _viol, f'U probe が自分の枠 (addi sp, sp, -M) の外 = sp 以上に触れる: {_viol}'
+assert _n_checked > 100  # 空振り防止: 退避・復帰・パターンの sp 相対アクセスを実際に検査している
+# 検査自体の試験: 枠なしの内側 probe (修正前の .Lreentrant_a_child) と、枠が足りない probe を検出できること。
+_bad_child = '    ".Lreentrant_a_child:\\n"\n    "  li t0, 0xAA02BEEF\\n"\n    "  sw t0, 16(sp)\\n"\n    "  ret\\n"\n'
+assert _u_probe_frame_violations(_bad_child)[0] == [('.Lreentrant_a_child', 'sw t0, 16(sp)', 0)]
+_short = '    ".Lp:\\n"\n    "  addi sp, sp, -16\\n"\n    "  sw ra, 16(sp)\\n"\n'
+assert len(_u_probe_frame_violations(_short)[0]) == 1
+_ok = '    ".Lp:\\n"\n    "  addi sp, sp, -32\\n"\n    "  sw ra, 28(sp)\\n"\n    "  sw t0, -512(sp)\\n"\n    "  addi sp, sp, 32\\n"\n'
+assert _u_probe_frame_violations(_ok)[0] == []
+# 内側 probe 2 つは自分の枠を取り、外側の 16(sp) と別の枠に書く。
+for _inner in ('.Lreentrant_a_child', '.Lreentrant_aba_child_a2'):
+    _blk = stage1.split(f'"{_inner}:\\n"', 1)[1].split('"  ret\\n"', 1)[0]
+    assert _blk.index('"  addi sp, sp, -32\\n"') < _blk.index('"  sw t0, 16(sp)\\n"') < _blk.index('"  addi sp, sp, 32\\n"'), _inner
+    assert '"  li a0, 0x42\\n"' in _blk, _inner
 c5_src = (root / 'chips/esp32_c5/trap.cpp').read_text()
 assert c5_src.count('const auto *const entered = context;') == 3
 assert c5_src.count('if (context != entered) arch::scrub_on_switch(*context);') == 3

@@ -49,6 +49,8 @@ template <> void KERNEL::bootstrap(
   //   経由せずプリミティブとして解釈されてしまう)。
   thread.set_state(THREAD::state_t::RUNNING);
   ARCH::stack_limit_set(*thread.context, limit);
+  // boot thread の本物の stack 領域。set_stack_bounds が 8B 整列 ([base+7 & ~7, (base+bytes) & ~7)) をする。
+  thread.set_stack_bounds(base, base + stack_bytes);
   if constexpr (ARCH::HAS_OBJECT_PROTECTION) {
     const auto boot_stack_win = ARCH::encode_stack_window(base, base + stack_bytes);
     thread.stack_rbar = boot_stack_win.rbar;
@@ -89,6 +91,7 @@ void KERNEL::bootstrap_secondary(uint32_t thread, void (*entry)(),
   adopted.affinity = 1u << BOARD::core_num();
   adopted.set_state(THREAD::state_t::RUNNING);
   ARCH::stack_limit_set(*adopted.context, limit);
+  adopted.set_stack_bounds(stack_base, stack_base + stack_bytes);
   if constexpr (ARCH::HAS_OBJECT_PROTECTION) {
     const auto sec_stack_win = ARCH::encode_stack_window(stack_base, stack_base + stack_bytes);
     adopted.stack_rbar = sec_stack_win.rbar;

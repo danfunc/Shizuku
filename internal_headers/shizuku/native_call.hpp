@@ -15,6 +15,7 @@
 #include "shizuku/core_num.hpp"
 #include "shizuku/kernel_abi.hpp"
 #include "shizuku/object_api.hpp"
+#include "shizuku/stack_window.hpp"
 #include "shizuku/svc_attributes.hpp"
 
 #if defined(SHIZUKU_C6_UMODE) && !defined(SHIZUKU_LEAN_LEDGER)
@@ -335,6 +336,41 @@ template <class K, class KObj>
       thread.call_stack.call_count--;
       thread.call_stack.call_top = entry.prev_call;
     }
+    // 窓機構を持つ arch (HAS_STACK_WINDOW) だけ。窓を持つのは U callee の段だけなので、win_span を
+    // 1 回読み、0 (M callee / dispatch 段) なら窓関連を一切しない。cur_win は U の入場・戻りでしか
+    // 動かさない不変条件「cur_win = 最内の U 窓 (無ければ stack 全域)」を保つので、M 段を戻るときも
+    // 復元は要らない (M 段の間に U 段が入って戻れば、その pop が最内の U 窓へ戻してある)。
+    // 持たない arch (ARM) は記帳もゼロ化もしない。
+    if constexpr (K::THREAD::HAS_STACK_WINDOW) {
+      const uint32_t popped_index = depth - 1;
+      if (popped_index < thread.MAX_STACK_WINDOWS && thread.win_span[popped_index] != 0) {
+        const auto popped_win = thread.window_at(popped_index);
+        if (popped_win.is_valid()) {
+          zero_window_of<A>(popped_win);
+        }
+        thread.clear_window_at(popped_index);
+
+        // 戻り先が M でも U でも、cur_win を「この段より外側の最内の U 窓」へ戻す
+        // (M caller へ戻る場合も、その M が更に外の U へ戻るときに復元が要らないようにする)。
+        stack_window caller_win{thread.stk.stack_lo, thread.stk.stack_hi};
+        for (int32_t d = static_cast<int32_t>(depth) - 2; d >= 0; --d) {
+          const auto w = thread.window_at(d);
+          if (w.is_valid()) {
+            caller_win = w;
+            break;
+          }
+        }
+        thread.stk.cur_win_lo = caller_win.lo;
+        thread.stk.cur_win_hi = caller_win.hi;
+
+        if (restore && entry.ret_privileged == 0) {
+          if constexpr (requires { A::apply_stack_window(context, caller_win.lo, caller_win.hi); }) {
+            A::apply_stack_window(context, caller_win.lo, caller_win.hi);
+          }
+        }
+      }
+    }
+
     if (restore) {
       if constexpr (arch_has_core_num<A>) {
         frame = A::call_resume_at(context, entry.ret_pc, entry.ret_sp, entry.ret_privileged != 0,
@@ -488,10 +524,39 @@ template <class K, class KObj>
 #endif
 #if defined(SHIZUKU_STACK_LEDGER)
 #elif defined(SHIZUKU_LEAN_LEDGER)
+    const uintptr_t ret_sp = A::call_return_sp(context);
+    auto &entry = thread.ledger[depth];
+    entry.ret_sp = ret_sp;
+    // 窓機構を持つ arch (HAS_STACK_WINDOW) だけ範囲検査・窓の記帳をする。ARM は何もしない。
+    // 窓は U callee だけが持つ。M callee は win_span を書かず読まない: win_span[depth] は常に 0
+    // (U 入場で書いた段は pop で必ず 0 に戻す不変条件。thread 生成時も 0)。
+    if constexpr (K::THREAD::HAS_STACK_WINDOW) {
+      if (!view.privileged) {
+        if (depth >= thread.MAX_STACK_WINDOWS) {
+          return kernel_error::NO_STACK;
+        }
+        // caller (M でも U でも) の SP は thread 自身の stack 内に無ければならない。
+        if (thread.stk.stack_lo != 0 || thread.stk.stack_hi != 0) {
+          if (ret_sp < thread.stk.stack_lo || ret_sp > thread.stk.stack_hi) {
+            return kernel_error::NO_STACK;
+          }
+        }
+        const auto win = open_window(ret_sp, thread.stk.stack_lo);
+        if (!win.is_valid()) {
+          return kernel_error::NO_STACK;
+        }
+        thread.set_window_at(depth, win);
+        thread.stk.cur_win_lo = win.lo;
+        thread.stk.cur_win_hi = win.hi;
+        if constexpr (requires { A::apply_stack_window(context, win.lo, win.hi); }) {
+          A::apply_stack_window(context, win.lo, win.hi);
+        }
+      }
+    }
+
     // 記帳は台帳の 1 項目だけ: 呼び先の同定 (object・handler・kind・via・floor・世代) と、この段から
     // 戻るときの caller の再開点 (pc・sp・特権) と、ひとつ外側の call 段への鎖 (prev_call)。窓は復帰時に解決する。
     // user stack のヘッダは書かない。current / caller の識別は call 段の列から導く (call_top だけ更新)。
-    auto &entry = thread.ledger[depth];
     entry.object = view.id;
     entry.handler_object = view.parent_handler_object;
     entry.handler_entry = view.parent_handler_entry;
@@ -500,7 +565,6 @@ template <class K, class KObj>
     entry.unwind_floor = (uint16_t)depth;
     entry.generation = view.instance_generation;
     entry.ret_pc = A::frame_pc(frame);
-    entry.ret_sp = return_sp;
     entry.prev_call = (uint16_t)stack.call_top;
     entry.ret_privileged = A::context_privileged(context) ? 1 : 0;
     stack.depth = depth + 1;
