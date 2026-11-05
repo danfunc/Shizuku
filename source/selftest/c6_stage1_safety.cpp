@@ -1249,6 +1249,33 @@ void record_check(const char *name, bool ok, unsigned long got, unsigned long wa
   }
 }
 
+#if defined(SHIZUKU_STACK_LEDGER) && defined(__riscv)
+// [SHIZUKU_STACK_LEDGER] C6 の呼出しの記録の配置 (on-target の一部)。
+// 実機の stack 上の枠 (16B 整列、512B) に呼び元の SP を置き、記録 [ret_sp + CALL_RECORD_OFFSET, +32) が
+// 呼び先の窓 (open_window) の外、かつ窓の上端より上にあることを確かめる。ret_sp は非整列にして、
+// 窓の上端の切り下げ (ret_sp & ~15) が効く場合も見る。
+// 組めていないもの (足場が要る): PMP の pmpaddr の読みと、U 呼び先から記録へ書いて fault を起こす試験
+// (U 側の呼び先と fault 受けの足場が要る)。記録の鎖の改ざん検出は thread 型が要るため host 試験で代替する。
+alignas(16) uint8_t stack_ledger_frame[512];
+
+void stack_ledger_placement_check() {
+  static_assert(ARCH::CALL_RECORD_OFFSET == 0, "stack record offset must be 0 (record sits at ret_sp)");
+  static_assert(ARCH::CALL_RECORD_BYTES == 32, "stack record slot is 32 bytes");
+  const uintptr_t stack_lo = reinterpret_cast<uintptr_t>(&stack_ledger_frame[0]);
+  const uintptr_t ret_sp = stack_lo + 396u; // 0x18C: 非整列。窓の上端は stack_lo + 384 (= ret_sp & ~15)
+  const shizuku::stack_window win = shizuku::open_window(ret_sp, stack_lo);
+  const uintptr_t record = ARCH::record_return_sp(ret_sp);
+  record_check("stack_ledger.window_valid", win.is_valid(), win.is_valid() ? 1u : 0u, 1u);
+  record_check("stack_ledger.window_hi_aligned", win.hi == stack_lo + 384u,
+               static_cast<unsigned long>(win.hi - stack_lo), 384u);
+  record_check("stack_ledger.record_is_ret_sp", record == ret_sp,
+               static_cast<unsigned long>(record - stack_lo), 396u);
+  record_check("stack_ledger.record_above_window",
+               record >= win.hi && !(record >= win.lo && record < win.hi),
+               static_cast<unsigned long>(record - stack_lo), 384u);
+}
+#endif
+
 // ---- U→U の往復サイクル計測 ------------------------------------------------------------
 constexpr uint32_t U_COST_ROUNDS = 2048;
 constexpr uint32_t U_COST_WARMUP = 32;
@@ -1426,6 +1453,9 @@ void u_cost_bench() {
 
 void c6_stage1_safety() {
   BOARD::diag_printf("[C6_STAGE1] starting stage 1 U-mode + PMP safety verification\n");
+#if defined(SHIZUKU_STACK_LEDGER) && defined(__riscv)
+  stack_ledger_placement_check();
+#endif
 
   // 0. 明示的なオブジェクト所有 range (code / data / stack / return trampoline) の登録
   g_c6_stage1_u_bounds.owner_id = OBJECT_STAGE1_PROBE;
