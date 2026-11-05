@@ -25,9 +25,6 @@
 #if defined(SHIZUKU_STACK_LEDGER) && !defined(SHIZUKU_LEAN_LEDGER)
 #error "SHIZUKU_STACK_LEDGER builds on the in-place entries of SHIZUKU_LEAN_LEDGER"
 #endif
-#if defined(SHIZUKU_STACK_LEDGER) && defined(SHIZUKU_C6_UMODE)
-#error "SHIZUKU_STACK_LEDGER is not wired for C6 U-mode: the callee PMP window covers the whole object stack"
-#endif
 
 namespace shizuku {
 
@@ -294,6 +291,29 @@ template <class K, class KObj>
       thread.call_stack.call_count--;
       thread.call_stack.call_top_rec = prev_call_address;
     }
+    // [SHIZUKU_STACK_LEDGER] 戻る段が U callee で窓を持っていたなら、その窓をゼロ化して外側の窓へ戻す。
+    // ゼロ化は [cur_win_lo, cur_win_hi) だけ。記録 (ret_sp の上 32B) は窓の上端 (ret_sp & ~15) より上なので壊れない。
+    // 外側に U の窓が無ければ全域、あれば外側の U callee の窓 = [戻り先 SP - K, その callee の入場の ret_sp)。
+    if constexpr (K::THREAD::HAS_STACK_WINDOW) {
+      if (is_call && !kobj.privileged_of(record->object)) {
+        zero_window_of<A>(shizuku::stack_window{thread.stk.cur_win_lo, thread.stk.cur_win_hi});
+        const uint32_t remaining = thread.stk.u_depth - 1u;
+        thread.stk.u_depth = remaining;
+        if (remaining == 0 || prev_address == 0) {
+          thread.stk.u_depth = 0;
+          thread.stk.cur_win_lo = thread.stk.stack_lo;
+          thread.stk.cur_win_hi = thread.stk.stack_hi;
+        } else {
+          const uintptr_t hi = A::record_return_sp(prev_address) & ~uintptr_t(15);
+          const uintptr_t sp = ret_sp & ~uintptr_t(15);
+          const uintptr_t lo = sp > thread.stk.stack_lo + kStackWindowStep
+                                   ? sp - kStackWindowStep
+                                   : thread.stk.stack_lo;
+          thread.stk.cur_win_lo = lo;
+          thread.stk.cur_win_hi = hi;
+        }
+      }
+    }
     if (restore) {
       if constexpr (arch_has_core_num<A>) {
         frame = A::call_resume_at(context, ret_pc, ret_sp, caller_privileged, 0, 0, scrub, core);
@@ -304,6 +324,9 @@ template <class K, class KObj>
           kobj, caller_via, K::LEDGER_DISPATCH, caller_object);
       A::set_region_window(context, window.base, window.limit);
       if (!caller_is_dispatch && !A::context_privileged(context)) {
+        if constexpr (requires { A::set_unprivileged_resume_metadata(*frame, ret_sp, A::trusted_stack_top(), scrub); }) {
+          A::set_unprivileged_resume_metadata(*frame, ret_sp, A::trusted_stack_top(), scrub);
+        }
         if constexpr (arch_has_core_num<A>) {
           A::switch_caller_protection(caller_object, core);
         } else {
@@ -505,6 +528,23 @@ template <class K, class KObj>
     // 余白がある」の 1 本だけ。depth / unwind_floor は 16 bit: RP2350 の SRAM 520KiB / 64B < 65535 で溢れない。
     if (!A::call_record_room_at(context, return_sp))
       return kernel_error::NO_STACK;
+    // [SHIZUKU_STACK_LEDGER] U callee の窓を開く (窓を持つのは U callee の段だけ)。全検査の後で状態を変える。
+    // 特権 caller が外側の U 窓の中にいる (depth != 0 かつ u_depth != 0) なら、戻りで外側の窓を復元できないので断る。
+    if constexpr (K::THREAD::HAS_STACK_WINDOW) {
+      if (!view.privileged) {
+        if (A::context_privileged(context) && stack.depth != 0 && thread.stk.u_depth != 0)
+          return kernel_error::NO_STACK;
+        if ((thread.stk.stack_lo != 0 || thread.stk.stack_hi != 0) &&
+            (return_sp < thread.stk.stack_lo || return_sp > thread.stk.stack_hi))
+          return kernel_error::NO_STACK;
+        const auto win = open_window(return_sp, thread.stk.stack_lo);
+        if (!win.is_valid())
+          return kernel_error::NO_STACK;
+        thread.stk.cur_win_lo = win.lo;
+        thread.stk.cur_win_hi = win.hi;
+        thread.stk.u_depth = thread.stk.u_depth + 1;
+      }
+    }
     typename K::FRAME &frame = *context.sp;
     {
       auto *record = stack_record_push<A>(thread, context, frame, return_sp, via, depth);

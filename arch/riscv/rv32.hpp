@@ -381,6 +381,35 @@ public:
 #endif
   }
 
+#if defined(SHIZUKU_STACK_LEDGER)
+  // [SHIZUKU_STACK_LEDGER] 呼出しの記録は caller の枠 [ret_sp + CALL_RECORD_OFFSET, +32) に置く。
+  // 枠は呼び手 stub が ecall 前に 32B 下げて空ける (ret_sp = その時点の SP)。callee の窓の上端は ret_sp & ~15 なので
+  // 記録は窓の外にある。
+  static constexpr uintptr_t CALL_RECORD_OFFSET = 0;
+  static constexpr uintptr_t CALL_RECORD_BYTES = 32;
+  static constexpr uintptr_t record_return_sp(uintptr_t record) { return record - CALL_RECORD_OFFSET; }
+  // 記録を書く前の検査 1 本 (return_sp で評価する版)。U caller は thread の stack 範囲の内側・整列・
+  // 入口の余白の検査。M caller は call_header_has_room と同じ式を return_sp で評価する。
+  static bool call_record_room_at(const context_t &context, uintptr_t return_sp) {
+    constexpr uintptr_t kRequired = 2u * sizeof(exception_frame_t) + EXC_FRAME_MAX_BYTES +
+                                    FAULT_CONTEXT_BYTES + CALL_HEADROOM;
+#if defined(SHIZUKU_C6_UMODE)
+    if (!context.privileged) {
+      uintptr_t base = 0, limit = 0;
+      if constexpr (requires { IntMode::thread_stack_bounds(base, limit); }) {
+        if (!IntMode::thread_stack_bounds(base, limit)) return false;
+        return (return_sp & 0xFu) == 0u && return_sp >= base && return_sp <= limit &&
+               CALL_RECORD_BYTES <= limit - return_sp && return_sp - base >= kRequired;
+      }
+      return false;
+    }
+#endif
+    const uintptr_t limit = stack_limit(context);
+    if (limit == 0) return true;
+    return return_sp >= limit && return_sp - limit >= kRequired;
+  }
+#endif
+
   // caller の ecall 時点の SP (= 再開フレームの上端。ヘッダ枠方式ではヘッダ枠のアドレスと同じ)。
   static uintptr_t call_return_sp(const context_t &context) {
 #if defined(SHIZUKU_C6_UMODE)

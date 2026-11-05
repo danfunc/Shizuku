@@ -262,7 +262,13 @@ template <typename CONTEXT> struct thread {
   // 窓機構は arch の能力 (CONTEXT::HAS_STACK_WINDOW) で有効になる。既定 (宣言なし) は false で、
   // そのとき win_span / stk は空 ([[no_unique_address]]) で thread の大きさを増やさない。
   static constexpr bool HAS_STACK_WINDOW = stack_window_enabled<CONTEXT>();
+  // [SHIZUKU_STACK_LEDGER] 窓は thread.stk の cur_win と u_depth だけで持つ (段ごとの win_span は使わない)。
+  // STACK 版では call_ledger_entry に ret_sp が無いので window_at (ledger[d].ret_sp) を参照させない。
+#if defined(SHIZUKU_STACK_LEDGER)
+  static constexpr uint32_t MAX_STACK_WINDOWS = 0;
+#else
   static constexpr uint32_t MAX_STACK_WINDOWS = HAS_STACK_WINDOW ? 34 : 0;
+#endif
   struct window_span_array {
     uint16_t data[34]{};
     constexpr uint16_t &operator[](uint32_t i) noexcept { return data[i]; }
@@ -277,6 +283,8 @@ template <typename CONTEXT> struct thread {
     uintptr_t stack_hi = 0;
     uintptr_t cur_win_lo = 0;
     uintptr_t cur_win_hi = 0;
+    // [SHIZUKU_STACK_LEDGER] いま開いている U callee の窓を持つ段の数 (0 = 外側に U の窓が無い)。
+    uint32_t u_depth = 0;
   };
   [[no_unique_address]] std::conditional_t<HAS_STACK_WINDOW, stack_extent,
                                            empty_ledger_payload> stk{};
@@ -332,6 +340,7 @@ template <typename CONTEXT> struct thread {
       stk.stack_hi = hi;
       stk.cur_win_lo = lo;
       stk.cur_win_hi = hi;
+      stk.u_depth = 0;
     } else {
       (void)lo; (void)hi;
     }
@@ -342,8 +351,11 @@ template <typename CONTEXT> struct thread {
   void reset_windows() noexcept {
     if constexpr (MAX_STACK_WINDOWS != 0) {
       for (uint32_t d = 0; d < MAX_STACK_WINDOWS; ++d) win_span[d] = 0;
+    }
+    if constexpr (HAS_STACK_WINDOW) {
       stk.cur_win_lo = stk.stack_lo;
       stk.cur_win_hi = stk.stack_hi;
+      stk.u_depth = 0;
     }
   }
   call_ledger_entry *ledger = nullptr;

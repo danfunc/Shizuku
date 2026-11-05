@@ -935,6 +935,30 @@ bool shizuku_c6_handle_fault(arch::exception_frame_t *frame) {
   // 0. スタック窓の伸長 (U からの mcause 5/7: Load/Store access fault)
   // depth == 0 (base) は全 stack が窓なので伸長しない。
   // 最内活動が dispatch 段 (LEDGER_DISPATCH) の場合、win は {} なので伸長せず従来の fault 処理へ。
+#if defined(SHIZUKU_STACK_LEDGER)
+  // [SHIZUKU_STACK_LEDGER] 窓は thread.stk の cur_win だけで持つ (段ごとの記帳は無い)。u_depth == 0 (U の窓が
+  // 無い) なら伸長しない。下端 (cur_win_lo) より下で stack 内のアドレスなら、窓の下端を広げて再実行する。
+  if ((frame->mcause == 5 || frame->mcause == 7) &&
+      ((frame->mstatus & RV32_MSTATUS_MPP) == 0)) {
+    auto &thread = shizuku::kernel_instance.current_thread();
+    if (thread.stk.u_depth != 0) {
+      const uintptr_t fault_addr = frame->mtval;
+      const shizuku::stack_window win{thread.stk.cur_win_lo, thread.stk.cur_win_hi};
+      if (win.is_valid() && fault_addr >= thread.stk.stack_lo && fault_addr < win.lo) {
+        const auto new_win = shizuku::extend_window(win, fault_addr, thread.stk.stack_lo);
+        if (new_win.is_valid()) {
+          thread.stk.cur_win_lo = new_win.lo;
+          thread.stk.cur_win_hi = new_win.hi;
+          shizuku::chips::esp32_c6::pmp_controller::apply_stack_window(new_win.lo, new_win.hi);
+          s_pmp_shadow.win_lo = new_win.lo;
+          s_pmp_shadow.win_hi = new_win.hi;
+          shizuku_c6_stack_extend_count = shizuku_c6_stack_extend_count + 1;
+          return true;
+        }
+      }
+    }
+  }
+#else
   if ((frame->mcause == 5 || frame->mcause == 7) &&
       ((frame->mstatus & RV32_MSTATUS_MPP) == 0)) {
     auto &thread = shizuku::kernel_instance.current_thread();
@@ -960,6 +984,7 @@ bool shizuku_c6_handle_fault(arch::exception_frame_t *frame) {
       }
     }
   }
+#endif
 
   // 1. 0x802 読み取りプローブ時の Illegal Instruction (mcause == 2) 捕捉
   if (frame->mcause == 2) {
@@ -1314,6 +1339,20 @@ uintptr_t plic_vector_mode::kstack_limit() {
 }
 uintptr_t plic_vector_mode::kstack_top() {
   return reinterpret_cast<uintptr_t>(shizuku_c6_kernel_stack + sizeof(shizuku_c6_kernel_stack));
+}
+
+bool plic_vector_mode::thread_stack_bounds(uintptr_t &base, uintptr_t &limit) {
+#if defined(SHIZUKU_C6_UMODE)
+  auto &thread = shizuku::kernel_instance.current_thread();
+  if (thread.stk.stack_lo == 0 || thread.stk.stack_hi <= thread.stk.stack_lo)
+    return false;
+  base = thread.stk.stack_lo;
+  limit = thread.stk.stack_hi;
+  return true;
+#else
+  (void)base; (void)limit;
+  return false;
+#endif
 }
 
 bool plic_vector_mode::user_stack_bounds(uint32_t object_id, uintptr_t &base, uintptr_t &limit) {
