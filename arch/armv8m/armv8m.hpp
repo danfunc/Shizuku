@@ -442,6 +442,10 @@ public:
   static bool call_header_has_room(const context_t &context, uint32_t) {
     return call_stack_has_room(call_return_sp(context), context.psplim, context.stack_ceiling);
   }
+  // 求めておいた戻り SP (call_return_sp(context)) で調べる版。例外フレームの読みを 1 回にするために使う。
+  static bool call_stack_has_room_at(const context_t &context, uintptr_t return_sp) {
+    return call_stack_has_room(return_sp, context.psplim, context.stack_ceiling);
+  }
   struct lazy_fp_state {
     static void materialize() {
       uint32_t fpscr;

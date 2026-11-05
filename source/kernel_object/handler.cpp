@@ -147,6 +147,9 @@ template <> uintptr_t KERNEL_OBJECT::handler_entry() {
 //   (= 特権のみ) なので非特権オブジェクトから届かない。用意するのはこちら
 //   (オブジェクトランド) で、置き場所の条件はカーネルが検査する。
 #if defined(SHIZUKU_LEAN_LEDGER)
+// 入場の検査は台帳の枠を depth + 1 < capacity の 1 本で調べ、16 bit の unwind_floor の溢れ検査を持たない。
+static_assert(KERNEL_OBJECT::LEDGER_CAPACITY <= UINT16_MAX,
+              "ledger capacity must keep depth within the 16-bit unwind floor");
 static_assert(sizeof(uintptr_t) != 4 || sizeof(KERNEL::call_ledger_entry) ==
               (templates::compact_ledger_enabled<KERNEL::CONTEXT>() ? 20 : 32),
               "lean call ledger entry size must match its architecture");

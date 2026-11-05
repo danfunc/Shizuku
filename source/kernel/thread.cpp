@@ -87,6 +87,10 @@ template <> void KERNEL::set_thread_ledger(
   if (id >= m_thread_count || memory == nullptr || capacity == 0 ||
       (uintptr_t)memory >= BOARD::unprivileged_floor())
     BOARD::panic("call ledger must be privileged memory");
+  // 入場の検査 (enter_in_place) はこの 2 つを前提に 16 bit の unwind_floor と台帳なしを調べない:
+  //   capacity <= UINT16_MAX、台帳なし (ledger == nullptr) のとき capacity == 0。
+  if (capacity > UINT16_MAX)
+    BOARD::panic("call ledger capacity exceeds 16-bit depth");
   THREAD &thread = m_threads[id].thread;
 #if !defined(SHIZUKU_LEAN_LEDGER) && !defined(__riscv)
   if constexpr (requires { ARCH::HAS_OBJECT_PROTECTION; } && ARCH::HAS_OBJECT_PROTECTION) {

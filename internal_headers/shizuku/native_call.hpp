@@ -53,6 +53,18 @@ template <class A, class Context>
   else
     return false;
 }
+// stack の余地の検査。求めておいた caller の戻り SP を使える ARCH (ARM) はそれで調べ、そうでなければ従来どおり。
+template <class A, class Context, class Thread>
+[[gnu::always_inline]] inline bool call_sp_has_room_of(const Context &context, uintptr_t return_sp,
+                                                       const Thread &thread) {
+  if constexpr (requires { A::call_stack_has_room_at(context, return_sp); }) {
+    (void)thread;
+    return A::call_stack_has_room_at(context, return_sp);
+  } else {
+    (void)return_sp;
+    return A::call_header_has_room(context, thread.identity_object());
+  }
+}
 // caller の枠にヘッダを書いて top を進める。caller の状態は frame (trap フレーム) と context から取る。
 // via / floor は台帳 (特権側) が持つので、非特権スタック上のヘッダには書かない (呼び出し側が台帳に書く)。
 template <class A, class Thread, class Context, class Frame>
@@ -328,12 +340,20 @@ template <class K, class KObj>
     if (via != K::LEDGER_DESCRIPTOR_CALL &&
         (view.kind == object_kind::KERNEL_OBJECT || view.id == kernel.svc_handler_object()))
       return kernel_error::BAD_REQUEST;
-    if (stack.call_count >= KObj::MAX_DEPTH)
+    // 深さの上限: CALL_METHOD は呼び出し側 (call_method_in_place) が行を引いた直後に同じ条件で断っているので、
+    // ここで二度目を調べるのは方法記述子の経路だけ (via は呼び出し側で定数。展開後は枝ごと消える)。
+    if (via == K::LEDGER_DESCRIPTOR_CALL && stack.call_count >= KObj::MAX_DEPTH)
       return kernel_error::NO_STACK;
     const uint32_t depth = stack.depth; // 呼び先の unwind floor
+    // caller の戻り SP は 1 回だけ求め、stack の余地の検査と台帳の書出しで使い回す (ARM では例外フレームの
+    // 読みが 2 回走っていた)。
+    const uintptr_t return_sp = A::call_return_sp(context);
     // 4A: 最後の 1 枠 (ledger_capacity - 1) は return dispatch 専用に先取り予約する。
-    if (depth > UINT16_MAX || thread.ledger == nullptr || depth + 1u >= thread.ledger_capacity ||
-        !A::call_header_has_room(context, thread.identity_object()))
+    //   台帳の枠の検査は depth + 1 < ledger_capacity の 1 本で足りる。次の 2 つは台帳の置き場所の不変条件
+    //   (set_thread_ledger が capacity <= UINT16_MAX を、解放が ledger と capacity を同時に 0 にすることを保証)
+    //   から出るので、ここでは調べない: capacity == 0 (台帳なし) なら必ず断る / depth + 1 < capacity <= UINT16_MAX
+    //   なので unwind_floor (16 bit) は溢れない。
+    if (depth + 1u >= thread.ledger_capacity || !call_sp_has_room_of<A>(context, return_sp, thread))
       return kernel_error::NO_STACK;
     typename K::FRAME &frame = *context.sp;
 #if defined(SHIZUKU_LEAN_LEDGER)
@@ -349,7 +369,7 @@ template <class K, class KObj>
     entry.unwind_floor = (uint16_t)depth;
     entry.generation = view.instance_generation;
     entry.ret_pc = A::frame_pc(frame);
-    entry.ret_sp = A::call_return_sp(context);
+    entry.ret_sp = return_sp;
     entry.prev_call = (uint16_t)stack.call_top;
     entry.ret_privileged = A::context_privileged(context) ? 1 : 0;
     stack.depth = depth + 1;
