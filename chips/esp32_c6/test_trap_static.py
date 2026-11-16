@@ -205,16 +205,16 @@ assert trap_src.count('const auto *const entered = context;') == 4
 assert trap_src.count('if (context != entered) arch::scrub_on_switch(*context);') == 4
 # U-mode selftest assembly follows the ECALL caller ABI: returning raw ECALL probes preserve RA.
 stage1 = (root / 'source/selftest/c6_stage1_safety.cpp').read_text()
-for label, next_label in (
-    ('.Lprobe_ecall', '.Lprobe_unpriv'),
-    ('.Lprobe_unpriv', '.Lprobe_caller_stack'),
-    ('.Lprobe_multi_trap_combo', '.Lprobe_u_to_u_call_1'),
+for label, next_label, ra_offset, frame_bytes in (
+    ('.Lprobe_ecall', '.Lprobe_unpriv', 12, 16),
+    ('.Lprobe_unpriv', '.Lprobe_caller_stack', 44, 48),
+    ('.Lprobe_multi_trap_combo', '.Lprobe_u_to_u_call_1', 12, 16),
 ):
     block = stage1.split(f'"{label}:\\n"', 1)[1].split(f'"{next_label}:\\n"', 1)[0]
     ecall_pos = block.index('"  ecall\\n"')
-    assert block.index('"  sw ra, 12(sp)\\n"') < ecall_pos
-    assert block.index('"  lw ra, 12(sp)\\n"', ecall_pos) > ecall_pos
-    assert block.index('"  addi sp, sp, 16\\n"', ecall_pos) < block.rindex('"  ret\\n"')
+    assert block.index(f'"  sw ra, {ra_offset}(sp)\\n"') < ecall_pos
+    assert block.index(f'"  lw ra, {ra_offset}(sp)\\n"', ecall_pos) > ecall_pos
+    assert block.index(f'"  addi sp, sp, {frame_bytes}\\n"', ecall_pos) < block.rindex('"  ret\\n"')
 # U-to-U probe: ecall 通常 return / scrub で s0-s11, ra が消去されるため、
 # .Lprobe_u_to_u_call_fault は ecall 直後に自窓アドレス (u_mode_stage1_data_pool) を再ロードしてから
 # 16(s0) をアクセスすること (40(sp) にあるのは caller の s0 であり自窓アドレスではない)。
