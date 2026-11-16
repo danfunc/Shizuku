@@ -935,8 +935,7 @@ bool shizuku_c6_handle_fault(arch::exception_frame_t *frame) {
   // 0. スタック窓の伸長 (U からの mcause 5/7: Load/Store access fault)
   // depth == 0 (base) は全 stack が窓なので伸長しない。
   // 最内活動が dispatch 段 (LEDGER_DISPATCH) の場合、win は {} なので伸長せず従来の fault 処理へ。
-#if defined(SHIZUKU_STACK_LEDGER)
-  // [SHIZUKU_STACK_LEDGER] 窓は thread.stk の cur_win だけで持つ (段ごとの記帳は無い)。u_depth == 0 (U の窓が
+  // 窓は thread.stk の cur_win だけで持つ (段ごとの記帳は無い)。u_depth == 0 (U の窓が
   // 無い) なら伸長しない。下端 (cur_win_lo) より下で stack 内のアドレスなら、窓の下端を広げて再実行する。
   if ((frame->mcause == 5 || frame->mcause == 7) &&
       ((frame->mstatus & RV32_MSTATUS_MPP) == 0)) {
@@ -958,9 +957,6 @@ bool shizuku_c6_handle_fault(arch::exception_frame_t *frame) {
       }
     }
   }
-#else
-#error "the C6 U-mode fault path needs SHIZUKU_STACK_LEDGER"
-#endif
 
   // 1. 0x802 読み取りプローブ時の Illegal Instruction (mcause == 2) 捕捉
   if (frame->mcause == 2) {

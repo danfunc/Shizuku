@@ -248,9 +248,7 @@ template void plic_vector_mode::enter_u_object<shizuku::archs::rv32_c6::context_
 
 using namespace shizuku;
 
-#if !defined(SHIZUKU_LEAN_LEDGER) || !defined(SHIZUKU_STACK_LEDGER)
-#error "test_dispatcher_v1 は SHIZUKU_LEAN_LEDGER + SHIZUKU_STACK_LEDGER (STACK) で組む"
-#endif
+static_assert(KERNEL::THREAD::IN_PLACE, "test_dispatcher_v1 は in-place の ARCH (STACK 方式) で組む");
 
 // ---- 呼出しの記録 (戻りの権威) を試験が直接据える・読む口 ---------------------------------------
 //   記録は caller の stack 枠 ([return_sp, +32)) にあり、カーネルが持つのは先頭の記録へのポインタ

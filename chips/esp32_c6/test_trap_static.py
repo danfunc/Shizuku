@@ -147,7 +147,7 @@ assert {'MEPC', 'MSTATUS', 'MCAUSE', 'RESERVED0', 'RESERVED1'} <= _written, _wri
 for _u_label in ('.Lrv32_umode_exit_ecall:', '.Lrv32_umode_exit_scrub:'):
     _zeroed_set = set(re.findall(r'sw\s+zero,\s+RV32_F_(\w+)\(sp\)', asm.split(_u_label)[1].split('mret')[0]))
     assert _written <= _zeroed_set, (_u_label, sorted(_written - _zeroed_set))
-# 再開フレームを作るのは call_resume_at (ヘッダ版の call_resume も、SHIZUKU_LEAN_LEDGER の台帳版もここへ来る)。
+# 再開フレームを作るのは call_resume_at (STACK 方式の戻りも、ここへ来る)。
 call_resume = header.split('static exception_frame_t *call_resume_at(')[1].split('\n  }\n')[0]
 assert 'frame->mcause = scrub ? RV32_TAG_ECALL_SCRUB : RV32_TAG_ECALL' in call_resume
 assert 'frame->mepc = pc' in call_resume

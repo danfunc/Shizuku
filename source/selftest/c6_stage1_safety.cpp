@@ -1249,8 +1249,8 @@ void record_check(const char *name, bool ok, unsigned long got, unsigned long wa
   }
 }
 
-#if defined(SHIZUKU_STACK_LEDGER) && defined(__riscv)
-// [SHIZUKU_STACK_LEDGER] C6 の呼出しの記録の配置 (on-target の一部)。
+#if defined(__riscv)
+// C6 の呼出しの記録の配置 (on-target の一部)。
 // 実機の stack 上の枠 (16B 整列、512B) に呼び元の SP を置き、記録 [ret_sp + CALL_RECORD_OFFSET, +32) が
 // 呼び先の窓 (open_window) の外、かつ窓の上端より上にあることを確かめる。ret_sp は非整列にして、
 // 窓の上端の切り下げ (ret_sp & ~15) が効く場合も見る。
@@ -1453,7 +1453,7 @@ void u_cost_bench() {
 
 void c6_stage1_safety() {
   BOARD::diag_printf("[C6_STAGE1] starting stage 1 U-mode + PMP safety verification\n");
-#if defined(SHIZUKU_STACK_LEDGER) && defined(__riscv)
+#if defined(__riscv)
   stack_ledger_placement_check();
 #endif
 

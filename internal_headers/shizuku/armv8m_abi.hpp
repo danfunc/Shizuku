@@ -13,7 +13,7 @@ namespace shizuku::armv8m_abi {
 // outside a callee's exclusive REGION_STACK upper bound.
 inline constexpr uintptr_t stack_alignment = 32;
 inline constexpr uintptr_t scratch_bytes = 32;
-// [SHIZUKU_STACK_LEDGER] converter が svc の前に空ける枠は 2 枚: ret_sp から上へ、下の 32B は converter の
+// [STACK 方式] converter が svc の前に空ける枠は 2 枚: ret_sp から上へ、下の 32B は converter の
 // 退避、上の 32B (ret_sp + record_offset) はカーネルの呼出しの記録。どちらも callee の窓 (上端 = ret_sp) の外。
 inline constexpr uintptr_t record_bytes = 32;
 inline constexpr uintptr_t record_offset = scratch_bytes;

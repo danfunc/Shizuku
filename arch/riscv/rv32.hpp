@@ -383,8 +383,7 @@ public:
 #endif
   }
 
-#if defined(SHIZUKU_STACK_LEDGER)
-  // [SHIZUKU_STACK_LEDGER] 呼出しの記録は caller の枠 [ret_sp + CALL_RECORD_OFFSET, +32) に置く。
+  // 呼出しの記録は caller の枠 [ret_sp + CALL_RECORD_OFFSET, +32) に置く。
   // 枠は呼び手 stub が ecall 前に 32B 下げて空ける (ret_sp = その時点の SP)。callee の窓の上端は ret_sp & ~15 なので
   // 記録は窓の外にある。
   static constexpr uintptr_t CALL_RECORD_OFFSET = 0;
@@ -410,7 +409,6 @@ public:
     if (limit == 0) return true;
     return return_sp >= limit && return_sp - limit >= kRequired;
   }
-#endif
 
   // caller の ecall 時点の SP (= 再開フレームの上端。ヘッダ枠方式ではヘッダ枠のアドレスと同じ)。
   static uintptr_t call_return_sp(const context_t &context) {
@@ -421,7 +419,7 @@ public:
   }
 
   // 再開フレームを sp の直下に作って context を caller の状態へ戻す。戻り先の値 (pc・sp・特権・窓) は
-  // 呼び出し側が権威のある所 (特権の台帳。SHIZUKU_LEAN_LEDGER) から読んで渡す。
+  // 呼び出し側が権威のある所 (caller の stack 上の記録と、特権の表。STACK 方式) から読んで渡す。
   [[gnu::always_inline]] static exception_frame_t *call_resume_at(context_t &context, uintptr_t pc,
                                                                   uintptr_t sp, bool privileged,
                                                                   uintptr_t region_base,

@@ -70,10 +70,6 @@ cc_library(
     name = "internal_headers",
     hdrs = glob(["internal_headers/**/*.hpp"]),
     includes = ["internal_headers"],
-    defines = select({
-        "//configs:riscv_stack_ledger": ["SHIZUKU_LEAN_LEDGER=1", "SHIZUKU_STACK_LEDGER=1"],
-        "//conditions:default": [],
-    }),
     visibility = ["//visibility:public"],
     deps = [":object_ids"],
 )
@@ -114,7 +110,6 @@ cc_test(
         "-include",
         "source/selftest/test_dispatcher_v1_config.hpp",
     ],
-    defines = ["SHIZUKU_LEAN_LEDGER=1", "SHIZUKU_STACK_LEDGER=1"],
     local_defines = ["SHIZUKU_C6_SKELETON_PERMITTED=1"],
     deps = [
         ":internal_headers",
@@ -140,7 +135,7 @@ cc_test(
         "-include",
         "source/selftest/test_dispatcher_v1_config.hpp",
     ],
-    defines = ["SHIZUKU_TEST_REAL_KERNEL_OBJECT=1", "SHIZUKU_LEAN_LEDGER=1", "SHIZUKU_STACK_LEDGER=1"],
+    defines = ["SHIZUKU_TEST_REAL_KERNEL_OBJECT=1"],
     local_defines = ["SHIZUKU_C6_SKELETON_PERMITTED=1"],
     deps = [
         ":internal_headers",
@@ -168,7 +163,6 @@ cc_test(
 cc_test(
     name = "stack_window_test",
     srcs = ["tests/stack_window_test.cpp"],
-    defines = ["SHIZUKU_LEAN_LEDGER=1", "SHIZUKU_STACK_LEDGER=1"],
     deps = [":internal_headers"],
 )
 

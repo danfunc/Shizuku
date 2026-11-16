@@ -400,7 +400,7 @@ public:
                        row.region_base,
                        row.region_limit};
   }
-  // object が特権で走るか (表の flags から。SHIZUKU_STACK_LEDGER の戻りで caller の特権を引く)。
+  // object が特権で走るか (表の flags から。STACK 方式の戻りで caller の特権を引く)。
   bool privileged_of(uint32_t id) const { return (m_objects[id].flags & OBJECT_UNPRIVILEGED) == 0; }
   // 項目に呼び先の前計算を書き、最後に偶数 seq を release で公開する (作成と試験の据付けが共有する)。
   // 書く側は seq を奇数にしてから中身を書き、書き終えたら偶数に進めて store-release で公開。

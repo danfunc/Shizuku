@@ -341,8 +341,9 @@ bool g_owner_probe_old_index = false;
 uintptr_t g_owner_old_index_error = (uintptr_t)object_error::UNKNOWN_API;
 
 // RP2350 (ARM) の MPU を PPB 越しに読むので、RISC-V (C6) では定義しない。C6 の記録の on-target 検査は未実装。
-#if defined(SHIZUKU_STACK_LEDGER) && !defined(__riscv)
-// ---- 呼出しの記録 (SHIZUKU_STACK_LEDGER): 呼び先の中から記録を調べる -------------------------------
+// in-place の ARM は RP2350 (armv8m)。RP2040 (armv6m) は in-place でないので記録の検査は無い。
+#if !defined(__riscv) && !defined(SHIZUKU_RP2040)
+// ---- 呼出しの記録: 呼び先の中から記録を調べる -------------------------------
 // 記録は caller の stack 枠にあり、呼び先の stack 窓の外にある。これを実機で確かめる。
 struct stack_probe_result {
   bool ran;
@@ -389,7 +390,7 @@ bool g_stack_probe_armed = false;
 #endif
 
 uintptr_t desc_target_fn(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f) {
-#if defined(SHIZUKU_STACK_LEDGER) && !defined(__riscv)
+#if !defined(__riscv) && !defined(SHIZUKU_RP2040)
   if (g_stack_probe_armed) {
     g_stack_probe_armed = false;
     stack_ledger_probe();
@@ -1087,7 +1088,7 @@ void call_ladder() {
             g_desc_calls == calls_before + 1,
             (unsigned long)g_desc_calls, (unsigned long)(calls_before + 1));
     }
-#if defined(SHIZUKU_STACK_LEDGER)
+#if !defined(__riscv) && !defined(SHIZUKU_RP2040)
     // 呼出しの記録は caller の stack 枠にある。呼び先の中で記録・窓・改ざんの検出を調べた結果を読む。
     {
       g_stack_probe_armed = true;

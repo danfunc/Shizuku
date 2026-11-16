@@ -7,7 +7,7 @@
 #include "shizuku/stack_window.hpp"
 namespace shizuku {
 
-// SHIZUKU_LEAN_LEDGER 未定義時でも、user stack 上の header を権威とせず、
+// in-place でない ARCH (RP2040) で、user stack 上の header を権威とせず、
 // 特権メモリで戻り先 (PC, SP, 特権) を保証するための特権退避域。窓は復帰時に現在行から得る。
 struct caller_return_record {
   uintptr_t ret_pc = 0;
@@ -116,7 +116,7 @@ template <typename CONTEXT> struct thread {
     // thread の添字計算 (×480 の shift+add) が mul に変わって hot path の命令列と .text が動く (3c のゲートで実測)。
     // 消すかどうかは性能の判断と一緒に別途決める。それまで寸法を下の static_assert で固定する。
     uint32_t call_top = 0;
-    // [SHIZUKU_STACK_LEDGER] 最新の記録 (top) と、最新の call 段の記録のアドレス (0 = なし)。記録は
+    // [STACK 方式 = in-place の ARCH] 最新の記録 (top) と、最新の call 段の記録のアドレス (0 = なし)。記録は
     // caller の stack 枠にあり、カーネルが持つのはこの 2 本のポインタと深さだけ。base_privileged は
     // 最外の活動の特権 (記録を積む前の文脈の特権。戻りで最外の caller の特権を引く)。
     // この版では current_call_* / caller_* は更新しない (identity_object() などの読み出しを使うこと)。
@@ -218,7 +218,7 @@ template <typename CONTEXT> struct thread {
   uint32_t stack_rlar = 0;
   // 窓機構は arch の能力 (CONTEXT::HAS_STACK_WINDOW) で有効になる。既定 (宣言なし) は false で、
   // そのとき stk は空 ([[no_unique_address]]) で thread の大きさを増やさない。
-  // [SHIZUKU_STACK_LEDGER] 窓は thread.stk の cur_win と u_depth だけで持つ (段ごとの窓の記帳は無い)。
+  // [STACK 方式] 窓は thread.stk の cur_win と u_depth だけで持つ (段ごとの窓の記帳は無い)。
   static constexpr bool HAS_STACK_WINDOW = stack_window_enabled<CONTEXT>();
   // thread 自身の stack 全域 [stack_lo, stack_hi) と、いまの窓 [cur_win_lo, cur_win_hi)。
   // HAS_STACK_WINDOW == false の thread では空で、メンバへのアクセスは if constexpr の中だけ。
@@ -227,7 +227,7 @@ template <typename CONTEXT> struct thread {
     uintptr_t stack_hi = 0;
     uintptr_t cur_win_lo = 0;
     uintptr_t cur_win_hi = 0;
-    // [SHIZUKU_STACK_LEDGER] いま開いている U callee の窓を持つ段の数 (0 = 外側に U の窓が無い)。
+    // [STACK 方式] いま開いている U callee の窓を持つ段の数 (0 = 外側に U の窓が無い)。
     uint32_t u_depth = 0;
   };
   [[no_unique_address]] std::conditional_t<HAS_STACK_WINDOW, stack_extent,

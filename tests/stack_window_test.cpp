@@ -1,7 +1,7 @@
 // stack 窓の試験: 純関数 (open_window / extend_window / zero_window) と、STACK 方式の enter_in_place /
 // pop_in_place を実メモリの stack 上で通した試験。
 //
-// 方式は BUILD の defines (SHIZUKU_LEAN_LEDGER + SHIZUKU_STACK_LEDGER) で選ぶ。STACK の窓は thread.stk の
+// 方式は mock の context の CALL_IN_PLACE (= STACK 方式) で決まる。STACK の窓は thread.stk の
 // cur_win_{lo,hi} と u_depth だけで持ち (段ごとの記帳は無い)、呼出しの記録は caller の ecall 時点の SP の枠
 // [return_sp + CALL_RECORD_OFFSET, +sizeof(record)) に置かれる。この試験の mock arch は CALL_RECORD_OFFSET = 0 (RV32 相当)。
 // 旧版 (LEAN) の窓の検査との対応は report4d.md に表で残した。
@@ -16,10 +16,6 @@
 #include "shizuku/stack_window.hpp"
 #include "shizuku/templates/thread.hpp"
 #include "shizuku/native_call.hpp"
-
-#if !defined(SHIZUKU_STACK_LEDGER)
-#error "stack_window_test は SHIZUKU_LEAN_LEDGER + SHIZUKU_STACK_LEDGER を定義して組む"
-#endif
 
 // ===========================================================================
 // Pure function tests

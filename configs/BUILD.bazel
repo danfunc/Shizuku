@@ -54,27 +54,6 @@ config_setting(
     flag_values = {":c6_umode": "disabled"},
     visibility = ["//visibility:public"],
 )
-# [SHIZUKU_STACK_LEDGER] RISC-V firmware (C6 の U-mode / M-mode、C5) の呼出しの記録は caller の stack 枠に置く。
-# firmware と host 試験は board / c6_umode の組が同じになる (host 試験も board=esp32_c6 c6_umode=disabled で走る)
-# ので、flag の組では見分けない。firmware は cpu:riscv32 の platform (--config=esp32c6 / esp32c5) でだけ
-# ビルドされる、という違いで選ぶ。host 試験は自分の defines で方式を選ぶ。
-config_setting(
-    name = "riscv_c6_stack_ledger",
-    constraint_values = ["@platforms//cpu:riscv32"],
-    flag_values = {":board": "esp32_c6"},
-    visibility = ["//visibility:public"],
-)
-config_setting(
-    name = "riscv_c5_stack_ledger",
-    constraint_values = ["@platforms//cpu:riscv32"],
-    flag_values = {":board": "esp32_c5"},
-    visibility = ["//visibility:public"],
-)
-selects.config_setting_group(
-    name = "riscv_stack_ledger",
-    match_any = [":riscv_c6_stack_ledger", ":riscv_c5_stack_ledger"],
-    visibility = ["//visibility:public"],
-)
 string_flag(
     name = "bootsel_support",
     build_setting_default = "disabled",
@@ -293,10 +272,6 @@ cc_library(
     name = "config",
     hdrs = [":config_hpp"],
     includes = ["internal_headers"],
-    defines = select({
-        ":rp2350": ["SHIZUKU_LEAN_LEDGER=1", "SHIZUKU_STACK_LEDGER=1"],
-        "//conditions:default": [],
-    }),
     visibility = ["//visibility:public"],
     deps = [
         "//:internal_headers",

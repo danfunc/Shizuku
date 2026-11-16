@@ -146,13 +146,11 @@ cc_test(
     deps = ["//boards/esp32_c6:led_object"],
 )
 
-# [SHIZUKU_STACK_LEDGER] 記録の位置・鎖の照合・窓のゼロ化。STACK 版でだけ組める。
+# [STACK 方式] 記録の位置・鎖の照合・窓のゼロ化。
 # 実行: bazel test --//configs:board=esp32_c6 //tests/esp32_c6:stack_ledger_window_test
-# 方式は自分の defines で選ぶ (host の flag の組には依らない)。
 cc_test(
     name = "stack_ledger_window_test",
     srcs = ["stack_ledger_window_test.cpp"],
-    defines = ["SHIZUKU_LEAN_LEDGER=1", "SHIZUKU_STACK_LEDGER=1"],
     tags = ["manual"],
     deps = ["//:internal_headers"],
 )

@@ -461,7 +461,7 @@ public:
   static bool call_header_has_room(const context_t &context, uint32_t) {
     return call_stack_has_room(call_return_sp(context), context.psplim, context.stack_ceiling);
   }
-  // [SHIZUKU_STACK_LEDGER] 呼出しの記録の位置: converter が空けた枠の上の半分 [ret_sp + 32, +32)。
+  // [STACK 方式] 呼出しの記録の位置: converter が空けた枠の上の半分 [ret_sp + 32, +32)。
   //   ret_sp は svc 時の SP なので callee の窓の上端 (shrink_stack_limit) と一致し、記録は callee から見えない。
   static constexpr uintptr_t CALL_RECORD_OFFSET = armv8m_abi::record_offset;
   static constexpr uintptr_t CALL_RECORD_BYTES = armv8m_abi::record_bytes;

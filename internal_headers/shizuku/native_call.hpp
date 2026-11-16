@@ -19,22 +19,10 @@
 #include "shizuku/svc_attributes.hpp"
 #include "shizuku/templates/thread.hpp"
 
-#if defined(SHIZUKU_C6_UMODE) && !defined(SHIZUKU_LEAN_LEDGER)
-#error "C6 U-mode requires kernel-resident call return authority (SHIZUKU_LEAN_LEDGER)"
-#endif
-
-#if defined(SHIZUKU_STACK_LEDGER) && !defined(SHIZUKU_LEAN_LEDGER)
-#error "SHIZUKU_STACK_LEDGER builds on the in-place entries of SHIZUKU_LEAN_LEDGER"
-#endif
-// 2 つの define は常に対で定義する (段 4 で constexpr に置き換えるまでの名前)。LEAN 専用の枝は消してあり、
-// 以降の `#if defined(SHIZUKU_STACK_LEDGER)` は「in-place の ARCH」と同じ意味で使っている。
-#if defined(SHIZUKU_LEAN_LEDGER) && !defined(SHIZUKU_STACK_LEDGER)
-#error "SHIZUKU_LEAN_LEDGER alone is no longer a supported configuration (define SHIZUKU_STACK_LEDGER too)"
-#endif
-// 旧 call-header 方式 (user stack 上のヘッダを戻りの権威にする) は廃止した。ARCH::CALL_IN_PLACE が真の ARCH は
-// SHIZUKU_STACK_LEDGER が必要で、無いときは header_push_of /
-// pop_in_place / enter_in_place の static_assert で止まる。CALL_IN_PLACE が偽の ARCH (RP2040) は
-// これらの本体を使わず、従来の call_frame_push の経路を通る。
+// 呼出しの記録の方式は、ARCH の context_t::CALL_IN_PLACE (thread.hpp の call_in_place_of) で決まる。
+//   真 (RP2350 / C6 / C5): 記録を caller の stack 枠に置く (STACK 方式。header_push_of / pop_in_place / enter_in_place)。
+//   偽 (RP2040): 従来の call_frame_push と特権の配列 (thread.ledger) の経路を通る。
+// context_t と ARCH::CALL_IN_PLACE の一致は、pop_in_place / enter_in_place の static_assert が見張る。
 
 namespace shizuku {
 
@@ -233,7 +221,7 @@ template <class K, class KObj>
       thread.call_stack.call_count--;
       thread.call_stack.call_top_rec = prev_call_address;
     }
-    // [SHIZUKU_STACK_LEDGER] 戻る段が U callee で窓を持っていたなら、その窓をゼロ化して外側の窓へ戻す。
+    // 戻る段が U callee で窓を持っていたなら、その窓をゼロ化して外側の窓へ戻す。
     // ゼロ化は [cur_win_lo, cur_win_hi) だけ。記録 (ret_sp の上 32B) は窓の上端 (ret_sp & ~15) より上なので壊れない。
     // 外側に U の窓が無ければ全域、あれば外側の U callee の窓 = [戻り先 SP - K, その callee の入場の ret_sp)。
     if constexpr (K::THREAD::HAS_STACK_WINDOW) {
@@ -367,7 +355,7 @@ template <class K, class KObj>
     // 余白がある」の 1 本だけ。depth / unwind_floor は 16 bit: RP2350 の SRAM 520KiB / 64B < 65535 で溢れない。
     if (!A::call_record_room_at(context, return_sp))
       return kernel_error::NO_STACK;
-    // [SHIZUKU_STACK_LEDGER] U callee の窓を開く (窓を持つのは U callee の段だけ)。全検査の後で状態を変える。
+    // U callee の窓を開く (窓を持つのは U callee の段だけ)。全検査の後で状態を変える。
     // 特権 caller が外側の U 窓の中にいる (depth != 0 かつ u_depth != 0) なら、戻りで外側の窓を復元できないので断る。
     if constexpr (K::THREAD::HAS_STACK_WINDOW) {
       if (!view.privileged) {
