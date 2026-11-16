@@ -959,31 +959,7 @@ bool shizuku_c6_handle_fault(arch::exception_frame_t *frame) {
     }
   }
 #else
-  if ((frame->mcause == 5 || frame->mcause == 7) &&
-      ((frame->mstatus & RV32_MSTATUS_MPP) == 0)) {
-    auto &thread = shizuku::kernel_instance.current_thread();
-    const uint32_t depth = thread.call_stack.depth;
-    if (depth > 0 && depth - 1 < thread.MAX_STACK_WINDOWS) {
-      const auto win = thread.window_at(depth - 1);
-      if (win.is_valid()) {
-        const uintptr_t fault_addr = frame->mtval;
-        if (fault_addr >= thread.stk.stack_lo && fault_addr < win.lo) {
-          const auto new_win = shizuku::extend_window(win, fault_addr, thread.stk.stack_lo);
-          if (new_win.is_valid()) {
-            thread.set_window_at(depth - 1, new_win);
-            thread.stk.cur_win_lo = new_win.lo;
-            thread.stk.cur_win_hi = new_win.hi;
-            shizuku::chips::esp32_c6::pmp_controller::apply_stack_window(new_win.lo, new_win.hi);
-            s_pmp_shadow.win_lo = new_win.lo;
-            s_pmp_shadow.win_hi = new_win.hi;
-            shizuku_c6_stack_extend_count = shizuku_c6_stack_extend_count + 1;
-            // mepc を進めず再実行 (同じ命令を再試行)
-            return true;
-          }
-        }
-      }
-    }
-  }
+#error "the C6 U-mode fault path needs SHIZUKU_STACK_LEDGER"
 #endif
 
   // 1. 0x802 読み取りプローブ時の Illegal Instruction (mcause == 2) 捕捉

@@ -441,8 +441,8 @@ SHIZUKU_HOT SHIZUKU_SVC_RAM kernel_error KERNEL::enter_call(KERNEL::THREAD &thre
   auto &entry = thread.ledger_top_mut();
 #if defined(SHIZUKU_LEAN_LEDGER)
   if (arch_call_in_place<ARCH>()) {
-    // header_push_of が戻りの権威 (ret_*・prev_call) を書いた。ここでは同定と世代だけを足し、
-    // 集成体の代入で消さない。identity (current / caller) は call 段の列から導く (call_top だけ更新)。
+    // header_push_of が記録 (ret_pc・prev・prev_call) を書いた。ここでは同定と世代だけを足し、
+    // 集成体の代入で消さない。identity (current / caller) は call 段の列から導く (call_top_rec を更新)。
     entry.object = request.callee_object;
     entry.handler_object = request.parent_handler_object;
     entry.handler_entry = request.parent_handler_entry;
@@ -451,10 +451,8 @@ SHIZUKU_HOT SHIZUKU_SVC_RAM kernel_error KERNEL::enter_call(KERNEL::THREAD &thre
     entry.unwind_floor = (uint16_t)unwind_floor;
     entry.generation = request.callee_generation;
     thread.call_stack.call_count++;
-    thread.call_stack.call_top = thread.call_stack.depth;
-#if defined(SHIZUKU_STACK_LEDGER)
+    thread.call_stack.call_top = thread.call_stack.depth; // 未読の旧 LEAN の添字 (消すと .text が動く。段 4 で消す)
     thread.call_stack.call_top_rec = thread.call_stack.top;
-#endif
     return kernel_error::OK;
   }
 #endif

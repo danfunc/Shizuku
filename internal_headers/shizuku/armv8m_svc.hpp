@@ -31,15 +31,9 @@ struct profile_span {
 // The trusted limit of the activation that issued this SVC (not supplied by PSP).
 template <class Thread>
 [[gnu::always_inline]] inline uint32_t stack_ceiling(const Thread &activation) {
-#if defined(SHIZUKU_STACK_LEDGER)
   return activation.call_stack.depth != 0
       ? (uint32_t)ARCH::record_return_sp(activation.call_stack.top)
       : (activation.stack_rlar & ~31u) + 32u;
-#else
-  return activation.call_stack.depth != 0
-      ? (uint32_t)activation.ledger[activation.call_stack.depth - 1].ret_sp
-      : (activation.stack_rlar & ~31u) + 32u;
-#endif
 }
 
 // The original thread is still current and still owns its state until PendSV's

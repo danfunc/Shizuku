@@ -25,8 +25,13 @@
 #if defined(SHIZUKU_STACK_LEDGER) && !defined(SHIZUKU_LEAN_LEDGER)
 #error "SHIZUKU_STACK_LEDGER builds on the in-place entries of SHIZUKU_LEAN_LEDGER"
 #endif
+// 2 つの define は常に対で定義する (段 4 で constexpr に置き換えるまでの名前)。LEAN 専用の枝は消してあり、
+// 以降の `#if defined(SHIZUKU_STACK_LEDGER)` は「in-place の ARCH」と同じ意味で使っている。
+#if defined(SHIZUKU_LEAN_LEDGER) && !defined(SHIZUKU_STACK_LEDGER)
+#error "SHIZUKU_LEAN_LEDGER alone is no longer a supported configuration (define SHIZUKU_STACK_LEDGER too)"
+#endif
 // 旧 call-header 方式 (user stack 上のヘッダを戻りの権威にする) は廃止した。ARCH::CALL_IN_PLACE が真の ARCH は
-// SHIZUKU_STACK_LEDGER か SHIZUKU_LEAN_LEDGER が必要で、どちらも無いときは header_push_of /
+// SHIZUKU_STACK_LEDGER が必要で、無いときは header_push_of /
 // pop_in_place / enter_in_place の static_assert で止まる。CALL_IN_PLACE が偽の ARCH (RP2040) は
 // これらの本体を使わず、従来の call_frame_push の経路を通る。
 
@@ -55,25 +60,6 @@ static constexpr bool is_context_unprivileged(const C *ctx) {
 // 呼出しの記録 (ヘッダ枠方式、ARCH::CALL_IN_PLACE) の出し入れ。dispatch.cpp の関数は明示特殊化
 // (テンプレートではない) で、使わない側の枝も構文として通る必要があるため、ARCH 固有の呼び出しは
 // ここ (依存名のテンプレート) に包む。
-template <class A, class Context>
-[[gnu::always_inline]] inline bool header_has_room_of(const Context &context, uint32_t caller_object) {
-  if constexpr (arch_call_in_place<A>())
-    return A::call_header_has_room(context, caller_object);
-  else
-    return false;
-}
-// stack の余地の検査。求めておいた caller の戻り SP を使える ARCH (ARM) はそれで調べ、そうでなければ従来どおり。
-template <class A, class Context, class Thread>
-[[gnu::always_inline]] inline bool call_sp_has_room_of(const Context &context, uintptr_t return_sp,
-                                                       const Thread &thread) {
-  if constexpr (requires { A::call_stack_has_room_at(context, return_sp); }) {
-    (void)thread;
-    return A::call_stack_has_room_at(context, return_sp);
-  } else {
-    (void)return_sp;
-    return A::call_header_has_room(context, thread.identity_object());
-  }
-}
 #if defined(SHIZUKU_STACK_LEDGER)
 // [SHIZUKU_STACK_LEDGER] caller の枠 (converter が空けた [return_sp + CALL_RECORD_OFFSET, +32)) に記録を積む。
 // 前提: A::call_record_room_at(context, return_sp) が真 (枠が caller の天井の内側にある)。
@@ -127,22 +113,8 @@ template <class A, class Thread, class Context, class Frame>
       return false;
     stack_record_push<A>(thread, context, frame, return_sp, via, floor);
     return true;
-#elif defined(SHIZUKU_LEAN_LEDGER)
-    if (thread.ledger == nullptr || thread.call_stack.depth >= thread.ledger_capacity ||
-        !A::call_header_has_room(context, thread.identity_object()))
-      return false;
-    // 戻りの権威は特権の台帳に置く (user stack にヘッダは書かない)。段の中身 (object・handler・kind・
-    // via・floor) は呼び出し側が depth - 1 の項目へ書く。ここでは戻りに要るものだけを書く。
-    auto &entry = thread.ledger[thread.call_stack.depth];
-    entry.generation = 0;
-    entry.ret_pc = A::frame_pc(frame);
-    entry.ret_sp = A::call_return_sp(context);
-    entry.prev_call = (uint16_t)thread.call_stack.call_top;
-    entry.ret_privileged = A::context_privileged(context) ? 1 : 0;
-    thread.call_stack.depth++;
-    return true;
 #else
-    static_assert(sizeof(A) == 0, "an in-place ARCH needs SHIZUKU_STACK_LEDGER (or SHIZUKU_LEAN_LEDGER)");
+    static_assert(sizeof(A) == 0, "an in-place ARCH needs SHIZUKU_STACK_LEDGER");
     return false;
 #endif
   } else {
@@ -295,89 +267,8 @@ template <class K, class KObj>
     }
     thread.call_stack.top = prev_address;
     thread.call_stack.depth = depth - 1;
-#elif defined(SHIZUKU_LEAN_LEDGER)
-    // PC/SP/privilege and caller identity come from protected ledger memory. The window is resolved below.
-    const auto &entry = thread.ledger[depth - 1];
-    const uint8_t via = entry.via;
-    // The resumed caller is the preceding activation. Inspect its via directly so a
-    // dispatch entry is not skipped while resolving the caller object's call chain.
-    const uint8_t caller_via = depth > 1 ? thread.ledger[depth - 2].via : 0;
-    const bool caller_is_dispatch = caller_via == K::LEDGER_DISPATCH;
-    const bool is_call = via == K::LEDGER_CALL || via == K::LEDGER_DESCRIPTOR_CALL;
-    if (is_call && thread.call_stack.call_count == 0)
-      return false;
-    if (entry.ret_privileged > 1u || entry.prev_call >= depth ||
-        entry.prev_call > thread.ledger_capacity)
-      return false;
-    const uint32_t caller_object = entry.prev_call != 0
-        ? thread.ledger[entry.prev_call - 1].object
-        : thread.base_object;
-    if (is_call) {
-      thread.call_stack.call_count--;
-      thread.call_stack.call_top = entry.prev_call;
-    }
-    // 窓機構を持つ arch (HAS_STACK_WINDOW) だけ。窓を持つのは U callee の段だけなので、win_span を
-    // 1 回読み、0 (M callee / dispatch 段) なら窓関連を一切しない。cur_win は U の入場・戻りでしか
-    // 動かさない不変条件「cur_win = 最内の U 窓 (無ければ stack 全域)」を保つので、M 段を戻るときも
-    // 復元は要らない (M 段の間に U 段が入って戻れば、その pop が最内の U 窓へ戻してある)。
-    // 持たない arch (ARM) は記帳もゼロ化もしない。
-    if constexpr (K::THREAD::HAS_STACK_WINDOW) {
-      const uint32_t popped_index = depth - 1;
-      if (popped_index < thread.MAX_STACK_WINDOWS && thread.win_span[popped_index] != 0) {
-        const auto popped_win = thread.window_at(popped_index);
-        if (popped_win.is_valid()) {
-          zero_window_of<A>(popped_win);
-        }
-        thread.clear_window_at(popped_index);
-
-        // 戻り先が M でも U でも、cur_win を「この段より外側の最内の U 窓」へ戻す
-        // (M caller へ戻る場合も、その M が更に外の U へ戻るときに復元が要らないようにする)。
-        stack_window caller_win{thread.stk.stack_lo, thread.stk.stack_hi};
-        for (int32_t d = static_cast<int32_t>(depth) - 2; d >= 0; --d) {
-          const auto w = thread.window_at(d);
-          if (w.is_valid()) {
-            caller_win = w;
-            break;
-          }
-        }
-        thread.stk.cur_win_lo = caller_win.lo;
-        thread.stk.cur_win_hi = caller_win.hi;
-
-        if (restore && entry.ret_privileged == 0) {
-          if constexpr (requires { A::apply_stack_window(context, caller_win.lo, caller_win.hi); }) {
-            A::apply_stack_window(context, caller_win.lo, caller_win.hi);
-          }
-        }
-      }
-    }
-
-    if (restore) {
-      if constexpr (arch_has_core_num<A>) {
-        frame = A::call_resume_at(context, entry.ret_pc, entry.ret_sp, entry.ret_privileged != 0,
-                                  0, 0, scrub, core);
-      } else {
-        frame = A::call_resume_at(context, entry.ret_pc, entry.ret_sp, entry.ret_privileged != 0,
-                                  0, 0, scrub);
-      }
-      const auto window = resolve_return_region_window(
-          kobj, caller_via, K::LEDGER_DISPATCH, caller_object);
-      A::set_region_window(context, window.base, window.limit);
-      if (!caller_is_dispatch && !A::context_privileged(context)) {
-        if constexpr (requires { A::set_unprivileged_resume_metadata(*frame, entry.ret_sp, A::trusted_stack_top(), scrub); }) {
-          A::set_unprivileged_resume_metadata(*frame, entry.ret_sp, A::trusted_stack_top(), scrub);
-        }
-        if constexpr (arch_has_core_num<A>) {
-          A::switch_caller_protection(caller_object, core);
-        } else {
-          if constexpr (requires { A::switch_caller_protection(caller_object); }) {
-            A::switch_caller_protection(caller_object);
-          }
-        }
-      }
-    }
-    thread.call_stack.depth = depth - 1;
 #else
-    static_assert(sizeof(A) == 0, "an in-place ARCH needs SHIZUKU_STACK_LEDGER (or SHIZUKU_LEAN_LEDGER)");
+    static_assert(sizeof(A) == 0, "an in-place ARCH needs SHIZUKU_STACK_LEDGER");
 #endif
   }
   return true;
@@ -455,21 +346,10 @@ template <class K, class KObj>
     if (via != K::LEDGER_DESCRIPTOR_CALL &&
         (view.kind == object_kind::KERNEL_OBJECT || view.id == kernel.svc_handler_object()))
       return kernel_error::BAD_REQUEST;
-    // 深さの上限: CALL_METHOD は呼び出し側 (call_method_in_place) が行を引いた直後に同じ条件で断っているので、
-    // ここで二度目を調べるのは方法記述子の経路だけ (via は呼び出し側で定数。展開後は枝ごと消える)。
-#if !defined(SHIZUKU_STACK_LEDGER)
-    if (via == K::LEDGER_DESCRIPTOR_CALL && stack.call_count >= KObj::MAX_DEPTH)
-      return kernel_error::NO_STACK;
-#endif
+    // 深さの上限は stack の大きさで決まる (MAX_DEPTH の検査は無い)。
     const uint32_t depth = stack.depth; // 呼び先の unwind floor
-    // caller の戻り SP は 1 回だけ求め、stack の余地の検査と台帳の書出しで使い回す (ARM では例外フレームの
-    // 読みが 2 回走っていた)。
+    // caller の戻り SP は 1 回だけ求め、stack の余地の検査と記録の書出しで使い回す。
     const uintptr_t return_sp = A::call_return_sp(context);
-    // 4A: 最後の 1 枠 (ledger_capacity - 1) は return dispatch 専用に先取り予約する。
-    //   台帳の枠の検査は depth + 1 < ledger_capacity の 1 本で足りる。次の 2 つは台帳の置き場所の不変条件
-    //   (set_thread_ledger が capacity <= UINT16_MAX を、解放が ledger と capacity を同時に 0 にすることを保証)
-    //   から出るので、ここでは調べない: capacity == 0 (台帳なし) なら必ず断る / depth + 1 < capacity <= UINT16_MAX
-    //   なので unwind_floor (16 bit) は溢れない。
 #if defined(SHIZUKU_STACK_LEDGER)
     // 記録は caller の stack 枠に置く。深さの上限は stack の大きさで決まり (記録 1 つにつき 64B 以上を使う)、
     // 台帳の枠・MAX_DEPTH・16 bit の検査は要らない。残るのは「枠が caller の天井の内側にあり、PSPLIM との間に
@@ -506,61 +386,9 @@ template <class K, class KObj>
       set_callee_entry<A>(frame, entry_pc, view.id);
     }
 #else
-    if (depth + 1u >= thread.ledger_capacity || !call_sp_has_room_of<A>(context, return_sp, thread))
-      return kernel_error::NO_STACK;
+    // frame は後続の共通部分が使う (捨てられる枝でも名前の探索は非依存名で行われる)。
     typename K::FRAME &frame = *context.sp;
-#endif
-#if defined(SHIZUKU_STACK_LEDGER)
-#elif defined(SHIZUKU_LEAN_LEDGER)
-    const uintptr_t ret_sp = A::call_return_sp(context);
-    auto &entry = thread.ledger[depth];
-    entry.ret_sp = ret_sp;
-    // 窓機構を持つ arch (HAS_STACK_WINDOW) だけ範囲検査・窓の記帳をする。ARM は何もしない。
-    // 窓は U callee だけが持つ。M callee は win_span を書かず読まない: win_span[depth] は常に 0
-    // (U 入場で書いた段は pop で必ず 0 に戻す不変条件。thread 生成時も 0)。
-    if constexpr (K::THREAD::HAS_STACK_WINDOW) {
-      if (!view.privileged) {
-        if (depth >= thread.MAX_STACK_WINDOWS) {
-          return kernel_error::NO_STACK;
-        }
-        // caller (M でも U でも) の SP は thread 自身の stack 内に無ければならない。
-        if (thread.stk.stack_lo != 0 || thread.stk.stack_hi != 0) {
-          if (ret_sp < thread.stk.stack_lo || ret_sp > thread.stk.stack_hi) {
-            return kernel_error::NO_STACK;
-          }
-        }
-        const auto win = open_window(ret_sp, thread.stk.stack_lo);
-        if (!win.is_valid()) {
-          return kernel_error::NO_STACK;
-        }
-        thread.set_window_at(depth, win);
-        thread.stk.cur_win_lo = win.lo;
-        thread.stk.cur_win_hi = win.hi;
-        if constexpr (requires { A::apply_stack_window(context, win.lo, win.hi); }) {
-          A::apply_stack_window(context, win.lo, win.hi);
-        }
-      }
-    }
-
-    // 記帳は台帳の 1 項目だけ: 呼び先の同定 (object・handler・kind・via・floor・世代) と、この段から
-    // 戻るときの caller の再開点 (pc・sp・特権) と、ひとつ外側の call 段への鎖 (prev_call)。窓は復帰時に解決する。
-    // user stack のヘッダは書かない。current / caller の識別は call 段の列から導く (call_top だけ更新)。
-    entry.object = view.id;
-    entry.handler_object = view.parent_handler_object;
-    entry.handler_entry = view.parent_handler_entry;
-    entry.kind = (uint8_t)view.kind;
-    entry.via = via;
-    entry.unwind_floor = (uint16_t)depth;
-    entry.generation = view.instance_generation;
-    entry.ret_pc = A::frame_pc(frame);
-    entry.prev_call = (uint16_t)stack.call_top;
-    entry.ret_privileged = A::context_privileged(context) ? 1 : 0;
-    stack.depth = depth + 1;
-    stack.call_count = stack.call_count + 1;
-    stack.call_top = depth + 1;
-    set_callee_entry<A>(frame, entry_pc, view.id);
-#else
-    static_assert(sizeof(A) == 0, "an in-place ARCH needs SHIZUKU_STACK_LEDGER (or SHIZUKU_LEAN_LEDGER)");
+    static_assert(sizeof(A) == 0, "an in-place ARCH needs SHIZUKU_STACK_LEDGER");
 #endif
     A::set_priv(context, view.privileged);
     A::set_region_window(context, view.region_base, view.region_limit);
@@ -605,12 +433,6 @@ template <class K, class KObj>
         A::set_result(frame, (uintptr_t)error, 0);
         return;
       }
-#if !defined(SHIZUKU_STACK_LEDGER)
-      if (thread.call_stack.call_count >= KObj::MAX_DEPTH) {
-        A::set_result(frame, (uintptr_t)object_error::NO_STACK, 0);
-        return;
-      }
-#endif
       const uintptr_t argument = A::arg(frame, 3);
       const kernel_error entered = enter_in_place<K, KObj>(
           kernel, thread, context, kobj.view_of_row((uint32_t)id, *row), (uintptr_t)entry,
@@ -633,13 +455,6 @@ template <class K, class KObj>
         A::set_result(frame, (uintptr_t)error, 0);
         return;
       }
-      // 従来は呼び先を引いたあと、台帳に入る前にここで深さを断っていた (入口の BAD_REQUEST より先)。
-#if !defined(SHIZUKU_STACK_LEDGER)
-      if (thread.call_stack.call_count >= KObj::MAX_DEPTH) {
-        A::set_result(frame, (uintptr_t)object_error::NO_STACK, 0);
-        return;
-      }
-#endif
       const uintptr_t argument = A::arg(frame, 3);
       const kernel_error entered = enter_in_place<K, KObj>(
           kernel, thread, context, resolved.view, (uintptr_t)entry,

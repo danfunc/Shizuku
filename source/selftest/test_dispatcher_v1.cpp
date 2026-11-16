@@ -447,7 +447,6 @@ static void run_dispatcher_tests() {
   // Reset depth
   thread.call_stack.depth = 0;
   thread.call_stack.call_count = 0;
-  thread.call_stack.call_top = 0;
   thread.call_stack.call_top_rec = 0;
   thread.call_stack.current_call_object = 0;
   thread.call_stack.caller_object = 0;
@@ -479,7 +478,6 @@ static void run_dispatcher_tests() {
   // Pop the dispatch frame
   thread.call_stack.depth = 0;
   thread.call_stack.top = 0;
-  thread.call_stack.call_top = 0;
   thread.call_stack.call_top_rec = 0;
   ctx->sp = frame;
 
@@ -493,7 +491,6 @@ static void run_dispatcher_tests() {
 
   thread.call_stack.depth = 0;
   thread.call_stack.top = 0;
-  thread.call_stack.call_top = 0;
   thread.call_stack.call_top_rec = 0;
   ctx->sp = frame;
 
@@ -507,7 +504,6 @@ static void run_dispatcher_tests() {
 
   thread.call_stack.depth = 0;
   thread.call_stack.top = 0;
-  thread.call_stack.call_top = 0;
   thread.call_stack.call_top_rec = 0;
   ctx->sp = frame;
 
@@ -530,7 +526,6 @@ static void run_dispatcher_tests() {
            (unsigned long)raw_id);
     thread.call_stack.depth = 0;
     thread.call_stack.top = 0;
-    thread.call_stack.call_top = 0;
     thread.call_stack.call_top_rec = 0;
     ctx->sp = frame;
   }
@@ -554,7 +549,6 @@ static void run_dispatcher_tests() {
 
   thread.call_stack.depth = 0;
   thread.call_stack.top = 0;
-  thread.call_stack.call_top = 0;
   thread.call_stack.call_top_rec = 0;
   ctx->sp = frame;
 
@@ -568,7 +562,6 @@ static void run_dispatcher_tests() {
 
   thread.call_stack.depth = 0;
   thread.call_stack.top = 0;
-  thread.call_stack.call_top = 0;
   thread.call_stack.call_top_rec = 0;
   ctx->sp = frame;
 
@@ -629,7 +622,6 @@ static void run_dispatcher_tests() {
     // 呼出しの記録: caller (sp = frame + trap フレーム) の再開点を据える (caller stub が空けた枠の記録)。
     thread.call_stack.depth = 0;
     thread.call_stack.call_count = 0;
-    thread.call_stack.call_top = 0;
     thread.call_stack.call_top_rec = 0;
     fake_call_entry(thread, 0, LEAF_ID, ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY, via, unwind_floor);
     fake_return_record(*ctx, thread, 0, A_PC_6, true);
@@ -661,7 +653,6 @@ static void run_dispatcher_tests() {
   thread.call_stack.depth = 0;
   thread.call_stack.call_count = 0;
   thread.call_stack.top = 0;
-  thread.call_stack.call_top = 0;
   thread.call_stack.call_top_rec = 0;
   arm_frame(KERNEL::LEDGER_CALL, 0, callee);
   kernel_instance.svc_dispatch(ctx);
@@ -678,7 +669,6 @@ static void run_dispatcher_tests() {
   thread.call_stack.depth = 0;
   thread.call_stack.call_count = 0;
   thread.call_stack.top = 0;
-  thread.call_stack.call_top = 0;
   thread.call_stack.call_top_rec = 0;
   arm_frame(KERNEL::LEDGER_DESCRIPTOR_CALL, 1, callee);
   kernel_instance.svc_dispatch(ctx);
@@ -693,7 +683,6 @@ static void run_dispatcher_tests() {
   thread.call_stack.depth = 0;
   thread.call_stack.call_count = 0;
   thread.call_stack.top = 0;
-  thread.call_stack.call_top = 0;
   thread.call_stack.call_top_rec = 0;
   arm_frame(KERNEL::LEDGER_DESCRIPTOR_CALL, 0, callee);
   record_of(thread, 0).handler_object = CUSTOM_HANDLER_ID;
@@ -2298,7 +2287,6 @@ static void run_dispatcher_tests() {
     thread.call_stack.depth = 0;
     thread.call_stack.call_count = 0;
     thread.call_stack.top = 0;
-    thread.call_stack.call_top = 0;
     thread.call_stack.call_top_rec = 0;
     thread.call_stack.caller_object = 0;
     thread.call_stack.current_call_object = 0;
@@ -2343,7 +2331,6 @@ static void run_dispatcher_tests() {
     thread.call_stack.depth = 0;
     thread.call_stack.call_count = 0;
     thread.call_stack.top = 0;
-    thread.call_stack.call_top = 0;
     thread.call_stack.call_top_rec = 0;
     kernel_instance.set_thread_ledger(
         0, ledger_34, 34, ROOT_APP_ID, (uint32_t)object_kind::PLAIN,
@@ -2404,7 +2391,6 @@ static void run_dispatcher_tests() {
     thread.call_stack.depth = 0;
     thread.call_stack.call_count = 0;
     thread.call_stack.top = 0;
-    thread.call_stack.call_top = 0;
     thread.call_stack.call_top_rec = 0;
     kernel_instance.set_thread_ledger(
         0, ledger, 32, ROOT_APP_ID, (uint32_t)object_kind::PLAIN,
@@ -2612,7 +2598,6 @@ static void run_dispatcher_tests() {
   thread.call_stack.depth = 0;
   thread.call_stack.call_count = 0;
   thread.call_stack.top = 0;
-  thread.call_stack.call_top = 0;
   thread.call_stack.call_top_rec = 0;
   ctx->sp = frame;
 
