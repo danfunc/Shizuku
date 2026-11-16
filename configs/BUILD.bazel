@@ -58,17 +58,10 @@ config_setting(
 # firmware と host 試験は board / c6_umode の組が同じになる (host 試験も board=esp32_c6 c6_umode=disabled で走る)
 # ので、flag の組では見分けない。firmware は cpu:riscv32 の platform (--config=esp32c6 / esp32c5) でだけ
 # ビルドされる、という違いで選ぶ。host 試験は自分の defines で方式を選ぶ。
-# c6_stack_ledger=disabled は C6 U-mode を LEAN へ戻す逃げ道 (段 3 で LEAN とともに消す)。
-string_flag(
-    name = "c6_stack_ledger",
-    build_setting_default = "enabled",
-    values = ["disabled", "enabled"],
-    visibility = ["//visibility:public"],
-)
 config_setting(
     name = "riscv_c6_stack_ledger",
     constraint_values = ["@platforms//cpu:riscv32"],
-    flag_values = {":board": "esp32_c6", ":c6_stack_ledger": "enabled"},
+    flag_values = {":board": "esp32_c6"},
     visibility = ["//visibility:public"],
 )
 config_setting(
@@ -80,12 +73,6 @@ config_setting(
 selects.config_setting_group(
     name = "riscv_stack_ledger",
     match_any = [":riscv_c6_stack_ledger", ":riscv_c5_stack_ledger"],
-    visibility = ["//visibility:public"],
-)
-config_setting(
-    name = "riscv_c6_umode_lean_ledger",
-    constraint_values = ["@platforms//cpu:riscv32"],
-    flag_values = {":board": "esp32_c6", ":c6_umode": "enabled", ":c6_stack_ledger": "disabled"},
     visibility = ["//visibility:public"],
 )
 string_flag(

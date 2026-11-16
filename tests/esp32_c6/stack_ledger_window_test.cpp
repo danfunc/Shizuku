@@ -6,14 +6,14 @@
 // 特権 caller の NO_STACK 拒否) は、カーネル一式 (dispatcher_v1 の harness) を STACK 版でビルドできないため
 // ここでは試験しない。報告書に明記する。
 //
-// 実行は --//configs:c6_stack_ledger=enabled を付けたときだけ (既定では SHIZUKU_STACK_LEDGER が無く #error)。
+// 方式は BUILD の defines (SHIZUKU_LEAN_LEDGER + SHIZUKU_STACK_LEDGER) で選ぶ。
 
 #ifndef SHIZUKU_LEAN_LEDGER
 #define SHIZUKU_LEAN_LEDGER 1
 #endif
 
 #if !defined(SHIZUKU_STACK_LEDGER)
-#error "stack_ledger_window_test は --//configs:c6_stack_ledger=enabled で実行する (SHIZUKU_STACK_LEDGER が必要)"
+#error "stack_ledger_window_test は SHIZUKU_STACK_LEDGER を定義して組む"
 #endif
 
 #include <cassert>

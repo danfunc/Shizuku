@@ -248,18 +248,15 @@ template void plic_vector_mode::enter_u_object<shizuku::archs::rv32_c6::context_
 
 using namespace shizuku;
 
-#if !defined(SHIZUKU_LEAN_LEDGER)
-#error "test_dispatcher_v1 は SHIZUKU_LEAN_LEDGER (LEAN) か SHIZUKU_LEAN_LEDGER + SHIZUKU_STACK_LEDGER (STACK) で組む"
+#if !defined(SHIZUKU_LEAN_LEDGER) || !defined(SHIZUKU_STACK_LEDGER)
+#error "test_dispatcher_v1 は SHIZUKU_LEAN_LEDGER + SHIZUKU_STACK_LEDGER (STACK) で組む"
 #endif
 
 // ---- 呼出しの記録 (戻りの権威) を試験が直接据える・読む口 ---------------------------------------
-//   SHIZUKU_LEAN_LEDGER の版は台帳の項目 (ret_* / generation / prev_call) と call_top。同じ試験が
-//   LEAN / STACK のどちらの版でも通ることを確かめるため、版の違いはここに閉じ込める。
-//   (user stack 上のヘッダ (call_header_t) を権威にする旧方式は廃止した。)
-//   SHIZUKU_STACK_LEDGER の版は記録が caller の stack 枠 ([return_sp, +32)) にあり、カーネルが持つのは
-//   先頭の記録へのポインタ (call_stack.top)・最新の call 段の記録 (call_top_rec)・深さだけ。
+//   記録は caller の stack 枠 ([return_sp, +32)) にあり、カーネルが持つのは先頭の記録へのポインタ
+//   (call_stack.top)・最新の call 段の記録 (call_top_rec)・深さだけ。
 //   index 段 (深さ index + 1 の記録) は record_of が先頭から prev を辿って返す。
-#if defined(SHIZUKU_STACK_LEDGER)
+//   (user stack 上のヘッダ方式と、特権メモリの台帳 (LEAN) は廃止した。)
 static KERNEL::call_ledger_entry &record_of(KERNEL::THREAD &t, uint32_t index) {
   auto *r = reinterpret_cast<KERNEL::call_ledger_entry *>(t.call_stack.top);
   // 鎖が壊れていても (記録が重なって自分を指す等) 止まるように、段数の上限で打ち切る。
@@ -276,56 +273,34 @@ static KERNEL::call_ledger_entry g_fake_records[40];
 // 深さ 0 のまま call 段が MAX_DEPTH 個あることにするための、識別だけを持つ call 段の記録。
 static KERNEL::call_ledger_entry g_identity_record;
 static uintptr_t g_saved_stack_limit = 0;
-#else
-static KERNEL::call_ledger_entry &record_of(KERNEL::THREAD &t, uint32_t index) { return t.ledger[index]; }
-[[maybe_unused]] static const KERNEL::call_ledger_entry &record_of(const KERNEL::THREAD &t, uint32_t index) {
-  return t.ledger[index];
-}
-#endif
-//   呼び先が自分の stack を使ってから次の ecall をする状況を作る。STACK の記録は caller の ecall 時点の SP の枠
+//   呼び先が自分の stack を使ってから次の ecall をする状況を作る。記録は caller の ecall 時点の SP の枠
 //   にあるので、入れ子の各段は別の SP から ecall しなければ記録が重なる (実機の呼び先は必ず自分の stack を使う)。
-//   frame を 400B 下へ写し、ctx->sp をそこへ移して返す。STACK 以外は据え直さず frame をそのまま返す。
+//   frame を 400B 下へ写し、ctx->sp をそこへ移して返す。
 static KERNEL::FRAME *descend_frame(KERNEL::FRAME *f) {
-#if defined(SHIZUKU_STACK_LEDGER)
   auto *lower = reinterpret_cast<KERNEL::FRAME *>(reinterpret_cast<uint8_t *>(f) - 400);
   *lower = *f;
   kernel_instance.current_context()->sp = lower;
   return lower;
-#else
-  return f;
-#endif
 }
 //   深さ 0 のまま、識別が object の call 段 (call_count は呼び側が据える) にする / 戻す。
 static void fake_identity_call(KERNEL::THREAD &t, uint32_t object) {
-#if defined(SHIZUKU_STACK_LEDGER)
   g_identity_record = {};
   g_identity_record.object = (uint16_t)object;
   t.call_stack.call_top_rec = reinterpret_cast<uintptr_t>(&g_identity_record);
-  // STACK には MAX_DEPTH の検査が無く (native_call.hpp / dispatch.cpp の #if !SHIZUKU_STACK_LEDGER)、
-  // 深さの上限は caller の stack の余地で決まる (call_record_room_at)。「段数が上限」の代わりに
-  // 「余地が尽きた」状況を据える: stack の下限を caller の戻り SP のすぐ下まで上げる。
+  // STACK には段数 (MAX_DEPTH) の検査が無く、深さの上限は caller の stack の余地で決まる
+  // (call_record_room_at)。「段数が上限」の代わりに「余地が尽きた」状況を据える:
+  // stack の下限を caller の戻り SP のすぐ下まで上げる。
   auto *c = kernel_instance.current_context();
   g_saved_stack_limit = ARCH::stack_limit(*c);
   ARCH::stack_limit_set(*c, ARCH::call_return_sp(*c) - 16u);
-#elif defined(SHIZUKU_LEAN_LEDGER)
-  t.ledger[0].object = object;
-  t.ledger[0].generation = 0;
-  t.ledger[0].prev_call = 0;
-  t.call_stack.call_top = 1;
-#endif
 }
 static void clear_identity_call(KERNEL::THREAD &t) {
-#if defined(SHIZUKU_STACK_LEDGER)
   t.call_stack.call_top_rec = 0;
   ARCH::stack_limit_set(*kernel_instance.current_context(), g_saved_stack_limit);
-#elif defined(SHIZUKU_LEAN_LEDGER)
-  t.call_stack.call_top = 0;
-#endif
 }
-//   台帳の index 段を call 段として据える (同定 + 識別の記帳。戻りの記録は fake_return_record)。
+//   index 段を call 段として据える (同定 + 識別の記帳。戻りの記録は fake_return_record)。
 static void fake_call_entry(KERNEL::THREAD &t, uint32_t index, uint32_t object, uint32_t handler_object,
                             uintptr_t handler_entry, uint8_t via, uint16_t floor) {
-#if defined(SHIZUKU_STACK_LEDGER)
   assert(index < 40);
   auto &r = g_fake_records[index];
   r = {};
@@ -342,20 +317,10 @@ static void fake_call_entry(KERNEL::THREAD &t, uint32_t index, uint32_t object, 
   t.call_stack.depth = index + 1;
   t.call_stack.call_count++;
   t.call_stack.call_top_rec = reinterpret_cast<uintptr_t>(&r);
-#elif defined(SHIZUKU_LEAN_LEDGER)
-  KERNEL::call_ledger_entry entry = {object, handler_object, handler_entry,
-                                     (uint8_t)object_kind::PLAIN, via, floor};
-  entry.prev_call = (uint16_t)t.call_stack.call_top;
-  t.ledger[index] = entry;
-  t.call_stack.depth = index + 1;
-  t.call_stack.call_count++;
-  t.call_stack.call_top = index + 1;
-#endif
 }
 //   index 段から戻るときの caller の再開点を据える (ctx->sp は caller の ecall 時点の trap フレーム)。
 static void fake_return_record(KERNEL::CONTEXT &c, KERNEL::THREAD &t, uint32_t index, uintptr_t pc,
                                bool privileged) {
-#if defined(SHIZUKU_STACK_LEDGER)
   // 記録を caller の枠 (ecall 時点の SP) へ移す。ret_sp は記録の位置から arch が求めるので、
   // 位置そのものが戻り先の SP になる。特権は記録に置かない: 最外の段なら base_privileged、
   // それ以外は ひとつ外側の記録の呼び先から引かれる (本物の pop と同じ)。
@@ -369,27 +334,17 @@ static void fake_return_record(KERNEL::CONTEXT &c, KERNEL::THREAD &t, uint32_t i
     t.call_stack.call_top_rec = reinterpret_cast<uintptr_t>(slot);
   if (index == 0)
     t.call_stack.base_privileged = privileged ? 1u : 0u;
-#elif defined(SHIZUKU_LEAN_LEDGER)
-  auto &e = t.ledger[index];
-  e.ret_pc = pc;
-  e.ret_sp = ARCH::call_return_sp(c);
-  e.ret_privileged = privileged ? 1 : 0;
-#endif
 }
-//   最内の段の戻りの記録 (pc と caller の特権) を読む。STACK は ledger_top() が先頭の記録を返す。
+//   最内の段の戻りの記録 (pc と caller の特権) を読む。ledger_top() が先頭の記録を返す。
 static uintptr_t top_return_pc(const KERNEL::THREAD &t) {
   return t.ledger_top().ret_pc;
 }
 static bool top_return_privileged(const KERNEL::THREAD &t) {
-#if defined(SHIZUKU_STACK_LEDGER)
   // caller の特権は記録に置かれない。戻りで再開する活動 (ひとつ外側の記録の呼び先) から引く:
   // 最外ならスレッドの base_privileged、dispatch で入った活動は常に特権、call で入った活動は object の表の flags。
   const auto *prev = reinterpret_cast<const KERNEL::call_ledger_entry *>(t.ledger_top().prev);
   return prev == nullptr ? t.call_stack.base_privileged != 0
                          : (prev->via == KERNEL::LEDGER_DISPATCH || kernel_object_instance.privileged_of(prev->object));
-#elif defined(SHIZUKU_LEAN_LEDGER)
-  return t.ledger_top().ret_privileged != 0;
-#endif
 }
 
 static void run_dispatcher_tests() {
@@ -671,8 +626,7 @@ static void run_dispatcher_tests() {
   auto arm_frame = [&](uint8_t via, uint16_t unwind_floor, ARCH::exception_frame_t *callee) {
     ctx->sp = frame;
     ctx->privileged = true;
-    // 呼出しの記録: caller (sp = frame + trap フレーム) の再開点を据える (STACK の版は caller stub が
-    // 空けた枠の記録、LEAN の版は台帳の項目)。
+    // 呼出しの記録: caller (sp = frame + trap フレーム) の再開点を据える (caller stub が空けた枠の記録)。
     thread.call_stack.depth = 0;
     thread.call_stack.call_count = 0;
     thread.call_stack.call_top = 0;
@@ -897,9 +851,7 @@ static void run_dispatcher_tests() {
   {
     // 呼出しの記録は caller の枠 (trap フレームの直上 = caller の ecall 時点の SP) にある。
     // カーネルが持つのはその先頭へのポインタと深さだけ。callee の窓の上端は枠の下端 (= 枠のアドレス)。
-#if defined(SHIZUKU_STACK_LEDGER)
-    // SHIZUKU_STACK_LEDGER の版: 記録は caller の枠 (trap フレームの直上) にあり、ret_sp はその位置そのもの。
-    // LEAN の ret_sp / ret_privileged に当たる性質は、位置 (record_return_sp) と top_return_privileged で確かめる。
+    // ret_sp / ret_privileged に当たる性質は、記録の位置 (record_return_sp) と top_return_privileged で確かめる。
     const auto &rec = record_of(thread, 0);
     assert(reinterpret_cast<uintptr_t>(&rec) == reinterpret_cast<uintptr_t>(frame) + sizeof(KERNEL::FRAME));
     assert(ARCH::record_return_sp(reinterpret_cast<uintptr_t>(&rec)) == reinterpret_cast<uintptr_t>(frame) + sizeof(KERNEL::FRAME));
@@ -908,15 +860,6 @@ static void run_dispatcher_tests() {
     assert(thread.call_stack.top == reinterpret_cast<uintptr_t>(&rec) && thread.call_stack.call_top_rec == thread.call_stack.top);
     assert(thread.call_stack.call_count == 1);
     assert(thread.identity_object() == B_ID && thread.call_caller_object() == ROOT_APP_ID /* fresh() の base */);
-#elif defined(SHIZUKU_LEAN_LEDGER)
-    // SHIZUKU_LEAN_LEDGER の版: user stack にヘッダは無い。戻りの権威は台帳の項目 (特権メモリ) に 1 つ。
-    const auto &rec = thread.ledger[0];
-    assert(rec.ret_sp == reinterpret_cast<uintptr_t>(frame) + sizeof(KERNEL::FRAME));
-    assert(rec.prev_call == 0 && rec.ret_pc == A_PC && rec.ret_privileged == 1);
-    assert(rec.generation == 0);
-    assert(thread.call_stack.call_top == 1 && thread.call_stack.call_count == 1);
-    assert(thread.identity_object() == B_ID && thread.call_caller_object() == ROOT_APP_ID /* fresh() の base */);
-#endif
   }
   // ra は 32bit レジスタ。host (64bit) では関数ポインタが切り詰められるので下位 32bit で比べる。
   assert(frame->ra == (uint32_t)ARCH::return_stub()); // 戻り口はカーネルが決める
@@ -1371,14 +1314,10 @@ static void run_dispatcher_tests() {
   frame->a1 = ROOT_KOBJ_ID;
   frame->a2 = 0;
   kernel_instance.svc_dispatch(ctx);
-#if defined(SHIZUKU_STACK_LEDGER)
-  // STACK: 段数の上限の検査 (MAX_DEPTH) は無く、NO_STACK は enter_in_place の余地の検査 (native_call.hpp:546) で、
-  // 入口の BAD_REQUEST (root の名乗り → BAD_OBJECT、native_call.hpp:520-523 付近) より後ろ。
-  // 余地が尽きていても名乗りの拒否 (BAD_OBJECT) が勝つ。LEAN の「NO_STACK が勝つ」順は MAX_DEPTH 検査の位置の性質。
+  // 段数の上限の検査 (MAX_DEPTH) は無く、NO_STACK は enter_in_place の余地の検査で、
+  // 入口の BAD_REQUEST (root の名乗り → BAD_OBJECT) より後ろ。
+  // 余地が尽きていても名乗りの拒否 (BAD_OBJECT) が勝つ。
   assert(kernel_instance.current_depth() == 0 && frame->a0 == (uintptr_t)object_error::BAD_OBJECT && frame->a1 == 0);
-#else
-  assert(kernel_instance.current_depth() == 0 && frame->a0 == (uintptr_t)object_error::NO_STACK && frame->a1 == 0);
-#endif
   clear_identity_call(thread);
   thread.call_stack.call_count = 0;
   printf("  8k. CALL_METHOD to the root handler's ID: BAD_OBJECT (impersonation refused, nothing pushed); with the depth limit also reached NO_STACK wins, as before: PASS\n");
@@ -1831,8 +1770,7 @@ static void run_dispatcher_tests() {
     frame->a3 = 0x21;
     kernel_instance.svc_dispatch(ctx);
     assert(kernel_instance.current_depth() == 1 && record_of(thread, 0).handler_object == CUSTOM_HANDLER_ID);
-#if defined(SHIZUKU_STACK_LEDGER)
-    // STACK: 記録は caller の ecall 時点の SP の枠に置かれる。呼び先 D は in-place で同じ frame から始まるが、
+    // 記録は caller の ecall 時点の SP の枠に置かれる。呼び先 D は in-place で同じ frame から始まるが、
     // 実機の D は自分の stack を使ってから ecall するので、D の ecall の SP は A の ecall の SP より下にある。
     // 同じ位置のまま raw SVC を撃つと段 1 の記録が段 0 の記録に重なり鎖が壊れる (exit_in_place が CORRUPT)。
     // (18c/18d の into_kobj_stage と同じく、D が 400 バイト使った位置へ移す。)
@@ -1841,7 +1779,6 @@ static void run_dispatcher_tests() {
       *frame_d = *frame;
       ctx->sp = frame_d;
     }
-#endif
     ctx->sp->a0 = 77; // 専用 HANDLER への raw SVC
     kernel_instance.svc_dispatch(ctx);
     assert(kernel_instance.current_depth() == 2);
@@ -1964,7 +1901,6 @@ static void run_dispatcher_tests() {
       assert(ARCH::arg(*ctx->sp, 0) == i);
       assert(ctx->sp == cur); // どの段も frame をコピーしない
       assert(regs_pass_through(cur, 0x500 + 0x40 * i));
-#if defined(SHIZUKU_STACK_LEDGER)
       // 戻りの権威は caller の枠にある記録: 段 i の記録は caller の再開点 (SP = 枠の位置) に置かれ、
       // prev で一つ外側の記録、prev_call で一つ外側の call 段の記録へ鎖がつながる。
       const auto &rec = record_of(thread, i);
@@ -1977,17 +1913,6 @@ static void run_dispatcher_tests() {
       assert(thread.call_stack.top == reinterpret_cast<uintptr_t>(&rec) && thread.call_stack.call_top_rec == thread.call_stack.top);
       // 各段の caller の再開点は前の段の再開点より下 (スタックは下へ伸びる)。
       assert(i == 0 || rec_sp < headers[i - 1]);
-#elif defined(SHIZUKU_LEAN_LEDGER)
-      // 戻りの権威は台帳の項目: 段 i の caller の再開点 (pc・sp) と、ひとつ外側の call 段への鎖 (prev_call)。
-      const auto &rec = thread.ledger[i];
-      headers[i] = rec.ret_sp;
-      assert(rec.ret_sp == reinterpret_cast<uintptr_t>(cur) + sizeof(KERNEL::FRAME));
-      assert(rec.prev_call == i && rec.ret_pc == A_PC + 0x10 * i);
-      assert(thread.call_stack.call_top == i + 1);
-      // 各段の caller の再開点は前の段の再開点より下 (スタックは下へ伸びる)。
-      assert(i == 0 || rec.ret_sp < thread.ledger[i - 1].ret_sp);
-      (void)headers;
-#endif
       // 呼び先は自分のスタックを 400 バイト使ってから次の ecall をする (窓は枠の下端まで)。
       cur = reinterpret_cast<KERNEL::FRAME *>(reinterpret_cast<uint8_t *>(cur) - 400);
       ctx->sp = cur;
@@ -2001,13 +1926,9 @@ static void run_dispatcher_tests() {
       cur->a4 = RETURN_STUB_MARKER;
       kernel_instance.svc_dispatch(ctx);
       assert(kernel_instance.current_depth() == i);
-#if defined(SHIZUKU_STACK_LEDGER)
       // 鎖が一つ外側の記録へ戻る (top = 外側の記録、call_top_rec も同じ記録か 0)。
       assert(thread.call_stack.top == (i == 0 ? 0 : headers[i - 1]));
       assert(thread.call_stack.call_top_rec == thread.call_stack.top);
-#elif defined(SHIZUKU_LEAN_LEDGER)
-      assert(thread.call_stack.call_top == i); // 鎖が一つ外側の call 段へ戻る
-#endif
       cur = ctx->sp;
       assert(cur == frames[i]); // 段 i を呼んだ caller の枠の直下で再開する
       assert(cur->a0 == (uintptr_t)object_error::OK && cur->a1 == 0x70 + i);
@@ -2415,156 +2336,6 @@ static void run_dispatcher_tests() {
       access::set_kernel_role(ck_id, false);
     }
 
-#if !defined(SHIZUKU_STACK_LEDGER)
-    // [LEAN 専用の検査: 段 3 で LEAN と一緒に消える] 19a は台帳の容量 (ledger_capacity = 34) と、最後の 1 枠を
-    // return dispatch 用に先取りする 4A の予約を見る。STACK には台帳の容量も予約枠も無い (記録は caller の stack 枠で、
-    // 深さの上限は stack の余地だけ。dispatch.cpp:431-440 の STACK 側、native_call.hpp:541-548)。さらに本試験は
-    // 全段で同じ frame (ctx->sp = frame) から呼ぶので、STACK では記録が同じ位置 (frame + sizeof(FRAME)) に重なり鎖が成り立たない。
-    // 深さ・鎖・戻りの正しさは STACK では 15c と 19b (段ごとに別の frame) が見る。
-    // 19a. Reach depth=32 via alternating calls and dispatches:
-    //      H_{k-1} calls C_k (call, depth 2k - 1), C_k raw SVC -> H_k (dispatch, depth 2k)
-    for (uint32_t k = 1; k <= 16; ++k) {
-      uint32_t ck_id = C_BASE_ID + k;
-      uint32_t hk_id = H_BASE_ID + k;
-
-      ctx->sp = frame;
-      frame->a0 = (uintptr_t)object_api::CALL_METHOD;
-      frame->a1 = ck_id;
-      frame->a2 = 0;
-      frame->a3 = k * 10;
-      kernel_instance.svc_dispatch(ctx);
-      assert(thread.call_stack.depth == 2 * k - 1);
-      assert(thread.call_stack.call_count == k);
-      assert(record_of(thread, 2 * k - 2).via == KERNEL::LEDGER_CALL);
-      assert(record_of(thread, 2 * k - 2).object == ck_id);
-
-      ctx->sp = frame;
-      frame->a0 = 0x100 + k;
-      kernel_instance.svc_dispatch(ctx);
-      assert(thread.call_stack.depth == 2 * k);
-      assert(thread.call_stack.call_count == k);
-      assert(record_of(thread, 2 * k - 1).via == KERNEL::LEDGER_DISPATCH);
-      assert(record_of(thread, 2 * k - 1).object == hk_id);
-    }
-
-    // At this point (k=16 completed):
-    // depth == 32, call_count == 16, H16 is running at depth 32.
-    assert(thread.call_stack.depth == 32);
-    assert(thread.call_stack.call_count == 16);
-
-    // H16 calls C17 (parent handler ROOT_KOBJ_ID so C17 can issue CALL_METHOD directly to trap)
-    uint32_t c17_id = C_BASE_ID + 17;
-    uintptr_t c17_entry = 0x61000000 + 17 * 0x10000;
-    access::declare(c17_id, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(c17_entry), 0,
-                    ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
-    access::set_creator(c17_id, C_BASE_ID + 16);
-    access::set_kernel_role(c17_id, false);
-
-    ctx->sp = frame;
-    frame->a0 = (uintptr_t)object_api::CALL_METHOD;
-    frame->a1 = c17_id;
-    frame->a2 = 0;
-    frame->a3 = 170;
-    kernel_instance.svc_dispatch(ctx);
-    assert(thread.call_stack.depth == 33);
-    assert(thread.call_stack.call_count == 17);
-    assert(record_of(thread, 32).via == KERNEL::LEDGER_CALL);
-    assert(record_of(thread, 32).object == c17_id);
-
-    // Now we are at:
-    // depth == 33 (entries 0..32 filled, exactly 1 slot left: slot 33)
-    // call_count == 17 (< 32)
-    // ledger_capacity == 34
-    assert(thread.call_stack.depth == 33);
-    assert(thread.call_stack.call_count == 17);
-    assert(thread.ledger_capacity == 34);
-
-    // Declare C18 (child of C17)
-    uint32_t c18_id = C_BASE_ID + 18;
-    uintptr_t c18_entry = 0x61000000 + 18 * 0x10000;
-    access::declare(c18_id, 0, reinterpret_cast<KERNEL_OBJECT::method_t>(c18_entry), 0,
-                    ROOT_KOBJ_ID, ROOT_HANDLER_ENTRY);
-    access::set_creator(c18_id, c17_id);
-    access::set_kernel_role(c18_id, false);
-
-    // Snapshot entire state before attempting CALL_METHOD at depth=33
-    const uint32_t depth_before = thread.call_stack.depth;
-    const uint32_t call_count_before = thread.call_stack.call_count;
-    const uint32_t call_top_before = thread.call_stack.call_top;
-    const uintptr_t reg_base_before = ctx->region_base;
-    const uintptr_t reg_limit_before = ctx->region_limit;
-    const bool priv_before = ctx->privileged;
-    const void *sp_before = ctx->sp;
-
-    KERNEL::call_ledger_entry ledger_saved[34];
-    for (size_t i = 0; i < 34; ++i) ledger_saved[i] = record_of(thread, i);
-
-    // C17 attempts to call C18 via CALL_METHOD.
-    // 4A: this MUST be rejected with NO_STACK because slot 33 is reserved for return dispatch!
-    ctx->sp = frame;
-    frame->a0 = (uintptr_t)object_api::CALL_METHOD;
-    frame->a1 = c18_id;
-    frame->a2 = 0;
-    frame->a3 = 999;
-    frame->a4 = 0xAA55;
-    frame->a5 = 0x55AA;
-    kernel_instance.svc_dispatch(ctx);
-
-    // 4A assertions:
-    assert(frame->a0 == (uintptr_t)object_error::NO_STACK);
-    assert(frame->a1 == 0); // response value register
-    assert(frame->a2 == 0);
-    assert(frame->a3 == 999);
-    assert(frame->a4 == 0xAA55);
-    assert(frame->a5 == 0x55AA);
-    assert(thread.call_stack.depth == depth_before);
-    assert(thread.call_stack.call_count == call_count_before);
-    assert(thread.call_stack.call_top == call_top_before);
-    assert(ctx->region_base == reg_base_before);
-    assert(ctx->region_limit == reg_limit_before);
-    assert(ctx->privileged == priv_before);
-    assert(ctx->sp == sp_before);
-    // Entire ledger must be completely untouched!
-    for (size_t i = 0; i < 34; ++i) {
-      assert(record_of(thread, i).object == ledger_saved[i].object);
-      assert(record_of(thread, i).via == ledger_saved[i].via);
-      assert(record_of(thread, i).kind == ledger_saved[i].kind);
-      assert(record_of(thread, i).handler_object == ledger_saved[i].handler_object);
-      assert(record_of(thread, i).unwind_floor == ledger_saved[i].unwind_floor);
-    }
-    printf("  19a-1. 4A boundary at depth=33, call_count=17: CALL_METHOD rejected with NO_STACK, full invariants (all 34 ledger entries, context, frame inputs) preserved: PASS\n");
-
-    // 19a-2. Return dispatch (svc_forward) CAN use the reserved slot 33 -> reaching depth=34!
-    // Set C17's parent handler to H16 (both in object table and in active call ledger frame)
-    uint32_t h16_id = H_BASE_ID + 16;
-    uintptr_t h16_entry = 0x51000000 + 16 * 0x10000;
-    access::set_parent_handler(c17_id, h16_id, h16_entry);
-    record_of(thread, 32).handler_object = h16_id;
-    record_of(thread, 32).handler_entry = h16_entry;
-
-    // C17 returns to dedicated parent handler H16 (to_root == false) via raw SVC
-    ctx->sp = frame;
-    frame->a0 = 0x77; // raw SVC notification to parent handler H16
-    kernel_instance.svc_dispatch(ctx);
-    assert(thread.call_stack.depth == 34); // The 34th slot (index 33) is used by return dispatch!
-    assert(thread.call_stack.call_count == 17);
-    assert(record_of(thread, 33).via == KERNEL::LEDGER_DISPATCH);
-    assert(record_of(thread, 33).object == h16_id);
-    assert(record_of(thread, 33).kind == (uint8_t)object_kind::HANDLER);
-    printf("  19a-2. return dispatch (svc_forward) successfully uses the reserved 34th slot (depth=34, object=H16): PASS\n");
-
-    // 19a-3. FORWARD_CHILD_EXIT from depth 34 unwinds back to depth 32 (H16)
-    ctx->sp->a0 = (uintptr_t)object_api::FORWARD_CHILD_EXIT;
-    ctx->sp->a1 = 32; // target depth: unwinds H16 dispatch (slot 33) and C17 call (slot 32)
-    ctx->sp->a2 = 0x88; // return value
-    ctx->sp->a3 = 0; // return error
-    kernel_instance.svc_dispatch(ctx);
-    assert(thread.call_stack.depth == 32);
-    assert(thread.call_stack.call_count == 16);
-    assert(ctx->sp->a0 == (uintptr_t)object_error::OK);
-    assert(ctx->sp->a1 == 0x88);
-    printf("  19a-3. FORWARD_CHILD_EXIT from depth=34 pops both frames cleanly back to depth=32 (value=0x88): PASS\n");
-#endif // !SHIZUKU_STACK_LEDGER (19a: LEAN の容量・予約枠の性質)
 
     // 19b. Verify normal 32-level call nesting is preserved
     // Built purely with creator relationships (no kernel_role bypass)
@@ -2608,21 +2379,6 @@ static void run_dispatcher_tests() {
     assert(thread.call_stack.depth == 32);
     assert(thread.call_stack.call_count == 32);
 
-#if !defined(SHIZUKU_STACK_LEDGER)
-    // [LEAN 専用の検査: 段 3 で LEAN と一緒に消える] call 33 は call_count == MAX_DEPTH で NO_STACK。
-    // STACK には段数の上限が無い (native_call.hpp:697-700 の検査は #if !STACK) ので 33 段目も通りうる。
-    // STACK の上限は余地尽きで、8f/8i/8k の stack_limit を上げた検査が見る。
-    // Call 33 rejected with NO_STACK because call_count == MAX_DEPTH
-    cur->a0 = (uintptr_t)object_api::CALL_METHOD;
-    cur->a1 = C_BASE_ID + 32;
-    cur->a2 = 0;
-    cur->a3 = 999;
-    ctx->sp = cur;
-    kernel_instance.svc_dispatch(ctx);
-    assert(cur->a0 == (uintptr_t)object_error::NO_STACK);
-    assert(thread.call_stack.depth == 32);
-    assert(thread.call_stack.call_count == 32);
-#endif
 
     // Unwind all 32 levels back to depth 0
     for (uint32_t i = 32; i-- > 0;) {

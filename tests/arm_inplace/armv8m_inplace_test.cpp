@@ -1,6 +1,8 @@
 // ===========================================================================
-//  Host unit test for ARMv8-M in-place native templates & payload trait (S1)
+//  Host unit test for ARMv8-M in-place native templates (STACK 方式の記録)
 // ===========================================================================
+//  旧版は LEAN の台帳項目 (compact entry、payload、20B / 32B / 64B の寸法) と旧 call-header 方式の寸法も
+//  検査していた。どちらも廃止し、呼出しの記録は caller の stack 枠の 32B (stack_call_record) だけになった。
 #include "arm_inplace_fixture.hpp"
 
 #include "arch/armv8m/armv8m.hpp"
@@ -15,64 +17,33 @@ static uintptr_t registered_word(uintptr_t a, uintptr_t, uintptr_t, uintptr_t) {
 }
 
 // ---------------------------------------------------------------------------
-// 1. Payload trait size & offset static checks (ARMv8-M and RV32)
+// 1. 記録の寸法 (ARMv8-M と RV32)。32bit のときだけ 32B ちょうど。
 // ---------------------------------------------------------------------------
-namespace test_armv8m_payload {
+namespace test_armv8m_record {
 using armv8m_raw = shizuku::archs::armv8m<8, 4>;
-
-struct context_with_arm_payload : armv8m_raw::context_t {
-  // S2 で本番 context_t が宣言する形を、arch 自身の inplace_payload_t で先取りして試す。
-  using ledger_payload_t = armv8m_raw::inplace_payload_t;
-  static constexpr bool COMPACT_LEDGER = false;
-};
-
-static_assert(sizeof(armv8m_raw::inplace_payload_t) == 32, "r4-r11 = 8 words");
-static_assert(std::is_same_v<shizuku::templates::ledger_payload_of<armv8m_raw::context_t>,
-                             shizuku::empty_ledger_payload>,
-              "S1: production ARMv8-M must not enable the payload yet");
-static_assert(std::is_same_v<shizuku::templates::ledger_payload_of<context_with_arm_payload>,
-                             armv8m_raw::inplace_payload_t>);
-
-using thread_armv8m_empty = shizuku::templates::thread<armv8m_raw::context_t>;
-using thread_armv8m_with_payload = shizuku::templates::thread<context_with_arm_payload>;
 
 struct mock_int_mode {
   static bool in_interrupt() { return false; }
   static bool current_priv() { return true; }
 };
 using rv32_raw = shizuku::archs::rv32<16, 4, mock_int_mode>;
-using thread_rv32_empty = shizuku::templates::thread<rv32_raw::context_t>;
+using thread_armv8m = shizuku::templates::thread<armv8m_raw::context_t>;
+using thread_rv32 = shizuku::templates::thread<rv32_raw::context_t>;
 
-#if defined(SHIZUKU_LEAN_LEDGER)
-// ARMv8-M empty payload size check
-static_assert(sizeof(thread_armv8m_empty::call_ledger_entry) == (sizeof(uintptr_t) == 4 ? 20 : 32),
-              "LEAN ARMv8-M compact ledger size");
-// Real RV32 empty payload size check
-static_assert(sizeof(thread_rv32_empty::call_ledger_entry) == (sizeof(uintptr_t) == 4 ? 32 : 48),
-              "LEAN RV32 call_ledger_entry with empty payload must not increase in size");
-// ARM payload size and offset check
-static_assert(offsetof(thread_armv8m_with_payload::call_ledger_entry, payload) == (sizeof(uintptr_t) == 4 ? 32 : 44),
-              "Payload offset must immediately follow reserved field");
-static_assert(sizeof(thread_armv8m_with_payload::call_ledger_entry) == (sizeof(uintptr_t) == 4 ? 64 : 80),
-              "LEAN call_ledger_entry with ARM payload size (32 + 32 on 32-bit)");
-#else
-static_assert(sizeof(thread_armv8m_empty::call_ledger_entry) == (sizeof(uintptr_t) == 4 ? 16 : 24),
-              "Non-LEAN ARMv8-M call_ledger_entry with empty payload must not increase in size");
-static_assert(sizeof(thread_rv32_empty::call_ledger_entry) == (sizeof(uintptr_t) == 4 ? 16 : 24),
-              "Non-LEAN RV32 call_ledger_entry with empty payload must not increase in size");
-static_assert(offsetof(thread_armv8m_with_payload::call_ledger_entry, payload) == (sizeof(uintptr_t) == 4 ? 16 : 20),
-              "Payload offset must immediately follow unwind_floor");
-static_assert(sizeof(thread_armv8m_with_payload::call_ledger_entry) == (sizeof(uintptr_t) == 4 ? 48 : 56),
-              "Non-LEAN call_ledger_entry with ARM payload size (16 + 32 on 32-bit)");
-#endif
-} // namespace test_armv8m_payload
+static_assert(sizeof(uintptr_t) != 4 || sizeof(thread_armv8m::call_ledger_entry) == 32,
+              "STACK call record (ARMv8-M) must be 32 bytes");
+static_assert(sizeof(uintptr_t) != 4 || sizeof(thread_rv32::call_ledger_entry) == 32,
+              "STACK call record (RV32) must be 32 bytes");
+static_assert(armv8m_raw::CALL_RECORD_BYTES == sizeof(thread_armv8m::call_ledger_entry) || sizeof(uintptr_t) != 4,
+              "ARMv8-M record slot must hold exactly one record on 32-bit");
+} // namespace test_armv8m_record
 
 // ---------------------------------------------------------------------------
 // 2. Production arch invariants
 // ---------------------------------------------------------------------------
 void test_armv8m_production_invariants() {
   using armv8m_raw = shizuku::archs::armv8m<8, 4>;
-  using test_rv32_raw = shizuku::archs::rv32<16, 4, test_armv8m_payload::mock_int_mode>;
+  using test_rv32_raw = shizuku::archs::rv32<16, 4, test_armv8m_record::mock_int_mode>;
 
   assert(shizuku::arch_call_in_place<armv8m_raw>());
   const auto address = shizuku::method_entry<armv8m_raw, &registered_word>();
@@ -87,7 +58,7 @@ void test_armv8m_production_invariants() {
 // 3. RV32 6-argument descriptor contrast test
 // ---------------------------------------------------------------------------
 void test_rv32_descriptor_contrast() {
-  using test_rv32_raw = shizuku::archs::rv32<16, 4, test_armv8m_payload::mock_int_mode>;
+  using test_rv32_raw = shizuku::archs::rv32<16, 4, test_armv8m_record::mock_int_mode>;
   test_rv32_raw::exception_frame_t rv_frame{};
   rv_frame.a2 = 0x11;
   rv_frame.a3 = 0x12;
@@ -106,7 +77,7 @@ void test_rv32_descriptor_contrast() {
 }
 
 int main() {
-  printf("Starting ARMv8-M in-place native templates & payload trait host test...\n");
+  printf("Starting ARMv8-M in-place native templates host test (STACK records)...\n");
   test_armv8m_production_invariants();
 
   using adapter = test_inplace_adapter<shizuku::archs::armv8m<8, 4>>;
@@ -115,7 +86,7 @@ int main() {
   test_rv32_descriptor_contrast();
   run_inplace_method_failures_ledger_invariant<adapter>("ARMv8-M");
   run_inplace_descriptor_failures_ledger_invariant<adapter>("ARMv8-M");
-  run_inplace_lean_push_pop<adapter>("ARMv8-M");
+  run_inplace_stack_push_pop<adapter>("ARMv8-M");
   run_inplace_return_window_current_row<adapter>("ARMv8-M");
   run_inplace_exit_validation<adapter>("ARMv8-M");
 
