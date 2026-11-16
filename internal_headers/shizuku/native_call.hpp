@@ -115,6 +115,26 @@ template <class A, class Thread, class Context, class Frame>
 }
 namespace native {
 
+// enter_call (dispatch.cpp) の in-place の枝: header_push_of が書いた記録 (ret_pc・prev・prev_call) に、呼び先の同定と
+// 世代だけを足し、call 段を 1 つ進める。集成体の代入で消さない。identity (current / caller) は call 段の列から導く
+// (call_top_rec を更新する)。call_top は STACK では読まれないが、書くのをやめると .text が動くので残す。
+// dispatch.cpp の特殊化は template ではなく、捨てた枝も型検査される。in-place でない台帳項目には generation が
+// 無いので、書出しは依存名のこの template に包み、in-place の枝からだけ呼ぶ。
+template <class Thread, class Entry, class Request>
+[[gnu::always_inline]] inline void write_call_record(Thread &thread, Entry &entry, const Request &request,
+                                                     uint8_t via, uint32_t unwind_floor) {
+  entry.object = request.callee_object;
+  entry.handler_object = request.parent_handler_object;
+  entry.handler_entry = request.parent_handler_entry;
+  entry.kind = (uint8_t)request.callee_kind;
+  entry.via = via;
+  entry.unwind_floor = (uint16_t)unwind_floor;
+  entry.generation = request.callee_generation;
+  thread.call_stack.call_count++;
+  thread.call_stack.call_top = thread.call_stack.depth;
+  thread.call_stack.call_top_rec = thread.call_stack.top;
+}
+
 template <class A>
 [[gnu::always_inline]] inline bool defer_thread_switch(core_arg_t<A> core) {
   if constexpr (arch_has_core_num<A>) {
