@@ -248,10 +248,14 @@ template void plic_vector_mode::enter_u_object<shizuku::archs::rv32_c6::context_
 
 using namespace shizuku;
 
+#if !defined(SHIZUKU_LEAN_LEDGER)
+#error "test_dispatcher_v1 は SHIZUKU_LEAN_LEDGER (LEAN) か SHIZUKU_LEAN_LEDGER + SHIZUKU_STACK_LEDGER (STACK) で組む"
+#endif
+
 // ---- 呼出しの記録 (戻りの権威) を試験が直接据える・読む口 ---------------------------------------
-//   既定の版は user stack 上のヘッダ (call_header_t) とスレッドの call_stack の識別欄、
 //   SHIZUKU_LEAN_LEDGER の版は台帳の項目 (ret_* / generation / prev_call) と call_top。同じ試験が
-//   どちらの版でも通ることを確かめるため、版の違いはここに閉じ込める。
+//   LEAN / STACK のどちらの版でも通ることを確かめるため、版の違いはここに閉じ込める。
+//   (user stack 上のヘッダ (call_header_t) を権威にする旧方式は廃止した。)
 //   SHIZUKU_STACK_LEDGER の版は記録が caller の stack 枠 ([return_sp, +32)) にあり、カーネルが持つのは
 //   先頭の記録へのポインタ (call_stack.top)・最新の call 段の記録 (call_top_rec)・深さだけ。
 //   index 段 (深さ index + 1 の記録) は record_of が先頭から prev を辿って返す。
@@ -308,9 +312,6 @@ static void fake_identity_call(KERNEL::THREAD &t, uint32_t object) {
   t.ledger[0].generation = 0;
   t.ledger[0].prev_call = 0;
   t.call_stack.call_top = 1;
-#else
-  t.call_stack.current_call_object = object;
-  t.call_stack.current_call_generation = 0;
 #endif
 }
 static void clear_identity_call(KERNEL::THREAD &t) {
@@ -319,8 +320,6 @@ static void clear_identity_call(KERNEL::THREAD &t) {
   ARCH::stack_limit_set(*kernel_instance.current_context(), g_saved_stack_limit);
 #elif defined(SHIZUKU_LEAN_LEDGER)
   t.call_stack.call_top = 0;
-#else
-  t.call_stack.current_call_object = 0;
 #endif
 }
 //   台帳の index 段を call 段として据える (同定 + 識別の記帳。戻りの記録は fake_return_record)。
@@ -351,16 +350,6 @@ static void fake_call_entry(KERNEL::THREAD &t, uint32_t index, uint32_t object, 
   t.call_stack.depth = index + 1;
   t.call_stack.call_count++;
   t.call_stack.call_top = index + 1;
-#else
-  t.ledger[index] = {object, handler_object, handler_entry, (uint8_t)object_kind::PLAIN, via, floor};
-  t.call_stack.depth = index + 1;
-  t.call_stack.caller_object =
-      t.call_stack.call_count == 0 ? t.base_object : t.call_stack.current_call_object;
-  t.call_stack.caller_generation =
-      t.call_stack.call_count == 0 ? t.call_stack.base_object_generation : t.call_stack.current_call_generation;
-  t.call_stack.current_call_object = object;
-  t.call_stack.current_call_generation = 0;
-  t.call_stack.call_count++;
 #endif
 }
 //   index 段から戻るときの caller の再開点を据える (ctx->sp は caller の ecall 時点の trap フレーム)。
@@ -385,23 +374,11 @@ static void fake_return_record(KERNEL::CONTEXT &c, KERNEL::THREAD &t, uint32_t i
   e.ret_pc = pc;
   e.ret_sp = ARCH::call_return_sp(c);
   e.ret_privileged = privileged ? 1 : 0;
-#else
-  auto *header = ARCH::call_header_slot(c);
-  *header = {};
-  header->pc = pc;
-  header->caller_object = (uint32_t)KERNEL_OBJECT::NO_OBJECT; // 呼び先を積む前の caller_object
-  header->privileged = privileged ? 1 : 0;
-  t.call_stack.top = (uintptr_t)header;
-  (void)index;
 #endif
 }
-//   最内の段の戻りの記録 (pc と caller の特権) を読む。
+//   最内の段の戻りの記録 (pc と caller の特権) を読む。STACK は ledger_top() が先頭の記録を返す。
 static uintptr_t top_return_pc(const KERNEL::THREAD &t) {
-#if defined(SHIZUKU_LEAN_LEDGER) // STACK は ledger_top() が先頭の記録を返す
   return t.ledger_top().ret_pc;
-#else
-  return ((const ARCH::call_header_t *)t.call_stack.top)->pc;
-#endif
 }
 static bool top_return_privileged(const KERNEL::THREAD &t) {
 #if defined(SHIZUKU_STACK_LEDGER)
@@ -412,8 +389,6 @@ static bool top_return_privileged(const KERNEL::THREAD &t) {
                          : (prev->via == KERNEL::LEDGER_DISPATCH || kernel_object_instance.privileged_of(prev->object));
 #elif defined(SHIZUKU_LEAN_LEDGER)
   return t.ledger_top().ret_privileged != 0;
-#else
-  return ((const ARCH::call_header_t *)t.call_stack.top)->privileged != 0;
 #endif
 }
 
@@ -696,8 +671,8 @@ static void run_dispatcher_tests() {
   auto arm_frame = [&](uint8_t via, uint16_t unwind_floor, ARCH::exception_frame_t *callee) {
     ctx->sp = frame;
     ctx->privileged = true;
-    // 呼出しの記録: caller (sp = frame + trap フレーム) の再開点を据える (既定の版は caller stub が
-    // 空けた枠のヘッダ、SHIZUKU_LEAN_LEDGER の版は台帳の項目)。
+    // 呼出しの記録: caller (sp = frame + trap フレーム) の再開点を据える (STACK の版は caller stub が
+    // 空けた枠の記録、LEAN の版は台帳の項目)。
     thread.call_stack.depth = 0;
     thread.call_stack.call_count = 0;
     thread.call_stack.call_top = 0;
@@ -941,13 +916,6 @@ static void run_dispatcher_tests() {
     assert(rec.generation == 0);
     assert(thread.call_stack.call_top == 1 && thread.call_stack.call_count == 1);
     assert(thread.identity_object() == B_ID && thread.call_caller_object() == ROOT_APP_ID /* fresh() の base */);
-#else
-    const auto *h = (const ARCH::call_header_t *)thread.call_stack.top;
-    assert((uintptr_t)h == reinterpret_cast<uintptr_t>(frame) + sizeof(KERNEL::FRAME));
-    assert(ARCH::call_window_top(h) == (uintptr_t)h);
-    assert(h->prev == 0 && h->pc == A_PC && h->privileged == 1);
-    // via / unwind_floor はヘッダに書かない (台帳が持つ。上で record_of(thread, 0) を検査済み)。
-    assert(h->caller_object == 0 /* fresh() の caller_object */);
 #endif
   }
   // ra は 32bit レジスタ。host (64bit) では関数ポインタが切り詰められるので下位 32bit で比べる。
@@ -2019,15 +1987,6 @@ static void run_dispatcher_tests() {
       // 各段の caller の再開点は前の段の再開点より下 (スタックは下へ伸びる)。
       assert(i == 0 || rec.ret_sp < thread.ledger[i - 1].ret_sp);
       (void)headers;
-#else
-      headers[i] = thread.call_stack.top;
-      assert(headers[i] == reinterpret_cast<uintptr_t>(cur) + sizeof(KERNEL::FRAME));
-      const auto *h = (const ARCH::call_header_t *)headers[i];
-      assert(h->prev == (i == 0 ? 0 : headers[i - 1]) && h->pc == A_PC + 0x10 * i);
-      // callee の窓の上端は前の段のヘッダの下端: 呼び先 (と次の枠) はそれより下にあり、前の段の
-      // ヘッダ (戻り pc・caller の識別) の領域へは届かない。
-      assert(i == 0 || (headers[i] + sizeof(ARCH::call_header_t) <=
-                        ARCH::call_window_top((const ARCH::call_header_t *)headers[i - 1])));
 #endif
       // 呼び先は自分のスタックを 400 バイト使ってから次の ecall をする (窓は枠の下端まで)。
       cur = reinterpret_cast<KERNEL::FRAME *>(reinterpret_cast<uint8_t *>(cur) - 400);
@@ -2048,8 +2007,6 @@ static void run_dispatcher_tests() {
       assert(thread.call_stack.call_top_rec == thread.call_stack.top);
 #elif defined(SHIZUKU_LEAN_LEDGER)
       assert(thread.call_stack.call_top == i); // 鎖が一つ外側の call 段へ戻る
-#else
-      assert(thread.call_stack.top == (i == 0 ? 0 : headers[i - 1]));
 #endif
       cur = ctx->sp;
       assert(cur == frames[i]); // 段 i を呼んだ caller の枠の直下で再開する

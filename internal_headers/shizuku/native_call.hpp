@@ -25,6 +25,10 @@
 #if defined(SHIZUKU_STACK_LEDGER) && !defined(SHIZUKU_LEAN_LEDGER)
 #error "SHIZUKU_STACK_LEDGER builds on the in-place entries of SHIZUKU_LEAN_LEDGER"
 #endif
+// 旧 call-header 方式 (user stack 上のヘッダを戻りの権威にする) は廃止した。ARCH::CALL_IN_PLACE が真の ARCH は
+// SHIZUKU_STACK_LEDGER か SHIZUKU_LEAN_LEDGER が必要で、どちらも無いときは header_push_of /
+// pop_in_place / enter_in_place の static_assert で止まる。CALL_IN_PLACE が偽の ARCH (RP2040) は
+// これらの本体を使わず、従来の call_frame_push の経路を通る。
 
 namespace shizuku {
 
@@ -138,61 +142,13 @@ template <class A, class Thread, class Context, class Frame>
     thread.call_stack.depth++;
     return true;
 #else
-    if (thread.ledger == nullptr || thread.call_stack.depth >= thread.ledger_capacity ||
-        !A::call_header_has_room(context, thread.identity_object()))
-      return false;
-    auto *header = A::call_header_slot(context);
-    header->prev = thread.call_stack.top;
-    header->pc = A::frame_pc(frame);
-    header->caller_object = thread.call_stack.caller_object;
-    header->caller_generation = thread.call_stack.caller_generation;
-    header->region_base = context.region_base;
-    header->region_limit = context.region_limit;
-    header->privileged = A::context_privileged(context) ? 1 : 0;
-    if constexpr (requires { A::set_call_header_extra(*header, frame); }) {
-      A::set_call_header_extra(*header, frame);
-    }
-    thread.call_stack.top = reinterpret_cast<uintptr_t>(header);
-    thread.call_stack.depth++;
-    return true;
+    static_assert(sizeof(A) == 0, "an in-place ARCH needs SHIZUKU_STACK_LEDGER (or SHIZUKU_LEAN_LEDGER)");
+    return false;
 #endif
   } else {
     return false;
   }
 }
-// 先頭ヘッダを 1 つ落とす。restore なら caller の再開フレームを作って frame を差し替える。
-// is_call なら call 段が積む前の caller の識別を戻す。scrub は再開フレームの目印 (出口でレジスタを
-// 消すか): callee が自分の意思で戻らない巻き戻しのときだけ true。
-template <class A, class Thread, class Context, class Frame>
-[[gnu::always_inline]] inline void header_pop_of(Thread &thread, Context &context, Frame *&frame, bool is_call, bool restore,
-                                                 bool scrub, core_arg_t<A> core) {
-  if constexpr (arch_call_in_place<A>()) {
-    auto *header = reinterpret_cast<typename A::call_header_t *>(thread.call_stack.top);
-    if (is_call) {
-      thread.call_stack.call_count--;
-      thread.call_stack.current_call_object = thread.call_stack.caller_object;
-      thread.call_stack.current_call_generation = thread.call_stack.caller_generation;
-      thread.call_stack.caller_object = header->caller_object;
-      thread.call_stack.caller_generation = header->caller_generation;
-    }
-    thread.call_stack.top = header->prev;
-    if (restore) {
-      if constexpr (arch_has_core_num<A>) {
-        frame = A::call_resume(context, header, scrub, core);
-      } else {
-        frame = A::call_resume(context, header, scrub);
-      }
-    }
-  }
-}
-
-template <class A, class Thread, class Context, class Frame>
-requires (!arch_has_core_num<A>)
-[[gnu::always_inline]] inline void header_pop_of(Thread &thread, Context &context, Frame *&frame, bool is_call, bool restore,
-                                                 bool scrub) {
-  header_pop_of<A>(thread, context, frame, is_call, restore, scrub, no_core{});
-}
-
 namespace native {
 
 template <class A>
@@ -251,7 +207,8 @@ template <class OBJECTS>
 
 // 台帳の最上段を 1 つ落とす (call の段なら識別を戻す)。ヘッダ枠方式 ARCH 専用。
 // 前提: depth >= 1 (呼び出し側が戻り先 d と count を検査済み)。call の段なのに call_count == 0 なら
-// 何も変えず false (不変条件の破れ)。scrub は header_pop_of を見よ。
+// 何も変えず false (不変条件の破れ)。scrub は再開フレームの目印 (出口でレジスタを消すか):
+// callee が自分の意思で戻らない巻き戻しのときだけ true。
 template <class K, class KObj>
 [[gnu::always_inline]] inline bool pop_in_place(KObj &kobj, typename K::THREAD &thread,
                                                 typename K::CONTEXT &context,
@@ -420,30 +377,7 @@ template <class K, class KObj>
     }
     thread.call_stack.depth = depth - 1;
 #else
-    const uint8_t via = thread.ledger[depth - 1].via;
-    const uint8_t caller_via = depth > 1 ? thread.ledger[depth - 2].via : 0;
-    const bool caller_is_dispatch = caller_via == K::LEDGER_DISPATCH;
-    const bool is_call = via == K::LEDGER_CALL || via == K::LEDGER_DESCRIPTOR_CALL;
-    if (is_call && thread.call_stack.call_count == 0)
-      return false;
-    header_pop_of<A>(thread, context, frame, is_call, restore, scrub, core);
-    if (restore) {
-      const uint32_t caller_object = thread.call_stack.call_count != 0
-          ? thread.call_stack.current_call_object
-          : thread.base_object;
-      const auto window = resolve_return_region_window(
-          kobj, caller_via, K::LEDGER_DISPATCH, caller_object);
-      A::set_region_window(context, window.base, window.limit);
-      if (!caller_is_dispatch && !A::context_privileged(context)) {
-        if constexpr (arch_has_core_num<A>) {
-          A::switch_caller_protection(caller_object, core);
-        } else {
-          if constexpr (requires { A::switch_caller_protection(caller_object); })
-            A::switch_caller_protection(caller_object);
-        }
-      }
-    }
-    thread.call_stack.depth = depth - 1;
+    static_assert(sizeof(A) == 0, "an in-place ARCH needs SHIZUKU_STACK_LEDGER (or SHIZUKU_LEAN_LEDGER)");
 #endif
   }
   return true;
@@ -626,30 +560,7 @@ template <class K, class KObj>
     stack.call_top = depth + 1;
     set_callee_entry<A>(frame, entry_pc, view.id);
 #else
-    auto *header = A::call_header_slot(context);
-    header->prev = stack.top;
-    header->pc = A::frame_pc(frame);
-    header->caller_object = stack.caller_object;
-    header->caller_generation = stack.caller_generation;
-    header->region_base = context.region_base;
-    header->region_limit = context.region_limit;
-    // unwind_floor / via はヘッダに書かない: 同じ値を台帳 (下の thread.ledger[depth]) が持つ。
-    header->privileged = A::context_privileged(context) ? 1 : 0;
-    if constexpr (requires { A::set_call_header_extra(*header, frame); }) {
-      A::set_call_header_extra(*header, frame);
-    }
-    stack.top = reinterpret_cast<uintptr_t>(header);
-    stack.depth = depth + 1;
-    thread.ledger[depth] = {view.id, view.parent_handler_object, view.parent_handler_entry,
-                            (uint8_t)view.kind, via, (uint16_t)depth};
-    const uint32_t count = stack.call_count;
-    stack.caller_object = count == 0 ? thread.base_object : stack.current_call_object;
-    stack.caller_generation =
-        count == 0 ? stack.base_object_generation : stack.current_call_generation;
-    stack.current_call_object = view.id;
-    stack.current_call_generation = view.instance_generation;
-    stack.call_count = count + 1;
-    set_callee_entry<A>(frame, entry_pc, view.id);
+    static_assert(sizeof(A) == 0, "an in-place ARCH needs SHIZUKU_STACK_LEDGER (or SHIZUKU_LEAN_LEDGER)");
 #endif
     A::set_priv(context, view.privileged);
     A::set_region_window(context, view.region_base, view.region_limit);

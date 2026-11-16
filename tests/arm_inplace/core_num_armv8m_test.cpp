@@ -55,11 +55,6 @@ concept can_pop_in_place = requires(KObj &kobj, typename K::THREAD &thread,
   shizuku::native::pop_in_place<K, KObj>(kobj, thread, ctx, frame, true, false);
 };
 
-template <class A, class Thread, class Context, class Frame>
-concept can_header_pop_of = requires(Thread &thread, Context &ctx, Frame *&frame) {
-  shizuku::header_pop_of<A>(thread, ctx, frame, true, true, false);
-};
-
 // core 対応 ARCH に対する「core なし」呼出しが viable でないこと
 static_assert(!can_call_method<kernel_t, mock_kobj>,
               "call_method_in_place without core must not be viable for core-aware ARCH");
@@ -71,8 +66,6 @@ static_assert(!can_defer_thread_switch<adapter>,
               "defer_thread_switch without core must not be viable for core-aware ARCH");
 static_assert(!can_pop_in_place<kernel_t, mock_kobj>,
               "pop_in_place without core must not be viable for core-aware ARCH");
-static_assert(!can_header_pop_of<adapter, typename kernel_t::THREAD, typename kernel_t::CONTEXT, typename kernel_t::FRAME>,
-              "header_pop_of without core must not be viable for core-aware ARCH");
 
 // 正の検査: core 引数を渡せば viable
 template <class K, class KObj, class Core>

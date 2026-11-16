@@ -71,8 +71,8 @@ cc_library(
     hdrs = glob(["internal_headers/**/*.hpp"]),
     includes = ["internal_headers"],
     defines = select({
-        "//configs:c6_umode_stack_ledger_enabled": ["SHIZUKU_LEAN_LEDGER=1", "SHIZUKU_STACK_LEDGER=1"],
-        "//configs:c6_umode_ledger_enabled": ["SHIZUKU_LEAN_LEDGER=1"],
+        "//configs:riscv_stack_ledger": ["SHIZUKU_LEAN_LEDGER=1", "SHIZUKU_STACK_LEDGER=1"],
+        "//configs:riscv_c6_umode_lean_ledger": ["SHIZUKU_LEAN_LEDGER=1"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
@@ -100,30 +100,8 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# Host unit test for the real dispatcher implementation. Compile the two
-# implementation units separately and force the same C6 test config into each.
-cc_test(
-    name = "dispatcher_v1_test",
-    srcs = [
-        "source/kernel/dispatch.cpp",
-        "source/kernel/thread.cpp",
-        "source/selftest/test_dispatcher_v1.cpp",
-        "source/selftest/test_dispatcher_v1_config.hpp",
-    ],
-    copts = [
-        "-std=c++20",
-        "-include",
-        "source/selftest/test_dispatcher_v1_config.hpp",
-    ],
-    local_defines = ["SHIZUKU_C6_SKELETON_PERMITTED=1"],
-    deps = [
-        ":internal_headers",
-        "//boards/esp32_c6:headers",
-        "//chips/esp32_c6:headers",
-        "//configs:config",
-    ],
-)
-
+# Host unit test for the real dispatcher implementation (LEAN / STACK 版)。2 つの実装単位を別々にコンパイルし、
+# 同じ C6 試験設定を両方に強制する。旧 call-header 方式 (define なし) の版は廃止した。
 # The kernel-resident return ledger must preserve dispatch/call behavior and reject invalid unwinds.
 cc_test(
     name = "dispatcher_v1_lean_ledger_test",
