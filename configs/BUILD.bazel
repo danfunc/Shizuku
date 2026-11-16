@@ -63,7 +63,7 @@ config_setting(
 # LEAN 版の型・窓を直接見る host 試験 (dispatcher_v1 系、stack_window_test など) は LEAN のまま残す。
 string_flag(
     name = "c6_stack_ledger",
-    build_setting_default = "disabled",
+    build_setting_default = "enabled",
     values = ["disabled", "enabled"],
     visibility = ["//visibility:public"],
 )
