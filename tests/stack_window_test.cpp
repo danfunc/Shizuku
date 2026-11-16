@@ -204,6 +204,7 @@ struct mock_frame {
 };
 
 struct mock_context {
+  static constexpr bool CALL_IN_PLACE = true;
   static constexpr bool HAS_STACK_WINDOW = true;
   mock_frame frame{};
   mock_frame *sp = &frame;
@@ -868,6 +869,7 @@ static void test_stack_m_caller_u_callee_window() {
 // ===========================================================================
 struct nowin_frame { uintptr_t pc = 0; uintptr_t ra = 0; };
 struct nowin_context {
+  static constexpr bool CALL_IN_PLACE = true;
   nowin_frame frame{};
   nowin_frame *sp = &frame;
   uintptr_t user_sp = 0;

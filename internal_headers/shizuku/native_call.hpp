@@ -17,6 +17,7 @@
 #include "shizuku/object_api.hpp"
 #include "shizuku/stack_window.hpp"
 #include "shizuku/svc_attributes.hpp"
+#include "shizuku/templates/thread.hpp"
 
 #if defined(SHIZUKU_C6_UMODE) && !defined(SHIZUKU_LEAN_LEDGER)
 #error "C6 U-mode requires kernel-resident call return authority (SHIZUKU_LEAN_LEDGER)"
@@ -60,8 +61,7 @@ static constexpr bool is_context_unprivileged(const C *ctx) {
 // 呼出しの記録 (ヘッダ枠方式、ARCH::CALL_IN_PLACE) の出し入れ。dispatch.cpp の関数は明示特殊化
 // (テンプレートではない) で、使わない側の枝も構文として通る必要があるため、ARCH 固有の呼び出しは
 // ここ (依存名のテンプレート) に包む。
-#if defined(SHIZUKU_STACK_LEDGER)
-// [SHIZUKU_STACK_LEDGER] caller の枠 (converter が空けた [return_sp + CALL_RECORD_OFFSET, +32)) に記録を積む。
+// caller の枠 (converter が空けた [return_sp + CALL_RECORD_OFFSET, +32)) に記録を積む。
 // 前提: A::call_record_room_at(context, return_sp) が真 (枠が caller の天井の内側にある)。
 // 呼び先の同定 (object・handler・kind・generation) は呼び出し側が戻り値の記録へ書く。特権は書かない。
 template <class A, class Thread, class Context, class Frame>
@@ -84,8 +84,6 @@ template <class A, class Thread, class Context, class Frame>
   stack.depth = stack.depth + 1u;
   return record;
 }
-#endif
-#if defined(SHIZUKU_STACK_LEDGER)
 // 先頭の記録がカーネルの持つ先頭ポインタ・深さと食い違っていないか (深さの一致と、ひとつ下の記録との鎖)。
 // 戻りの前に必ず調べる。試験 (call_ladder) も、記録を書き換えたときに検出できることをこれで確かめる。
 template <class Thread>
@@ -100,23 +98,17 @@ template <class Thread>
   const auto *prev = reinterpret_cast<const Record *>(record->prev);
   return (prev == nullptr) == (depth == 1u) && (prev == nullptr || prev->depth == depth - 1u);
 }
-#endif
 // caller の枠にヘッダを書いて top を進める。caller の状態は frame (trap フレーム) と context から取る。
 // via / floor は台帳 (特権側) が持つので、非特権スタック上のヘッダには書かない (呼び出し側が台帳に書く)。
 template <class A, class Thread, class Context, class Frame>
 [[gnu::always_inline]] inline bool header_push_of(Thread &thread, Context &context, Frame &frame, uint8_t via,
                                                   uint32_t floor) {
   if constexpr (arch_call_in_place<A>()) {
-#if defined(SHIZUKU_STACK_LEDGER)
     const uintptr_t return_sp = A::call_return_sp(context);
     if (!A::call_record_room_at(context, return_sp))
       return false;
     stack_record_push<A>(thread, context, frame, return_sp, via, floor);
     return true;
-#else
-    static_assert(sizeof(A) == 0, "an in-place ARCH needs SHIZUKU_STACK_LEDGER");
-    return false;
-#endif
   } else {
     return false;
   }
@@ -188,9 +180,10 @@ template <class K, class KObj>
                                                 bool scrub,
                                                 core_arg_t<typename K::ARCH> core) {
   using A = typename K::ARCH;
+  static_assert(templates::call_in_place_of<typename K::CONTEXT>() == arch_call_in_place<A>(),
+                "context_t::CALL_IN_PLACE must agree with ARCH::CALL_IN_PLACE");
   if constexpr (arch_call_in_place<A>()) {
     const uint32_t depth = thread.call_stack.depth;
-#if defined(SHIZUKU_STACK_LEDGER)
     // 先頭の記録は caller の stack 枠にある (callee の窓の外)。カーネルが持つ先頭ポインタ・深さと
     // 照合してから使う: 深さの食い違い・鎖の切れは何も変えずに false (呼び出し側が panic する)。
     using Record = typename K::THREAD::call_ledger_entry;
@@ -267,9 +260,6 @@ template <class K, class KObj>
     }
     thread.call_stack.top = prev_address;
     thread.call_stack.depth = depth - 1;
-#else
-    static_assert(sizeof(A) == 0, "an in-place ARCH needs SHIZUKU_STACK_LEDGER");
-#endif
   }
   return true;
 }
@@ -336,6 +326,8 @@ template <class K, class KObj>
     const typename KObj::callee_view &view, uintptr_t entry_pc, uint8_t via,
     core_arg_t<typename K::ARCH> core) {
   using A = typename K::ARCH;
+  static_assert(templates::call_in_place_of<typename K::CONTEXT>() == arch_call_in_place<A>(),
+                "context_t::CALL_IN_PLACE must agree with ARCH::CALL_IN_PLACE");
   if constexpr (arch_call_in_place<A>()) {
     auto &stack = thread.call_stack;
     // ★偽装防止: 一般の呼び先が KERNEL_OBJECT 種別や root ハンドラの ID を名乗ることは拒否する。
@@ -350,7 +342,6 @@ template <class K, class KObj>
     const uint32_t depth = stack.depth; // 呼び先の unwind floor
     // caller の戻り SP は 1 回だけ求め、stack の余地の検査と記録の書出しで使い回す。
     const uintptr_t return_sp = A::call_return_sp(context);
-#if defined(SHIZUKU_STACK_LEDGER)
     // 記録は caller の stack 枠に置く。深さの上限は stack の大きさで決まり (記録 1 つにつき 64B 以上を使う)、
     // 台帳の枠・MAX_DEPTH・16 bit の検査は要らない。残るのは「枠が caller の天井の内側にあり、PSPLIM との間に
     // 余白がある」の 1 本だけ。depth / unwind_floor は 16 bit: RP2350 の SRAM 520KiB / 64B < 65535 で溢れない。
@@ -385,11 +376,6 @@ template <class K, class KObj>
       stack.call_top_rec = reinterpret_cast<uintptr_t>(record);
       set_callee_entry<A>(frame, entry_pc, view.id);
     }
-#else
-    // frame は後続の共通部分が使う (捨てられる枝でも名前の探索は非依存名で行われる)。
-    typename K::FRAME &frame = *context.sp;
-    static_assert(sizeof(A) == 0, "an in-place ARCH needs SHIZUKU_STACK_LEDGER");
-#endif
     A::set_priv(context, view.privileged);
     A::set_region_window(context, view.region_base, view.region_limit);
     if constexpr (arch_has_core_num<A>) {

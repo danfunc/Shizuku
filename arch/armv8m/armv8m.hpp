@@ -90,6 +90,8 @@ public:
   // armv8m_ctx.S の .equ (CTX_*) と一致させること。下の static_assert が両縛りする。
   struct context_t {
     static constexpr bool COMPACT_LEDGER = true;
+    // in-place call (記録を caller の stack 枠に置く)。thread.hpp の call_in_place_of。ARCH::CALL_IN_PLACE と一致させる。
+    static constexpr bool CALL_IN_PLACE = true;
     uint32_t r4 = 0, r5 = 0, r6 = 0, r7 = 0;   // offset 0..12
     uint32_t r8 = 0, r9 = 0, r10 = 0, r11 = 0; // offset 16..28
     exception_frame_t *sp = nullptr;           // offset 32

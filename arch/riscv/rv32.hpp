@@ -87,6 +87,8 @@ public:
   struct context_t {
     // 呼出しの記録は user stack 上のヘッダ枠にある (thread.hpp: identity 配列を縮める目印)。
     static constexpr bool CALL_HEADER_ON_STACK = true;
+    // in-place call (記録を caller の stack 枠に置く)。thread.hpp の call_in_place_of。ARCH::CALL_IN_PLACE と一致させる。
+    static constexpr bool CALL_IN_PLACE = true;
     // thread が U callee 用の stack 窓 (open/extend/zero) を持つか。C6 U-mode 構成だけ true。
     // (PMP が無い M-only 構成では窓は意味を持たない。)
 #if defined(SHIZUKU_C6_UMODE)

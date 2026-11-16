@@ -1,5 +1,6 @@
 #ifndef SHIZUKU_TEMPLATE_THREAD_HPP
 #define SHIZUKU_TEMPLATE_THREAD_HPP
+#include <cstddef>
 #include <cstdint>
 #include <type_traits>
 #include "shizuku/kernel_abi.hpp"
@@ -72,7 +73,17 @@ template <typename CONTEXT> constexpr bool compact_ledger_enabled() {
   return false;
 }
 
+// この文脈の ARCH が in-place call (呼出しの記録を caller の stack 枠に置く方式) を持つか。
+// context_t が CALL_IN_PLACE を宣言した arch だけ true (rv32 / armv8m)。既定 (宣言なし) は false (RP2040)。
+// ARCH::CALL_IN_PLACE (native_call.hpp の arch_call_in_place) と必ず一致させる: native_call.hpp の
+// enter_in_place / pop_in_place の static_assert が見張る。
+template <typename CONTEXT> constexpr bool call_in_place_of() {
+  if constexpr (requires { CONTEXT::CALL_IN_PLACE; }) return CONTEXT::CALL_IN_PLACE;
+  else return false;
+}
+
 template <typename CONTEXT> struct thread {
+  static constexpr bool IN_PLACE = call_in_place_of<CONTEXT>();
   static constexpr uint32_t CALL_IDENTITY_CAPACITY = 32;
   // 配列の実際の大きさ (ヘッダ枠方式の ARCH は 1)。
   static constexpr uint32_t call_identity_storage = call_identity_capacity<CONTEXT>::value;
@@ -101,9 +112,9 @@ template <typename CONTEXT> struct thread {
     uint32_t base_object_generation = 0;
     uint32_t current_call_generation = 0;
     uint32_t caller_generation = 0;
-    // 旧 LEAN の台帳の添字。**どこからも読まれない** (書くのは dispatch.cpp の enter_call だけ)。消すと
-    // sizeof(thread) が 480 → 476 になり、thread の添字計算 (×480 の shift+add) が mul に変わって
-    // hot path の命令列と .text が動く (3c のゲートで実測)。段 4 で thread の寸法変更として扱う。
+    // STACK では読まれない (書くのは dispatch.cpp の enter_call だけ)。消すと sizeof(thread) が 480 → 476 になり、
+    // thread の添字計算 (×480 の shift+add) が mul に変わって hot path の命令列と .text が動く (3c のゲートで実測)。
+    // 消すかどうかは性能の判断と一緒に別途決める。それまで寸法を下の static_assert で固定する。
     uint32_t call_top = 0;
     // [SHIZUKU_STACK_LEDGER] 最新の記録 (top) と、最新の call 段の記録のアドレス (0 = なし)。記録は
     // caller の stack 枠にあり、カーネルが持つのはこの 2 本のポインタと深さだけ。base_privileged は
@@ -118,6 +129,13 @@ template <typename CONTEXT> struct thread {
       uint32_t previous_caller_generation;
     } identity[call_identity_storage]{};
   };
+  // 寸法の固定 (32-bit の実機): top 4 + uint32 8 本 (call_top を含む) 32 + call_top_rec 4 + base_privileged 4
+  // + identity。call_stack_t の大きさが thread の大きさと添字計算を決める (上の call_top のコメント)。
+  static_assert(sizeof(uintptr_t) != 4 || offsetof(call_stack_t, call_top_rec) == 36,
+                "call_stack_t layout (call_top must stay: see the comment on call_top)");
+  static_assert(sizeof(uintptr_t) != 4 ||
+                    sizeof(call_stack_t) == 44 + 8 * call_identity_storage,
+                "call_stack_t size must not change (thread stride 480 on RP2350)");
 
   // ★state は CAS の対象なので 32bit 幅を固定する (ARCH::cas32 が uint32_t* で叩く)。
   uint32_t state = (uint32_t)state_t::UNINITIALIZED;
@@ -133,8 +151,7 @@ template <typename CONTEXT> struct thread {
     [[no_unique_address]] ledger_payload_of<CONTEXT> payload{};
   };
 
-#if defined(SHIZUKU_STACK_LEDGER)
-  // ---- [SHIZUKU_STACK_LEDGER] 呼出しの記録 = caller の stack 枠に置く 32B (実機) ----------------------
+  // ---- in-place の ARCH: 呼出しの記録 = caller の stack 枠に置く 32B (実機) ----------------------
   //   記録は callee の窓の外 (caller の SP 以上) にあり、callee・別 object は書けない。特権は置かない
   //   (戻りで caller の活動の特権を object の表から引く)。ret_sp は記録の位置から arch が求める。
   //   prev = 一つ外側の記録、prev_call = 一つ外側の call 段の記録 (識別の鎖)。depth = 積んだ後の深さ。
@@ -154,10 +171,8 @@ template <typename CONTEXT> struct thread {
   };
   static_assert(sizeof(uintptr_t) != 4 || sizeof(stack_call_record) == 32,
                 "stack call record must fill the 32-byte slot");
-  using call_ledger_entry = stack_call_record;
-#else
-  using call_ledger_entry = standard_call_ledger_entry;
-#endif
+  // in-place でない ARCH (RP2040) は従来の 16B の台帳項目。
+  using call_ledger_entry = std::conditional_t<IN_PLACE, stack_call_record, standard_call_ledger_entry>;
 
   caller_return_record *return_records = nullptr;
   // Preserve the C6/RP2040 record ABI while ARMv8-M drops the obsolete register
@@ -249,61 +264,56 @@ template <typename CONTEXT> struct thread {
   uint32_t base_kind = (uint32_t)object_kind::PLAIN;
   uint32_t base_handler_object = 0;
   uintptr_t base_handler_entry = 0;
-#if defined(SHIZUKU_STACK_LEDGER)
   static const call_ledger_entry *record_at(uintptr_t address) {
     return reinterpret_cast<const call_ledger_entry *>(address);
   }
   const call_ledger_entry &ledger_top() const {
-    return *record_at(call_stack.top);
+    if constexpr (IN_PLACE)
+      return *record_at(call_stack.top);
+    else
+      return ledger[call_stack.depth - 1];
   }
   // 積んだ直後の先頭の記録に呼び先の同定を書くための可変の口。
   call_ledger_entry &ledger_top_mut() {
-    return *reinterpret_cast<call_ledger_entry *>(call_stack.top);
+    if constexpr (IN_PLACE)
+      return *reinterpret_cast<call_ledger_entry *>(call_stack.top);
+    else
+      return ledger[call_stack.depth - 1];
   }
-#else
-  const call_ledger_entry &ledger_top() const {
-    return ledger[call_stack.depth - 1];
-  }
-  call_ledger_entry &ledger_top_mut() {
-    return ledger[call_stack.depth - 1];
-  }
-#endif
   // ---- 識別 (call 段の列から) ----------------------------------------------------------------
-  //   既定の版 (RP2040) は call_stack のフィールドを読む。SHIZUKU_STACK_LEDGER の版はそれらを更新しないので、
+  //   既定の版 (RP2040) は call_stack のフィールドを読む。in-place の版はそれらを更新しないので、
   //   最内の call 段の記録 (call_top_rec) とその prev_call の鎖から導く。どちらの版でも同じ意味:
   //     identity_*        : call 段が無ければ base、あればその段の呼び先 (今「自分」として走っているもの)
   //     call_caller_*     : (前提 call_count != 0) その段を呼んだ側 = ひとつ外側の call 段の呼び先か base
   uint32_t identity_object() const {
-#if defined(SHIZUKU_STACK_LEDGER)
-    return call_stack.call_count != 0 ? record_at(call_stack.call_top_rec)->object : base_object;
-#else
-    return call_stack.call_count != 0 ? call_stack.current_call_object : base_object;
-#endif
+    if constexpr (IN_PLACE)
+      return call_stack.call_count != 0 ? record_at(call_stack.call_top_rec)->object : base_object;
+    else
+      return call_stack.call_count != 0 ? call_stack.current_call_object : base_object;
   }
   uint32_t identity_generation() const {
-#if defined(SHIZUKU_STACK_LEDGER)
-    return call_stack.call_count != 0 ? record_at(call_stack.call_top_rec)->generation
-                                      : call_stack.base_object_generation;
-#else
-    return call_stack.call_count != 0 ? call_stack.current_call_generation
-                                      : call_stack.base_object_generation;
-#endif
+    if constexpr (IN_PLACE)
+      return call_stack.call_count != 0 ? record_at(call_stack.call_top_rec)->generation
+                                        : call_stack.base_object_generation;
+    else
+      return call_stack.call_count != 0 ? call_stack.current_call_generation
+                                        : call_stack.base_object_generation;
   }
   uint32_t call_caller_object() const {
-#if defined(SHIZUKU_STACK_LEDGER)
-    const uintptr_t previous = record_at(call_stack.call_top_rec)->prev_call;
-    return previous != 0 ? record_at(previous)->object : base_object;
-#else
-    return call_stack.caller_object;
-#endif
+    if constexpr (IN_PLACE) {
+      const uintptr_t previous = record_at(call_stack.call_top_rec)->prev_call;
+      return previous != 0 ? record_at(previous)->object : base_object;
+    } else {
+      return call_stack.caller_object;
+    }
   }
   uint32_t call_caller_generation() const {
-#if defined(SHIZUKU_STACK_LEDGER)
-    const uintptr_t previous = record_at(call_stack.call_top_rec)->prev_call;
-    return previous != 0 ? record_at(previous)->generation : call_stack.base_object_generation;
-#else
-    return call_stack.caller_generation;
-#endif
+    if constexpr (IN_PLACE) {
+      const uintptr_t previous = record_at(call_stack.call_top_rec)->prev_call;
+      return previous != 0 ? record_at(previous)->generation : call_stack.base_object_generation;
+    } else {
+      return call_stack.caller_generation;
+    }
   }
   uint32_t current_object() const {
     return call_stack.depth ? ledger_top().object : base_object;
