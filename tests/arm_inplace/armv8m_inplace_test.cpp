@@ -7,6 +7,9 @@
 #include "arch/riscv/rv32.hpp"
 #include "shizuku/method_entry.hpp"
 
+extern "C" void shizuku_armv8m_call_entry() {}
+extern "C" void shizuku_armv8m_return_stub() {}
+
 static uintptr_t registered_word(uintptr_t a, uintptr_t, uintptr_t, uintptr_t) {
   return a + 1;
 }

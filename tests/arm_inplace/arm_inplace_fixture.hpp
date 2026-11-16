@@ -100,6 +100,15 @@ struct test_inplace_adapter : public BaseArch {
     return true;
   }
 
+  static bool call_stack_has_room_at(const typename BaseArch::context_t &, uintptr_t) {
+    return true;
+  }
+
+  template <class Frame>
+  static void set_entry_for_object(Frame &frame, uintptr_t pc, uint32_t) {
+    set_entry(frame, pc, return_stub());
+  }
+
   static uintptr_t call_return_sp(const typename BaseArch::context_t &ctx) {
     return reinterpret_cast<uintptr_t>(ctx.sp) + sizeof(typename BaseArch::exception_frame_t);
   }
