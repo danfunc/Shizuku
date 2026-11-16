@@ -1,6 +1,8 @@
 # Stack 窓の設計 (thread 保持・積み上げ・使った分だけゼロ化)
 
 状態: 設計 (2026-11-03)。ユーザー決定 5 件に従う。実装は段階ごとにコミット。
+更新 (2026-11-17): 実装は STACK 方式 (`notes/call-record-on-stack.md`) になり、窓は `thread.stk` の `cur_win_lo/hi` と `u_depth` だけで持つ。
+段ごとの `win_lo/win_hi` (台帳の項目・別表 `win_span`・`window_at`) は無い。§0 の「台帳」の記述と §1 の `win_lo/win_hi` の置き場は設計当時のもの。
 対象: C6 (U-mode, `SHIZUKU_C6_UMODE`)。共通部は thread 側、chip は PMP 形式への適用だけ。
 
 ## 0. 現状 (調べた事実)
@@ -8,7 +10,7 @@
 - C6 の U stack は **object ごとに 1 領域**: `c6_stage1_object_bounds.stack_base/stack_limit` (`chips/esp32_c6/pmp_c6.hpp:77`、上端が `stack_limit`)。登録は `g_c6_stage1_u_bounds` と `g_c6_stage1_driver_bounds` の 2 つ。
 - 入場のたびに callee SP を固定 top に戻す: `chips/esp32_c6/trap.cpp:1291` (`enter_u_object`)、`:559` (`context_to_frame` の SP 検査)。A→A / A→B→A で使用中 stack を上書きする。
 - PMP: entry 0-3 固定 (code, 共有窓)、4-5 stack (TOR, RW)、6-7 data、8-9 mmio、10-15 未使用。粒度 4B (`pmp_c6.hpp:11`)。stack 窓は `precomputed.pmpaddr4/5` (`pmp_c6.hpp:23-24`) で object ごとに前計算。
-- 台帳 (`thread.ledger[depth]`) はカーネル領域。1 段ごとに `ret_pc/ret_sp/prev_call/...` を持つ (`native_call.hpp:280-293`)。user stack にヘッダは書かない (`SHIZUKU_LEAN_LEDGER`)。
+- 台帳 (`thread.ledger[depth]`) はカーネル領域。1 段ごとに `ret_pc/ret_sp/prev_call/...` を持つ (`native_call.hpp:280-293`)。user stack にヘッダは書かない (当時の LEAN 方式。現在は caller の stack 枠に記録を置く STACK 方式)。
 - U からの trap の frame はカーネル stack 上 (`arch/riscv/rv32_trap.S:40-50`)。U stack には触れない。
 - 通常 return は `call_resume_at` (`arch/riscv/rv32.hpp:380-397`) が **caller の `ret_sp - sizeof(frame)` = user stack 上** に resume frame を作る。
 - U 側の fault: `shizuku_c6_handle_fault` (`trap.cpp:894`) は selftest probe の PC 一致だけを扱い、それ以外は fatal。窓を伸ばす経路は無い。
