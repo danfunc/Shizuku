@@ -1,0 +1,29 @@
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "measure.sh",
+    "read_results.py",
+])
+
+# Plain ESP-IDF FreeRTOS task/queue IPC cost benchmark. No parent firmware
+# BUILD dependency; links neither the Shizuku archive nor Shizuku sources.
+genrule(
+    name = "image",
+    srcs = [
+        "CMakeLists.txt",
+        "frtos-ipc-c6.defaults",
+        "main/CMakeLists.txt",
+        "main/main.c",
+        "build_frtos_ipc.sh",
+    ],
+    outs = [
+        "shizuku_esp32c6_frtos_ipc.bin",
+        "shizuku_esp32c6_frtos_ipc.elf",
+        "shizuku_esp32c6_frtos_ipc.map",
+        "shizuku_esp32c6_frtos_ipc.sdkconfig",
+    ],
+    cmd = "$(location build_frtos_ipc.sh) $(location shizuku_esp32c6_frtos_ipc.bin) esp-15.2.0_20251204",
+    tools = ["build_frtos_ipc.sh"],
+    tags = ["local", "no-sandbox"],
+    target_compatible_with = ["@platforms//cpu:riscv32"],
+)
