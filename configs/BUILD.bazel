@@ -208,6 +208,13 @@ bool_flag(
     build_setting_default = False,
     visibility = ["//visibility:public"],
 )
+# 実験 (既定は無効): 前後とも特権の再開では stack 窓 (MPU Region 2) を張り替えない。
+# U が絡む再開では常に張り替える。条件の詳細は internal_headers/shizuku/armv8m_resume.hpp。
+bool_flag(
+    name = "rp2350_skip_priv_stack_window",
+    build_setting_default = False,
+    visibility = ["//visibility:public"],
+)
 selects.config_setting_group(
     name = "cyw43",
     match_any = [":rp2040_pico_w", ":rp2350_pico2_w"],
@@ -250,6 +257,7 @@ cost_probe_config(
     is_rp2350 = select({":rp2350": True, "//conditions:default": False}),
     xip_probe = ":rp2350_xip_cost_probe",
     route_probe = ":rp2350_route_cost_probe",
+    skip_priv_stack_window = ":rp2350_skip_priv_stack_window",
     layout_pad = ":layout_pad_bytes",
     substitutions = select({
         # 型名は歴史的経緯で rp2040_pico_w だが、Pico / Pico W / XIAO 共通の

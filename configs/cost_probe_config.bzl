@@ -6,6 +6,7 @@ def _config_impl(ctx):
     substitutions = dict(ctx.attr.substitutions)
     substitutions["${SHIZUKU_XIP_COST_PROBE}"] = "1" if ctx.attr.is_rp2350 and ctx.attr.xip_probe[BuildSettingInfo].value else "0"
     substitutions["${SHIZUKU_ROUTE_COST_PROBE}"] = "1" if ctx.attr.is_rp2350 and ctx.attr.route_probe[BuildSettingInfo].value else "0"
+    substitutions["${SHIZUKU_SKIP_PRIV_STACK_WINDOW}"] = "1" if ctx.attr.is_rp2350 and ctx.attr.skip_priv_stack_window[BuildSettingInfo].value else "0"
     pad = ctx.attr.layout_pad[BuildSettingInfo].value if ctx.attr.is_rp2350 else 0
     if pad < 0 or pad > 65536:
         fail("--//configs:layout_pad_bytes must be within 0..65536, got %d" % pad)
@@ -26,6 +27,7 @@ cost_probe_config = rule(
         "is_rp2350": attr.bool(),
         "xip_probe": attr.label(mandatory = True, providers = [BuildSettingInfo]),
         "route_probe": attr.label(mandatory = True, providers = [BuildSettingInfo]),
+        "skip_priv_stack_window": attr.label(mandatory = True, providers = [BuildSettingInfo]),
         "layout_pad": attr.label(mandatory = True, providers = [BuildSettingInfo]),
     },
 )

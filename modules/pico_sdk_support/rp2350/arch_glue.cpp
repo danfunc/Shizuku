@@ -80,6 +80,8 @@ extern "C" SHIZUKU_SVC_RAM void shizuku_restore_region_window() {
   ARCH::apply_grant_window(context->region_base, context->region_limit, core);
   const auto &thread = shizuku::kernel_instance.current_thread();
   ARCH::apply_stack_window(thread.stack_rbar, thread.stack_rlar, core);
+  if constexpr (shizuku::skip_priv_stack_window_enabled)
+    ARCH::note_resumed(!ARCH::context_unprivileged(*context), core); // この経路は常に張る
 
   // 非特権へ戻るときだけ、その thread のオブジェクトの窓にそろえる (すでにそうなら書かない)。
   // 特権へ戻るときは窓を触らない: 特権は窓に制限されず、次に非特権へ入るときに張り直す。
