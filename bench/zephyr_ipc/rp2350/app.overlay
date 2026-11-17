@@ -1,0 +1,14 @@
+/ {
+	chosen {
+		zephyr,console = &cdc_acm_uart0;
+	};
+};
+
+&zephyr_udc0 {
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+		/* A full result dump is ~14 KB; poll_out drops bytes when the FIFO is full
+		 * and flow control is off, so make it larger than one dump. */
+		tx-fifo-size = <20480>;
+	};
+};

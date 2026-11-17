@@ -1,0 +1,16 @@
+package(default_visibility = ["//visibility:public"])
+
+# Zephyr is built with west (see build.sh); Bazel only exports the sources.
+exports_files([
+    "BUILD.bazel",
+    "CMakeLists.txt",
+    "prj.conf",
+    "app.overlay",
+    "build.sh",
+    "measure.sh",
+    "capture.py",
+    "read_results.py",
+    "src/main.c",
+    "src/bench_sc.c",
+    "include/bench_sc.h",
+])
