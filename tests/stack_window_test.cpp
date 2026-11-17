@@ -672,13 +672,16 @@ static void test_stack_dispatch_caller() {
     Record &r1 = rec_at(thread, 1);
     assert(r1.prev == addr_of(d0) && r1.prev_call == 0); // dispatch 段は call 段の鎖に入らない
     assert(same_win(cur_win(thread), shizuku::stack_window{(hi - 0x300u) - K, hi - 0x300u}));
+    put((hi - 0x300u) - 64u, 0xCA11EE01u); // U callee が窓に残した値
 
     assert(pop(kobj, thread, context));
     assert(thread.call_stack.depth == 1 && thread.call_stack.call_count == 0 && thread.stk.u_depth == 0);
     assert(thread.call_stack.top == addr_of(d0));
     assert(cur_win(thread).lo == lo && cur_win(thread).hi == hi); // {0, 0} ではなく stack 全域
     assert(context.privileged); // dispatch で入った活動は常に特権
-    assert(test_fake_arch::zeroed_windows.size() == 1);
+    // dispatch 段 (特権 handler) が呼び手の戻り (M -> U) は窓をゼロ化しない。窓は外側 (全域) へ戻る。
+    assert(test_fake_arch::zeroed_windows.empty());
+    assert(get((hi - 0x300u) - 64u) == 0xCA11EE01u);
   }
   // Case 2: U (A) -> dispatch 段 -> 特権 handler が U (B) を呼ぶ。handler は外側の U 窓 (u_depth != 0) の中にいるので NO_STACK。
   {
@@ -802,7 +805,9 @@ static void test_stack_m_mode_callee_no_window_and_frame_protected() {
 
 // ===========================================================================
 // M caller が U callee を呼ぶ。thread の stack = M が実際に走る stack そのもの。
-// 窓は [ret_sp - K, ret_sp) で開き、戻りでゼロ化され、ret_sp 以上 (記録の枠より上) の語は保存される。
+// 窓は [ret_sp - K, ret_sp) で開く (M -> U でも U callee から M の stack を守る)。M への戻りでは
+// ゼロ化しない (M は信頼できるソフトウェア。設計者の決定)。窓は stack 全域へ戻り、ret_sp 以上 (記録の枠より
+// 上) の語は保存される。
 // ===========================================================================
 static void test_stack_m_caller_u_callee_window() {
   test_fake_arch::reset();
@@ -824,7 +829,7 @@ static void test_stack_m_caller_u_callee_window() {
   put(ret_sp + kAboveRecord, 0x4D43414Cu);
   put(ret_sp + kAboveRecord + 0x20u, 0x4D544F50u);
   for (uintptr_t p = ret_sp - K; p < ret_sp; p += 4)
-    put(p, 0xDEADBEEFu); // 前の利用者の残り。戻りでゼロ化される
+    put(p, 0xDEADBEEFu); // 前の利用者の残り。M への戻りではゼロ化されず残る
   put(ret_sp - K - 4u, 0xBADBAD01u); // 窓の下は触られない
 
   mock_kobj::callee_view view_u{};
@@ -838,9 +843,10 @@ static void test_stack_m_caller_u_callee_window() {
 
   assert(pop(kobj, thread, context));
   assert(thread.call_stack.depth == 0 && thread.stk.u_depth == 0);
-  assert(test_fake_arch::zeroed_windows.size() == 1);
-  assert(same_win(test_fake_arch::zeroed_windows[0], win));
-  assert_zero(win);
+  assert(test_fake_arch::zeroed_windows.empty()); // M -> U の戻りはゼロ化しない
+  for (uintptr_t p = win.lo; p < win.hi; p += 4)
+    assert(get(p) == 0xDEADBEEFu); // 窓の中の値が残る
+  assert(cur_win(thread).lo == lo && cur_win(thread).hi == hi); // 窓は stack 全域へ戻る
   assert(context.privileged); // 最外の caller (M) の特権で再開する
   assert(get(ret_sp + kAboveRecord) == 0x4D43414Cu);
   assert(get(ret_sp + kAboveRecord + 0x20u) == 0x4D544F50u);
@@ -857,6 +863,80 @@ static void test_stack_m_caller_u_callee_window() {
   // (枠が stack の上端を越える位置の拒否は arch の call_record_room_at の仕事で、この mock の範囲外。)
   context.user_sp = hi - kAboveRecord;
   assert(enter(kernel, thread, context, view_u, 0x42003000u) == shizuku::kernel_error::OK);
+}
+
+// ===========================================================================
+// M -> U1 -> U2。U2 から U1 への戻り (呼び手が U) はゼロ化する。U1 から M への戻り (呼び手が M) はゼロ化しない。
+// 決定の帰結: M が U1 の後に同じ位置で U2 を呼ぶと、U2 の窓に U1 の残りが見える (変えない)。
+// ===========================================================================
+static void test_stack_m_u1_u2_zero_only_for_u_caller() {
+  test_fake_arch::reset();
+  mock_kernel kernel{};
+  mock_kobj kobj{};
+  mock_context context{};
+  Thread thread{};
+  thread.base_object = 1;
+
+  alignas(16) static uint8_t m_thread_stack[0x2000];
+  const uintptr_t lo = reinterpret_cast<uintptr_t>(m_thread_stack);
+  const uintptr_t hi = lo + sizeof(m_thread_stack);
+  thread.set_stack_bounds(lo, hi);
+
+  const uintptr_t s0 = lo + 0x1800u;
+  context.privileged = true; // 最外の呼び手は M
+  context.user_sp = s0;
+  put(s0 + kAboveRecord, 0x4D43414Cu);
+
+  mock_kobj::callee_view view_u1{};
+  view_u1.id = 3;
+  mock_kobj::callee_view view_u2{};
+  view_u2.id = 4;
+
+  // M -> U1
+  assert(enter(kernel, thread, context, view_u1, 0x42003000u) == shizuku::kernel_error::OK);
+  assert(thread.call_stack.base_privileged == 1 && thread.stk.u_depth == 1);
+  const auto w1 = cur_win(thread);
+  assert(w1.hi == s0 && w1.lo == s0 - K);
+  put(w1.hi - 32u, 0xA1A1A1A1u);  // U1 の frame (U2 の窓の上)
+  put(w1.hi - 48u, 0xA1A1A102u); // U2 の記録 ([w1.hi - 128, +64)) の上
+
+  // U1 -> U2
+  context.privileged = false;
+  context.user_sp = w1.hi - 128u;
+  assert(enter(kernel, thread, context, view_u2, 0x42004000u) == shizuku::kernel_error::OK);
+  assert(thread.call_stack.depth == 2 && thread.stk.u_depth == 2);
+  const auto w2 = cur_win(thread);
+  assert(w2.hi == w1.hi - 128u && w2.lo == w2.hi - K);
+  put(w2.hi - 16u, 0xB2B2B2B2u);
+  put(w2.lo + 8u, 0xB2B20002u);
+
+  // U2 -> U1: 呼び手が U なのでゼロ化する
+  assert(pop(kobj, thread, context));
+  assert(thread.call_stack.depth == 1 && thread.stk.u_depth == 1);
+  assert(test_fake_arch::zeroed_windows.size() == 1);
+  assert(same_win(test_fake_arch::zeroed_windows[0], w2));
+  assert_zero(w2);
+  assert(!context.privileged);
+  assert(get(w1.hi - 32u) == 0xA1A1A1A1u && get(w1.hi - 48u) == 0xA1A1A102u); // U1 の frame は残る
+  const shizuku::stack_window back_in_u1{w1.hi - 128u - K, w1.hi};
+  assert(same_win(cur_win(thread), back_in_u1));
+
+  // U1 -> M: 呼び手が M なのでゼロ化しない。窓は stack 全域へ戻る
+  assert(pop(kobj, thread, context));
+  assert(thread.call_stack.depth == 0 && thread.stk.u_depth == 0);
+  assert(test_fake_arch::zeroed_windows.size() == 1); // 増えない
+  assert(get(w1.hi - 32u) == 0xA1A1A1A1u && get(w1.hi - 48u) == 0xA1A1A102u); // U1 の残りが残る
+  assert(cur_win(thread).lo == lo && cur_win(thread).hi == hi);
+  assert(context.privileged);
+  assert(get(s0 + kAboveRecord) == 0x4D43414Cu);
+
+  // 帰結: M が同じ位置から U2 を呼ぶと、窓の中に U1 の残りが見える
+  context.user_sp = s0;
+  assert(enter(kernel, thread, context, view_u2, 0x42004000u) == shizuku::kernel_error::OK);
+  const auto w3 = cur_win(thread);
+  assert(w3.hi == w1.hi && get(w3.hi - 32u) == 0xA1A1A1A1u);
+  assert(pop(kobj, thread, context));
+  assert(test_fake_arch::zeroed_windows.size() == 1);
 }
 
 // ===========================================================================
@@ -1079,6 +1159,7 @@ int main() {
   test_stack_window_extension_fault_semantics();
   test_stack_m_mode_callee_no_window_and_frame_protected();
   test_stack_m_caller_u_callee_window();
+  test_stack_m_u1_u2_zero_only_for_u_caller();
   test_stack_gate_false_no_window_no_zero();
   test_stack_m_callee_leaves_window_state_untouched();
   test_current_behavior_overlapping_record_not_detected();

@@ -1691,9 +1691,10 @@ void c6_stage1_safety() {
                shizuku_c6_u_mode_diag[6] == kstack_addr, shizuku_c6_u_mode_diag[6], kstack_addr);
 
   // 8. 窓を閉じた後の検査。callee 窓 [win_hi-K, win_hi) にカナリアを敷き、何もしない U callee
-  // (未定義 cmd=99 は a0=0 で ret) を呼ぶ。戻った直後に (関数呼出しを挟まず) 窓のうち resume frame
-  // (RV32_FRAME_BYTES) より下の語が全部 0 であること = カナリアが残っていない (窓を閉じるとき開いた分が
-  // ゼロ化された) ことを見る。resume frame は M caller の復帰用に窓の最上位へ作られるので対象外。
+  // (未定義 cmd=99 は a0=0 で ret) を呼ぶ。呼び手は M (特権) なので、M -> U の戻りは窓をゼロ化しない
+  // (設計者の決定: M は信頼できるソフトウェアなので U callee の残りを消さない)。戻った直後に (関数呼出しを
+  // 挟まず) 窓の最下位 16 語 (resume frame より下で、上側の使用から離れた語) がカナリアのまま残ることを見る。
+  // 旧は resume frame より下の全語が 0 (ゼロ化された) ことを見ていた。実機では未実行。
   constexpr size_t STAGE1_WIN_WORDS = shizuku::kStackWindowStep / sizeof(uint32_t);
   constexpr size_t STAGE1_FRAME_WORDS = RV32_FRAME_BYTES / sizeof(uint32_t);
   // callee 窓の上端は C++ の sp からは推測しない。ARCH::syscall は ecall の前に gp/tp/s0 の退避枠を sp から
@@ -1721,11 +1722,16 @@ void c6_stage1_safety() {
       OBJECT_STAGE1_PROBE,
       METHOD_STAGE1_PROBE,
       99 /* cmd=99: no-op U callee */);
+  // 窓 256B = 64 語、resume frame 144B = 36 語なので、frame より下は 28 語。そのうち最下位の 16 語
+  // (窓の下端から 64B) だけを見る: 窓の上側にある frame と、no-op callee が入場 sp から下へ使う数語から
+  // 十分に離れ、確実に触られない範囲に絞る (実機未実行のため弱い側)。
+  constexpr size_t STAGE1_CANARY_CHECK_WORDS = 16;
+  static_assert(STAGE1_CANARY_CHECK_WORDS <= STAGE1_WIN_WORDS - STAGE1_FRAME_WORDS);
   bool canary_intact = true;
-  for (size_t i = 0; i < STAGE1_WIN_WORDS - STAGE1_FRAME_WORDS; ++i) {
-    if (u_stack_words[i] != 0u) canary_intact = false;
+  for (size_t i = 0; i < STAGE1_CANARY_CHECK_WORDS; ++i) {
+    if (u_stack_words[i] != U_STACK_CANARY) canary_intact = false;
   }
-  record_check("stage1: closed callee window leaves no canary and M handler did not spill (below resume frame)",
+  record_check("stage1: M -> U return does not zero the callee window (lowest 16 window words keep the canary)",
                closed_res.error == 0 && closed_res.value == 0 && canary_intact,
                canary_intact ? 1 : 0, 1);
   const auto sp_probe_res2 = ARCH::syscall(

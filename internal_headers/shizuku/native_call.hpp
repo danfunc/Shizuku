@@ -221,12 +221,14 @@ template <class K, class KObj>
       thread.call_stack.call_count--;
       thread.call_stack.call_top_rec = prev_call_address;
     }
-    // 戻る段が U callee で窓を持っていたなら、その窓をゼロ化して外側の窓へ戻す。
+    // 戻る段が U callee で窓を持っていたなら、外側の窓へ戻す。戻り先 (caller) が非特権のときだけ、その窓を
+    // ゼロ化する。特権 (M) の caller は信頼できるソフトウェアなので、U callee の残りを消さない (M -> U の戻り)。
     // ゼロ化は [cur_win_lo, cur_win_hi) だけ。記録 (ret_sp の上 32B) は窓の上端 (ret_sp & ~15) より上なので壊れない。
     // 外側に U の窓が無ければ全域、あれば外側の U callee の窓 = [戻り先 SP - K, その callee の入場の ret_sp)。
     if constexpr (K::THREAD::HAS_STACK_WINDOW) {
       if (is_call && !kobj.privileged_of(record->object)) {
-        zero_window_of<A>(shizuku::stack_window{thread.stk.cur_win_lo, thread.stk.cur_win_hi});
+        if (!caller_privileged)
+          zero_window_of<A>(shizuku::stack_window{thread.stk.cur_win_lo, thread.stk.cur_win_hi});
         const uint32_t remaining = thread.stk.u_depth - 1u;
         thread.stk.u_depth = remaining;
         if (remaining == 0 || prev_address == 0) {
