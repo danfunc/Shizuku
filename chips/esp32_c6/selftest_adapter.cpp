@@ -237,6 +237,13 @@ static const name_id_entry kMapping[] = {
     {"stage1: U-to-U cost: counter enabled", 0x6057},
     {"stage1: U-to-U cost: method valid", 0x6058},
     {"stage1: U-to-U cost: descriptor valid", 0x6059},
+
+    // 0x7000 番台: mailbox_switch (RUN_FOR / YIELD によるポーリング往復の実測の正しさ)
+    {"mbox: service thread spawned", 0x7001},
+    {"mbox: RUN_FOR round trips all answered correctly", 0x7002},
+    {"mbox: YIELD(id) round trips all answered correctly", 0x7003},
+    {"mbox: YIELD(0) round trips all answered correctly", 0x7004},
+    {"mbox: service threads finished", 0x7005},
 };
 
 static const size_t kMappingCount = sizeof(kMapping) / sizeof(kMapping[0]);

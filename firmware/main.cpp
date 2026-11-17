@@ -186,6 +186,9 @@ void shizuku::app_entry() {
 #endif
   shizuku::selftest::unprivileged_probe();
   shizuku::selftest::rp2350_u_cost();
+#if !defined(SHIZUKU_RP2040) // RP2040 (armv6m) には cycle_counter_read が無く、mailbox_switch はビルドに入れない
+  shizuku::selftest::mailbox_switch();
+#endif
   shizuku::selftest::rp2350_svc_breakdown();
   shizuku::selftest::register_leak_test();
 

@@ -289,7 +289,7 @@ C5_SELFTEST_SRCS = [
     "source/selftest/thread_ladder.cpp",
 ]
 
-C6_SELFTEST_SRCS = C5_SELFTEST_SRCS + select({
+C6_SELFTEST_SRCS = C5_SELFTEST_SRCS + ["source/selftest/mailbox_switch.cpp"] + select({
     "//configs:c6_umode_enabled": ["source/selftest/c6_stage1_safety.cpp"],
     "//conditions:default": [],
 })
@@ -333,7 +333,11 @@ cc_library(
         "source/selftest/rp2350_u_cost.cpp",
         "source/selftest/rp2350_svc_breakdown.cpp",
         "source/selftest/register_leak_test.cpp",
-    ],
+    ] + select({
+        # mailbox_switch は DWT CYCCNT (cycle_counter_read) を使う。RP2040 (armv6m) には無いので入れない。
+        "//configs:rp2040": [],
+        "//conditions:default": ["source/selftest/mailbox_switch.cpp"],
+    }),
     visibility = ["//visibility:public"],
     # flash_stream はカーネルの stream と flash_ops / flash_map を直接試す (FlashFS は使わない)。
     # stress はオブジェクト (peripherals) を相手に試す。

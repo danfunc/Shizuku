@@ -10,6 +10,7 @@ void thread_ladder();
 void memory_ladder();
 void stream_ladder();
 void call_cost();
+void mailbox_switch();
 #if defined(SHIZUKU_C6_UMODE)
 void c6_stage1_safety();
 #endif
@@ -54,6 +55,11 @@ extern "C" void shizuku_c6_run_selftests(void) {
 
     // 6. call_cost (段V0 baseline 測定)
     shizuku::selftest::call_cost();
+    shizuku_c6_selftest_record.passed = shizuku::selftest::passed;
+    shizuku_c6_selftest_record.failed = shizuku::selftest::failed;
+
+    // 6b. mailbox_switch (RUN_FOR / YIELD による共有メールボックスのポーリング往復の実測)
+    shizuku::selftest::mailbox_switch();
     shizuku_c6_selftest_record.passed = shizuku::selftest::passed;
     shizuku_c6_selftest_record.failed = shizuku::selftest::failed;
 
