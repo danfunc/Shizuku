@@ -42,8 +42,17 @@ int main() {
     Clock::available = false;
     shizuku::native::get_time<Clock, RV>(f);
     CHECK(f.a0 == 24 && f.a1 == 0 && f.a2 == 0);
+    RV::set_time_result(f, shizuku::object_error::OK, 0x12345678ABCDEF01ull);
+    RV::set_result(f, 7, 9);
+    CHECK(f.a0 == 7 && f.a1 == 9);
+    CHECK(f.mcause == (user ? RV32_TAG_U_SCRUB : RV32_TAG_ECALL_SCRUB));
+    RV::set_time_result(f, shizuku::object_error::OK, 0x12345678ABCDEF01ull);
+    RV::set_unprivileged_resume_metadata(f, 0x20001000, 0x40801000, false);
+    CHECK(f.mcause == RV32_TAG_U_ECALL); // normal method return never retains TIME
   }
   CHECK(Clock::reads == 4);
+  static_assert(sizeof(RV::syscall_result) == 2 * sizeof(uintptr_t));
+  static_assert(sizeof(shizuku::rv32_abi::call_result) == 2 * sizeof(uintptr_t));
   struct Result { uintptr_t value, value_high; } r{0xABCDEF01, 0x12345678};
   CHECK(shizuku::native::time_value(r) == 0x12345678ABCDEF01ull);
   const auto *a = shizuku::svc_attribute_for(34);

@@ -1,6 +1,7 @@
 #ifndef SHIZUKU_RV32_ABI_HPP
 #define SHIZUKU_RV32_ABI_HPP
 #include <cstdint>
+#include <type_traits>
 
 // ===========================================================================
 //  RV32 の ABI converter (2026-10-22 決定、.handoff/v3-design-notes.md §4/§5)
@@ -69,8 +70,8 @@ template <auto F> inline uintptr_t entry_address() {
 struct call_result {
   uintptr_t error;
   uintptr_t value;
-  uintptr_t value_high; // GET_TIME_US only; unspecified for other APIs
 };
+struct time_result { uintptr_t error, value, value_high; };
 
 #if defined(__riscv)
 // ---- 試験的な遅延退避 (既定は無効): SHIZUKU_ABI_LAZY_SAVE ---------------------------------------------
@@ -109,7 +110,8 @@ inline namespace lazy_save {
 #endif
 
 // a0 = 番号, a1..a4 = 引数。a5..a7 はカーネルに渡さず、返ったあと値が不定になるだけ。
-[[gnu::always_inline]] inline call_result ecall(uintptr_t number, uintptr_t a1,
+template <bool TimeReply = false>
+[[gnu::always_inline]] inline std::conditional_t<TimeReply, time_result, call_result> ecall(uintptr_t number, uintptr_t a1,
                                                 uintptr_t a2, uintptr_t a3,
                                                 uintptr_t a4) {
   register uintptr_t r_a0 asm("a0") = number;
@@ -134,7 +136,8 @@ inline namespace lazy_save {
         "=r"(r_a5), "=r"(r_a6), "=r"(r_a7)
       :
       : SHIZUKU_RV32_ABI_SAVE_RESTORE_CLOBBERS);
-  return {r_a0, r_a1, r_a2};
+  if constexpr (TimeReply) return {r_a0, r_a1, r_a2};
+  else return {r_a0, r_a1};
 }
 
 // a0 = 番号, a1..a7 = 引数 (CALL_METHOD_DESCRIPTOR は a2..a7 に 6 引数を載せる)。
@@ -164,7 +167,7 @@ inline namespace lazy_save {
         "+r"(r_a5), "+r"(r_a6), "+r"(r_a7)
       :
       : SHIZUKU_RV32_ABI_SAVE_RESTORE_CLOBBERS);
-  return {r_a0, r_a1, r_a2};
+  return {r_a0, r_a1};
 }
 #if defined(SHIZUKU_ABI_LAZY_SAVE)
 } // inline namespace lazy_save

@@ -2,6 +2,7 @@
 #define SHIZUKU_ARCHS_ARMV6M_HPP
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 #include "arch/ppb.hpp"
 #include "shizuku/concepts/arch.hpp"
 #include "shizuku/kernel_abi.hpp"
@@ -318,10 +319,14 @@ public:
   static void debug_enable(bool){} static bool debug_enabled(){return false;} static void debug_step(bool){}
   static uint32_t debug_reason_take(){return 0;} static uint32_t breakpoint_count(){return 0;}
   static void breakpoint_enable(bool){} static void breakpoint_set(uint32_t,uintptr_t){} static void breakpoint_clear(uint32_t){}
-  struct syscall_result{uintptr_t error,value,value_high;};
-  static inline syscall_result syscall(uintptr_t n,uintptr_t a1=0,uintptr_t a2=0,uintptr_t a3=0,uintptr_t a4=0){
+  struct syscall_result{uintptr_t error,value;};
+  struct time_result{uintptr_t error,value,value_high;};
+  static inline time_result get_time_us(){return syscall<true>((uintptr_t)shizuku::object_api::GET_TIME_US);}
+  template<bool TimeReply=false>
+  static inline std::conditional_t<TimeReply,time_result,syscall_result> syscall(uintptr_t n,uintptr_t a1=0,uintptr_t a2=0,uintptr_t a3=0,uintptr_t a4=0){
     register uintptr_t r0 asm("r0")=n;register uintptr_t r1 asm("r1")=a1;register uintptr_t r2 asm("r2")=a2;register uintptr_t r3 asm("r3")=a3;register uintptr_t r12 asm("r12")=a4;
-    asm volatile("svc 0":"+r"(r0),"+r"(r1),"+r"(r2),"+r"(r3),"+r"(r12)::"memory","cc");return {r0,r1,r2};
+    asm volatile("svc 0":"+r"(r0),"+r"(r1),"+r"(r2),"+r"(r3),"+r"(r12)::"memory","cc");
+    if constexpr(TimeReply) return {r0,r1,r2}; else return {r0,r1};
   }
   [[noreturn]] static void enter_thread_mode(uintptr_t top,uintptr_t,void(*entry)()){shizuku_armv6m_enter_thread_mode(top,entry);}
 };

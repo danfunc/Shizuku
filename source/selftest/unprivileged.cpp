@@ -88,7 +88,7 @@ uintptr_t probe(uintptr_t selector, uintptr_t, uintptr_t, uintptr_t) {
     for (uint32_t i = 0; i < rounds; ++i) {
       uint64_t value = 0;
       if (selector != 14) {
-        const auto r = ARCH::syscall((uintptr_t)object_api::GET_TIME_US);
+        const auto r = ARCH::get_time_us();
         if (r.error != 0) words[4] = words[4] + 1;
         value = native::time_value(r);
       } else {

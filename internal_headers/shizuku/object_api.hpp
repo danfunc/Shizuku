@@ -156,6 +156,8 @@ enum struct object_api : uintptr_t {
   CALL_METHOD_DESCRIPTOR = 33,
   // Bounded trap-local clock read. No arguments. a0=error, a1=low32,
   // a2=high32 (r0/r1/r2 on ARM); both value words are zero on failure.
+  // Use ARCH::get_time_us() for a C++ three-word result; the ordinary
+  // ARCH::syscall converter retains its historical two-word result ABI.
   GET_TIME_US = 34,
   // 専用ハンドラ (HANDLER) が配下の子オブジェクトの終了を Root KOBJ へ転送する。
   // a1 = 絶対戻り先深さ d, a2 = 戻り値, a3 = エラーコード。

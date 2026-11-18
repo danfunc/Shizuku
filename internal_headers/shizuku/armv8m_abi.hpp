@@ -32,8 +32,8 @@ constexpr uintptr_t fp_saved_begin(uintptr_t original_sp) {
 struct result {
   uintptr_t error;
   uintptr_t value;
-  uintptr_t value_high; // GET_TIME_US only; unspecified for other APIs
 };
+struct time_result { uintptr_t error, value, value_high; };
 
 // Entries use the one-word soft-float ABI. A normal C++ return ensures that
 // its AAPCS epilogue finishes before the common assembly return stub runs.
@@ -123,8 +123,9 @@ template <auto F> inline uintptr_t entry_address() {
 // saves, is in this single asm block after the runtime test.
 // ObserveScratch is reserved for the selftest: a4 supplies its output buffer.
 // GAS removes these instructions entirely from every normal instantiation.
-template <bool Service = false, bool ObserveScratch = false, bool ObserveFP = false>
-[[gnu::always_inline]] inline result syscall(uintptr_t number, uintptr_t a1 = 0,
+template <bool Service = false, bool ObserveScratch = false, bool ObserveFP = false,
+          bool TimeReply = false>
+[[gnu::always_inline]] inline std::conditional_t<TimeReply, time_result, result> syscall(uintptr_t number, uintptr_t a1 = 0,
                                              uintptr_t a2 = 0, uintptr_t a3 = 0,
                                              uintptr_t a4 = 0) {
   static_assert(!(ObserveScratch && ObserveFP));
@@ -203,7 +204,9 @@ template <bool Service = false, bool ObserveScratch = false, bool ObserveFP = fa
       "str r5, [r4, #64]\n"
       ".Lshizuku_observe_fp_inactive_%=:\n"
       ".endif\n"
-      "mov r6, r2\n" // preserve the third reply word across SP/FP restoration
+      ".if %c[time_reply]\n"
+      "mov r6, r2\n" // only the clock caller preserves the third reply word
+      ".endif\n"
       "ldr r2, [sp, #0]\n"
       "ldr r3, [sp, #4]\n"
       "ldr r7, [sp, #12]\n"
@@ -216,14 +219,18 @@ template <bool Service = false, bool ObserveScratch = false, bool ObserveFP = fa
       ".Lshizuku_no_fp_restore_%=:\n"
       "mov sp, r2\n"
       ".Lshizuku_converter_done_%=:\n"
+      ".if %c[time_reply]\n"
       "mov r2, r6\n"
+      ".endif\n"
       : "+r"(r0), "+r"(r1), "+r"(r2), "+r"(r3), "+r"(r12)
-      : [service] "i" (Service), [observe] "i" (ObserveScratch), [observe_fp] "i" (ObserveFP)
+      : [service] "i" (Service), [observe] "i" (ObserveScratch), [observe_fp] "i" (ObserveFP),
+        [time_reply] "i" (TimeReply)
       : "r4", "r5", "r6", "r8", "r9", "r10", "r11", "lr",
         "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7",
         "s8", "s9", "s10", "s11", "s12", "s13", "s14", "s15",
         "vfpcc", "cc", "memory");
-  return {r0, r1, r2};
+  if constexpr (TimeReply) return {r0, r1, r2};
+  else return {r0, r1};
 }
 
 } // namespace shizuku::armv8m_abi

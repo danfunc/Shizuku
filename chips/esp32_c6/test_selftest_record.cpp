@@ -15,6 +15,21 @@ void record_fail(const char *name, unsigned long got, unsigned long want);
 int main() {
     std::printf("[TEST] Running C6 selftest RAM record unit tests...\n");
 
+    shizuku_c6_selftest_record_init();
+    assert(sizeof(shizuku_c6_failure_record) == 64);
+    const char *failure_name = "stage1 unregistered failure";
+    for (unsigned i = 0; i < 6; ++i)
+        shizuku::selftest::record_fail(failure_name, 100u + i, 200u + i);
+    assert(shizuku_c6_failure_record.magic == 0x46364353u);
+    assert(shizuku_c6_failure_record.total == 6 && shizuku_c6_failure_record.stored == 4);
+    for (unsigned i = 0; i < 4; ++i) {
+        assert(shizuku_c6_failure_record.entries[i].name == uint32_t(reinterpret_cast<uintptr_t>(failure_name)));
+        assert(shizuku_c6_failure_record.entries[i].got == 100u + i);
+        assert(shizuku_c6_failure_record.entries[i].want == 200u + i);
+    }
+    shizuku_c6_selftest_record_init();
+    assert(shizuku_c6_failure_record.total == 0 && shizuku_c6_failure_record.stored == 0);
+
     // Every new clock check must have a stable diagnostic ID.
     const char *time_names[] = {"time: U reads succeed", "time: U monotonic",
         "time: privileged bracket", "time: counter enabled", "time: cost samples valid"};

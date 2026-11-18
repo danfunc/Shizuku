@@ -113,7 +113,6 @@ public:
   struct syscall_result {
     uintptr_t error;
     uintptr_t value;
-    uintptr_t value_high;
   };
 
   // 以下の policy 値は IntMode (チップ・割込み方式側) から受ける。generic は値を持たない。
@@ -210,6 +209,10 @@ public:
 
   static void set_result(exception_frame_t &frame, uintptr_t error,
                          uintptr_t value) {
+    // A replacement two-word reply must revoke a prior clock reply's a2
+    // authority. Keep the scrub policy even when replacing after a switch.
+    if (frame.mcause == RV32_TAG_TIME) frame.mcause = RV32_TAG_ECALL_SCRUB;
+    else if (frame.mcause == RV32_TAG_U_TIME) frame.mcause = RV32_TAG_U_SCRUB;
     frame.a0 = error;
     frame.a1 = value;
   }
@@ -596,11 +599,14 @@ public:
 #if defined(__riscv)
   // caller 側 ABI converter (shizuku/rv32_abi.hpp): カーネルは sp / pc / a0 / a1 以外を
   // 保証しない。callee-saved・ra・gp・tp の退避と復元は ecall の中 (クラバー + 明示退避)。
+  [[gnu::always_inline]] static rv32_abi::time_result get_time_us() {
+    return rv32_abi::ecall<true>((uintptr_t)shizuku::object_api::GET_TIME_US, 0, 0, 0, 0);
+  }
   [[gnu::always_inline]] static syscall_result syscall(uintptr_t number, uintptr_t a1 = 0,
                                 uintptr_t a2 = 0, uintptr_t a3 = 0,
                                 uintptr_t a4 = 0) {
     const auto result = rv32_abi::ecall(number, a1, a2, a3, a4);
-    return {result.error, result.value, result.value_high};
+    return {result.error, result.value};
   }
 
   [[gnu::always_inline]] static syscall_result syscall(uintptr_t number, uintptr_t a1,
@@ -608,10 +614,11 @@ public:
                                 uintptr_t a4, uintptr_t a5,
                                 uintptr_t a6, uintptr_t a7) {
     const auto result = rv32_abi::ecall(number, a1, a2, a3, a4, a5, a6, a7);
-    return {result.error, result.value, result.value_high};
+    return {result.error, result.value};
   }
 #else
   // 非-RISC-V 環境でのホスト呼出しを成功に見せる no-op は禁止。未対応時リンク不能とする。
+  static rv32_abi::time_result get_time_us();
   static syscall_result syscall(uintptr_t number, uintptr_t a1 = 0,
                                 uintptr_t a2 = 0, uintptr_t a3 = 0,
                                 uintptr_t a4 = 0);
