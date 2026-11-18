@@ -352,7 +352,8 @@ struct stack_probe_result {
   bool depth_matches;
   bool object_is_callee;
   bool chain_ok_before;
-  bool window_excludes_record;
+  bool u_window_excludes_record;   // 非特権の呼び先に張る窓 (shrink_stack_limit) の上端が record の 32B 下 (計算)
+  bool priv_region2_unprogrammed;  // 特権の呼び先では Region 2 は無効のまま (実機の RLAR を読む)
   bool tamper_detected;
   bool restored_ok;
   bool callee_registers_clear_of_record;
@@ -374,12 +375,18 @@ bool g_stack_probe_armed = false;
   probe.depth_matches = record->depth == kernel_instance.current_depth();
   probe.object_is_callee = record->object == OBJECT_DESC_TEST;
   probe.chain_ok_before = shizuku::stack_record_chain_ok(thread);
-  // 窓の排他的な上端は記録の位置から求めた ret_sp と一致する (記録は窓の外、ret_sp の 32B 上)。
+  // ★この呼び先は特権。特権の再開では stack 窓 (Region 2) は張らず無効にする (armv8m_prepare_resume) ので、
+  //   ここで読めるのは「無効のまま」であって、非特権の呼び先の窓ではない。窓の幾何は 2 つに分けて見る:
+  //   (1) 非特権の呼び先に張る窓 = shrink_stack_limit(thread の窓, 記録から求めた ret_sp)。その排他的な
+  //       上端が ret_sp と一致し、記録は窓の外 (ret_sp の 32B 上) にあること (prepare_resume と同じ式)。
+  //   (2) 特権の呼び先では Region 2 が無効 (RLAR の enable ビットが 0) であること。
+  const uintptr_t return_sp = ARCH::record_return_sp((uintptr_t)record);
+  const uintptr_t u_window_end =
+      (uintptr_t)(ARCH::shrink_stack_limit(thread.stack_rlar, return_sp) & ~0x1Fu) + 32u;
+  probe.u_window_excludes_record =
+      u_window_end == return_sp && u_window_end + ARCH::CALL_RECORD_OFFSET == (uintptr_t)record;
   shizuku::archs::ppb::mpu->rnr = ARCH::REGION_STACK;
-  const uintptr_t window_end = (uintptr_t)(shizuku::archs::ppb::mpu->rlar & ~0x1Fu) + 32u;
-  probe.window_excludes_record =
-      window_end == ARCH::record_return_sp((uintptr_t)record) &&
-      window_end + ARCH::CALL_RECORD_OFFSET == (uintptr_t)record;
+  probe.priv_region2_unprogrammed = (shizuku::archs::ppb::mpu->rlar & 1u) == 0;
   // 書き換え (特権の呼び先なら届く) を、先頭ポインタ・深さとの照合が検出する。
   const uint16_t saved_depth = record->depth;
   record->depth = (uint16_t)(saved_depth + 1u);
@@ -1106,8 +1113,10 @@ void call_ladder() {
             g_stack_probe.object_is_callee, 1);
       check("stack ledger: chain is consistent before tampering", g_stack_probe.chain_ok_before,
             g_stack_probe.chain_ok_before, 1);
-      check("stack ledger: callee stack window ends at ret_sp, 32 bytes below the record",
-            g_stack_probe.window_excludes_record, g_stack_probe.window_excludes_record, 1);
+      check("stack ledger: the window a U callee gets ends at ret_sp, 32 bytes below the record",
+            g_stack_probe.u_window_excludes_record, g_stack_probe.u_window_excludes_record, 1);
+      check("stack ledger: a privileged callee leaves the stack window (region 2) unprogrammed",
+            g_stack_probe.priv_region2_unprogrammed, g_stack_probe.priv_region2_unprogrammed, 1);
       check("stack ledger: a rewritten depth is detected by the kernel's head/depth check",
             g_stack_probe.tamper_detected, g_stack_probe.tamper_detected, 1);
       check("stack ledger: chain is consistent again after the record is restored",

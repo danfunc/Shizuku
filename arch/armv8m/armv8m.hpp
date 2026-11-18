@@ -761,23 +761,13 @@ public:
     apply_stack_window(rbar, rlar, core.index());
   }
 
-  // 実験 (--//configs:rp2350_skip_priv_stack_window): 直前に再開した context が特権だったか (core ごと)。
-  // 初期値は false = 最初の再開は必ず張る。stack 窓を張り替えずに済ませてよいのは「直前も今も特権」
-  // のときだけで、どちらかが非特権なら必ず張る。★stack 窓 (Region 2) の書込みはすべて region_program
-  // を通り、その影 (s_programmed_region) は実機の値と常に一致する。飛ばしても影は動かないので、次に
-  // 非特権を再開するときの「同じ値なら書かない」判定は正しいまま (古い値と違えば書く)。
-  static inline bool s_resumed_privileged[2] = {};
-  // 今回の再開 (now_privileged) を記録し、stack 窓を飛ばしてよいかを返す。
-  [[gnu::always_inline]] static inline bool stack_window_skippable(bool now_privileged, core_num core) {
-    bool &previous = s_resumed_privileged[core.index()];
-    const bool skippable = previous && now_privileged;
-    previous = now_privileged;
-    return skippable;
-  }
-  // 窓を張り替えた経路 (CTX_RESTORE) が、再開した context の特権を記録する。
-  [[gnu::always_inline]] static inline void note_resumed(bool now_privileged, core_num core) {
-    s_resumed_privileged[core.index()] = now_privileged;
-  }
+  // 特権が走るときの stack 窓 (Region 2) は「無効」(RLAR = 0) にする。特権は PRIVDEFENA で窓に制限されず、
+  // Region 2 の中身は特権の stack アクセスに効かない。無効 {0, 0} は region_program の影が正規化する値なので、
+  // 特権 → 特権の再開は影と同じ値になり **書込みも DSB も起きない** (追跡用の状態も分岐も要らない)。
+  // 非特権の再開は従来どおりその thread の窓 (呼び先なら shrink 済み) を張る = 非特権が絡む遷移では、
+  // 影と違えば必ず書く。影の更新は region_program が書込みと一体で行うので、影は実機の値と常に一致する。
+  static constexpr uint32_t PRIVILEGED_STACK_RBAR = 0;
+  static constexpr uint32_t PRIVILEGED_STACK_RLAR = 0;
 
   // 非特権の窓 (region 3/4) を id のものにする。すでにそうなら何も書かない。特権は PRIVDEFENA で
   // 全域に触れ、窓に制限されないので、特権の呼び先/呼び元のときは窓を触らない (呼ばない)。
