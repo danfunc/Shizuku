@@ -32,6 +32,7 @@ constexpr uintptr_t fp_saved_begin(uintptr_t original_sp) {
 struct result {
   uintptr_t error;
   uintptr_t value;
+  uintptr_t value_high; // GET_TIME_US only; unspecified for other APIs
 };
 
 // Entries use the one-word soft-float ABI. A normal C++ return ensures that
@@ -202,6 +203,7 @@ template <bool Service = false, bool ObserveScratch = false, bool ObserveFP = fa
       "str r5, [r4, #64]\n"
       ".Lshizuku_observe_fp_inactive_%=:\n"
       ".endif\n"
+      "mov r6, r2\n" // preserve the third reply word across SP/FP restoration
       "ldr r2, [sp, #0]\n"
       "ldr r3, [sp, #4]\n"
       "ldr r7, [sp, #12]\n"
@@ -214,13 +216,14 @@ template <bool Service = false, bool ObserveScratch = false, bool ObserveFP = fa
       ".Lshizuku_no_fp_restore_%=:\n"
       "mov sp, r2\n"
       ".Lshizuku_converter_done_%=:\n"
+      "mov r2, r6\n"
       : "+r"(r0), "+r"(r1), "+r"(r2), "+r"(r3), "+r"(r12)
       : [service] "i" (Service), [observe] "i" (ObserveScratch), [observe_fp] "i" (ObserveFP)
       : "r4", "r5", "r6", "r8", "r9", "r10", "r11", "lr",
         "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7",
         "s8", "s9", "s10", "s11", "s12", "s13", "s14", "s15",
         "vfpcc", "cc", "memory");
-  return {r0, r1};
+  return {r0, r1, r2};
 }
 
 } // namespace shizuku::armv8m_abi

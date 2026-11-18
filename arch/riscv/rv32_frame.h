@@ -58,10 +58,14 @@
 #define RV32_TAG_U_ENTRY 0x110
 #define RV32_TAG_U_ECALL 0x111
 #define RV32_TAG_U_SCRUB 0x112
+// Clock replies use the existing scrub exits, preserving a2 as the high word.
+// These tags remain valid across a thread switch; every other scratch is zero.
+#define RV32_TAG_TIME 0x102
+#define RV32_TAG_U_TIME 0x113
 // M-mode ECALL を a0 の番号で直接振り分ける表 (shizuku_rv32_ecall_table、chip の trap.cpp が持つ) の
-// 要素数。object_api の番号 0..33 (svc_attributes の大きさ) と同じ。範囲外の番号は 0 番の要素
+// 要素数。object_api の番号 0..34 (svc_attributes の大きさ) と同じ。範囲外の番号は 0 番の要素
 // (= thread mode の API・primitive・raw 配送を従来どおり決める共通の入口) に落とす。
-#define RV32_ECALL_TABLE_ENTRIES 34
+#define RV32_ECALL_TABLE_ENTRIES 35
 #define RV32_MSTATUS_MPP 0x1800
 #define RV32_MSTATUS_MPIE 0x80
 #endif

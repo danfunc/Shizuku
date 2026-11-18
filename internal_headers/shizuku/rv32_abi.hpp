@@ -69,6 +69,7 @@ template <auto F> inline uintptr_t entry_address() {
 struct call_result {
   uintptr_t error;
   uintptr_t value;
+  uintptr_t value_high; // GET_TIME_US only; unspecified for other APIs
 };
 
 #if defined(__riscv)
@@ -133,7 +134,7 @@ inline namespace lazy_save {
         "=r"(r_a5), "=r"(r_a6), "=r"(r_a7)
       :
       : SHIZUKU_RV32_ABI_SAVE_RESTORE_CLOBBERS);
-  return {r_a0, r_a1};
+  return {r_a0, r_a1, r_a2};
 }
 
 // a0 = 番号, a1..a7 = 引数 (CALL_METHOD_DESCRIPTOR は a2..a7 に 6 引数を載せる)。
@@ -163,7 +164,7 @@ inline namespace lazy_save {
         "+r"(r_a5), "+r"(r_a6), "+r"(r_a7)
       :
       : SHIZUKU_RV32_ABI_SAVE_RESTORE_CLOBBERS);
-  return {r_a0, r_a1};
+  return {r_a0, r_a1, r_a2};
 }
 #if defined(SHIZUKU_ABI_LAZY_SAVE)
 } // inline namespace lazy_save

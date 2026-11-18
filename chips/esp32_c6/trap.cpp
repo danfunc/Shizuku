@@ -887,6 +887,11 @@ SHIZUKU_HOT arch::exception_frame_t *ecall_get_current(arch::exception_frame_t *
     return k.svc_get_current(&context) ? native_status::DONE : native_status::FORWARD;
   });
 }
+SHIZUKU_HOT arch::exception_frame_t *ecall_get_time(arch::exception_frame_t *frame) {
+  return ecall_direct(frame, [](K &k, auto &, auto &context) {
+    return k.svc_get_time(&context) ? native_status::DONE : native_status::FORWARD;
+  });
+}
 SHIZUKU_HOT arch::exception_frame_t *ecall_get_caller(arch::exception_frame_t *frame) {
   return ecall_direct(frame, [](K &k, auto &, auto &context) {
     return k.svc_get_caller(&context) ? native_status::DONE : native_status::FORWARD;
@@ -904,6 +909,7 @@ constexpr auto make_ecall_table() {
   t[(unsigned)object_api::EXIT_METHOD] = &ecall_exit_method;
   t[(unsigned)object_api::CALL_METHOD] = &ecall_call_method;
   t[(unsigned)object_api::GET_CURRENT_OBJECT] = &ecall_get_current;
+  t[(unsigned)object_api::GET_TIME_US] = &ecall_get_time;
   t[(unsigned)object_api::GET_CALLER_OBJECT] = &ecall_get_caller;
   // 実行権を渡す API (切替えが起きる) は記帳つきの ecall_run を通る。
   t[(unsigned)object_api::YIELD] = &ecall_native<&K::svc_yield>;

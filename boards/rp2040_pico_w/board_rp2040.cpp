@@ -1,4 +1,5 @@
 #include "shizuku/kernel_services.hpp"
+#include "hardware/timer.h"
 #include <cstdarg>
 #include <cstdio>
 #include "hardware/clocks.h"
@@ -249,6 +250,15 @@ bool rp2040_pico_w::dma_busy(int ch){return dma_channel_is_busy((uint)ch);}
 void rp2040_pico_w::dma_release(int ch){dma_channel_unclaim((uint)ch);}
 uint32_t rp2040_pico_w::cycles_per_us(){return clock_get_hz(clk_sys)/1000000u;}
 uint64_t rp2040_pico_w::time_us(){return time_us_64();}
+bool rp2040_pico_w::try_time_us(uint64_t &out){
+  for(unsigned attempt=0;attempt<4;++attempt){
+    const uint32_t hi1=timer_hw->timerawh;
+    const uint32_t lo=timer_hw->timerawl;
+    const uint32_t hi2=timer_hw->timerawh;
+    if(hi1==hi2){out=(static_cast<uint64_t>(hi1)<<32)|lo;return true;}
+  }
+  return false;
+}
 uintptr_t rp2040_pico_w::unprivileged_floor(){return ((uintptr_t)__end__+31u)&~(uintptr_t)31u;}
 void rp2040_pico_w::diag_printf(const char*f,...){
   char line[384];

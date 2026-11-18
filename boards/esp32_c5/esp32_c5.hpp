@@ -43,6 +43,7 @@ public:
 
   static uint32_t core_num() { return 0; }
   static uint64_t time_us();
+  static bool try_time_us(uint64_t &out);
   static uint32_t cycles_per_us();
   static uintptr_t unprivileged_floor();
 

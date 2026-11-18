@@ -15,6 +15,16 @@ void record_fail(const char *name, unsigned long got, unsigned long want);
 int main() {
     std::printf("[TEST] Running C6 selftest RAM record unit tests...\n");
 
+    // Every new clock check must have a stable diagnostic ID.
+    const char *time_names[] = {"time: U reads succeed", "time: U monotonic",
+        "time: privileged bracket", "time: counter enabled", "time: cost samples valid"};
+    shizuku_c6_selftest_record_init();
+    for (unsigned i = 0; i < 5; ++i) {
+        shizuku_c6_selftest_record_assert(time_names[i], true, 0, 0);
+        assert(shizuku_c6_selftest_record.last_test_id == 0xB001u + i);
+        assert(shizuku_c6_selftest_record.failed == 0);
+    }
+
     // 1. 初期化状態の検証
     shizuku_c6_selftest_record_init();
     assert(shizuku_c6_selftest_record.magic == SHIZUKU_C6_SELFTEST_MAGIC);

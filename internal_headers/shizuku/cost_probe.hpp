@@ -19,9 +19,9 @@ constexpr xip_delta difference(xip_snapshot before, xip_snapshot after) {
   return {hit, access, access - hit, true, false};
 }
 
-// API numbers 0..33 and an out-of-range bucket. PendSV is intentionally not
+// API numbers 0..34 and an out-of-range bucket. PendSV is intentionally not
 // attributed to an API: a pend can be unrelated or coalesced.
-inline constexpr unsigned api_count = 34;
+inline constexpr unsigned api_count = 35;
 inline constexpr unsigned unknown_api = api_count;
 inline constexpr unsigned bucket_count = api_count + 1;
 constexpr unsigned bucket(uint32_t api) { return api < api_count ? api : unknown_api; }

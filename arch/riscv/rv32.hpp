@@ -7,6 +7,7 @@
 #include "arch/riscv/rv32_frame.h"
 #include "shizuku/concepts/arch.hpp"
 #include "shizuku/rv32_abi.hpp"
+#include "shizuku/object_api.hpp"
 #include "shizuku/stack_window.hpp"
 
 // 共通の RV32 trap 経路 (arch/riscv/rv32_trap.S) の入口・戻り口。
@@ -112,6 +113,7 @@ public:
   struct syscall_result {
     uintptr_t error;
     uintptr_t value;
+    uintptr_t value_high;
   };
 
   // 以下の policy 値は IntMode (チップ・割込み方式側) から受ける。generic は値を持たない。
@@ -212,6 +214,13 @@ public:
     frame.a1 = value;
   }
 
+  static void set_time_result(exception_frame_t &frame, shizuku::object_error error, uint64_t value) {
+    set_result(frame, (uintptr_t)error, uint32_t(value));
+    frame.a2 = uint32_t(value >> 32);
+    // These exits scrub every other scratch register, including after a switch.
+    frame.mcause = (frame.mstatus & RV32_MSTATUS_MPP) == 0
+                       ? RV32_TAG_U_TIME : RV32_TAG_TIME;
+  }
   static void set_entry(exception_frame_t &frame, uintptr_t pc, uintptr_t lr) {
     frame.mepc = pc;
     frame.ra = lr;
@@ -591,7 +600,7 @@ public:
                                 uintptr_t a2 = 0, uintptr_t a3 = 0,
                                 uintptr_t a4 = 0) {
     const auto result = rv32_abi::ecall(number, a1, a2, a3, a4);
-    return {result.error, result.value};
+    return {result.error, result.value, result.value_high};
   }
 
   [[gnu::always_inline]] static syscall_result syscall(uintptr_t number, uintptr_t a1,
@@ -599,7 +608,7 @@ public:
                                 uintptr_t a4, uintptr_t a5,
                                 uintptr_t a6, uintptr_t a7) {
     const auto result = rv32_abi::ecall(number, a1, a2, a3, a4, a5, a6, a7);
-    return {result.error, result.value};
+    return {result.error, result.value, result.value_high};
   }
 #else
   // 非-RISC-V 環境でのホスト呼出しを成功に見せる no-op は禁止。未対応時リンク不能とする。

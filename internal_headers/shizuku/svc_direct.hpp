@@ -23,15 +23,17 @@ enum class svc_direct_kind : uint8_t {
   CALL_METHOD,
   SET_BUDGET,
   CALL_DESCRIPTOR,
+  GET_TIME,
 };
 
-inline constexpr unsigned svc_direct_table_size = 34;
+inline constexpr unsigned svc_direct_table_size = 35;
 // 番号 → 種別。switch で書くのは、例外入口が番号を直接ジャンプ表 (tbb) にできるようにするため
 // (配列を引くと、フラッシュの表の読みと範囲検査が 1 段増える)。下の static_assert が全番号で
 // svc_attributes と突き合わせる。
 constexpr svc_direct_kind svc_direct_of(uintptr_t id) {
   switch (id) {
   case (uintptr_t)object_api::GET_CURRENT_OBJECT: return svc_direct_kind::GET_CURRENT;
+  case (uintptr_t)object_api::GET_TIME_US: return svc_direct_kind::GET_TIME;
   case (uintptr_t)object_api::GET_CALLER_OBJECT: return svc_direct_kind::GET_CALLER;
   case (uintptr_t)object_api::EXIT_METHOD: return svc_direct_kind::EXIT_METHOD;
   case (uintptr_t)object_api::FORWARD_CHILD_EXIT: return svc_direct_kind::FORWARD_CHILD_EXIT;

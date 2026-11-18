@@ -28,6 +28,7 @@ class arm_legacy_host_board {
   static bool dma_busy(int) { std::abort(); }
   static void dma_release(int) { std::abort(); }
   static uint64_t time_us() { return 0; }
+  static bool try_time_us(uint64_t &out) { out = 0; return true; }
   static uint32_t cycles_per_us() { return 1; }
   static uintptr_t unprivileged_floor() { return UINTPTR_MAX; }
   [[noreturn]] static void panic(const char *) { std::abort(); }

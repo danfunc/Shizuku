@@ -15,6 +15,7 @@
 #include "shizuku/core_num.hpp"
 #include "shizuku/kernel_abi.hpp"
 #include "shizuku/object_api.hpp"
+#include "shizuku/native_time.hpp"
 #include "shizuku/stack_window.hpp"
 #include "shizuku/svc_attributes.hpp"
 #include "shizuku/templates/thread.hpp"

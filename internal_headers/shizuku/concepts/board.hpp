@@ -19,6 +19,8 @@ namespace concepts {
 //   ★release が要る。掴んだきり返せないと**チャネルが漏れる**うえ、接続を
 //     畳めない = 詰まった接続を外す手段が無くなる (再起動しか無くなる)。
 // - time_us()      : 単調増加のマイクロ秒時刻 (全コア共通基準)
+// - try_time_us(out): trap-safe bounded read; false if hardware did not become
+//                    ready within a fixed number of reads. No unbounded wait.
 // - cycles_per_us(): タイマの刻みを µs から換算するための実クロック。
 //                    ★クロックを知っているのは board だけ (PORT §2.3)。上位は
 //                      µs でしか話さないので、クロックを変えても上位は無傷
@@ -31,7 +33,7 @@ namespace concepts {
 // ★クロック変更はこの層の API として実装し、固定分周ハードコードの追従まで
 //   board が面倒を見ること (PORT §2.3)。上位はクロックを直接触らない。
 template <typename BOARD>
-concept board_requires = requires(uint32_t core, const char *text) {
+concept board_requires = requires(uint32_t core, const char *text, uint64_t time) {
   { BOARD::init(core) };
   { BOARD::core_num() } -> std::same_as<uint32_t>;
   // もう一方のコアを起こす (CORE_COUNT == 1 の構成でも口は要る)。
@@ -45,6 +47,7 @@ concept board_requires = requires(uint32_t core, const char *text) {
   { BOARD::dma_busy(0) } -> std::same_as<bool>;
   { BOARD::dma_release(0) } -> std::same_as<void>;
   { BOARD::time_us() } -> std::same_as<uint64_t>;
+  { BOARD::try_time_us(time) } -> std::same_as<bool>;
   { BOARD::cycles_per_us() } -> std::same_as<uint32_t>;
   { BOARD::unprivileged_floor() } -> std::same_as<uintptr_t>;
   { BOARD::diag_printf(text) };

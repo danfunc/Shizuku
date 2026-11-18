@@ -14,6 +14,11 @@ struct name_id_entry {
 };
 
 static const name_id_entry kMapping[] = {
+    {"time: U reads succeed", 0xB001},
+    {"time: U monotonic", 0xB002},
+    {"time: privileged bracket", 0xB003},
+    {"time: counter enabled", 0xB004},
+    {"time: cost samples valid", 0xB005},
     // 0x1000 番台: call_ladder
     {"create object", 0x1001},
     {"call/1: error", 0x1002},

@@ -66,7 +66,7 @@ ecall = asm.split('.Lrv32_full_save:')[0]
 assert 'addi t0, t0, 4\n  sw t0, RV32_F_MEPC(sp)' in ecall
 assert 'li t0, RV32_ECALL_TABLE_ENTRIES\n  bltu a0, t0, .Lrv32_ecall_in_range\n  li a0, 0\n' in ecall
 assert 'slli a0, a0, 2\n  la t1, shizuku_rv32_ecall_table\n  add t1, t1, a0\n  lw t1, 0(t1)\n  j .Lrv32_save_done' in ecall
-assert '#define RV32_ECALL_TABLE_ENTRIES 34' in layout
+assert '#define RV32_ECALL_TABLE_ENTRIES 35' in layout
 # 戻りの出口は 3 つ (カーネルはルータに徹し、レジスタは素通し。.handoff/v3-design-notes.md §5g):
 #   RV32_TAG_ECALL       ECALL の普通の戻り。mepc / mstatus / a0 / a1 だけを読み、何も消さない。
 #   RV32_TAG_ECALL_SCRUB callee が自分の意思で戻らない巻き戻し・別スレッドの再開。読むのは同じ 4 つで、
@@ -99,7 +99,8 @@ assert not re.findall(r'mv (\w+), zero', exit_ecall)  # 素通しの出口は何
 assert exit_ecall.rstrip().endswith('mret')
 exit_scrub = asm.split('.Lrv32_exit_scrub:')[1].split('// ---- 呼び先の入口')[0]
 assert sorted(re.findall(r'lw (\w+), RV32_F_(\w+)\(sp\)', exit_scrub)) == sorted(
-    [('t0', 'MEPC'), ('t0', 'MSTATUS'), ('a0', 'A0'), ('a1', 'A1')])
+    [('t0', 'MCAUSE'), ('a2', 'A2'), ('t0', 'MEPC'), ('t0', 'MSTATUS'), ('a0', 'A0'), ('a1', 'A1')])
+assert 'mv a2, zero\n  lw t0, RV32_F_MCAUSE(sp)\n  li t1, RV32_TAG_TIME\n  bne t0, t1, 2f\n  lw a2, RV32_F_A2(sp)\n2:' in exit_scrub
 cleared = set(re.findall(r'mv (\w+), zero', exit_scrub))
 expected_cleared = {'ra', *(f't{i}' for i in range(7)), *(f'a{i}' for i in range(2, 8)),
                     *(f's{i}' for i in range(12))}
@@ -131,12 +132,18 @@ for _u_label in ('.Lrv32_umode_exit_ecall:', '.Lrv32_umode_exit_scrub:'):
 # U 出口での frame 各語のゼロ化 (sw zero, OFF(sp)) の存在と順序を検証
 for _u_label, _expected_zero_order in (
     ('.Lrv32_umode_exit_entry:', ['MEPC', 'MSTATUS', 'RA', 'A0', 'A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7', 'RESERVED1', 'RESERVED0']),
-    ('.Lrv32_umode_exit_ecall:', ['MEPC', 'MSTATUS', 'MCAUSE', 'A0', 'A1', 'RESERVED1', 'RESERVED0']),
-    ('.Lrv32_umode_exit_scrub:', ['MEPC', 'MSTATUS', 'MCAUSE', 'A0', 'A1', 'RESERVED1', 'RESERVED0']),
+    ('.Lrv32_umode_exit_ecall:', ['A2', 'MEPC', 'MSTATUS', 'MCAUSE', 'A0', 'A1', 'RESERVED1', 'RESERVED0']),
+    ('.Lrv32_umode_exit_scrub:', ['A2', 'MEPC', 'MSTATUS', 'MCAUSE', 'A0', 'A1', 'RESERVED1', 'RESERVED0']),
 ):
     _blk = asm.split(_u_label)[1].split('mret')[0]
     _zeroed = re.findall(r'sw\s+zero,\s+RV32_F_(\w+)\(sp\)', _blk)
     assert _zeroed == _expected_zero_order, (_u_label, _zeroed, _expected_zero_order)
+# The third word is loaded only for the dedicated clock reply. Ordinary U
+# returns keep a2 zero; clock replies also erase that word from the frame.
+_time_exit = asm.split('.Lrv32_umode_exit_scrub:')[1].split('mret')[0]
+assert 'mv a2, zero\n  lw t0, RV32_F_MCAUSE(sp)\n  li t1, RV32_TAG_U_TIME\n  bne t0, t1, 2f\n  lw a2, RV32_F_A2(sp)\n  sw zero, RV32_F_A2(sp)\n2:' in _time_exit
+assert 'li t1, RV32_TAG_U_TIME\n  beq t0, t1, .Lrv32_umode_exit_ecall' in restore
+assert 'li t1, RV32_TAG_TIME\n  beq t0, t1, .Lrv32_exit_scrub' in restore
 # U caller の再開フレームは user stack (caller の ret_sp - 144) 上に作られ、callee の窓 [sp-256, sp) に入る。
 # call_resume_at / set_unprivileged_resume_metadata が書く語 (+ 戻り値 a0/a1) は、U 出口 (ecall / scrub) が
 # 全部 sw zero で消さなければならない (残ると caller に非 0 の語が見える。目印 mcause=0x111 が残った実機不具合の再発防止)。
@@ -319,7 +326,7 @@ for name, call in (('exit_method', 'exit_in_place<K, shizuku::KERNEL_OBJECT, fal
                    ('call_method', 'call_method_in_place'), ('call_descriptor', 'call_descriptor_in_place')):
     body = trap_src.split(f'ecall_{name}(arch::exception_frame_t *frame) {{')[1].split('\n}\n')[0]
     assert 'ecall_direct(frame' in body and call in body, name
-for name in ('exit_method', 'call_method', 'get_current', 'get_caller', 'set_budget',
+for name in ('exit_method', 'call_method', 'get_current', 'get_caller', 'get_time', 'set_budget',
              'forward_child_exit', 'call_descriptor'):
     assert f'= &ecall_{name};' in trap_src, name
 

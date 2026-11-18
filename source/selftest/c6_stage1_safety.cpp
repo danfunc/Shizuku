@@ -24,6 +24,7 @@
 #include "shizuku/object_api.hpp"
 #include "shizuku/object_ids.hpp"
 #include "shizuku/selftest.hpp"
+#include "shizuku/time_cost_record.hpp"
 #include "chips/esp32_c6/selftest_record.h"
 #include "chips/esp32_c6/pmp_c6.hpp"
 
@@ -31,6 +32,7 @@ using c6_stage1_object_bounds = shizuku::chips::esp32_c6::c6_stage1_object_bound
 using c6_stage1_role = shizuku::chips::esp32_c6::c6_stage1_role;
 
 extern "C" {
+volatile shizuku_time_cost_record_t shizuku_time_cost_record = {};
 bool shizuku_c6_is_authorized_u_object(uint32_t owner_id, uint32_t current_obj);
 uintptr_t shizuku_c6_get_m_handler_stack(uintptr_t current_sp, uintptr_t frame_sp);
 bool shizuku_c6_is_dispatch_stack_address(uintptr_t addr);
@@ -127,6 +129,11 @@ asm(
     ".global u_mode_probe_worker\n"
     ".type u_mode_probe_worker, @function\n"
     "u_mode_probe_worker:\n"
+    // Extend the existing worker (no new trap entry or fastcall). 40=two
+    // clock reads, 41=2048 reads, 42=the same loop without ECALL.
+    "  addi t0, a0, -40\n"
+    "  li t1, 3\n"
+    "  bltu t0, t1, .Lprobe_time\n"
     // cmd 20..24 は U→U のサイクル計測用。一致するまで比較を重ねる並びだと cmd 番号で費用が変わるので、
     // 先頭で範囲を見て 8 バイト刻みの表で飛ぶ (どの cmd も同じ命令数で本体に着く)。
     "  addi t0, a0, -20\n"
@@ -193,6 +200,53 @@ asm(
     "  li t0, 32\n"
     "  beq a0, t0, .Lprobe_return_sp\n"
     "  li a0, 0\n"
+    "  ret\n"
+    "\n"
+    ".Lprobe_time:\n"
+    "  addi sp, sp, -48\n"
+    "  sw ra, 44(sp)\n"
+    "  sw zero, 32(sp)\n" // completed count survives scrubbed registers
+    "  li t1, 42\n"
+    "  sub t1, a0, t1\n"
+    "  sw t1, 40(sp)\n" // zero means baseline
+    "  li t1, 2048\n"
+    "  li t2, 40\n"
+    "  bne a0, t2, 1f\n"
+    "  li t1, 2\n"
+    "1: sw t1, 36(sp)\n"
+    "  la t1, u_mode_stage1_data_pool\n"
+    "  sw zero, 208(t1)\n"
+    "  sw zero, 212(t1)\n"
+    // This is an intra-probe loop, not a new entry: its 48-byte frame
+    // remains allocated across the back edge and every ECALL.
+    "4:\n"
+    "  li a0, 34\n"
+    "  li a1, 0\n"
+    "  li a2, 0\n"
+    "  lw t0, 40(sp)\n"
+    "  beqz t0, 1f\n"
+    "  ecall\n"
+    "  j 2f\n"
+    "1: li a0, 0\n"
+    "2: la t1, u_mode_stage1_data_pool\n"
+    "  lw t0, 208(t1)\n"
+    "  snez a0, a0\n"
+    "  add t0, t0, a0\n"
+    "  sw t0, 208(t1)\n"
+    "  lw t0, 32(sp)\n"
+    "  bnez t0, 3f\n"
+    "  sw a1, 192(t1)\n"
+    "  sw a2, 196(t1)\n"
+    "3: sw a1, 200(t1)\n"
+    "  sw a2, 204(t1)\n"
+    "  addi t0, t0, 1\n"
+    "  sw t0, 32(sp)\n"
+    "  sw t0, 212(t1)\n"
+    "  lw t1, 36(sp)\n"
+    "  bltu t0, t1, 4b\n"
+    "  li a0, 0\n"
+    "  lw ra, 44(sp)\n"
+    "  addi sp, sp, 48\n"
     "  ret\n"
     "\n"
     ".Lprobe_0x802:\n"
@@ -1277,6 +1331,57 @@ void stack_ledger_placement_check() {
 #endif
 
 // ---- U→U の往復サイクル計測 ------------------------------------------------------------
+static_assert((uintptr_t)object_api::GET_TIME_US == 34); // existing worker's immediate
+void time_bench() {
+  auto &r = shizuku_time_cost_record;
+  r.magic = 0x54494D45; r.version = 1; r.done = 0; r.rounds = 2048;
+  auto invoke = [](uintptr_t cmd) {
+    return ARCH::syscall((uintptr_t)object_api::CALL_METHOD,
+                         OBJECT_STAGE1_PROBE, METHOD_STAGE1_PROBE, cmd);
+  };
+  const uint64_t before = BOARD::time_us();
+  const auto pair = invoke(40);
+  const uint64_t after = BOARD::time_us();
+  auto *w = reinterpret_cast<volatile uint32_t *>(u_mode_stage1_data_pool) + 48;
+  const uint64_t first = (uint64_t(w[1]) << 32) | w[0];
+  const uint64_t last = (uint64_t(w[3]) << 32) | w[2];
+  const bool reads_ok = pair.error == 0 && pair.value == 0 && w[4] == 0 && w[5] == 2;
+  const bool monotonic = last >= first && last - first <= 1000000;
+  const bool bracket = before <= first && last <= after && after - before <= 1000000;
+  record_check("time: U reads succeed", reads_ok, w[4], 0);
+  record_check("time: U monotonic", monotonic, (unsigned long)(last - first), 1000000);
+  record_check("time: privileged bracket", bracket, (unsigned long)(after - before), 1000000);
+  r.first_low = uint32_t(first); r.first_high = uint32_t(first >> 32);
+  r.last_low = uint32_t(last); r.last_high = uint32_t(last >> 32);
+  r.before_low = uint32_t(before); r.before_high = uint32_t(before >> 32);
+  r.after_low = uint32_t(after); r.after_high = uint32_t(after >> 32);
+  r.counter_enabled = ARCH::cycle_counter_enable() ? 1 : 0;
+  record_check("time: counter enabled", r.counter_enabled == 1, r.counter_enabled, 1);
+  if (!r.counter_enabled) { r.done = 1; return; }
+  auto measure = [&](uintptr_t cmd, bool &ok) {
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    const uint32_t start = ARCH::cycle_counter_read();
+    const auto out = invoke(cmd);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    const uint32_t elapsed = ARCH::cycle_counter_read() - start;
+    ok = out.error == 0 && out.value == 0 && w[4] == 0 && w[5] == 2048;
+    return elapsed;
+  };
+  bool base_ok, raw_ok;
+  r.baseline_total = measure(42, base_ok);
+  r.raw_total = measure(41, raw_ok);
+  r.errors = w[4];
+  r.baseline_mean = r.baseline_total / r.rounds;
+  r.raw_mean = r.raw_total / r.rounds;
+  r.ok = reads_ok && monotonic && bracket && base_ok && raw_ok && r.raw_total > r.baseline_total;
+  r.net_mean = r.ok ? (r.raw_total - r.baseline_total) / r.rounds : 0;
+  record_check("time: cost samples valid", r.ok, r.errors, 0);
+  r.done = 1;
+  BOARD::diag_printf("[COST] GET_TIME_US U rounds=%lu baseline=%lu raw=%lu net=%lu cyc ok=%lu\n",
+      (unsigned long)r.rounds, (unsigned long)r.baseline_mean,
+      (unsigned long)r.raw_mean, (unsigned long)r.net_mean, (unsigned long)r.ok);
+}
+
 constexpr uint32_t U_COST_ROUNDS = 2048;
 constexpr uint32_t U_COST_WARMUP = 32;
 constexpr uintptr_t U_COST_CMD_METHOD_HOP = 20;
@@ -2020,6 +2125,7 @@ void c6_stage1_safety() {
                u2u_res2.error == 0 && u2u_res2.value == 0x42u,
                u2u_res2.value, 0x42u);
 
+  time_bench();
   u_cost_bench();
 
   // 15. 2回目の後の mscratch 健全性確認、および U callee 窓アクセス fault、caller 自窓復帰の検証
