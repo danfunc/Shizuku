@@ -28,6 +28,10 @@ struct profile_span {
   }
 };
 
+[[noreturn, gnu::noinline, gnu::cold]] static void corrupt_ledger() {
+  KERNEL::BOARD::panic("call ledger count underflow");
+}
+
 // The trusted limit of the activation that issued this SVC (not supplied by PSP).
 template <class Thread>
 [[gnu::always_inline]] inline uint32_t stack_ceiling(const Thread &activation) {
@@ -62,6 +66,15 @@ template <class Thread>
   asm volatile("msr psp, %0\nmsr psplim, %1\nmsr control, %2"
       :: "r"(context->sp), "r"(context->psplim), "r"(next_control) : "memory");
   probe(6, exc_return, api);
+}
+
+// Native call/exit bodies update context.sp, never hardware PSP. Read the original
+// PSP here, only on the scrub branch, instead of keeping it live through unwind.
+[[gnu::noinline, gnu::cold]] static void pend_tail(
+    KERNEL::CONTEXT *context, uint32_t exc_return, uint32_t api) {
+  uintptr_t psp;
+  asm volatile("mrs %0, psp" : "=r"(psp) :: "memory");
+  return_pended(context, psp, exc_return, api);
 }
 
 // General path: every number, every caller. Anything the direct bodies decline
@@ -121,6 +134,11 @@ template <svc_direct_kind Kind>
   constexpr bool scrubs = Kind == svc_direct_kind::EXIT_METHOD ||
                           Kind == svc_direct_kind::FORWARD_CHILD_EXIT;
   constexpr bool moves_caller = is_call || scrubs;
+  // CALL / EXIT use the lean body (adopted as the default). Profiling's destructor must still run
+  // after the hardware resume, so that diagnostic configuration (and every other Kind) stays on the
+  // original path, with its original lifetime.
+  constexpr bool lean = !service_profile::enabled &&
+      (Kind == svc_direct_kind::CALL_METHOD || Kind == svc_direct_kind::EXIT_METHOD);
   auto &kernel = kernel_instance;
   // core_num は trap 入口で一度だけ構築され以後引き回される。
   auto &thread = kernel.current_thread_on(core.index());
@@ -134,6 +152,7 @@ template <svc_direct_kind Kind>
   const uint32_t api = frame->r0;
   auto *context = thread.context;
   native::status result;
+  [[maybe_unused]] bool caller_moved = false;
   {
     profile_span profile;
     probe(0, exc_return, api);
@@ -141,10 +160,17 @@ template <svc_direct_kind Kind>
     context->exc_return = exc_return;
     context->control = control;
     if constexpr (is_call) context->stack_ceiling = stack_ceiling(thread);
-    [[maybe_unused]] const auto depth = thread.call_stack.depth;
+    [[maybe_unused]] const auto depth = [&] {
+      if constexpr (lean && Kind == svc_direct_kind::CALL_METHOD) return uint32_t{0};
+      else return thread.call_stack.depth;
+    }();
     probe(1, exc_return, api);
     if constexpr (Kind == svc_direct_kind::CALL_METHOD) {
-      native::call_method_in_place(kernel, thread, *context, kernel_object_instance, core);
+      if constexpr (lean)
+        caller_moved = native::try_call_method_in_place(
+            kernel, thread, *context, kernel_object_instance, core);
+      else
+        native::call_method_in_place(kernel, thread, *context, kernel_object_instance, core);
       result = native::status::DONE;
     } else if constexpr (Kind == svc_direct_kind::CALL_DESCRIPTOR) {
       native::call_descriptor_in_place(kernel, thread, *context, kernel_object_instance, core);
@@ -174,22 +200,38 @@ template <svc_direct_kind Kind>
       } else {
         if constexpr (scrubs) {
           if (ARCH::s_resume_scrub[core.index()]) {
-            return_pended(context, psp, exc_return, api);
-            return;
+            if constexpr (lean) return pend_tail(context, exc_return, api);
+            else {
+              return_pended(context, psp, exc_return, api);
+              return;
+            }
           }
         }
-        if ((uintptr_t)context->sp == psp && frame->pc == pc &&
-            context->control == control && thread.call_stack.depth == depth) {
-          probe_return(exc_return, api);
+        if constexpr (lean) {
+          // CALL reports entry directly; no old depth survives its resolution.
+          // EXIT on DONE either rejects unchanged or pops at least one record.
+          if constexpr (Kind == svc_direct_kind::EXIT_METHOD)
+            caller_moved = thread.call_stack.depth != depth;
+          if (!caller_moved) {
+            probe_return(exc_return, api);
+            return;
+          }
+          return_resumed(context, thread, core, exc_return, api);
+          return;
+        } else {
+          if ((uintptr_t)context->sp == psp && frame->pc == pc &&
+              context->control == control && thread.call_stack.depth == depth) {
+            probe_return(exc_return, api);
+            return;
+          }
+          return_resumed(context, thread, core, exc_return, api);
           return;
         }
-        return_resumed(context, thread, core, exc_return, api);
-        return;
       }
     }
   }
   // The ledger was partly unwound: the same stop the general path reaches.
-  if (result == native::status::CORRUPT) KERNEL::BOARD::panic("call ledger count underflow");
+  if (result == native::status::CORRUPT) corrupt_ledger(); // cold, noreturn (same panic message)
   return generic(exc_return, core);
 }
 

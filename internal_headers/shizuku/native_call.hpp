@@ -409,8 +409,10 @@ requires (!arch_has_core_num<typename K::ARCH>)
 
 // CALL_METHOD (4): a1 = オブジェクト ID, a2 = メソッド番号, a3 = 引数。応答は (error, 0)。
 //   エラーの種類・順序: BAD_OBJECT → NOT_PRIVILEGED → BAD_METHOD → UNDECLARED_METHOD → NO_STACK。
+// Return whether a record was pushed and the callee entered. Direct handlers can
+// use this outcome instead of retaining the caller's old depth through resolution.
 template <class K, class KObj>
-[[gnu::always_inline]] inline void call_method_in_place(K &kernel,
+[[gnu::always_inline]] inline bool try_call_method_in_place(K &kernel,
                                                         typename K::THREAD &thread,
                                                         typename K::CONTEXT &context,
                                                         KObj &kobj,
@@ -427,7 +429,7 @@ template <class K, class KObj>
       const auto *row = kobj.find_method_row(id, A::arg(frame, 2), caller_id, error, entry);
       if (row == nullptr) {
         A::set_result(frame, (uintptr_t)error, 0);
-        return;
+        return false;
       }
       const uintptr_t argument = A::arg(frame, 3);
       const kernel_error entered = enter_in_place<K, KObj>(
@@ -437,7 +439,7 @@ template <class K, class KObj>
         A::set_result(frame, (uintptr_t)(entered == kernel_error::NO_STACK
                                              ? object_error::NO_STACK
                                              : object_error::BAD_OBJECT), 0);
-        return;
+        return false;
       }
       A::set_method_argument(frame, argument);
     } else {
@@ -449,7 +451,7 @@ template <class K, class KObj>
       const auto resolved = resolve_method_view(kobj, id, A::arg(frame, 2), caller_id, error, entry);
       if (!resolved.found) {
         A::set_result(frame, (uintptr_t)error, 0);
-        return;
+        return false;
       }
       const uintptr_t argument = A::arg(frame, 3);
       const kernel_error entered = enter_in_place<K, KObj>(
@@ -460,13 +462,26 @@ template <class K, class KObj>
                                              ? object_error::NO_STACK
                                              : object_error::BAD_OBJECT),
                       0);
-        return;
+        return false;
       }
       // 呼び先の引数は a0 (ARM では r0) = argument だけ。a1 以降は書かない (caller の入力のまま素通し。
       // 呼び先は宣言した引数以外を信用しない)。
       A::set_method_argument(frame, argument);
     }
+    return true;
+  } else {
+    return false;
   }
+}
+
+// Preserve the existing void API for every caller that does not need the outcome.
+template <class K, class KObj>
+[[gnu::always_inline]] inline void call_method_in_place(K &kernel,
+                                                        typename K::THREAD &thread,
+                                                        typename K::CONTEXT &context,
+                                                        KObj &kobj,
+                                                        core_arg_t<typename K::ARCH> core) {
+  (void)try_call_method_in_place<K, KObj>(kernel, thread, context, kobj, core);
 }
 
 template <class K, class KObj>

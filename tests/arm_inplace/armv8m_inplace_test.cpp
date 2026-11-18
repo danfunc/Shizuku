@@ -85,6 +85,10 @@ int main() {
   run_inplace_descriptor_call_success<adapter>("ARMv8-M");
   test_rv32_descriptor_contrast();
   run_inplace_method_failures_ledger_invariant<adapter>("ARMv8-M");
+  // Exercise the outcome-returning call body's multi-core branch as well as the
+  // single-core branch above. The mock resolver is not an atomic snapshot test.
+  run_inplace_method_call_success<adapter, mock_multicore_kernel<adapter>>("ARMv8-M/2-core");
+  run_inplace_method_failures_ledger_invariant<adapter, mock_multicore_kernel<adapter>>("ARMv8-M/2-core");
   run_inplace_descriptor_failures_ledger_invariant<adapter>("ARMv8-M");
   run_inplace_stack_push_pop<adapter>("ARMv8-M");
   run_inplace_return_window_current_row<adapter>("ARMv8-M");

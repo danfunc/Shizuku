@@ -193,6 +193,11 @@ struct mock_kernel {
   }
 };
 
+template <typename Adapter>
+struct mock_multicore_kernel : mock_kernel<Adapter> {
+  static constexpr uint32_t CORE_COUNT = 2;
+};
+
 struct mock_kobj {
   using method_t = uintptr_t;
   static constexpr uintptr_t MAX_DEPTH = 8;
@@ -343,10 +348,10 @@ auto &record_at_depth(Thread &thread, uint32_t index) {
   return *r;
 }
 
-template <typename Adapter>
+template <typename Adapter, typename Kernel = mock_kernel<Adapter>>
 void run_inplace_method_call_success(const char *tag) {
   const auto core = make_test_core<Adapter>(0);
-  mock_kernel<Adapter> kernel;
+  Kernel kernel;
   mock_kobj kobj;
   typename mock_kernel<Adapter>::CONTEXT ctx{};
   stack_slot<Adapter> slot{};
@@ -369,8 +374,9 @@ void run_inplace_method_call_success(const char *tag) {
   frame.r3 = 0xCAFEBABEu; // Argument
   frame.r12 = 0x12121212u; // Passthrough canary
 
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core);
+  const bool moved = shizuku::native::try_call_method_in_place(kernel, thread, ctx, kobj, core);
 
+  assert(moved);
   assert(frame.r0 == 0xCAFEBABEu);
   assert(frame.pc == 0x10002000u);
   assert(frame.lr == Adapter::return_stub());
@@ -439,15 +445,24 @@ void run_inplace_descriptor_call_success(const char *tag) {
   printf("  [%s] PASS: descriptor_call_success (ARM 1-arg D2(a))\n", tag);
 }
 
-template <typename Adapter>
+template <typename Adapter, typename Kernel = mock_kernel<Adapter>>
 void run_inplace_method_failures_ledger_invariant(const char *tag) {
   const auto core = make_test_core<Adapter>(0);
-  mock_kernel<Adapter> kernel;
+  Kernel kernel;
   mock_kobj kobj;
   typename mock_kernel<Adapter>::CONTEXT ctx{};
   stack_slot<Adapter> slot{};
   auto &frame = slot.frame;
   ctx.sp = &frame;
+  frame.pc = 0x10001234u;
+  ctx.control = Adapter::CONTROL_PRIV_PSP;
+  // W8's movement check relies on every rejection leaving the caller
+  // where it was, even though r0/r1 contain the error response.
+  const auto unchanged_caller = [&] {
+    assert(ctx.sp == &frame);
+    assert(frame.pc == 0x10001234u);
+    assert(ctx.control == Adapter::CONTROL_PRIV_PSP);
+  };
 
   typename mock_kernel<Adapter>::THREAD thread;
   thread.base_object = 3;
@@ -457,8 +472,10 @@ void run_inplace_method_failures_ledger_invariant(const char *tag) {
   frame.r1 = mock_kobj::OBJECT_COUNT + 1;
   frame.r2 = 0;
   frame.r3 = 42;
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core);
+  const bool bad_object_moved = shizuku::native::try_call_method_in_place(kernel, thread, ctx, kobj, core);
+  assert(!bad_object_moved);
   assert(frame.r0 == (uint32_t)shizuku::object_error::BAD_OBJECT);
+  unchanged_caller();
   assert(thread.call_stack.depth == 0);
   assert(thread.call_stack.call_count == 0);
 
@@ -467,8 +484,10 @@ void run_inplace_method_failures_ledger_invariant(const char *tag) {
   frame.r1 = 5;
   frame.r2 = 0;
   frame.r3 = 42;
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core);
+  const bool denied_moved = shizuku::native::try_call_method_in_place(kernel, thread, ctx, kobj, core);
+  assert(!denied_moved);
   assert(frame.r0 == (uint32_t)shizuku::object_error::NOT_PRIVILEGED);
+  unchanged_caller();
   assert(thread.call_stack.depth == 0);
   assert(thread.call_stack.call_count == 0);
 
@@ -478,8 +497,10 @@ void run_inplace_method_failures_ledger_invariant(const char *tag) {
   frame.r1 = 5;
   frame.r2 = 99;
   frame.r3 = 42;
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core);
+  const bool bad_method_moved = shizuku::native::try_call_method_in_place(kernel, thread, ctx, kobj, core);
+  assert(!bad_method_moved);
   assert(frame.r0 == (uint32_t)shizuku::object_error::BAD_METHOD);
+  unchanged_caller();
   assert(thread.call_stack.depth == 0);
 
   // 4. Undeclared Method
@@ -487,8 +508,10 @@ void run_inplace_method_failures_ledger_invariant(const char *tag) {
   frame.r1 = 5;
   frame.r2 = 7;
   frame.r3 = 42;
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core);
+  const bool undeclared_moved = shizuku::native::try_call_method_in_place(kernel, thread, ctx, kobj, core);
+  assert(!undeclared_moved);
   assert(frame.r0 == (uint32_t)shizuku::object_error::UNDECLARED_METHOD);
+  unchanged_caller();
   assert(thread.call_stack.depth == 0);
 
   // 5. 記録の枠が取れない (STACK の深さの上限は stack の余地で決まる。LEAN の MAX_DEPTH / 台帳容量の検査の代わり)。
@@ -501,9 +524,11 @@ void run_inplace_method_failures_ledger_invariant(const char *tag) {
   frame.r1 = 5;
   frame.r2 = 0;
   frame.r3 = 42;
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core);
+  const bool no_stack_moved = shizuku::native::try_call_method_in_place(kernel, thread, ctx, kobj, core);
   Adapter::record_room = true;
+  assert(!no_stack_moved);
   assert(frame.r0 == (uint32_t)shizuku::object_error::NO_STACK);
+  unchanged_caller();
   assert(thread.call_stack.depth == 0);
   assert(thread.call_stack.call_count == 0);
   assert(thread.call_stack.top == 0);
@@ -861,6 +886,9 @@ void run_inplace_exit_validation(const char *tag) {
   slots[1].frame.r3 = (uint32_t)shizuku::object_error::OK;
 
   mock_kobj kobj;
+  const auto *rejected_sp = ctx.sp;
+  const auto rejected_pc = ctx.sp->pc;
+  const auto rejected_control = ctx.control;
   auto st_rejected = shizuku::native::exit_in_place<mock_kernel<Adapter>, mock_kobj, false>(
       kernel, kobj, thread, ctx, core);
   assert(st_rejected == shizuku::native::status::DONE);
@@ -868,6 +896,8 @@ void run_inplace_exit_validation(const char *tag) {
   assert(slots[1].frame.r1 == (uint32_t)shizuku::kernel_error::DEPTH_MISMATCH);
   assert(thread.call_stack.depth == 2);
   assert(thread.call_stack.call_count == 2);
+  assert(ctx.sp == rejected_sp && ctx.sp->pc == rejected_pc);
+  assert(ctx.control == rejected_control);
 
   // 2. Test valid 1-step return: d=1 from depth=2 (floor=1)
   slots[1].frame.r0 = (uint32_t)shizuku::object_api::EXIT_METHOD;
