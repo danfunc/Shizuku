@@ -218,7 +218,7 @@ selects.config_setting_group(
 #   なく pico-sdk の PICO_CONFIG_EXTRA_HEADER 経由で入れる。.bazelrc で指している。
 bool_flag(
     name = "rp2350_copy_to_ram",
-    build_setting_default = True,
+    build_setting_default = False,
     visibility = ["//visibility:public"],
 )
 config_setting(
@@ -228,6 +228,16 @@ config_setting(
 selects.config_setting_group(
     name = "rp2350_copy_to_ram_enabled",
     match_all = [":rp2350", ":rp2350_copy_to_ram_flag_on"],
+    visibility = ["//visibility:public"],
+)
+bool_flag(
+    name = "c6_iram_measure",
+    build_setting_default = False,
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "c6_iram_measure_enabled",
+    flag_values = {":c6_iram_measure": "true"},
     visibility = ["//visibility:public"],
 )
 expand_template(

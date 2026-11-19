@@ -347,6 +347,7 @@ shizuku_armv8m_enter_thread_mode:
 .align 2
 .type shizuku_armv8m_fault_entry, %function
 shizuku_armv8m_fault_entry:
+#if SHIZUKU_RP2350_BOOT_DIAG
     // Boot faults can precede kernel/context initialization. Capture the raw
     // hardware frame before CTX_SAVE asks the kernel for a current thread.
     // The board hook returns for expected Thread/PSP fault selftests.
@@ -360,6 +361,7 @@ shizuku_armv8m_fault_entry:
     addeq r1, r1, #24  // original MSP, before our aligned save
     bl   shizuku_rp2350_boot_fault
     pop  {r0-r3, r12, lr}
+#endif
 #if defined(SHIZUKU_SELFTEST_PROGRESS) && SHIZUKU_SELFTEST_PROGRESS > 0
     // 診断専用: CTX_SAVE (PSP へ積む) より前に、fault の素性だけを MSP 上の C で記録する。
     push {r0-r3, r12, lr}

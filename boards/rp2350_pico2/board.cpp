@@ -51,7 +51,9 @@ namespace shizuku {
 namespace boards {
 
 void rp2350_pico2::init(uint32_t core) {
+#if PICO_COPY_TO_RAM
   if (core == 0) shizuku_rp2350_boot_stage(31);
+#endif
   if (core == 0) {
     // RAM ベクタテーブルは両コア共有: 登録は core0 の 1 回だけ
     // (exclusive 登録は二重登録で panic するため、core1 で再登録しない)。
@@ -101,9 +103,13 @@ void rp2350_pico2::init(uint32_t core) {
   exception_set_priority(SVCALL_EXCEPTION, SOC_TYPE::kPrioritySvc);
   exception_set_priority(SYSTICK_EXCEPTION, SOC_TYPE::kPrioritySysTick);
   exception_set_priority(PENDSV_EXCEPTION, SOC_TYPE::kPriorityLowest);
+#if PICO_COPY_TO_RAM
   if (core == 0) shizuku_rp2350_boot_stage(32);
+#endif
   protection_init(); // region は per-core banked なので各コアで張る
+#if PICO_COPY_TO_RAM
   if (core == 0) shizuku_rp2350_boot_stage(33);
+#endif
 
   // ---- 落ちたときに必ず声が出るようにする -------------------------------
   // ★診断が届くかどうかは優先度で決まる。報告している最中に USB の割り込みが
@@ -146,13 +152,14 @@ void rp2350_pico2::protection_init() {
   // SDK の .text 終端は 4B 整列なので、次の .data と重ならないようリンカ側で 32B に揃える。
   const uintptr_t code_start = (uintptr_t)__ram_text_start__;
   const uintptr_t code_end = (uintptr_t)__ram_text_end__ - 1u;
-#else
-  const uintptr_t code_start = SOC_TYPE::kXipBase;
-  const uintptr_t code_end =
-      ((uintptr_t)&__flash_binary_end + 31u) & ~(uintptr_t)31;
-#endif
   ARCH_TYPE::region_set(0, code_start, code_end, ARCH_TYPE::ACCESS_RO_ALL,
                         false, 0);
+#else
+  const uintptr_t code_end =
+      ((uintptr_t)&__flash_binary_end + 31u) & ~(uintptr_t)31;
+  ARCH_TYPE::region_set(0, SOC_TYPE::kXipBase, code_end, ARCH_TYPE::ACCESS_RO_ALL,
+                        false, 0);
+#endif
   // Region 1: SRAM 全域 RW は撤廃。SRAM は PRIVDEFENA (特権 RWX, 非特権 None) に委ね、
   // 非特権オブジェクトには Region 2(Stack), Region 3(Data), Region 4(MMIO) を動的に張る。
   for (uint32_t index = 1; index < SOC_TYPE::kMpuRegionCount; ++index)
@@ -421,6 +428,7 @@ void rp2350_pico2::dma_copy(int channel, const void *from, void *to,
 int rp2350_pico2::dma_claim() { return ::dma_claim_unused_channel(false); }
 
 uint64_t rp2350_pico2::time_us() {
+#if PICO_COPY_TO_RAM
   // pico-sdk timer_time_us_64 と同じ high/low/high の読み方。SDK の関数を呼ばない。
   uint32_t hi = timer_hw->timerawh;
   for (;;) {
@@ -429,6 +437,9 @@ uint64_t rp2350_pico2::time_us() {
     if (hi == next_hi) return (static_cast<uint64_t>(hi) << 32) | lo;
     hi = next_hi;
   }
+#else
+  return ::time_us_64();
+#endif
 }
 bool rp2350_pico2::try_time_us(uint64_t &out) {
   for (unsigned attempt = 0; attempt < 4; ++attempt) {

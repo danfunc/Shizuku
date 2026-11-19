@@ -9,6 +9,7 @@
 #include "pico/stdlib.h"
 #include <cstdio>
 
+#if PICO_COPY_TO_RAM
 extern "C" void shizuku_armv8m_fault_entry();
 extern "C" uint32_t __vectors[], __vectors_end[];
 namespace {
@@ -133,3 +134,4 @@ extern "C" void shizuku_rp2350_boot_recover_if_needed() {
     sleep_ms(250); // USB IRQ/alarm polling works without Shizuku bootstrap
   }
 }
+#endif

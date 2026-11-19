@@ -39,6 +39,7 @@ printf '%s\\n%s\\n' "$IDF_PATH" "$IDF_TOOLS_PATH" > "$MOCK_ENV_LOG"
 if [ "$1" = "--version" ]; then echo "ESP-IDF v6.1"; exit 0; fi
 build_dir=""
 args="$*"
+printf '%s\\n' "$args" >> "$MOCK_ARGS_LOG"
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "-B" ]; then shift; build_dir="$1"; fi
   shift
@@ -54,8 +55,12 @@ esac
                 "IDF_PATH": "mock-idf",
                 "IDF_TOOLS_PATH": "mock-tools",
                 "MOCK_ENV_LOG": str(env_log),
+                "MOCK_ARGS_LOG": str(root / "idf-args.log"),
+                # This fixture checks forwarding, not PMA validation of real ELFs.
+                "SHIZUKU_C6_UMODE": "off",
                 "PATH": f"{os.environ['PATH']}:{bin_dir}",
             })
+            env.pop("SHIZUKU_C6_IRAM_MEASURE", None)
             positive = subprocess.run(
                 ["bash", str(BUILD_SH), "kernel.a", "out/image.bin", "esp-15.2.0_20251204"],
                 cwd=root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -63,6 +68,31 @@ esac
             self.assertEqual(positive.returncode, 0, positive.stderr + positive.stdout)
             self.assertEqual(env_log.read_text().splitlines(), [str(idf.resolve()), str(tools.resolve())])
             self.assertEqual((root / "out" / "image.bin").read_bytes(), b"\xe9fixture")
+            args_log = root / "idf-args.log"
+            commands = args_log.read_text().splitlines()
+            self.assertEqual(len(commands), 2) # set-target and build
+            self.assertTrue(all("-DSHIZUKU_C6_IRAM_MEASURE=off" in line for line in commands))
+            for mode in ("on", "off"):
+                args_log.write_text("")
+                measure_env = env.copy()
+                measure_env["SHIZUKU_C6_IRAM_MEASURE"] = mode
+                forwarded = subprocess.run(
+                    ["bash", str(BUILD_SH), "kernel.a", f"out/{mode}.bin", "esp-15.2.0_20251204"],
+                    cwd=root, env=measure_env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                self.assertEqual(forwarded.returncode, 0, forwarded.stderr + forwarded.stdout)
+                commands = args_log.read_text().splitlines()
+                self.assertEqual(len(commands), 2)
+                self.assertTrue(all(f"-DSHIZUKU_C6_IRAM_MEASURE={mode}" in line for line in commands))
+            bad_mode_env = env.copy()
+            bad_mode_env["SHIZUKU_C6_IRAM_MEASURE"] = "invalid"
+            rejected = subprocess.run(
+                ["bash", str(BUILD_SH), "kernel.a", "out/bad-mode.bin", "esp-15.2.0_20251204"],
+                cwd=root, env=bad_mode_env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("SHIZUKU_C6_IRAM_MEASURE", rejected.stderr)
+            self.assertFalse((root / "out" / "bad-mode.bin").exists())
 
             negative_env = env.copy()
             negative_env["MOCK_NO_PYTHON"] = "1"

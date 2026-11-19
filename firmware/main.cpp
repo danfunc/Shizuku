@@ -14,7 +14,7 @@
 #include "shizuku/objects/peripherals.hpp"
 #include "shizuku/selftest.hpp"
 
-#if !defined(SHIZUKU_RP2040)
+#if !defined(SHIZUKU_RP2040) && PICO_COPY_TO_RAM
 #include "boards/rp2350_pico2/boot_diag.hpp"
 #define RP2350_BOOT_STAGE(stage) shizuku_rp2350_boot_stage(stage)
 #define RP2350_BOOT_POLL() shizuku_rp2350_boot_poll()

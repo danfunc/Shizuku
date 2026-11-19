@@ -25,7 +25,7 @@ if(SHIZUKU_ESP_BLE OR SHIZUKU_C5_BLE OR "$ENV{SHIZUKU_ESP_BLE}" STREQUAL "1" OR 
            "../../freertos_compat/shizuku_port.cpp"
       PRIV_REQUIRES ${shizuku_ble_priv_requires})
 else()
-  if(IDF_TARGET STREQUAL "esp32c6")
+  if(IDF_TARGET STREQUAL "esp32c6" AND SHIZUKU_C6_IRAM_MEASURE STREQUAL "on")
     set(shizuku_ram_fragments "shizuku_ram.lf")
   else()
     set(shizuku_ram_fragments "")

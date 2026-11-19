@@ -48,7 +48,6 @@ cc_library(
     target_compatible_with = ["@pico-sdk//bazel/constraint:rp2350"],
     deps = [
         ":headers",
-        ":boot_diag",
         "//arch/armv8m:ctx",
         "//:kernel",
         "//configs:config",
@@ -61,5 +60,8 @@ cc_library(
         "@pico-sdk//src/rp2_common/hardware_watchdog",
         "@pico-sdk//src/rp2_common/pico_multicore",
         "@pico-sdk//src/rp2_common/pico_stdlib",
-    ],
+    ] + select({
+        "//configs:rp2350_copy_to_ram_enabled": [":boot_diag"],
+        "//conditions:default": [],
+    }),
 )

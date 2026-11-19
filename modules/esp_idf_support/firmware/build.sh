@@ -86,6 +86,12 @@ if [ "$C6_UMODE" = on ] && [ "$TARGET" != esp32c6 ]; then
   C6_UMODE=off
 fi
 IDF_PROFILE_ARGS=("-DSHIZUKU_C6_UMODE=$C6_UMODE")
+C6_IRAM_MEASURE=${SHIZUKU_C6_IRAM_MEASURE:-off}
+case "$C6_IRAM_MEASURE" in off|on) ;; *) fail "SHIZUKU_C6_IRAM_MEASURE は off|on のどちらか: $C6_IRAM_MEASURE" ;; esac
+if [ "$TARGET" != esp32c6 ]; then
+  C6_IRAM_MEASURE=off
+fi
+IDF_PROFILE_ARGS+=("-DSHIZUKU_C6_IRAM_MEASURE=$C6_IRAM_MEASURE")
 case "$PROFILE" in
   "") ;;
   ble)
