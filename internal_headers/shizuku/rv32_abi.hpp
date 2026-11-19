@@ -32,7 +32,8 @@ inline constexpr unsigned CALL_HEADER_BYTES = 32;
 //      caller の tp がそのまま正しい (オブジェクト単位の TLS は無い)。
 #if defined(__riscv)
 // ★SHIZUKU_HOT は付けない: __COUNTER__ がテンプレート定義時に 1 回しか評価されず、全実体化が同じ
-//   .iram1.N に入って COMDAT と内部リンケージの実体化が section type conflict になる。stub は数命令で flash のまま。
+//   .iram1.N に入って COMDAT と内部リンケージの実体化が section type conflict になる。
+//   計測 firmware は main/shizuku_ram.lf の archive mapping で、この .text を IRAM に置く。
 template <auto F> [[gnu::naked, gnu::used]] void method_stub_body() {
   asm volatile(
       ".option push\n"

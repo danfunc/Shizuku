@@ -1,10 +1,37 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
+    name = "boot_diag_record",
+    hdrs = ["boot_diag_record.hpp"],
+)
+
+cc_test(
+    name = "boot_diag_record_test",
+    srcs = ["boot_diag_record_test.cpp"],
+    deps = [":boot_diag_record"],
+)
+
+cc_library(
+    name = "boot_diag",
+    srcs = ["boot_diag.cpp"],
+    hdrs = ["boot_diag.hpp"],
+    copts = ["-mgeneral-regs-only", "-fno-builtin"],
+    alwayslink = True,
+    target_compatible_with = ["@pico-sdk//bazel/constraint:rp2350"],
+    deps = [
+        ":boot_diag_record",
+        "//chips/rp2350:headers",
+        "@pico-sdk//src/rp2_common/hardware_watchdog",
+        "@pico-sdk//src/rp2_common/pico_runtime_init",
+        "@pico-sdk//src/rp2_common/pico_stdlib",
+    ],
+)
+
+cc_library(
     name = "headers",
-    hdrs = ["rp2350_pico2.hpp"],
+    hdrs = ["rp2350_pico2.hpp", "boot_diag.hpp"],
     includes = ["."],
     target_compatible_with = ["@pico-sdk//bazel/constraint:rp2350"],
     deps = [
@@ -33,5 +60,8 @@ cc_library(
         "@pico-sdk//src/rp2_common/hardware_watchdog",
         "@pico-sdk//src/rp2_common/pico_multicore",
         "@pico-sdk//src/rp2_common/pico_stdlib",
-    ],
+    ] + select({
+        "//configs:rp2350_copy_to_ram_enabled": [":boot_diag"],
+        "//conditions:default": [],
+    }),
 )

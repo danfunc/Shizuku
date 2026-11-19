@@ -77,18 +77,6 @@ CMAKE_BUILD_PARALLEL_LEVEL = "24"
 IDF_PATH = "/home/ishigakiyua/.local/esp-idf-c5-v6.1"
 IDF_TOOLS_PATH = "/home/ishigakiyua/.local/idf-tools-c5-v6.1"
 
-# ESP32-C6 STACK 版 (SHIZUKU_STACK_LEDGER)。build_esp32c6 と同じで、フラグだけ追加。
-[jobs.build_esp32c6_stack]
-worker = "main-lxc"
-backend = "bazel"
-args = ["build", "--config=esp32c6", "--//configs:c6_stack_ledger=enabled", "--jobs=auto", "--action_env=CMAKE_BUILD_PARALLEL_LEVEL=24", "--action_env=IDF_PATH=/home/ishigakiyua/.local/esp-idf-c5-v6.1", "--action_env=IDF_TOOLS_PATH=/home/ishigakiyua/.local/idf-tools-c5-v6.1", "//modules/esp_idf_support/firmware:esp32c6"]
-artifacts = ["bazel-bin/modules/esp_idf_support/firmware/shizuku_esp32c6.bin"]
-
-[jobs.build_esp32c6_stack.env]
-CMAKE_BUILD_PARALLEL_LEVEL = "24"
-IDF_PATH = "/home/ishigakiyua/.local/esp-idf-c5-v6.1"
-IDF_TOOLS_PATH = "/home/ishigakiyua/.local/idf-tools-c5-v6.1"
-
 [jobs.build_esp32c6_ble]
 worker = "main-lxc"
 backend = "bazel"

@@ -61,6 +61,15 @@ genrule(
     }),
 )
 
+genrule(
+    name = "c6_iram_measure_flag",
+    outs = ["c6_iram_measure.txt"],
+    cmd = select({
+        "//configs:c6_iram_measure_enabled": "echo on > $@",
+        "//conditions:default": "echo off > $@",
+    }),
+)
+
 # ESP32-C6: Bazel が作る libshizuku_kernel.a を ESP-IDF v6.1 の最終リンクへ渡し、
 # .bin を出すターゲット (idf.py build の薄いラッパ)。
 #   bazelisk build --config=esp32c6 //modules/esp_idf_support/firmware:esp32c6
@@ -72,6 +81,7 @@ genrule(
     }) + [
         ":esp32c6_project",
         ":c6_umode_flag",
+        ":c6_iram_measure_flag",
     ],
     outs = [
         "shizuku_esp32c6.bin",
@@ -79,7 +89,8 @@ genrule(
         "shizuku_esp32c6.map",
     ],
     cmd = "ARCHIVE=; for f in $(SRCS); do case $$f in *libshizuku_kernel.a|*libshizuku_kernel_lto.a) ARCHIVE=$$f;; esac; done;" +
-          " SHIZUKU_C6_UMODE=$$(cat $(location :c6_umode_flag)) $(location build.sh) $$ARCHIVE $(location shizuku_esp32c6.bin) esp-15.2.0_20251204 esp32c6 \"\" $(location shizuku_esp32c6.elf) $(location shizuku_esp32c6.map)",
+          " SHIZUKU_C6_UMODE=$$(cat $(location :c6_umode_flag)) " +
+          " SHIZUKU_C6_IRAM_MEASURE=$$(cat $(location :c6_iram_measure_flag)) $(location build.sh) $$ARCHIVE $(location shizuku_esp32c6.bin) esp-15.2.0_20251204 esp32c6 \"\" $(location shizuku_esp32c6.elf) $(location shizuku_esp32c6.map)",
     tools = ["build.sh"],
     tags = [
         "local",
@@ -135,10 +146,12 @@ genrule(
     }) + [
         ":esp32c6_project",
         ":c6_umode_flag",
+        ":c6_iram_measure_flag",
     ],
     outs = ["shizuku_esp32c6_ble.bin", "shizuku_esp32c6_ble.elf", "shizuku_esp32c6_ble.map"],
     cmd = "ARCHIVE=; for f in $(SRCS); do case $$f in *libshizuku_kernel.a|*libshizuku_kernel_lto.a) ARCHIVE=$$f;; esac; done;" +
           " SHIZUKU_C6_UMODE=$$(cat $(location :c6_umode_flag)) " +
+          " SHIZUKU_C6_IRAM_MEASURE=$$(cat $(location :c6_iram_measure_flag)) " +
           select({
               ":esp_ble_prefer_1m_phy": "SHIZUKU_ESP_BLE_PREFER_1M_PHY=1 ",
               "//conditions:default": "SHIZUKU_ESP_BLE_PREFER_1M_PHY=0 ",

@@ -27,5 +27,10 @@ cc_test(
 cc_library(
     name = "ctx",
     srcs = ["armv8m_ctx.S"],
+    # SDK 非依存の asm にも、同じ Bazel 条件を明示して渡す。
+    local_defines = select({
+        "//configs:rp2350_copy_to_ram_enabled": ["SHIZUKU_RP2350_BOOT_DIAG=1"],
+        "//conditions:default": [],
+    }),
     alwayslink = True,
 )

@@ -1,6 +1,8 @@
 # 既定ターゲット: RP2350 / Pico 2 W (CMake kit と同じ構成)
 build --platforms=@pico-sdk//bazel/platform:rp2350
 build --@pico-sdk//bazel/config:PICO_BOARD=pico2_w
+# RP2350 は SDK copy_to_ram (//configs:rp2350_copy_to_ram=false で XIP)、RP2040 は従来の linker。
+build --@pico-sdk//bazel/config:PICO_DEFAULT_LINKER_SCRIPT=//firmware:board_linker_script
 build:rp2350_pico2_w --platforms=@pico-sdk//bazel/platform:rp2350
 build:rp2350_pico2_w --@pico-sdk//bazel/config:PICO_BOARD=pico2_w
 build:rp2350_pico2_w --//configs:board=rp2350_pico2_w
@@ -50,6 +52,9 @@ build --copt=-DSHIZUKU_RP2350_SVC_BREAKDOWN=0
 build:svc_breakdown --copt=-USHIZUKU_RP2350_SVC_BREAKDOWN
 build:svc_breakdown --copt=-DSHIZUKU_RP2350_SVC_BREAKDOWN=1
 build:svc_in_ram --copt=-DSHIZUKU_SVC_IN_RAM=1
+
+# 計測時だけ全経路を SRAM / IRAM に置く。通常の配置・起動動作の既定は off。
+build:measure_ram --//configs:rp2350_copy_to_ram=true --//configs:c6_iram_measure=true
 
 # ★行番号を必ず入れる。DWARF は**焼くものには入らない** (uf2 に載るのは loadable な
 #   セクションだけ) ので、デバイス側の費用はゼロ。入れていなかったせいで、フォールトの

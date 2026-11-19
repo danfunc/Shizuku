@@ -14,6 +14,17 @@
 #include "shizuku/objects/peripherals.hpp"
 #include "shizuku/selftest.hpp"
 
+#if !defined(SHIZUKU_RP2040) && PICO_COPY_TO_RAM
+#include "boards/rp2350_pico2/boot_diag.hpp"
+#define RP2350_BOOT_STAGE(stage) shizuku_rp2350_boot_stage(stage)
+#define RP2350_BOOT_POLL() shizuku_rp2350_boot_poll()
+#define RP2350_BOOT_RECOVER() shizuku_rp2350_boot_recover_if_needed()
+#else
+#define RP2350_BOOT_STAGE(stage) ((void)0)
+#define RP2350_BOOT_POLL() ((void)0)
+#define RP2350_BOOT_RECOVER() ((void)0)
+#endif
+
 #if defined(SHIZUKU_FLASHFS_ONLY)
 namespace shizuku::selftest {
 extern uint32_t passed;
@@ -95,6 +106,7 @@ extern "C" bool shizuku_selftest_deep_read(uint32_t *);
 #define APP_PROG(stage) ((void)0)
 #endif
 void shizuku::app_entry() {
+  RP2350_BOOT_STAGE(60);
 #if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(CYW43_WL_GPIO_LED_PIN)
   shizuku::objects::usb_cdc_boot_diag_set_stage(
       shizuku::objects::boot_diag_stage::APP_ENTRY);
@@ -355,6 +367,7 @@ void shizuku::app_entry() {
 }
 
 int main() {
+  RP2350_BOOT_STAGE(10);
 #if defined(SHIZUKU_RP2040) && defined(SHIZUKU_CRASH_RECORD)
   const bool crash_recovered = watchdog_caused_reboot() &&
       (watchdog_hw->scratch[0] == 0x43524153u ||
@@ -613,13 +626,18 @@ int main() {
   shizuku::objects::usb_cdc_boot_diag_set_stage(
       shizuku::objects::boot_diag_stage::USB_WAIT);
 #endif
+  RP2350_BOOT_STAGE(20);
   shizuku::objects::usb_cdc_init();
+  RP2350_BOOT_STAGE(21);
+  RP2350_BOOT_RECOVER();
 #if defined(SHIZUKU_BOOT_LOG_WAIT)
   const uint64_t wait_start_us = time_us_64();
   const uint64_t wait_deadline_us = wait_start_us + 15000000ull;
   while (!shizuku::objects::usb_cdc_connected(0) &&
-         time_us_64() < wait_deadline_us)
+         time_us_64() < wait_deadline_us) {
+    RP2350_BOOT_POLL();
     sleep_ms(10);
+  }
   const bool cdc_connected = shizuku::objects::usb_cdc_connected(0);
   printf("[BOOT_LOG_WAIT] CDC0 connected=%u waited_ms=%lu\n",
          cdc_connected ? 1u : 0u,
@@ -653,10 +671,14 @@ int main() {
 #else
   sleep_ms(1000); // ホストが CDC を開く前の出力を落とさないための待ち
 #endif
+  RP2350_BOOT_STAGE(30);
   shizuku::kernel_instance.init();
+  RP2350_BOOT_STAGE(34);
   // 系の組み立て: カーネルオブジェクトの表を用意し、そのハンドラをカーネルへ据える。
   // これ以降、オブジェクトが撃った svc はすべてそのハンドラへ届く。
+  RP2350_BOOT_STAGE(40);
   shizuku::kernel_object_instance.init();
+  RP2350_BOOT_STAGE(41);
 #if defined(SHIZUKU_BOOT_LOG_WAIT)
   shizuku::objects::usb_cdc_boot_diag_set_stage(
       shizuku::objects::boot_diag_stage::OBJECT_TABLE_INIT);
@@ -670,6 +692,7 @@ int main() {
 #endif
   // 今の実行をスレッド 0 として採用し、スレッドスタックへ移って app_entry へ。
   // ★最初の 1 本のスタックもオブジェクトランドから借りる (他のスレッドと同じ扱い)。
+  RP2350_BOOT_STAGE(50);
   const auto boot = shizuku::kernel_object_instance.lend_boot_stack();
   shizuku::kernel_instance.bootstrap(shizuku::app_entry, boot.base, boot.bytes, boot.ledger,
                                      boot.ledger_capacity);

@@ -216,15 +216,50 @@ selects.config_setting_group(
 
 # ★SDK 内部 (cyw43 ドライバ) にも届かせる必要があるので、コンパイルオプションでは
 #   なく pico-sdk の PICO_CONFIG_EXTRA_HEADER 経由で入れる。.bazelrc で指している。
+bool_flag(
+    name = "rp2350_copy_to_ram",
+    build_setting_default = False,
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "rp2350_copy_to_ram_flag_on",
+    flag_values = {":rp2350_copy_to_ram": "true"},
+)
+selects.config_setting_group(
+    name = "rp2350_copy_to_ram_enabled",
+    match_all = [":rp2350", ":rp2350_copy_to_ram_flag_on"],
+    visibility = ["//visibility:public"],
+)
+bool_flag(
+    name = "c6_iram_measure",
+    build_setting_default = False,
+    visibility = ["//visibility:public"],
+)
+config_setting(
+    name = "c6_iram_measure_enabled",
+    flag_values = {":c6_iram_measure": "true"},
+    visibility = ["//visibility:public"],
+)
 expand_template(
     name = "pico_config_extra_headers",
     out = "pico_config_extra_headers.h",
-    substitutions = {
-        "@DIV@": str(CYW43_PIO_DIV),
-        "@PROGRAM@": CYW43_SPI_PROGRAM,
-        "@SCK@": str(CYW43_SCK_ACTUAL_KHZ),
-        "@CLK@": str(SYS_CLOCK_KHZ),
-    },
+    # A linker cc_library's defines do not reach sibling CRT0; this header does.
+    substitutions = select({
+        ":rp2350_copy_to_ram_enabled": {
+            "@RAM_CONFIG@": "#if defined(PICO_COPY_TO_RAM) && !PICO_COPY_TO_RAM\n#error RAM linker requires PICO_COPY_TO_RAM\n#endif\n#define PICO_COPY_TO_RAM 1",
+            "@DIV@": str(CYW43_PIO_DIV),
+            "@PROGRAM@": CYW43_SPI_PROGRAM,
+            "@SCK@": str(CYW43_SCK_ACTUAL_KHZ),
+            "@CLK@": str(SYS_CLOCK_KHZ),
+        },
+        "//conditions:default": {
+            "@RAM_CONFIG@": "",
+            "@DIV@": str(CYW43_PIO_DIV),
+            "@PROGRAM@": CYW43_SPI_PROGRAM,
+            "@SCK@": str(CYW43_SCK_ACTUAL_KHZ),
+            "@CLK@": str(SYS_CLOCK_KHZ),
+        },
+    }),
     template = "pico_config_extra_headers.h.in",
 )
 
