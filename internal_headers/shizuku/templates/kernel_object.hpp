@@ -43,13 +43,10 @@ public:
   static constexpr uintptr_t METHOD_COUNT = METHOD_COUNT_T;
   static constexpr uintptr_t METHOD_DESCRIPTOR_CAPACITY = 16;
   static constexpr uintptr_t MAX_DEPTH = MAX_DEPTH_T;
-#if defined(SHIZUKU_LEAN_LEDGER)
-  // 項目が 16B → 40B になるので、台帳の DRAM を抑えるため容量を MAX_DEPTH + 2 にする (旧は 2 倍。
-  // call 段の深さは MAX_DEPTH で別に縛られるので、足りない深さは NO_STACK で拒否される)。
-  static constexpr uint32_t LEDGER_CAPACITY = MAX_DEPTH + 2;
-#else
-  static constexpr uint32_t LEDGER_CAPACITY = 2 * MAX_DEPTH + 2;
-#endif
+  // in-place の ARCH は項目が大きい (記録は caller の stack にあり、この台帳は確保の寸法だけ) ので容量を
+  // MAX_DEPTH + 2 にする。in-place でない ARCH (RP2040) は従来の 2 倍。
+  static constexpr uint32_t LEDGER_CAPACITY =
+      KERNEL::THREAD::IN_PLACE ? MAX_DEPTH + 2 : 2 * MAX_DEPTH + 2;
   // ★スレッドを何本まで作れるかは**こちらが決める** (記憶を出すのがこちらなので)。
   static constexpr uintptr_t THREAD_COUNT = THREAD_COUNT_T;
   // 1 スレッドあたりのスタック。深さの上限も方針。
@@ -403,7 +400,7 @@ public:
                        row.region_base,
                        row.region_limit};
   }
-  // object が特権で走るか (表の flags から。SHIZUKU_STACK_LEDGER の戻りで caller の特権を引く)。
+  // object が特権で走るか (表の flags から。STACK 方式の戻りで caller の特権を引く)。
   bool privileged_of(uint32_t id) const { return (m_objects[id].flags & OBJECT_UNPRIVILEGED) == 0; }
   // 項目に呼び先の前計算を書き、最後に偶数 seq を release で公開する (作成と試験の据付けが共有する)。
   // 書く側は seq を奇数にしてから中身を書き、書き終えたら偶数に進めて store-release で公開。

@@ -303,14 +303,14 @@ template <>
 SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::call_frame_pop(KERNEL::THREAD &thread, KERNEL::CONTEXT *context,
                             KERNEL::FRAME **frame, bool restore, bool scrub,
                             core_arg_t<ARCH> core) {
-#if defined(SHIZUKU_LEAN_LEDGER)
-  // 最内ヘッダへのポインタ (top) は持たない。落とす段があるかは深さで見る。
-  if (thread.call_stack.depth == 0)
-    return false;
-#else
-  if (thread.call_stack.top == 0 || thread.call_stack.depth == 0)
-    return false;
-#endif
+  if constexpr (THREAD::IN_PLACE) {
+    // 最内ヘッダへのポインタ (top) は持たない。落とす段があるかは深さで見る。
+    if (thread.call_stack.depth == 0)
+      return false;
+  } else {
+    if (thread.call_stack.top == 0 || thread.call_stack.depth == 0)
+      return false;
+  }
   if (arch_call_in_place<ARCH>()) {
     // ヘッダ枠方式: ヘッダから caller の識別・pc・特権を読み、最後の 1 段だけ caller の
     // 再開フレームを caller の SP の直下に作る (a0/a1 以外は素通し。scrub のときは出口が消す)。
@@ -408,10 +408,10 @@ SHIZUKU_HOT SHIZUKU_SVC_RAM kernel_error KERNEL::enter_call(KERNEL::THREAD &thre
       request.callee_object == m_object_svc_handler_object) {
     return kernel_error::BAD_REQUEST;
   }
-#if !defined(SHIZUKU_STACK_LEDGER)
-  if (thread.call_stack.call_count >= KERNEL_OBJECT::MAX_DEPTH)
-    return kernel_error::NO_STACK;
-#endif
+  if constexpr (!THREAD::IN_PLACE) {
+    if (thread.call_stack.call_count >= KERNEL_OBJECT::MAX_DEPTH)
+      return kernel_error::NO_STACK;
+  }
   const uint32_t unwind_floor = thread.call_stack.depth;
   if (!arch_call_in_place<ARCH>()) {
     // 呼び先の普通の return は svc_dispatch 経由でもう 1 枚 call_frame_push する。
@@ -424,40 +424,26 @@ SHIZUKU_HOT SHIZUKU_SVC_RAM kernel_error KERNEL::enter_call(KERNEL::THREAD &thre
       return kernel_error::NO_STACK;
   }
   // 4A: 最後の 1 枠 (ledger_capacity - 1) は return dispatch 専用に先取り予約する。
-#if defined(SHIZUKU_STACK_LEDGER)
-  // 記録は caller の stack 枠: 枠の余白の検査は header_push_of が 1 本で行う。
-  if (!(arch_call_in_place<ARCH>()
-#else
-  if (unwind_floor > UINT16_MAX || thread.ledger == nullptr ||
-      unwind_floor + 1u >= thread.ledger_capacity ||
-      !(arch_call_in_place<ARCH>()
-#endif
-            ? header_push_of<ARCH>(thread, *context, **frame, via, unwind_floor)
-            : call_frame_push(thread, context, frame)))
-    return kernel_error::NO_STACK;
+  if constexpr (THREAD::IN_PLACE) {
+    // 記録は caller の stack 枠: 枠の余白の検査は header_push_of が 1 本で行う。
+    if (!header_push_of<ARCH>(thread, *context, **frame, via, unwind_floor))
+      return kernel_error::NO_STACK;
+  } else {
+    if (unwind_floor > UINT16_MAX || thread.ledger == nullptr ||
+        unwind_floor + 1u >= thread.ledger_capacity ||
+        !call_frame_push(thread, context, frame))
+      return kernel_error::NO_STACK;
+  }
   if (!arch_call_in_place<ARCH>())
     thread.call_stack.identity[thread.call_stack.call_count] = {
         thread.call_stack.caller_object, thread.call_stack.caller_generation};
   auto &entry = thread.ledger_top_mut();
-#if defined(SHIZUKU_LEAN_LEDGER)
-  if (arch_call_in_place<ARCH>()) {
-    // header_push_of が戻りの権威 (ret_*・prev_call) を書いた。ここでは同定と世代だけを足し、
-    // 集成体の代入で消さない。identity (current / caller) は call 段の列から導く (call_top だけ更新)。
-    entry.object = request.callee_object;
-    entry.handler_object = request.parent_handler_object;
-    entry.handler_entry = request.parent_handler_entry;
-    entry.kind = (uint8_t)request.callee_kind;
-    entry.via = via;
-    entry.unwind_floor = (uint16_t)unwind_floor;
-    entry.generation = request.callee_generation;
-    thread.call_stack.call_count++;
-    thread.call_stack.call_top = thread.call_stack.depth;
-#if defined(SHIZUKU_STACK_LEDGER)
-    thread.call_stack.call_top_rec = thread.call_stack.top;
-#endif
+  if constexpr (THREAD::IN_PLACE) {
+    // 明示特殊化の本体は template ではなく、捨てた枝も型検査される (RP2040 の台帳項目には generation が無い)。
+    // 記録の書出しは dependent な native:: の template に包む。
+    native::write_call_record(thread, entry, request, via, unwind_floor);
     return kernel_error::OK;
   }
-#endif
   entry.object = request.callee_object;
   entry.handler_object = request.parent_handler_object;
   entry.handler_entry = request.parent_handler_entry;

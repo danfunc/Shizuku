@@ -18,12 +18,10 @@
 #include "core_num_test_access.hpp"
 
 // ---------------------------------------------------------------------------
-// 1. Shared Payload Trait & Size Definitions
+// 1. 呼出しの記録 (STACK 方式)
+//    記録は caller の stack 枠にある 32B (templates::thread::stack_call_record)。旧版が持っていた LEAN の台帳項目
+//    (compact / payload 付きの寸法の写し) は廃止した。非 LEAN の 16B 項目の写し (RP2040 の台帳の寸法) は残す。
 // ---------------------------------------------------------------------------
-struct test_arm_callee_saved_payload {
-  uint32_t r4_r11[8];
-};
-
 // Simulated 32-bit call_ledger_entry to verify 32-bit target sizes on any host.
 struct call_ledger_entry_32bit_empty_nonlean {
   uint32_t object;
@@ -36,44 +34,6 @@ struct call_ledger_entry_32bit_empty_nonlean {
 };
 static_assert(sizeof(call_ledger_entry_32bit_empty_nonlean) == 16,
               "32-bit non-LEAN call_ledger_entry with empty payload must be exactly 16 bytes");
-
-struct call_ledger_entry_32bit_empty_lean {
-  uint32_t object;
-  uint32_t handler_object;
-  uint32_t handler_entry;
-  uint8_t kind;
-  uint8_t via;
-  uint16_t unwind_floor;
-  uint32_t generation;
-  uint32_t ret_pc;
-  uint32_t ret_sp;
-  uint16_t prev_call;
-  uint8_t ret_privileged;
-  uint8_t reserved;
-  [[no_unique_address]] shizuku::empty_ledger_payload payload{};
-};
-static_assert(sizeof(call_ledger_entry_32bit_empty_lean) == 32,
-              "32-bit LEAN call_ledger_entry with empty payload must be exactly 32 bytes");
-
-struct call_ledger_entry_32bit_with_payload_lean {
-  uint32_t object;
-  uint32_t handler_object;
-  uint32_t handler_entry;
-  uint8_t kind;
-  uint8_t via;
-  uint16_t unwind_floor;
-  uint32_t generation;
-  uint32_t ret_pc;
-  uint32_t ret_sp;
-  uint16_t prev_call;
-  uint8_t ret_privileged;
-  uint8_t reserved;
-  [[no_unique_address]] test_arm_callee_saved_payload payload{};
-};
-static_assert(sizeof(call_ledger_entry_32bit_with_payload_lean) == 64,
-              "32-bit LEAN call_ledger_entry with 32B ARM payload must be exactly 64 bytes (32 + 32)");
-static_assert(offsetof(call_ledger_entry_32bit_with_payload_lean, payload) == 32,
-              "32-bit LEAN payload offset must be at byte 32");
 
 // ---------------------------------------------------------------------------
 // 2. Host Test-Only Derived Arch Adapter (Test Seams Only)
@@ -98,6 +58,23 @@ struct test_inplace_adapter : public BaseArch {
 
   static bool call_header_has_room(const typename BaseArch::context_t &, uint32_t) {
     return true;
+  }
+
+  static bool call_stack_has_room_at(const typename BaseArch::context_t &, uintptr_t) {
+    return true;
+  }
+
+  // 呼出しの記録 (STACK) の枠が caller の天井の内側にあるか。本物の判定は context の stack_ceiling / psplim を
+  // 見るので、host の mock では試験が真偽を決める (false にすると NO_STACK の経路を通せる)。
+  // CALL_RECORD_OFFSET と record_return_sp は BaseArch (本物の armv8m) のものをそのまま使う。
+  static inline bool record_room = true;
+  static bool call_record_room_at(const typename BaseArch::context_t &, uintptr_t) {
+    return record_room;
+  }
+
+  template <class Frame>
+  static void set_entry_for_object(Frame &frame, uintptr_t pc, uint32_t) {
+    set_entry(frame, pc, return_stub());
   }
 
   static uintptr_t call_return_sp(const typename BaseArch::context_t &ctx) {
@@ -216,6 +193,11 @@ struct mock_kernel {
   }
 };
 
+template <typename Adapter>
+struct mock_multicore_kernel : mock_kernel<Adapter> {
+  static constexpr uint32_t CORE_COUNT = 2;
+};
+
 struct mock_kobj {
   using method_t = uintptr_t;
   static constexpr uintptr_t MAX_DEPTH = 8;
@@ -267,6 +249,8 @@ struct mock_kobj {
   uintptr_t m_region_base[OBJECT_COUNT]{};
   uintptr_t m_region_limit[OBJECT_COUNT]{};
 
+  // STACK の戻りは、再開する caller の特権を object の表の flags から引く。この mock の object は全て非特権。
+  bool privileged_of(uintptr_t) const { return false; }
   uintptr_t object_region_base(uintptr_t id) const { return m_region_base[id]; }
   uintptr_t object_region_limit(uintptr_t id) const { return m_region_limit[id]; }
   shizuku::native::return_region_window return_region(uintptr_t id) const {
@@ -333,23 +317,50 @@ auto make_test_core([[maybe_unused]] uint32_t val = 0) {
   }
 }
 
+
 // ---------------------------------------------------------------------------
-// 4. Templated Test Suite for Both ARMv8-M and ARMv6-M
+// 4. Test Suite (ARMv8-M、STACK 方式の記録)
 // ---------------------------------------------------------------------------
+// caller の枠 (例外フレーム) と、その上の記録の枠。記録は [ret_sp + CALL_RECORD_OFFSET, +32) に置かれる。
 template <typename Adapter>
+struct stack_slot {
+  typename mock_kernel<Adapter>::FRAME frame;
+  uint8_t gap[Adapter::CALL_RECORD_OFFSET];
+  typename mock_kernel<Adapter>::THREAD::call_ledger_entry record;
+};
+
+template <typename Adapter>
+void check_slot_layout(const stack_slot<Adapter> &slot) {
+  // 記録の位置 == caller の ecall 時点の SP + CALL_RECORD_OFFSET
+  assert(reinterpret_cast<uintptr_t>(&slot.record) ==
+         reinterpret_cast<uintptr_t>(&slot.frame) + sizeof(typename mock_kernel<Adapter>::FRAME) +
+             Adapter::CALL_RECORD_OFFSET);
+}
+
+// 深さ index + 1 の記録 (先頭から prev を辿る)。
+template <typename Thread>
+auto &record_at_depth(Thread &thread, uint32_t index) {
+  using Record = typename Thread::call_ledger_entry;
+  auto *r = reinterpret_cast<Record *>(thread.call_stack.top);
+  for (uint32_t n = 0; r != nullptr && r->depth != index + 1u && n < 64u; ++n)
+    r = reinterpret_cast<Record *>(r->prev);
+  assert(r != nullptr && r->depth == index + 1u);
+  return *r;
+}
+
+template <typename Adapter, typename Kernel = mock_kernel<Adapter>>
 void run_inplace_method_call_success(const char *tag) {
   const auto core = make_test_core<Adapter>(0);
-  mock_kernel<Adapter> kernel;
+  Kernel kernel;
   mock_kobj kobj;
   typename mock_kernel<Adapter>::CONTEXT ctx{};
-  typename mock_kernel<Adapter>::FRAME frame{};
+  stack_slot<Adapter> slot{};
+  check_slot_layout(slot);
+  auto &frame = slot.frame;
   ctx.sp = &frame;
   ctx.control = Adapter::CONTROL_UNPRIV_PSP;
 
   typename mock_kernel<Adapter>::THREAD thread;
-  typename mock_kernel<Adapter>::THREAD::call_ledger_entry ledger[16]{};
-  thread.ledger = ledger;
-  thread.ledger_capacity = 16;
   thread.base_object = 1; // root caller
 
   // Callee setup
@@ -363,20 +374,24 @@ void run_inplace_method_call_success(const char *tag) {
   frame.r3 = 0xCAFEBABEu; // Argument
   frame.r12 = 0x12121212u; // Passthrough canary
 
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core);
+  const bool moved = shizuku::native::try_call_method_in_place(kernel, thread, ctx, kobj, core);
 
+  assert(moved);
   assert(frame.r0 == 0xCAFEBABEu);
   assert(frame.pc == 0x10002000u);
   assert(frame.lr == Adapter::return_stub());
   assert(frame.r12 == 0x12121212u);
   assert(thread.call_stack.depth == 1);
   assert(thread.call_stack.call_count == 1);
-  assert(ledger[0].object == 5);
-  assert(ledger[0].via == mock_kernel<Adapter>::LEDGER_CALL);
-#if defined(SHIZUKU_LEAN_LEDGER)
-  assert(ledger[0].ret_pc == 0x10001000u);
-  assert(ledger[0].ret_privileged == 0);
-#endif
+  const auto &rec = record_at_depth(thread, 0);
+  assert(&rec == &slot.record);
+  assert(rec.object == 5);
+  assert(rec.via == mock_kernel<Adapter>::LEDGER_CALL);
+  assert(rec.ret_pc == 0x10001000u);
+  // LEAN の ret_privileged == 0 に当たる性質: 記録に特権は置かず、最外の特権はスレッドが持つ。
+  assert(thread.call_stack.base_privileged == 0);
+  assert(Adapter::record_return_sp(reinterpret_cast<uintptr_t>(&rec)) ==
+         reinterpret_cast<uintptr_t>(&frame) + sizeof(typename mock_kernel<Adapter>::FRAME));
   printf("  [%s] PASS: method_call_success\n", tag);
 }
 
@@ -386,14 +401,12 @@ void run_inplace_descriptor_call_success(const char *tag) {
   mock_kernel<Adapter> kernel;
   mock_kobj kobj;
   typename mock_kernel<Adapter>::CONTEXT ctx{};
-  typename mock_kernel<Adapter>::FRAME frame{};
+  stack_slot<Adapter> slot{};
+  auto &frame = slot.frame;
   ctx.sp = &frame;
   ctx.control = Adapter::CONTROL_PRIV_PSP;
 
   typename mock_kernel<Adapter>::THREAD thread;
-  typename mock_kernel<Adapter>::THREAD::call_ledger_entry ledger[16]{};
-  thread.ledger = ledger;
-  thread.ledger_capacity = 16;
   thread.base_object = 2;
 
   kobj.m_object_versions[6] = 4;
@@ -425,25 +438,33 @@ void run_inplace_descriptor_call_success(const char *tag) {
   assert(frame.r3 == 0x33333333u);
   assert(frame.r12 == 0x12121212u);
   assert(thread.call_stack.depth == 1);
-  assert(ledger[0].object == 6);
-  assert(ledger[0].via == mock_kernel<Adapter>::LEDGER_DESCRIPTOR_CALL);
+  const auto &rec = record_at_depth(thread, 0);
+  assert(rec.object == 6);
+  assert(rec.via == mock_kernel<Adapter>::LEDGER_DESCRIPTOR_CALL);
 
   printf("  [%s] PASS: descriptor_call_success (ARM 1-arg D2(a))\n", tag);
 }
 
-template <typename Adapter>
+template <typename Adapter, typename Kernel = mock_kernel<Adapter>>
 void run_inplace_method_failures_ledger_invariant(const char *tag) {
   const auto core = make_test_core<Adapter>(0);
-  mock_kernel<Adapter> kernel;
+  Kernel kernel;
   mock_kobj kobj;
   typename mock_kernel<Adapter>::CONTEXT ctx{};
-  typename mock_kernel<Adapter>::FRAME frame{};
+  stack_slot<Adapter> slot{};
+  auto &frame = slot.frame;
   ctx.sp = &frame;
+  frame.pc = 0x10001234u;
+  ctx.control = Adapter::CONTROL_PRIV_PSP;
+  // W8's movement check relies on every rejection leaving the caller
+  // where it was, even though r0/r1 contain the error response.
+  const auto unchanged_caller = [&] {
+    assert(ctx.sp == &frame);
+    assert(frame.pc == 0x10001234u);
+    assert(ctx.control == Adapter::CONTROL_PRIV_PSP);
+  };
 
   typename mock_kernel<Adapter>::THREAD thread;
-  typename mock_kernel<Adapter>::THREAD::call_ledger_entry ledger[16]{};
-  thread.ledger = ledger;
-  thread.ledger_capacity = 16;
   thread.base_object = 3;
 
   // 1. Bad Object
@@ -451,8 +472,10 @@ void run_inplace_method_failures_ledger_invariant(const char *tag) {
   frame.r1 = mock_kobj::OBJECT_COUNT + 1;
   frame.r2 = 0;
   frame.r3 = 42;
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core);
+  const bool bad_object_moved = shizuku::native::try_call_method_in_place(kernel, thread, ctx, kobj, core);
+  assert(!bad_object_moved);
   assert(frame.r0 == (uint32_t)shizuku::object_error::BAD_OBJECT);
+  unchanged_caller();
   assert(thread.call_stack.depth == 0);
   assert(thread.call_stack.call_count == 0);
 
@@ -461,8 +484,10 @@ void run_inplace_method_failures_ledger_invariant(const char *tag) {
   frame.r1 = 5;
   frame.r2 = 0;
   frame.r3 = 42;
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core);
+  const bool denied_moved = shizuku::native::try_call_method_in_place(kernel, thread, ctx, kobj, core);
+  assert(!denied_moved);
   assert(frame.r0 == (uint32_t)shizuku::object_error::NOT_PRIVILEGED);
+  unchanged_caller();
   assert(thread.call_stack.depth == 0);
   assert(thread.call_stack.call_count == 0);
 
@@ -472,8 +497,10 @@ void run_inplace_method_failures_ledger_invariant(const char *tag) {
   frame.r1 = 5;
   frame.r2 = 99;
   frame.r3 = 42;
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core);
+  const bool bad_method_moved = shizuku::native::try_call_method_in_place(kernel, thread, ctx, kobj, core);
+  assert(!bad_method_moved);
   assert(frame.r0 == (uint32_t)shizuku::object_error::BAD_METHOD);
+  unchanged_caller();
   assert(thread.call_stack.depth == 0);
 
   // 4. Undeclared Method
@@ -481,40 +508,30 @@ void run_inplace_method_failures_ledger_invariant(const char *tag) {
   frame.r1 = 5;
   frame.r2 = 7;
   frame.r3 = 42;
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core);
+  const bool undeclared_moved = shizuku::native::try_call_method_in_place(kernel, thread, ctx, kobj, core);
+  assert(!undeclared_moved);
   assert(frame.r0 == (uint32_t)shizuku::object_error::UNDECLARED_METHOD);
+  unchanged_caller();
   assert(thread.call_stack.depth == 0);
 
-  // 5. MAX_DEPTH exceeded
+  // 5. 記録の枠が取れない (STACK の深さの上限は stack の余地で決まる。LEAN の MAX_DEPTH / 台帳容量の検査の代わり)。
+  //    NO_STACK を返し、何も積まない。
   kobj.m_row_valid[5][0] = true;
   kobj.m_rows[5][0] = {5, 1, 0, shizuku::object_kind::PLAIN, false, 0, 0, 1, 0x1000};
   thread.base_object = 1;
-  thread.call_stack.call_count = mock_kobj::MAX_DEPTH;
-  thread.call_stack.current_call_object = 1;
-#if defined(SHIZUKU_LEAN_LEDGER)
-  thread.call_stack.call_top = 1;
-  thread.ledger[0].object = 1;
-#endif
+  Adapter::record_room = false;
   frame.r0 = 4;
   frame.r1 = 5;
   frame.r2 = 0;
   frame.r3 = 42;
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core);
+  const bool no_stack_moved = shizuku::native::try_call_method_in_place(kernel, thread, ctx, kobj, core);
+  Adapter::record_room = true;
+  assert(!no_stack_moved);
   assert(frame.r0 == (uint32_t)shizuku::object_error::NO_STACK);
+  unchanged_caller();
   assert(thread.call_stack.depth == 0);
-  assert(thread.call_stack.call_count == mock_kobj::MAX_DEPTH);
-
-  // 6. 4A: depth + 1 >= ledger_capacity (reserving final slot for return dispatch)
-  thread.call_stack.call_count = 1;
-  thread.call_stack.depth = thread.ledger_capacity - 1; // 15 when capacity is 16
-  frame.r0 = 4;
-  frame.r1 = 5;
-  frame.r2 = 0;
-  frame.r3 = 42;
-  shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core);
-  assert(frame.r0 == (uint32_t)shizuku::object_error::NO_STACK);
-  assert(thread.call_stack.depth == thread.ledger_capacity - 1);
-  assert(thread.call_stack.call_count == 1);
+  assert(thread.call_stack.call_count == 0);
+  assert(thread.call_stack.top == 0);
 
   printf("  [%s] PASS: method_failures_ledger_invariant\n", tag);
 }
@@ -525,13 +542,11 @@ void run_inplace_descriptor_failures_ledger_invariant(const char *tag) {
   mock_kernel<Adapter> kernel;
   mock_kobj kobj;
   typename mock_kernel<Adapter>::CONTEXT ctx{};
-  typename mock_kernel<Adapter>::FRAME frame{};
+  stack_slot<Adapter> slot{};
+  auto &frame = slot.frame;
   ctx.sp = &frame;
 
   typename mock_kernel<Adapter>::THREAD thread;
-  typename mock_kernel<Adapter>::THREAD::call_ledger_entry ledger[16]{};
-  thread.ledger = ledger;
-  thread.ledger_capacity = 16;
   thread.base_object = 2;
 
   // 1. Bad Index
@@ -584,18 +599,17 @@ void run_inplace_descriptor_failures_ledger_invariant(const char *tag) {
 }
 
 template <typename Adapter>
-void run_inplace_lean_push_pop(const char *tag) {
+void run_inplace_stack_push_pop(const char *tag) {
   typename mock_kernel<Adapter>::CONTEXT ctx{};
-  typename mock_kernel<Adapter>::FRAME frame{};
+  stack_slot<Adapter> slot{};
+  check_slot_layout(slot);
+  auto &frame = slot.frame;
   ctx.sp = &frame;
   ctx.control = Adapter::CONTROL_UNPRIV_PSP;
   ctx.region_base = 0x20000000u;
   ctx.region_limit = 0x20001000u;
 
   typename mock_kernel<Adapter>::THREAD thread;
-  typename mock_kernel<Adapter>::THREAD::call_ledger_entry ledger[16]{};
-  thread.ledger = ledger;
-  thread.ledger_capacity = 16;
   thread.base_object = 1;
 
   frame.pc = 0x10004000u;
@@ -604,18 +618,22 @@ void run_inplace_lean_push_pop(const char *tag) {
   assert(pushed);
   assert(thread.call_stack.depth == 1);
 
-#if defined(SHIZUKU_LEAN_LEDGER)
-  assert(ledger[0].ret_pc == 0x10004000u);
-  assert(ledger[0].ret_sp == reinterpret_cast<uintptr_t>(&frame) + sizeof(typename mock_kernel<Adapter>::FRAME));
-  assert(ledger[0].ret_privileged == 0);
+  auto &rec = thread.ledger_top_mut();
+  assert(&rec == &slot.record);
+  assert(rec.ret_pc == 0x10004000u);
+  assert(Adapter::record_return_sp(reinterpret_cast<uintptr_t>(&rec)) ==
+         reinterpret_cast<uintptr_t>(&frame) + sizeof(typename mock_kernel<Adapter>::FRAME));
+  assert(thread.call_stack.base_privileged == 0);
   mock_kobj kobj;
   kobj.m_region_base[1] = 0x20000000u;
   kobj.m_region_limit[1] = 0x20001000u;
 
-  ledger[0].via = mock_kernel<Adapter>::LEDGER_CALL;
-  ledger[0].unwind_floor = 0;
+  rec.via = mock_kernel<Adapter>::LEDGER_CALL;
+  rec.unwind_floor = 0;
+  rec.object = 1;
+  rec.kind = (uint8_t)shizuku::object_kind::PLAIN;
   thread.call_stack.call_count = 1;
-  thread.call_stack.call_top = 1;
+  thread.call_stack.call_top_rec = reinterpret_cast<uintptr_t>(&rec);
 
   const auto core = make_test_core<Adapter>(0);
   typename mock_kernel<Adapter>::FRAME *restored_frame = nullptr;
@@ -624,12 +642,12 @@ void run_inplace_lean_push_pop(const char *tag) {
   assert(popped);
   assert(thread.call_stack.depth == 0);
   assert(thread.call_stack.call_count == 0);
+  assert(thread.call_stack.top == 0);
   assert(restored_frame != nullptr);
   assert(restored_frame->pc == 0x10004000u);
   assert((ctx.control & 1u) == 1); // Unprivileged restored
-#endif
 
-  printf("  [%s] PASS: lean_push_pop\n", tag);
+  printf("  [%s] PASS: stack_push_pop\n", tag);
 }
 
 template <typename Adapter>
@@ -640,9 +658,10 @@ void run_inplace_return_window_current_row(const char *tag) {
   using Frame = typename K::FRAME;
   K kernel;
   mock_kobj kobj;
-  alignas(8) unsigned char storage[1024]{};
+  // 各 frame の上に記録の枠 (CALL_RECORD_OFFSET + 32B) が要るので、frame は 256B 離す。
+  alignas(8) unsigned char storage[2048]{};
   auto *outer_frame = reinterpret_cast<Frame *>(storage + 256);
-  auto *inner_frame = reinterpret_cast<Frame *>(storage + 512);
+  auto *inner_frame = reinterpret_cast<Frame *>(storage + 768);
   typename K::CONTEXT ctx{};
   ctx.sp = outer_frame;
   ctx.control = Adapter::CONTROL_UNPRIV_PSP;
@@ -650,9 +669,6 @@ void run_inplace_return_window_current_row(const char *tag) {
   ctx.region_limit = 0x20002000u;
 
   typename K::THREAD thread;
-  typename K::THREAD::call_ledger_entry ledger[16]{};
-  thread.ledger = ledger;
-  thread.ledger_capacity = 16;
   thread.base_object = 1;
   kobj.m_region_base[1] = 0x20001000u;
   kobj.m_region_limit[1] = 0x20002000u;
@@ -677,7 +693,7 @@ void run_inplace_return_window_current_row(const char *tag) {
   outer_frame->r3 = 0x31;
   shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core0);
   assert(thread.call_stack.depth == 1 && thread.call_stack.call_count == 1);
-  assert(ledger[0].via == K::LEDGER_CALL && ledger[0].object == 6);
+  assert(record_at_depth(thread, 0).via == K::LEDGER_CALL && record_at_depth(thread, 0).object == 6);
 
   ctx.sp = inner_frame;
   inner_frame->pc = 0x10006100u;
@@ -687,12 +703,9 @@ void run_inplace_return_window_current_row(const char *tag) {
   inner_frame->r3 = 0x32;
   shizuku::native::call_method_in_place(kernel, thread, ctx, kobj, core0);
   assert(thread.call_stack.depth == 2 && thread.call_stack.call_count == 2);
-  assert(ledger[1].via == K::LEDGER_CALL && ledger[1].object == 6);
-#if defined(SHIZUKU_LEAN_LEDGER)
-  assert(ledger[1].prev_call == 1);
-#else
-  assert(thread.call_stack.current_call_object == 6 && thread.call_stack.caller_object == 6);
-#endif
+  assert(record_at_depth(thread, 1).via == K::LEDGER_CALL && record_at_depth(thread, 1).object == 6);
+  // LEAN の prev_call == 1 (台帳の添字) に当たる性質: 一つ外側の call 段の記録への鎖。
+  assert(record_at_depth(thread, 1).prev_call == reinterpret_cast<uintptr_t>(&record_at_depth(thread, 0)));
   kobj.m_region_base[6] = 0;
   kobj.m_region_limit[6] = 0;
   inner_frame->r0 = 2;
@@ -729,7 +742,7 @@ void run_inplace_return_window_current_row(const char *tag) {
   inner_frame->r3 = 0;
   shizuku::native::call_descriptor_in_place(kernel, thread, ctx, kobj, core0);
   assert(thread.call_stack.depth == 2 && thread.call_stack.call_count == 2);
-  assert(ledger[1].via == K::LEDGER_DESCRIPTOR_CALL);
+  assert(record_at_depth(thread, 1).via == K::LEDGER_DESCRIPTOR_CALL);
   inner_frame->r0 = 2;
   inner_frame->r1 = 1;
   inner_frame->r2 = 0xD5;
@@ -752,16 +765,16 @@ void run_inplace_return_window_current_row(const char *tag) {
   dispatch_ctx.region_base = 0;
   dispatch_ctx.region_limit = 0;
   typename K::THREAD dispatch_thread;
-  typename K::THREAD::call_ledger_entry dispatch_ledger[16]{};
-  dispatch_thread.ledger = dispatch_ledger;
-  dispatch_thread.ledger_capacity = 16;
   dispatch_thread.base_object = 1;
   assert(shizuku::header_push_of<Adapter>(dispatch_thread, dispatch_ctx, *outer_frame,
                                           K::LEDGER_DISPATCH, 0));
-  dispatch_ledger[0].object = 7;
-  dispatch_ledger[0].kind = (uint8_t)shizuku::object_kind::HANDLER;
-  dispatch_ledger[0].via = K::LEDGER_DISPATCH;
-  dispatch_ledger[0].unwind_floor = 0;
+  {
+    auto &dispatch_record = dispatch_thread.ledger_top_mut();
+    dispatch_record.object = 7;
+    dispatch_record.kind = (uint8_t)shizuku::object_kind::HANDLER;
+    dispatch_record.via = K::LEDGER_DISPATCH;
+    dispatch_record.unwind_floor = 0;
+  }
   dispatch_ctx.region_base = 0;
   dispatch_ctx.region_limit = 0;
   dispatch_ctx.sp = inner_frame;
@@ -772,8 +785,8 @@ void run_inplace_return_window_current_row(const char *tag) {
   inner_frame->r3 = 0x33;
   shizuku::native::call_method_in_place(kernel, dispatch_thread, dispatch_ctx, kobj, core1);
   assert(dispatch_thread.call_stack.depth == 2 && dispatch_thread.call_stack.call_count == 1);
-  assert(dispatch_ledger[0].via == K::LEDGER_DISPATCH &&
-         dispatch_ledger[1].via == K::LEDGER_CALL);
+  assert(record_at_depth(dispatch_thread, 0).via == K::LEDGER_DISPATCH &&
+         record_at_depth(dispatch_thread, 1).via == K::LEDGER_CALL);
   inner_frame->r0 = 2;
   inner_frame->r1 = 1;
   inner_frame->r2 = 0xA7;
@@ -795,9 +808,6 @@ void run_inplace_return_window_current_row(const char *tag) {
   base_ctx.region_base = 0x20001000u;
   base_ctx.region_limit = 0x20002000u;
   typename K::THREAD base_thread;
-  typename K::THREAD::call_ledger_entry base_ledger[16]{};
-  base_thread.ledger = base_ledger;
-  base_thread.ledger_capacity = 16;
   base_thread.base_object = 1;
   outer_frame->pc = 0x10001100u;
   outer_frame->r0 = 4;
@@ -829,55 +839,45 @@ void run_inplace_exit_validation(const char *tag) {
   mock_kernel<Adapter> kernel;
   typename mock_kernel<Adapter>::CONTEXT ctx{};
 
-  struct stack_slot_t {
-    typename mock_kernel<Adapter>::FRAME frame;
-    typename Adapter::call_header_t header;
-  } slots[2]{};
+  stack_slot<Adapter> slots[2]{};
+  check_slot_layout(slots[0]);
 
   // Initially active frame is slot 1
   ctx.sp = &slots[1].frame;
 
   typename mock_kernel<Adapter>::THREAD thread;
-  typename mock_kernel<Adapter>::THREAD::call_ledger_entry ledger[16]{};
-  thread.ledger = ledger;
-  thread.ledger_capacity = 16;
   thread.base_object = 1;
 
-  // Setup 2 nested call frames
+  // Setup 2 nested call records (記録は各 slot の枠にある)
+  auto &r0 = slots[0].record;
+  auto &r1 = slots[1].record;
+  r0 = {};
+  r0.object = 1;
+  r0.handler_object = 1;
+  r0.via = mock_kernel<Adapter>::LEDGER_CALL;
+  r0.kind = (uint8_t)shizuku::object_kind::PLAIN;
+  r0.unwind_floor = 0;
+  r0.depth = 1;
+  r0.prev = 0;
+  r0.prev_call = 0;
+  r0.ret_pc = 0x10001000;
+
+  r1 = {};
+  r1.object = 2;
+  r1.handler_object = 1;
+  r1.via = mock_kernel<Adapter>::LEDGER_CALL;
+  r1.kind = (uint8_t)shizuku::object_kind::PLAIN;
+  r1.unwind_floor = 1;
+  r1.depth = 2;
+  r1.prev = reinterpret_cast<uintptr_t>(&r0);
+  r1.prev_call = reinterpret_cast<uintptr_t>(&r0);
+  r1.ret_pc = 0x10002000;
+
   thread.call_stack.depth = 2;
   thread.call_stack.call_count = 2;
-  thread.call_stack.call_top = 2;
-
-  // Setup headers for non-LEAN
-  slots[0].header.prev = 0;
-  slots[0].header.pc = 0x10001000;
-  slots[0].header.caller_object = 1;
-  slots[0].header.privileged = 0;
-  slots[1].header.prev = reinterpret_cast<uintptr_t>(&slots[0].header);
-  slots[1].header.pc = 0x10002000;
-  slots[1].header.caller_object = 2;
-  slots[1].header.privileged = 0;
-  thread.call_stack.top = reinterpret_cast<uintptr_t>(&slots[1].header);
-
-  // Setup ledger entries (both non-LEAN and LEAN)
-  ledger[0].object = 1;
-  ledger[0].handler_object = 1;
-  ledger[0].via = mock_kernel<Adapter>::LEDGER_CALL;
-  ledger[0].unwind_floor = 0;
-
-  ledger[1].object = 2;
-  ledger[1].handler_object = 1;
-  ledger[1].via = mock_kernel<Adapter>::LEDGER_CALL;
-  ledger[1].unwind_floor = 1;
-
-#if defined(SHIZUKU_LEAN_LEDGER)
-  ledger[0].ret_pc = 0x10001000;
-  ledger[0].ret_sp = reinterpret_cast<uintptr_t>(&slots[0].header);
-  ledger[0].prev_call = 0;
-  ledger[1].ret_pc = 0x10002000;
-  ledger[1].ret_sp = reinterpret_cast<uintptr_t>(&slots[1].header);
-  ledger[1].prev_call = 1;
-#endif
+  thread.call_stack.top = reinterpret_cast<uintptr_t>(&r1);
+  thread.call_stack.call_top_rec = reinterpret_cast<uintptr_t>(&r1);
+  thread.call_stack.base_privileged = 0;
 
   // 1. Test security check: illegal return target d=0 from depth=2 with floor=1
   slots[1].frame.r0 = (uint32_t)shizuku::object_api::EXIT_METHOD;
@@ -886,6 +886,9 @@ void run_inplace_exit_validation(const char *tag) {
   slots[1].frame.r3 = (uint32_t)shizuku::object_error::OK;
 
   mock_kobj kobj;
+  const auto *rejected_sp = ctx.sp;
+  const auto rejected_pc = ctx.sp->pc;
+  const auto rejected_control = ctx.control;
   auto st_rejected = shizuku::native::exit_in_place<mock_kernel<Adapter>, mock_kobj, false>(
       kernel, kobj, thread, ctx, core);
   assert(st_rejected == shizuku::native::status::DONE);
@@ -893,6 +896,8 @@ void run_inplace_exit_validation(const char *tag) {
   assert(slots[1].frame.r1 == (uint32_t)shizuku::kernel_error::DEPTH_MISMATCH);
   assert(thread.call_stack.depth == 2);
   assert(thread.call_stack.call_count == 2);
+  assert(ctx.sp == rejected_sp && ctx.sp->pc == rejected_pc);
+  assert(ctx.control == rejected_control);
 
   // 2. Test valid 1-step return: d=1 from depth=2 (floor=1)
   slots[1].frame.r0 = (uint32_t)shizuku::object_api::EXIT_METHOD;
@@ -905,6 +910,7 @@ void run_inplace_exit_validation(const char *tag) {
   assert(st1 == shizuku::native::status::DONE);
   assert(thread.call_stack.depth == 1);
   assert(thread.call_stack.call_count == 1);
+  assert(thread.call_stack.top == reinterpret_cast<uintptr_t>(&r0));
   assert(ctx.sp->r0 == (uint32_t)shizuku::object_error::OK);
   assert(ctx.sp->r1 == 42);
 
@@ -919,6 +925,7 @@ void run_inplace_exit_validation(const char *tag) {
   assert(st0 == shizuku::native::status::DONE);
   assert(thread.call_stack.depth == 0);
   assert(thread.call_stack.call_count == 0);
+  assert(thread.call_stack.top == 0);
   assert(ctx.sp->r0 == (uint32_t)shizuku::object_error::OK);
   assert(ctx.sp->r1 == 84);
 

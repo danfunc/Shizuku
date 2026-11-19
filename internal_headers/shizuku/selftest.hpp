@@ -53,6 +53,10 @@ extern uint32_t cost_call2;
 // 取り上げる。**取り上げが効くこと**が「1 つの暴走が全系を凍らせない」の証拠になる。
 void thread_ladder();
 
+// 実行権を渡す API (RUN_FOR / YIELD) による共有メールボックスのポーリング往復の実測。
+// 特権 thread 同士。結果は [COST-MBOX] 行と shizuku_mbox_cost_record (JTAG / SWD 用) に出す。
+void mailbox_switch();
+
 // 記憶の貸し借りが定数時間であることの実測。★空きの散らばり方を変えても費用が
 // 変わらないことを見る — 「O(1) にした」は主張であって、証拠はこの差の無さのほう。
 void memory_ladder();

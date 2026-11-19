@@ -43,7 +43,7 @@ struct plic_vector_mode {
   static uintptr_t kstack_limit();
   static uintptr_t kstack_top();
   static bool user_stack_bounds(uint32_t object_id, uintptr_t &base, uintptr_t &limit);
-  // [SHIZUKU_STACK_LEDGER] 現在の thread の stack 全域 [base, limit)。未登録なら false。
+  // [STACK 方式] 現在の thread の stack 全域 [base, limit)。未登録なら false。
   static bool thread_stack_bounds(uintptr_t &base, uintptr_t &limit);
   static void switch_object_pmp(uint32_t object_id);
   template <class Context, class Frame>

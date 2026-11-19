@@ -1,4 +1,4 @@
-// [SHIZUKU_STACK_LEDGER] C6 の呼出しの記録 (caller の stack 枠) と stack 窓の host 試験。
+// [STACK 方式] C6 の呼出しの記録 (caller の stack 枠) と stack 窓の host 試験。
 //
 // 組めた範囲: 記録の位置と窓の分離 (open_window)、記録の鎖の照合 (stack_record_chain_ok)、
 // 窓のゼロ化 (zero_window) の 3 つを、実物の inline 関数で直接確かめる。
@@ -6,15 +6,7 @@
 // 特権 caller の NO_STACK 拒否) は、カーネル一式 (dispatcher_v1 の harness) を STACK 版でビルドできないため
 // ここでは試験しない。報告書に明記する。
 //
-// 実行は --//configs:c6_stack_ledger=enabled を付けたときだけ (既定では SHIZUKU_STACK_LEDGER が無く #error)。
-
-#ifndef SHIZUKU_LEAN_LEDGER
-#define SHIZUKU_LEAN_LEDGER 1
-#endif
-
-#if !defined(SHIZUKU_STACK_LEDGER)
-#error "stack_ledger_window_test は --//configs:c6_stack_ledger=enabled で実行する (SHIZUKU_STACK_LEDGER が必要)"
-#endif
+// 方式は rv32 の context_t::CALL_IN_PLACE (= STACK 方式) で決まる。
 
 #include <cassert>
 #include <cstdint>

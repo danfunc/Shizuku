@@ -20,14 +20,20 @@ extern "C" void shizuku_selftest_fault_phase(uint32_t, uint32_t);
 namespace shizuku {
 
 namespace {
-#if !defined(SHIZUKU_LEAN_LEDGER) && !defined(__riscv)
-// ARM (RP2350 等) で HAS_OBJECT_PROTECTION かつ LEAN_LEDGER 未定義時のフォールバック用レコード。
-// C6 (非 U-mode / HAS_OBJECT_PROTECTION == false) では .bss を一切消費しないよう除外する。
+// in-place でない ARCH (RP2040) の、HAS_OBJECT_PROTECTION のときの戻り先の退避用レコード。
+// in-place の構成 (RP2350 / C6 / C5) は記録を caller の stack に置くので .bss を一切消費しない:
+// 配列は static inline メンバーで、使う (odr-use する) 特殊化 <false> の分しか確保されない。
 // スレッド数は configs/kit.bzl の SHIZUKU_THREAD_COUNT (32) に整合させる。
-static constexpr size_t kMaxReturnThreads = 32;
-static constexpr size_t kMaxReturnDepth = 34;
-alignas(8) caller_return_record s_thread_returns[kMaxReturnThreads][kMaxReturnDepth] = {};
-#endif
+template <bool IN_PLACE> struct thread_return_storage {
+  static constexpr size_t kThreads = 32;
+  static constexpr size_t kDepth = 34;
+  alignas(8) static inline caller_return_record records[kThreads][kDepth] = {};
+  static caller_return_record *get(size_t index) { return records[index]; }
+};
+template <> struct thread_return_storage<true> {
+  static constexpr size_t kThreads = 0;
+  static caller_return_record *get(size_t) { return nullptr; }
+};
 }
 
 // 実装より前に使う (do_switch が grant_unwind を、grant_unwind が arm_timer を呼ぶ)
@@ -66,13 +72,12 @@ template <> void KERNEL::set_thread_storage(void *memory, uintptr_t bytes) {
     m_threads[index].thread = THREAD{};
     m_threads[index].context = CONTEXT{};
     m_threads[index].thread.context = &m_threads[index].context;
-#if !defined(SHIZUKU_LEAN_LEDGER) && !defined(__riscv)
     if constexpr (requires { ARCH::HAS_OBJECT_PROTECTION; } && ARCH::HAS_OBJECT_PROTECTION) {
-      if (index < kMaxReturnThreads) {
-        m_threads[index].thread.return_records = s_thread_returns[index];
+      using returns = thread_return_storage<THREAD::IN_PLACE>;
+      if (index < returns::kThreads) {
+        m_threads[index].thread.return_records = returns::get(index);
       }
     }
-#endif
   }
   // 現在のスレッドのキャッシュを新しい表に張り直す (m_current は init で 0)。
   for (uint32_t core = 0; core < CORE_COUNT; ++core)
@@ -92,13 +97,12 @@ template <> void KERNEL::set_thread_ledger(
   if (capacity > UINT16_MAX)
     BOARD::panic("call ledger capacity exceeds 16-bit depth");
   THREAD &thread = m_threads[id].thread;
-#if !defined(SHIZUKU_LEAN_LEDGER) && !defined(__riscv)
   if constexpr (requires { ARCH::HAS_OBJECT_PROTECTION; } && ARCH::HAS_OBJECT_PROTECTION) {
-    if (id < kMaxReturnThreads) {
-      thread.return_records = s_thread_returns[id];
+    using returns = thread_return_storage<THREAD::IN_PLACE>;
+    if (id < returns::kThreads) {
+      thread.return_records = returns::get(id);
     }
   }
-#endif
   thread.ledger = memory;
   thread.ledger_capacity = capacity;
   thread.call_stack = {};

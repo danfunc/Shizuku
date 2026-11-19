@@ -147,7 +147,7 @@ assert {'MEPC', 'MSTATUS', 'MCAUSE', 'RESERVED0', 'RESERVED1'} <= _written, _wri
 for _u_label in ('.Lrv32_umode_exit_ecall:', '.Lrv32_umode_exit_scrub:'):
     _zeroed_set = set(re.findall(r'sw\s+zero,\s+RV32_F_(\w+)\(sp\)', asm.split(_u_label)[1].split('mret')[0]))
     assert _written <= _zeroed_set, (_u_label, sorted(_written - _zeroed_set))
-# 再開フレームを作るのは call_resume_at (ヘッダ版の call_resume も、SHIZUKU_LEAN_LEDGER の台帳版もここへ来る)。
+# 再開フレームを作るのは call_resume_at (STACK 方式の戻りも、ここへ来る)。
 call_resume = header.split('static exception_frame_t *call_resume_at(')[1].split('\n  }\n')[0]
 assert 'frame->mcause = scrub ? RV32_TAG_ECALL_SCRUB : RV32_TAG_ECALL' in call_resume
 assert 'frame->mepc = pc' in call_resume
@@ -205,16 +205,16 @@ assert trap_src.count('const auto *const entered = context;') == 4
 assert trap_src.count('if (context != entered) arch::scrub_on_switch(*context);') == 4
 # U-mode selftest assembly follows the ECALL caller ABI: returning raw ECALL probes preserve RA.
 stage1 = (root / 'source/selftest/c6_stage1_safety.cpp').read_text()
-for label, next_label in (
-    ('.Lprobe_ecall', '.Lprobe_unpriv'),
-    ('.Lprobe_unpriv', '.Lprobe_caller_stack'),
-    ('.Lprobe_multi_trap_combo', '.Lprobe_u_to_u_call_1'),
+for label, next_label, ra_offset, frame_bytes in (
+    ('.Lprobe_ecall', '.Lprobe_unpriv', 12, 16),
+    ('.Lprobe_unpriv', '.Lprobe_caller_stack', 44, 48),
+    ('.Lprobe_multi_trap_combo', '.Lprobe_u_to_u_call_1', 12, 16),
 ):
     block = stage1.split(f'"{label}:\\n"', 1)[1].split(f'"{next_label}:\\n"', 1)[0]
     ecall_pos = block.index('"  ecall\\n"')
-    assert block.index('"  sw ra, 12(sp)\\n"') < ecall_pos
-    assert block.index('"  lw ra, 12(sp)\\n"', ecall_pos) > ecall_pos
-    assert block.index('"  addi sp, sp, 16\\n"', ecall_pos) < block.rindex('"  ret\\n"')
+    assert block.index(f'"  sw ra, {ra_offset}(sp)\\n"') < ecall_pos
+    assert block.index(f'"  lw ra, {ra_offset}(sp)\\n"', ecall_pos) > ecall_pos
+    assert block.index(f'"  addi sp, sp, {frame_bytes}\\n"', ecall_pos) < block.rindex('"  ret\\n"')
 # U-to-U probe: ecall 通常 return / scrub で s0-s11, ra が消去されるため、
 # .Lprobe_u_to_u_call_fault は ecall 直後に自窓アドレス (u_mode_stage1_data_pool) を再ロードしてから
 # 16(s0) をアクセスすること (40(sp) にあるのは caller の s0 であり自窓アドレスではない)。

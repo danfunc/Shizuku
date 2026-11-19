@@ -79,7 +79,11 @@ extern "C" SHIZUKU_SVC_RAM void shizuku_restore_region_window() {
   // ★PMSAv8 は 32B 粒度。RLAR.LIMIT の取り方は grant_window_entry の注釈を見よ。
   ARCH::apply_grant_window(context->region_base, context->region_limit, core);
   const auto &thread = shizuku::kernel_instance.current_thread();
-  ARCH::apply_stack_window(thread.stack_rbar, thread.stack_rlar, core);
+  // stack 窓は非特権のときだけ張る。特権は無効 (armv8m_prepare_resume と同じ規則)。
+  if (ARCH::context_unprivileged(*context))
+    ARCH::apply_stack_window(thread.stack_rbar, thread.stack_rlar, core);
+  else
+    ARCH::apply_stack_window(ARCH::PRIVILEGED_STACK_RBAR, ARCH::PRIVILEGED_STACK_RLAR, core);
 
   // 非特権へ戻るときだけ、その thread のオブジェクトの窓にそろえる (すでにそうなら書かない)。
   // 特権へ戻るときは窓を触らない: 特権は窓に制限されず、次に非特権へ入るときに張り直す。

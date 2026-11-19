@@ -39,11 +39,20 @@ namespace shizuku::archs {
 struct armv8m_legacy_host : armv8m<8, 4> {
   static constexpr bool LEGACY_FRAME_HOST_TEST = true;
   static constexpr bool CALL_IN_PLACE = false;
+  // 本物の armv8m の context_t は CALL_IN_PLACE = true を宣言している。この host 試験は in-place でない (旧 frame 方式) ので、
+  // thread.hpp の call_in_place_of が false になる文脈を派生で作る (ARCH::CALL_IN_PLACE と一致させる)。
+  struct context_t : armv8m<8, 4>::context_t {
+    static constexpr bool CALL_IN_PLACE = false;
+  };
   static inline uintptr_t host_stack_limit = 0;
 
   static void set_entry(exception_frame_t &frame, uintptr_t pc, uintptr_t lr) {
     frame.pc = static_cast<uint32_t>(pc);
     frame.lr = static_cast<uint32_t>(lr);
+  }
+  template <class Frame>
+  static void set_entry_for_object(Frame &frame, uintptr_t pc, uint32_t) {
+    set_entry(frame, pc, return_stub());
   }
   static void pend_context_switch() {}
 
@@ -58,7 +67,10 @@ struct armv8m_legacy_host : armv8m<8, 4> {
   static uintptr_t stack_limit(const context_t &) { return host_stack_limit; }
   template <class Frame>
   static void switch_callee_protection(context_t &, Frame &, uint32_t, bool) {}
+  template <class Frame>
+  static void switch_callee_protection(context_t &, Frame &, uint32_t, bool, core_num) {}
   static void switch_caller_protection(uint32_t) {}
+  static void switch_caller_protection(uint32_t, core_num) {}
 };
 }  // namespace shizuku::archs
 

@@ -146,9 +146,8 @@ cc_test(
     deps = ["//boards/esp32_c6:led_object"],
 )
 
-# [SHIZUKU_STACK_LEDGER] 記録の位置・鎖の照合・窓のゼロ化。STACK 版でだけ組める。
-# 実行: bazel test --//configs:board=esp32_c6 --//configs:c6_stack_ledger=enabled //tests/esp32_c6:stack_ledger_window_test
-# (manual: 既定の bazel test //... からは外す。既定 (LEAN) では #error で落ちる。)
+# [STACK 方式] 記録の位置・鎖の照合・窓のゼロ化。
+# 実行: bazel test --//configs:board=esp32_c6 //tests/esp32_c6:stack_ledger_window_test
 cc_test(
     name = "stack_ledger_window_test",
     srcs = ["stack_ledger_window_test.cpp"],

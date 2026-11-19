@@ -90,6 +90,8 @@ public:
   // armv8m_ctx.S の .equ (CTX_*) と一致させること。下の static_assert が両縛りする。
   struct context_t {
     static constexpr bool COMPACT_LEDGER = true;
+    // in-place call (記録を caller の stack 枠に置く)。thread.hpp の call_in_place_of。ARCH::CALL_IN_PLACE と一致させる。
+    static constexpr bool CALL_IN_PLACE = true;
     uint32_t r4 = 0, r5 = 0, r6 = 0, r7 = 0;   // offset 0..12
     uint32_t r8 = 0, r9 = 0, r10 = 0, r11 = 0; // offset 16..28
     exception_frame_t *sp = nullptr;           // offset 32
@@ -459,7 +461,7 @@ public:
   static bool call_header_has_room(const context_t &context, uint32_t) {
     return call_stack_has_room(call_return_sp(context), context.psplim, context.stack_ceiling);
   }
-  // [SHIZUKU_STACK_LEDGER] 呼出しの記録の位置: converter が空けた枠の上の半分 [ret_sp + 32, +32)。
+  // [STACK 方式] 呼出しの記録の位置: converter が空けた枠の上の半分 [ret_sp + 32, +32)。
   //   ret_sp は svc 時の SP なので callee の窓の上端 (shrink_stack_limit) と一致し、記録は callee から見えない。
   static constexpr uintptr_t CALL_RECORD_OFFSET = armv8m_abi::record_offset;
   static constexpr uintptr_t CALL_RECORD_BYTES = armv8m_abi::record_bytes;
@@ -758,6 +760,14 @@ public:
                                                                core_num core) {
     apply_stack_window(rbar, rlar, core.index());
   }
+
+  // 特権が走るときの stack 窓 (Region 2) は「無効」(RLAR = 0) にする。特権は PRIVDEFENA で窓に制限されず、
+  // Region 2 の中身は特権の stack アクセスに効かない。無効 {0, 0} は region_program の影が正規化する値なので、
+  // 特権 → 特権の再開は影と同じ値になり **書込みも DSB も起きない** (追跡用の状態も分岐も要らない)。
+  // 非特権の再開は従来どおりその thread の窓 (呼び先なら shrink 済み) を張る = 非特権が絡む遷移では、
+  // 影と違えば必ず書く。影の更新は region_program が書込みと一体で行うので、影は実機の値と常に一致する。
+  static constexpr uint32_t PRIVILEGED_STACK_RBAR = 0;
+  static constexpr uint32_t PRIVILEGED_STACK_RLAR = 0;
 
   // 非特権の窓 (region 3/4) を id のものにする。すでにそうなら何も書かない。特権は PRIVDEFENA で
   // 全域に触れ、窓に制限されないので、特権の呼び先/呼び元のときは窓を触らない (呼ばない)。

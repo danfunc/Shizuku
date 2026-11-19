@@ -54,24 +54,6 @@ config_setting(
     flag_values = {":c6_umode": "disabled"},
     visibility = ["//visibility:public"],
 )
-config_setting(
-    name = "c6_umode_ledger_enabled",
-    flag_values = {":c6_umode": "enabled", ":board": "esp32_c6"},
-    visibility = ["//visibility:public"],
-)
-# [SHIZUKU_STACK_LEDGER] C6 の呼出しの記録を caller の stack 枠に置く。firmware (--config=esp32c6) だけで有効にし、
-# LEAN 版の型・窓を直接見る host 試験 (dispatcher_v1 系、stack_window_test など) は LEAN のまま残す。
-string_flag(
-    name = "c6_stack_ledger",
-    build_setting_default = "disabled",
-    values = ["disabled", "enabled"],
-    visibility = ["//visibility:public"],
-)
-config_setting(
-    name = "c6_umode_stack_ledger_enabled",
-    flag_values = {":c6_umode": "enabled", ":board": "esp32_c6", ":c6_stack_ledger": "enabled"},
-    visibility = ["//visibility:public"],
-)
 string_flag(
     name = "bootsel_support",
     build_setting_default = "disabled",
@@ -290,10 +272,6 @@ cc_library(
     name = "config",
     hdrs = [":config_hpp"],
     includes = ["internal_headers"],
-    defines = select({
-        ":rp2350": ["SHIZUKU_LEAN_LEDGER=1", "SHIZUKU_STACK_LEDGER=1"],
-        "//conditions:default": [],
-    }),
     visibility = ["//visibility:public"],
     deps = [
         "//:internal_headers",

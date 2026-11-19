@@ -1,13 +1,17 @@
 # 呼出しの記録を caller stack 枠へ一本化する設計 (固定台帳・窓別表の廃止)
 
 状態: 本設計 (2026-11-04)。段 3。
+更新 (2026-11-17): この方式 (STACK 方式) は C6 U-mode だけでなく in-place の ARCH (RP2350 / C6 U・M-mode / C5) 全部の唯一の方式になった。
+旧 LEAN 方式 (特権の台帳に戻りの権威を置く) と旧 call-header 方式は廃止し、`SHIZUKU_LEAN_LEDGER` / `SHIZUKU_STACK_LEDGER` の define も無い。
+方式は context_t の `CALL_IN_PLACE` (`thread.hpp` の `call_in_place_of`) で決まる。in-place でない ARCH (RP2040) だけが従来の特権配列を使う。
+以下の本文は設計当時の記述で、行番号・名前は当時のもの。
 対象: C6 (U-mode, `SHIZUKU_C6_UMODE`, RISC-V)。共通部の権威を stack 記録へ集約し、固定台帳・窓別表を全廃する。
 
 ---
 
 ## 1. 目的と背景
 
-従来の C6 U-mode では、戻り先 PC や特権、窓情報などの呼出し記録を特権メモリ上の固定長配列 (`thread.ledger[34]`) および別表 (`thread.win_span[34]`) に保持していた (`SHIZUKU_LEAN_LEDGER`)。
+従来の C6 U-mode では、戻り先 PC や特権、窓情報などの呼出し記録を特権メモリ上の固定長配列 (`thread.ledger[34]`) および別表 (`thread.win_span[34]`) に保持していた (旧 LEAN 方式。define と `win_span` は廃止済み)。
 しかしこの設計には以下の課題があった：
 1. **固定資源の消費**: スレッドごとに 1KB 以上の固定台帳メモリと 68 バイトの窓別表を消費し、組み込み DRAM を圧迫していた。
 2. **段数の固定上限**: `MAX_STACK_WINDOWS = 34` や `ledger_capacity` により、スタックに余裕があっても 34 段を超える呼出しができなかった。
@@ -75,7 +79,7 @@ C6 U-mode において全廃・削減される固定資源の一覧：
 | `thread.win_span` 配列 | `internal_headers/shizuku/templates/thread.hpp:243` | `uint16_t[34]` | **68 バイト / スレッド**<br>(34 × 2B) |
 | `thread.ledger_capacity` | `internal_headers/shizuku/templates/thread.hpp:321` | `uint32_t` (4B) | **4 バイト / スレッド** |
 | `early_boot` の静的台帳 | `modules/esp_idf_support/c6/early_boot.cpp:87` | `call_ledger_entry[4]` (4 × 32B) | **128 バイト** (.bss) |
-| `s_thread_returns` (参考) | `source/kernel/thread.cpp:29` | `caller_return_record[32][34]` (32 × 34 × 16B) | **17,408 バイト** (ARM 非 LEAN 時のみ使用、C6 では元々除外) |
+| `s_thread_returns` (参考) | `source/kernel/thread.cpp:29` | `caller_return_record[32][34]` (32 × 34 × 16B) | **17,408 バイト** (in-place でない ARCH = RP2040 だけが使う。`source/kernel/thread.cpp` の `thread_return_storage<false>` に移り、in-place の構成では確保されない) |
 
 **合計削減量 (C6 実行時)**:
 - スレッドあたり: **1,160 バイト** (`1088 + 68 + 4`)

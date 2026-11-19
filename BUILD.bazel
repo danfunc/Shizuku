@@ -70,11 +70,6 @@ cc_library(
     name = "internal_headers",
     hdrs = glob(["internal_headers/**/*.hpp"]),
     includes = ["internal_headers"],
-    defines = select({
-        "//configs:c6_umode_stack_ledger_enabled": ["SHIZUKU_LEAN_LEDGER=1", "SHIZUKU_STACK_LEDGER=1"],
-        "//configs:c6_umode_ledger_enabled": ["SHIZUKU_LEAN_LEDGER=1"],
-        "//conditions:default": [],
-    }),
     visibility = ["//visibility:public"],
     deps = [":object_ids"],
 )
@@ -100,10 +95,10 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# Host unit test for the real dispatcher implementation. Compile the two
-# implementation units separately and force the same C6 test config into each.
+# Host unit test for the real dispatcher implementation (STACK 版)。2 つの実装単位を別々にコンパイルし、
+# 同じ C6 試験設定を両方に強制する。(LEAN 版・旧 call-header 版の target は廃止した。)
 cc_test(
-    name = "dispatcher_v1_test",
+    name = "dispatcher_v1_stack_ledger_test",
     srcs = [
         "source/kernel/dispatch.cpp",
         "source/kernel/thread.cpp",
@@ -124,34 +119,8 @@ cc_test(
     ],
 )
 
-# The kernel-resident return ledger must preserve dispatch/call behavior and reject invalid unwinds.
 cc_test(
-    name = "dispatcher_v1_lean_ledger_test",
-    srcs = [
-        "source/kernel/dispatch.cpp",
-        "source/kernel/thread.cpp",
-        "source/selftest/test_dispatcher_v1.cpp",
-        "source/selftest/test_dispatcher_v1_config.hpp",
-    ],
-    copts = [
-        "-std=c++20",
-        "-include",
-        "source/selftest/test_dispatcher_v1_config.hpp",
-    ],
-    defines = ["SHIZUKU_LEAN_LEDGER=1"],
-    local_defines = ["SHIZUKU_C6_SKELETON_PERMITTED=1"],
-    deps = [
-        ":internal_headers",
-        "//boards/esp32_c6:headers",
-        "//chips/esp32_c6:headers",
-        "//configs:config",
-    ],
-)
-
-# The same dispatcher audit with the production KERNEL_OBJECT implementation linked,
-# so 3A can exercise the real grant_region row mutation and handler dispatch path.
-cc_test(
-    name = "dispatcher_v1_3a_real_kobj_lean_test",
+    name = "dispatcher_v1_3a_real_kobj_stack_test",
     srcs = [
         "source/kernel/dispatch.cpp",
         "source/kernel/thread.cpp",
@@ -166,7 +135,7 @@ cc_test(
         "-include",
         "source/selftest/test_dispatcher_v1_config.hpp",
     ],
-    defines = ["SHIZUKU_TEST_REAL_KERNEL_OBJECT=1", "SHIZUKU_LEAN_LEDGER=1"],
+    defines = ["SHIZUKU_TEST_REAL_KERNEL_OBJECT=1"],
     local_defines = ["SHIZUKU_C6_SKELETON_PERMITTED=1"],
     deps = [
         ":internal_headers",
@@ -320,7 +289,7 @@ C5_SELFTEST_SRCS = [
     "source/selftest/thread_ladder.cpp",
 ]
 
-C6_SELFTEST_SRCS = C5_SELFTEST_SRCS + select({
+C6_SELFTEST_SRCS = C5_SELFTEST_SRCS + ["source/selftest/mailbox_switch.cpp"] + select({
     "//configs:c6_umode_enabled": ["source/selftest/c6_stage1_safety.cpp"],
     "//conditions:default": [],
 })
@@ -364,7 +333,11 @@ cc_library(
         "source/selftest/rp2350_u_cost.cpp",
         "source/selftest/rp2350_svc_breakdown.cpp",
         "source/selftest/register_leak_test.cpp",
-    ],
+    ] + select({
+        # mailbox_switch は DWT CYCCNT (cycle_counter_read) を使う。RP2040 (armv6m) には無いので入れない。
+        "//configs:rp2040": [],
+        "//conditions:default": ["source/selftest/mailbox_switch.cpp"],
+    }),
     visibility = ["//visibility:public"],
     # flash_stream はカーネルの stream と flash_ops / flash_map を直接試す (FlashFS は使わない)。
     # stress はオブジェクト (peripherals) を相手に試す。
