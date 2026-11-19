@@ -1,6 +1,8 @@
 # 既定ターゲット: RP2350 / Pico 2 W (CMake kit と同じ構成)
 build --platforms=@pico-sdk//bazel/platform:rp2350
 build --@pico-sdk//bazel/config:PICO_BOARD=pico2_w
+# RP2350 は SDK copy_to_ram (//configs:rp2350_copy_to_ram=false で XIP)、RP2040 は従来の linker。
+build --@pico-sdk//bazel/config:PICO_DEFAULT_LINKER_SCRIPT=//firmware:board_linker_script
 build:rp2350_pico2_w --platforms=@pico-sdk//bazel/platform:rp2350
 build:rp2350_pico2_w --@pico-sdk//bazel/config:PICO_BOARD=pico2_w
 build:rp2350_pico2_w --//configs:board=rp2350_pico2_w

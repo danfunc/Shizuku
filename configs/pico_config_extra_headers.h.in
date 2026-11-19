@@ -4,6 +4,9 @@
 #ifndef SHIZUKU_PICO_CONFIG_EXTRA_HEADERS_H
 #define SHIZUKU_PICO_CONFIG_EXTRA_HEADERS_H
 
+// Match CRT0's copy table to the selected RP2350 linker, including SDK .S files.
+@RAM_CONFIG@
+
 // CYW43 の gSPI: clk_sys @CLK@ kHz / div @DIV@ -> SCK @SCK@ kHz
 #define CYW43_PIO_CLOCK_DIV_INT @DIV@
 #define CYW43_SPI_PROGRAM_NAME @PROGRAM@

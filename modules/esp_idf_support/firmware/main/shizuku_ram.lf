@@ -1,0 +1,13 @@
+# All code in the measurement firmware's kernel archive, including generated
+# method_stub_body instances, cold trap paths, probes and measurement loops.
+# Keep data/rodata under the existing IDF scheme; only executable text moves.
+# The BLE profile does not register this fragment.
+[mapping:shizuku_ram]
+archive: libshizuku_kernel.a
+entries:
+    * (noflash_text)
+
+[mapping:shizuku_ram_lto]
+archive: libshizuku_kernel_lto.a
+entries:
+    * (noflash_text)

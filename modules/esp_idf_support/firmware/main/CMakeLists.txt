@@ -25,7 +25,13 @@ if(SHIZUKU_ESP_BLE OR SHIZUKU_C5_BLE OR "$ENV{SHIZUKU_ESP_BLE}" STREQUAL "1" OR 
            "../../freertos_compat/shizuku_port.cpp"
       PRIV_REQUIRES ${shizuku_ble_priv_requires})
 else()
+  if(IDF_TARGET STREQUAL "esp32c6")
+    set(shizuku_ram_fragments "shizuku_ram.lf")
+  else()
+    set(shizuku_ram_fragments "")
+  endif()
   idf_component_register(SRCS "shizuku_boot.c" "usb_console.c" "early_diag.c"
+                         LDFRAGMENTS ${shizuku_ram_fragments}
                          PRIV_REQUIRES esp_hal_usb esp_hal_wdt esp_rom soc)
 endif()
 if(SHIZUKU_ESP_BLE OR SHIZUKU_C5_BLE OR "$ENV{SHIZUKU_ESP_BLE}" STREQUAL "1" OR "$ENV{SHIZUKU_C5_BLE}" STREQUAL "1")

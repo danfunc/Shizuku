@@ -11,6 +11,7 @@
 #include "pico/stdlib.h"
 #include "arch/armv8m/armv8m.hpp"
 #include "boards/rp2350_pico2/rp2350_pico2.hpp"
+#include "boards/rp2350_pico2/boot_diag.hpp"
 #include "chips/rp2350/chip.hpp"
 #include "shizuku/kernel.hpp"
 #include "shizuku/objects/usb_cdc.hpp"
@@ -35,6 +36,10 @@ extern "C" char __end__[];
 // リンカが置く「ファーム本体の終端」。flash_fs.cpp と同じ名前を同じ理由で
 // ファイルスコープの extern "C" として受ける。
 extern "C" char __flash_binary_end;
+#if PICO_COPY_TO_RAM
+extern "C" char __ram_text_start__[], __ram_text_end__[];
+extern "C" char __shizuku_rodata_start__[], __shizuku_rodata_end__[];
+#endif
 #include <cstdarg>
 #include <cstdio>
 
@@ -46,6 +51,7 @@ namespace shizuku {
 namespace boards {
 
 void rp2350_pico2::init(uint32_t core) {
+  if (core == 0) shizuku_rp2350_boot_stage(31);
   if (core == 0) {
     // RAM ベクタテーブルは両コア共有: 登録は core0 の 1 回だけ
     // (exclusive 登録は二重登録で panic するため、core1 で再登録しない)。
@@ -95,7 +101,9 @@ void rp2350_pico2::init(uint32_t core) {
   exception_set_priority(SVCALL_EXCEPTION, SOC_TYPE::kPrioritySvc);
   exception_set_priority(SYSTICK_EXCEPTION, SOC_TYPE::kPrioritySysTick);
   exception_set_priority(PENDSV_EXCEPTION, SOC_TYPE::kPriorityLowest);
+  if (core == 0) shizuku_rp2350_boot_stage(32);
   protection_init(); // region は per-core banked なので各コアで張る
+  if (core == 0) shizuku_rp2350_boot_stage(33);
 
   // ---- 落ちたときに必ず声が出るようにする -------------------------------
   // ★診断が届くかどうかは優先度で決まる。報告している最中に USB の割り込みが
@@ -133,14 +141,30 @@ void rp2350_pico2::protection_init() {
   //   読めて当然だが、ファイルの中身は**それを開いた者だけ**が読めるべきなので、
   //   region0 はコード範囲だけに絞り、ファイルの中身は
   //   GRANT_REGION (§11.3 / Q8) で対象オブジェクトへ動的に開く。
+#if PICO_COPY_TO_RAM
+  // SDK copy_to_ram: 公開コードの実行先だけを開く。.data / SVC / 台帳は含めない。
+  // SDK の .text 終端は 4B 整列なので、次の .data と重ならないようリンカ側で 32B に揃える。
+  const uintptr_t code_start = (uintptr_t)__ram_text_start__;
+  const uintptr_t code_end = (uintptr_t)__ram_text_end__ - 1u;
+#else
+  const uintptr_t code_start = SOC_TYPE::kXipBase;
   const uintptr_t code_end =
       ((uintptr_t)&__flash_binary_end + 31u) & ~(uintptr_t)31;
-  ARCH_TYPE::region_set(0, SOC_TYPE::kXipBase, code_end, ARCH_TYPE::ACCESS_RO_ALL,
+#endif
+  ARCH_TYPE::region_set(0, code_start, code_end, ARCH_TYPE::ACCESS_RO_ALL,
                         false, 0);
   // Region 1: SRAM 全域 RW は撤廃。SRAM は PRIVDEFENA (特権 RWX, 非特権 None) に委ね、
   // 非特権オブジェクトには Region 2(Stack), Region 3(Data), Region 4(MMIO) を動的に張る。
   for (uint32_t index = 1; index < SOC_TYPE::kMpuRegionCount; ++index)
     ARCH_TYPE::region_disable(index);
+#if PICO_COPY_TO_RAM
+  // flash 時と同じ定数の読取り権を維持する。可変データや .time_critical は窓の外。
+  static_assert(SOC_TYPE::kMpuRegionCount > 6);
+  if ((uintptr_t)__shizuku_rodata_end__ > (uintptr_t)__shizuku_rodata_start__)
+    ARCH_TYPE::region_set(6, (uintptr_t)__shizuku_rodata_start__,
+                         (uintptr_t)__shizuku_rodata_end__ - 1u,
+                         ARCH_TYPE::ACCESS_RO_ALL, true, 0);
+#endif
   ARCH_TYPE::protection_enable();
 }
 
@@ -396,7 +420,16 @@ void rp2350_pico2::dma_copy(int channel, const void *from, void *to,
 
 int rp2350_pico2::dma_claim() { return ::dma_claim_unused_channel(false); }
 
-uint64_t rp2350_pico2::time_us() { return ::time_us_64(); }
+uint64_t rp2350_pico2::time_us() {
+  // pico-sdk timer_time_us_64 と同じ high/low/high の読み方。SDK の関数を呼ばない。
+  uint32_t hi = timer_hw->timerawh;
+  for (;;) {
+    const uint32_t lo = timer_hw->timerawl;
+    const uint32_t next_hi = timer_hw->timerawh;
+    if (hi == next_hi) return (static_cast<uint64_t>(hi) << 32) | lo;
+    hi = next_hi;
+  }
+}
 bool rp2350_pico2::try_time_us(uint64_t &out) {
   for (unsigned attempt = 0; attempt < 4; ++attempt) {
     const uint32_t hi1 = timer_hw->timerawh;
