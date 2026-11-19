@@ -9,6 +9,7 @@
 //    (CREATE_METHOD_DESCRIPTOR=32, CALL_METHOD_DESCRIPTOR=33) 等の基礎機構は
 //    カーネルディスパッチが直接処理する。
 //  形は a0 = 番号, a1..a4 = 引数 / 戻り a0 = エラー (0 = 成功), a1 = 値。
+//  GET_TIME_US だけは a2 に上位32bitも返す。ほかの API の a2 は従来どおり未保証。
 //  ★将来 XNO (オブジェクト集合の別リポジトリ, D17) が使う公開 ABI はこれ。
 //    今は internal_headers に置いているが、境界を切るときにここから公開ヘッダへ移す。
 namespace shizuku {
@@ -153,6 +154,11 @@ enum struct object_api : uintptr_t {
   // ABI: a1=descriptor index, a2-a7=up to six register arguments (RISC-V).
   // The intended path uses creation-time authorization and a bounded lookup.
   CALL_METHOD_DESCRIPTOR = 33,
+  // Bounded trap-local clock read. No arguments. a0=error, a1=low32,
+  // a2=high32 (r0/r1/r2 on ARM); both value words are zero on failure.
+  // Use ARCH::get_time_us() for a C++ three-word result; the ordinary
+  // ARCH::syscall converter retains its historical two-word result ABI.
+  GET_TIME_US = 34,
   // 専用ハンドラ (HANDLER) が配下の子オブジェクトの終了を Root KOBJ へ転送する。
   // a1 = 絶対戻り先深さ d, a2 = 戻り値, a3 = エラーコード。
   // Root は d を検証し、現在深さとの差分だけ RETURN する。
@@ -239,12 +245,14 @@ enum struct object_error : uintptr_t {
   NO_DESCRIPTOR,  // 記述子テーブルが一杯 (容量 16 超過)
   BAD_DESCRIPTOR, // インデックス不正 / 未公開 / 権限なし
   STALE_DESCRIPTOR, // 呼び出し先世代が一致しない (stale)
+  TIME_UNAVAILABLE, // bounded board clock read did not complete
 };
 
 static_assert(static_cast<uintptr_t>(object_error::STREAM_BUSY) == 20);
 static_assert(static_cast<uintptr_t>(object_error::NO_DESCRIPTOR) == 21);
 static_assert(static_cast<uintptr_t>(object_error::BAD_DESCRIPTOR) == 22);
 static_assert(static_cast<uintptr_t>(object_error::STALE_DESCRIPTOR) == 23);
+static_assert(static_cast<uintptr_t>(object_error::TIME_UNAVAILABLE) == 24);
 
 } // namespace shizuku
 #endif // SHIZUKU_OBJECT_API_HPP

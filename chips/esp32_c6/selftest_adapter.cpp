@@ -13,7 +13,27 @@ struct name_id_entry {
     uint32_t id;
 };
 
+volatile shizuku_c6_failure_record_t shizuku_c6_failure_record = {};
+static_assert(sizeof(shizuku_c6_failure_record_t) == 64);
+// Selftests run serially. Publish stored only after all three words are written.
+static void capture_failure(const char *name, unsigned long got, unsigned long want) {
+    const uint32_t total = shizuku_c6_failure_record.total;
+    if (total != UINT32_MAX) shizuku_c6_failure_record.total = total + 1;
+    const uint32_t i = shizuku_c6_failure_record.stored;
+    if (i >= 4) return;
+    shizuku_c6_failure_record.entries[i].name = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(name));
+    shizuku_c6_failure_record.entries[i].got = static_cast<uint32_t>(got);
+    shizuku_c6_failure_record.entries[i].want = static_cast<uint32_t>(want);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    shizuku_c6_failure_record.stored = i + 1;
+}
+
 static const name_id_entry kMapping[] = {
+    {"time: U reads succeed", 0xB001},
+    {"time: U monotonic", 0xB002},
+    {"time: privileged bracket", 0xB003},
+    {"time: counter enabled", 0xB004},
+    {"time: cost samples valid", 0xB005},
     // 0x1000 番台: call_ladder
     {"create object", 0x1001},
     {"call/1: error", 0x1002},
@@ -259,6 +279,15 @@ uint32_t shizuku_c6_selftest_name_to_id(const char *name) {
 }
 
 void shizuku_c6_selftest_record_init(void) {
+    shizuku_c6_failure_record.magic = 0x46364353u;
+    shizuku_c6_failure_record.version = 1;
+    shizuku_c6_failure_record.total = 0;
+    shizuku_c6_failure_record.stored = 0;
+    for (unsigned i = 0; i < 4; ++i) {
+        shizuku_c6_failure_record.entries[i].name = 0;
+        shizuku_c6_failure_record.entries[i].got = 0;
+        shizuku_c6_failure_record.entries[i].want = 0;
+    }
     shizuku_c6_selftest_record.magic = SHIZUKU_C6_SELFTEST_MAGIC;
     shizuku_c6_selftest_record.completed = SHIZUKU_C6_SELFTEST_STATUS_RUNNING;
     shizuku_c6_selftest_record.passed = 0;
@@ -270,9 +299,8 @@ void shizuku_c6_selftest_record_init(void) {
 }
 
 void shizuku_c6_selftest_record_assert(const char *name, bool ok, unsigned long got, unsigned long want) {
-    (void)got;
-    (void)want;
     const uint32_t id = shizuku_c6_selftest_name_to_id(name);
+    if (!ok || id == 0xFFFFu) capture_failure(name, got, want);
     shizuku_c6_selftest_record.last_test_id = id;
     if (id == 0xFFFFu) {
         // 未登録のテスト名は成功とみなさない (失敗として記録)
@@ -319,8 +347,8 @@ extern uint32_t passed;
 extern uint32_t failed;
 
 void record_fail(const char *name, unsigned long got, unsigned long want) {
-    (void)got;
-    (void)want;
+    // Includes stage1 record_check's failure path, before diagnostic-ring writes.
+    capture_failure(name, got, want);
     const uint32_t id = shizuku_c6_selftest_name_to_id(name);
     shizuku_c6_selftest_record.last_test_id = id;
     if (id == 0xFFFFu) {

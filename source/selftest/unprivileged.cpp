@@ -16,6 +16,10 @@
 #include "shizuku/method_entry.hpp"
 #include "shizuku/selftest.hpp"
 #include "shizuku/svc_attributes.hpp"
+#include "shizuku/native_time.hpp"
+#include "shizuku/time_cost_record.hpp"
+
+extern "C" { volatile shizuku_time_cost_record_t shizuku_time_cost_record = {}; }
 
 namespace shizuku {
 namespace selftest {
@@ -76,6 +80,26 @@ bool provision_data_window(uint32_t id, const void *base, uintptr_t bytes) {
 
 // 自分の CONTROL を読んで返すだけ。触るのはレジスタと自分のスタックのみ。
 uintptr_t probe(uintptr_t selector, uintptr_t, uintptr_t, uintptr_t) {
+  if (selector >= 12 && selector <= 14) {
+    // Only the probe's own data window and stack are touched in U mode.
+    auto *words = reinterpret_cast<volatile uint32_t *>(s_unpriv_probe_data);
+    const uint32_t rounds = selector == 12 ? 2 : 2048;
+    words[4] = 0; words[5] = 0;
+    for (uint32_t i = 0; i < rounds; ++i) {
+      uint64_t value = 0;
+      if (selector != 14) {
+        const auto r = ARCH::get_time_us();
+        if (r.error != 0) words[4] = words[4] + 1;
+        value = native::time_value(r);
+      } else {
+        asm volatile("" ::: "memory");
+      }
+      if (i == 0) { words[0] = uint32_t(value); words[1] = uint32_t(value >> 32); }
+      words[2] = uint32_t(value); words[3] = uint32_t(value >> 32);
+      words[5] = words[5] + 1;
+    }
+    return 0;
+  }
   if (selector == 1)
     return ARCH::syscall((uintptr_t)object_api::GRANT_REGION, UINT32_MAX, 0, 0).error;
   if (selector == 2)
@@ -126,6 +150,39 @@ void check(const char *name, bool ok, unsigned long got, unsigned long want) {
   }
 }
 
+template <class A> void time_probe_cost(bool clock_ok) {
+  if constexpr (A::HAS_CYCLE_COUNTER) {
+    auto &r = shizuku_time_cost_record;
+    r.magic = 0x54494D45; r.version = 1; r.done = 0; r.rounds = 2048;
+    r.counter_enabled = A::cycle_counter_enable() ? 1 : 0;
+    check("time: counter enabled", r.counter_enabled == 1, r.counter_enabled, 1);
+    if (!r.counter_enabled) { r.done = 1; return; }
+    auto measure = [](uintptr_t selector, bool &ok) {
+      __atomic_thread_fence(__ATOMIC_SEQ_CST);
+      const uint32_t start = A::cycle_counter_read();
+      const auto out = A::syscall((uintptr_t)object_api::CALL_METHOD, OBJECT_UNPRIV_PROBE, METHOD_MAIN, selector);
+      __atomic_thread_fence(__ATOMIC_SEQ_CST);
+      const uint32_t elapsed = A::cycle_counter_read() - start;
+      ok = out.error == 0 && out.value == 0;
+      return elapsed;
+    };
+    bool base_ok, raw_ok;
+    r.baseline_total = measure(14, base_ok);
+    r.raw_total = measure(13, raw_ok);
+    auto *words = reinterpret_cast<volatile uint32_t *>(s_unpriv_probe_data);
+    r.errors = words[4];
+    r.baseline_mean = r.baseline_total / r.rounds;
+    r.raw_mean = r.raw_total / r.rounds;
+    r.ok = clock_ok && base_ok && raw_ok && words[5] == r.rounds && r.errors == 0 && r.raw_total > r.baseline_total;
+    r.net_mean = r.ok ? (r.raw_total - r.baseline_total) / r.rounds : 0;
+    check("time: cost samples valid", r.ok, r.errors, 0);
+    r.done = 1;
+    BOARD::diag_printf("[COST] GET_TIME_US U rounds=%lu baseline=%lu raw=%lu net=%lu cyc ok=%lu\n",
+        (unsigned long)r.rounds, (unsigned long)r.baseline_mean,
+        (unsigned long)r.raw_mean, (unsigned long)r.net_mean, (unsigned long)r.ok);
+  }
+}
+
 } // namespace
 
 void unprivileged_probe() {
@@ -164,6 +221,25 @@ void unprivileged_probe() {
   check("unpriv: caller still privileged",
         (ARCH::control_register() & 1u) == 0u,
         (unsigned long)ARCH::control_register(), 0);
+
+  const uint64_t before = BOARD::time_us();
+  const auto timed = ARCH::syscall((uintptr_t)object_api::CALL_METHOD,
+                                  OBJECT_UNPRIV_PROBE, METHOD_MAIN, 12);
+  const uint64_t after = BOARD::time_us();
+  const auto *tw = reinterpret_cast<volatile uint32_t *>(s_unpriv_probe_data);
+  const uint64_t first = (uint64_t(tw[1]) << 32) | tw[0];
+  const uint64_t last = (uint64_t(tw[3]) << 32) | tw[2];
+  check("time: U reads succeed", timed.error == 0 && timed.value == 0 && tw[4] == 0 && tw[5] == 2, tw[4], 0);
+  check("time: U monotonic", last >= first && last - first <= 1000000, (unsigned long)(last - first), 1000000);
+  check("time: privileged bracket", before <= first && last <= after && after - before <= 1000000,
+        (unsigned long)(after - before), 1000000);
+  auto &tr = shizuku_time_cost_record;
+  tr.first_low = uint32_t(first); tr.first_high = uint32_t(first >> 32);
+  tr.last_low = uint32_t(last); tr.last_high = uint32_t(last >> 32);
+  tr.before_low = uint32_t(before); tr.before_high = uint32_t(before >> 32);
+  tr.after_low = uint32_t(after); tr.after_high = uint32_t(after >> 32);
+  time_probe_cost<ARCH>(timed.error == 0 && timed.value == 0 && tw[4] == 0 && tw[5] == 2 &&
+      last >= first && last - first <= 1000000 && before <= first && last <= after && after - before <= 1000000);
 
   // Compare the actual handler decisions (not just its table) on both origins.
   for (uintptr_t selector = 1; selector <= 2; ++selector) {

@@ -183,6 +183,13 @@ void esp32_c6::diag_printf(const char *fmt, ...) {
   va_end(args);
 }
 uintptr_t esp32_c6::unprivileged_floor() { return (uintptr_t)-1; }
+static bool test_time_available = true;
+static unsigned test_time_reads = 0;
+bool esp32_c6::try_time_us(uint64_t &out) {
+  ++test_time_reads;
+  out = 0x12345678ABCDEF01ull;
+  return test_time_available;
+}
 #if defined(SHIZUKU_TEST_REAL_KERNEL_OBJECT)
 int esp32_c6::dma_claim() { std::abort(); }
 void esp32_c6::dma_copy(int, const void *, void *, uint32_t) { std::abort(); }
@@ -736,13 +743,39 @@ static void run_dispatcher_tests() {
   // -------------------------------------------------------------------------
   // ユーザー決定: 2, 4, 5, 6, 8, 9, 12, 27, 33 (10, 11 はスケジューラ設計待ちで thread のまま。
   // 16, 18, 20, 29, 30, 31 は O(1) でない / 錠を取るので thread に戻した)。
-  for (unsigned id = 1; id < 34; ++id) {
+  for (unsigned id = 1; id < svc_attributes.size(); ++id) {
     const bool expect_handler = id == 2 || id == 4 || id == 5 || id == 6 ||
                                 id == 8 || id == 9 || id == 12 || id == 27 ||
-                                id == 33;
+                                id == 33 || id == 34;
     assert((svc_attribute_for(id)->mode == svc_mode::handler) == expect_handler);
   }
-  printf("  7. svc_attributes handler set == {2,4,5,6,8,9,12,27,33}: PASS\n");
+  printf("  7. svc_attributes handler set == {2,4,5,6,8,9,12,27,33,34}: PASS\n");
+
+  // Exercise the real svc_dispatch -> svc_get_time -> bounded board call,
+  // not merely a table lookup. Poison inputs are never treated as pointers.
+  const unsigned clock_reads_before = boards::test_time_reads;
+  for (bool privileged : {false, true}) {
+    for (bool available : {true, false}) {
+      fresh(ROOT_APP_ID, privileged);
+      frame->mstatus = privileged ? RV32_MSTATUS_MPP : 0;
+      frame->mepc = 0x42012340;
+      frame->a0 = (uintptr_t)object_api::GET_TIME_US;
+      frame->a1 = UINT32_MAX;
+      frame->a2 = UINT32_MAX;
+      boards::test_time_available = available;
+      kernel_instance.svc_dispatch(ctx);
+      assert(ctx->sp == frame && kernel_instance.current_depth() == 0);
+      assert(ctx->privileged == privileged && frame->mepc == 0x42012340);
+      assert(frame->a0 == (available ? 0u : (uintptr_t)object_error::TIME_UNAVAILABLE));
+      assert(frame->a1 == (available ? 0xABCDEF01u : 0u));
+      assert(frame->a2 == (available ? 0x12345678u : 0u));
+      assert(frame->mcause == (privileged ? RV32_TAG_TIME : RV32_TAG_U_TIME));
+    }
+  }
+  assert(boards::test_time_reads == clock_reads_before + 4);
+  boards::test_time_available = true;
+  fresh(ROOT_APP_ID, true);
+  printf("  7b. GET_TIME_US: real native route, 64-bit reply and bounded failure on M/U: PASS\n");
 
   // -------------------------------------------------------------------------
   // 8. CALL_METHOD (4) / EXIT_METHOD (2): A (base) → B → C

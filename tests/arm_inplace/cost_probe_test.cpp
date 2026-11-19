@@ -6,7 +6,7 @@ using namespace shizuku::cost_probe;
 
 int main() {
   static_assert(bucket(0) == 0 && bucket(33) == 33);
-  static_assert(bucket(34) == unknown_api && bucket(UINT32_MAX) == unknown_api);
+  static_assert(bucket(34) == 34 && bucket(35) == unknown_api && bucket(UINT32_MAX) == unknown_api);
   constexpr auto normal = difference(xip_snapshot{100, 200}, xip_snapshot{106, 210});
   static_assert(normal.valid && !normal.saturated && normal.hit == 6 &&
                 normal.access == 10 && normal.miss == 4);

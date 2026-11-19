@@ -2,6 +2,7 @@
 #define SHIZUKU_ARCHS_ARMV8M_HPP
 #include <cstddef>
 #include <cstdint>
+#include "shizuku/object_api.hpp"
 #include "arch/ppb.hpp"
 #include "shizuku/concepts/arch.hpp"
 #include "shizuku/kernel_abi.hpp"
@@ -168,6 +169,10 @@ public:
                          uintptr_t value) {
     frame.r0 = (uint32_t)error;
     frame.r1 = (uint32_t)value;
+  }
+  static void set_time_result(exception_frame_t &frame, shizuku::object_error error, uint64_t value) {
+    set_result(frame, (uintptr_t)error, uint32_t(value));
+    frame.r2 = uint32_t(value >> 32);
   }
   static void set_entry(exception_frame_t &frame, uintptr_t pc, uintptr_t lr) {
     if (lr == return_stub()) {
@@ -831,6 +836,10 @@ public:
   // a0 = 番号 (Q1: 即値でなくレジスタ渡し。RISC-V の ecall に即値が無いため)。
   // レジスタを明示束縛するので、最適化レベルによらずオペランド割付が壊れない。
   using syscall_result = shizuku::armv8m_abi::result;
+  [[gnu::always_inline]] static inline shizuku::armv8m_abi::time_result get_time_us() {
+    return shizuku::armv8m_abi::syscall<false, false, false, true>(
+        (uintptr_t)shizuku::object_api::GET_TIME_US);
+  }
   [[gnu::always_inline]] static inline syscall_result syscall(uintptr_t number, uintptr_t a1 = 0,
                                        uintptr_t a2 = 0, uintptr_t a3 = 0,
                                        uintptr_t a4 = 0) {

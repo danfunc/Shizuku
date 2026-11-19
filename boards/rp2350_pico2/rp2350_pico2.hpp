@@ -42,6 +42,7 @@ public:
   static void dma_release(int channel);
   static uint32_t core_num() { return shizuku::chips::rp2350::chip::core_id(); }
   static uint64_t time_us();
+  static bool try_time_us(uint64_t &out);
   // ★クロックを知っているのは board (PORT §2.3)。上位は µs でしか話さない。
   static uint32_t cycles_per_us();
   // ★非特権オブジェクトから届く最下位アドレス (= ヒープ先頭)。これより下 (静的領域)

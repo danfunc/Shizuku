@@ -23,6 +23,8 @@ static_assert(!shizuku::armv8m_abi::supported_entry<decltype(&six_args)>::value)
 
 int main() {
   namespace abi = shizuku::armv8m_abi;
+  static_assert(sizeof(abi::result) == 2 * sizeof(uintptr_t));
+  static_assert(sizeof(abi::time_result) == 3 * sizeof(uintptr_t));
   assert(abi::wrapper<&word_entry>(42, 0, 0, 0, 0) == 42);
   assert(abi::wrapper<&zero_entry>(42, 0, 0, 0, 0) == 17);
   assert(abi::wrapper<&void_entry>(0, 0, 0, 0, 0) == 0);

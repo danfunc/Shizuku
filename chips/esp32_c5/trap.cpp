@@ -257,6 +257,7 @@ constexpr auto make_ecall_table() {
   t[(unsigned)object_api::EXIT_METHOD] = &ecall_native<&K::svc_exit_method>;
   t[(unsigned)object_api::CALL_METHOD] = &ecall_native<&K::svc_call_method>;
   t[(unsigned)object_api::GET_CURRENT_OBJECT] = &ecall_native<&K::svc_get_current>;
+  t[(unsigned)object_api::GET_TIME_US] = &ecall_native<&K::svc_get_time>;
   t[(unsigned)object_api::GET_CALLER_OBJECT] = &ecall_native<&K::svc_get_caller>;
   t[(unsigned)object_api::YIELD] = &ecall_native<&K::svc_yield>;
   t[(unsigned)object_api::RUN_FOR] = &ecall_native<&K::svc_run_for>;

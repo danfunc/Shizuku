@@ -127,9 +127,11 @@ enum class trap_api : uint8_t {
   RUN_FOR,
   SET_BUDGET,
   CALL_DESCRIPTOR,
+  GET_TIME,
 };
 inline constexpr auto trap_api_table = [] {
-  std::array<trap_api, 34> t{};
+  std::array<trap_api, 35> t{};
+  t[(unsigned)object_api::GET_TIME_US] = trap_api::GET_TIME;
   t[(unsigned)object_api::GET_CURRENT_OBJECT] = trap_api::GET_CURRENT;
   t[(unsigned)object_api::GET_CALLER_OBJECT] = trap_api::GET_CALLER;
   t[(unsigned)object_api::YIELD] = trap_api::YIELD;
@@ -609,6 +611,11 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_get_current(KERNEL::CON
   return true;
 }
 
+template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_get_time(KERNEL::CONTEXT *context, core_arg_t<ARCH>) {
+  native::get_time<BOARD, ARCH>(*context->sp);
+  return true;
+}
+
 template <> SHIZUKU_HOT SHIZUKU_SVC_RAM bool KERNEL::svc_get_caller(KERNEL::CONTEXT *context, core_arg_t<ARCH> core) {
   ARCH::set_result(*context->sp, (uintptr_t)object_error::OK,
                    caller_object(current_thread_id_for(*this, core)));
@@ -934,6 +941,9 @@ template <> SHIZUKU_HOT SHIZUKU_SVC_RAM void KERNEL::svc_dispatch(KERNEL::CONTEX
       break;
     case trap_api::GET_CURRENT:
       svc_get_current(context, core);
+      return;
+    case trap_api::GET_TIME:
+      svc_get_time(context, core);
       return;
     case trap_api::GET_CALLER:
       svc_get_caller(context, core);

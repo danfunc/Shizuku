@@ -1,5 +1,6 @@
 #include "shizuku/kernel_services.hpp"
 #include "hardware/clocks.h"
+#include "hardware/timer.h"
 #include "hardware/regs/addressmap.h"
 #include "hardware/exception.h"
 #include "hardware/irq.h"
@@ -396,6 +397,18 @@ void rp2350_pico2::dma_copy(int channel, const void *from, void *to,
 int rp2350_pico2::dma_claim() { return ::dma_claim_unused_channel(false); }
 
 uint64_t rp2350_pico2::time_us() { return ::time_us_64(); }
+bool rp2350_pico2::try_time_us(uint64_t &out) {
+  for (unsigned attempt = 0; attempt < 4; ++attempt) {
+    const uint32_t hi1 = timer_hw->timerawh;
+    const uint32_t lo = timer_hw->timerawl;
+    const uint32_t hi2 = timer_hw->timerawh;
+    if (hi1 == hi2) {
+      out = (static_cast<uint64_t>(hi1) << 32) | lo;
+      return true;
+    }
+  }
+  return false;
+}
 
 // ★掴んだチャネルを返す。接続を畳めるようにするために要る (無いとチャネルが
 //   漏れ、詰まった接続を外す手段も無くなる)。呼ぶ側が「もう転送中でない」

@@ -25,6 +25,7 @@ int main() {
       {object_api::EXIT_METHOD, svc_direct_kind::EXIT_METHOD},
       {object_api::CALL_METHOD, svc_direct_kind::CALL_METHOD},
       {object_api::GET_CURRENT_OBJECT, svc_direct_kind::GET_CURRENT},
+      {object_api::GET_TIME_US, svc_direct_kind::GET_TIME},
       {object_api::GET_CALLER_OBJECT, svc_direct_kind::GET_CALLER},
       {object_api::SET_BUDGET, svc_direct_kind::SET_BUDGET},
       {object_api::FORWARD_CHILD_EXIT, svc_direct_kind::FORWARD_CHILD_EXIT},
@@ -49,7 +50,7 @@ int main() {
       CHECK(id == (unsigned)object_api::YIELD || id == (unsigned)object_api::RUN_FOR,
             "the only handler APIs that are not direct are YIELD and RUN_FOR");
   }
-  CHECK(direct_count == 7, "seven APIs are direct");
+  CHECK(direct_count == 8, "eight APIs are direct");
   CHECK(handler_count == direct_count + 2, "handler APIs = direct + YIELD + RUN_FOR");
 
   // thread モードの API (例: STREAM_PUSH_N / EXIT_THREAD / SLEEP_US) と範囲外は直接入らない。

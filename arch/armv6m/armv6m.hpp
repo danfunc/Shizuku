@@ -2,9 +2,11 @@
 #define SHIZUKU_ARCHS_ARMV6M_HPP
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 #include "arch/ppb.hpp"
 #include "shizuku/concepts/arch.hpp"
 #include "shizuku/kernel_abi.hpp"
+#include "shizuku/object_api.hpp"
 #include "shizuku/service_profile.hpp"
 
 extern "C" {
@@ -84,6 +86,7 @@ public:
     set_args(f,a);*reinterpret_cast<uint32_t *>(stack_arg_address)=(uint32_t)a[4];
   }
   static void set_result(exception_frame_t &f,uintptr_t e,uintptr_t v){f.r0=e;f.r1=v;}
+  static void set_time_result(exception_frame_t &f,shizuku::object_error e,uint64_t v){set_result(f,(uintptr_t)e,uint32_t(v));f.r2=uint32_t(v>>32);}
   static void set_entry(exception_frame_t &f,uintptr_t pc,uintptr_t lr){f.pc=pc;f.lr=lr;}
   static uintptr_t return_stub(){return (uintptr_t)&shizuku_armv6m_return_stub;}
   static void prepare_thread_entry(context_t &c,uintptr_t top,uintptr_t pc,uintptr_t ret,uintptr_t arg){
@@ -317,9 +320,13 @@ public:
   static uint32_t debug_reason_take(){return 0;} static uint32_t breakpoint_count(){return 0;}
   static void breakpoint_enable(bool){} static void breakpoint_set(uint32_t,uintptr_t){} static void breakpoint_clear(uint32_t){}
   struct syscall_result{uintptr_t error,value;};
-  static inline syscall_result syscall(uintptr_t n,uintptr_t a1=0,uintptr_t a2=0,uintptr_t a3=0,uintptr_t a4=0){
+  struct time_result{uintptr_t error,value,value_high;};
+  static inline time_result get_time_us(){return syscall<true>((uintptr_t)shizuku::object_api::GET_TIME_US);}
+  template<bool TimeReply=false>
+  static inline std::conditional_t<TimeReply,time_result,syscall_result> syscall(uintptr_t n,uintptr_t a1=0,uintptr_t a2=0,uintptr_t a3=0,uintptr_t a4=0){
     register uintptr_t r0 asm("r0")=n;register uintptr_t r1 asm("r1")=a1;register uintptr_t r2 asm("r2")=a2;register uintptr_t r3 asm("r3")=a3;register uintptr_t r12 asm("r12")=a4;
-    asm volatile("svc 0":"+r"(r0),"+r"(r1):"r"(r2),"r"(r3),"r"(r12):"memory");return {r0,r1};
+    asm volatile("svc 0":"+r"(r0),"+r"(r1),"+r"(r2),"+r"(r3),"+r"(r12)::"memory","cc");
+    if constexpr(TimeReply) return {r0,r1,r2}; else return {r0,r1};
   }
   [[noreturn]] static void enter_thread_mode(uintptr_t top,uintptr_t,void(*entry)()){shizuku_armv6m_enter_thread_mode(top,entry);}
 };

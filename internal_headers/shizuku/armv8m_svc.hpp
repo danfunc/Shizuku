@@ -185,6 +185,8 @@ template <svc_direct_kind Kind>
       result = kernel.svc_get_current(context, core) ? native::status::DONE : native::status::FORWARD;
     } else if constexpr (Kind == svc_direct_kind::GET_CALLER) {
       result = kernel.svc_get_caller(context, core) ? native::status::DONE : native::status::FORWARD;
+    } else if constexpr (Kind == svc_direct_kind::GET_TIME) {
+      result = kernel.svc_get_time(context, core) ? native::status::DONE : native::status::FORWARD;
     } else {
       static_assert(Kind == svc_direct_kind::SET_BUDGET);
       result = kernel.svc_set_budget(context, core) ? native::status::DONE : native::status::FORWARD;
@@ -253,6 +255,9 @@ template <svc_direct_kind Kind>
 [[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void get_current(uint32_t e, uintptr_t p, ARCH::core_num core) {
   direct<svc_direct_kind::GET_CURRENT>(e, p, core);
 }
+[[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void get_time(uint32_t e, uintptr_t p, ARCH::core_num core) {
+  direct<svc_direct_kind::GET_TIME>(e, p, core);
+}
 [[gnu::noinline, gnu::noclone]] static SHIZUKU_SVC_RAM void get_caller(uint32_t e, uintptr_t p, ARCH::core_num core) {
   direct<svc_direct_kind::GET_CALLER>(e, p, core);
 }
@@ -266,7 +271,7 @@ template <svc_direct_kind Kind>
 // dispatch is one load and a jump table on the number; every path below is a tail call.
 // The cases are written on the numbers (a table lookup first would add a flash read and a
 // second range check); the asserts bind each of them to svc_direct_of, which the
-// svc_attributes consistency check in svc_direct.hpp covers for all 34 numbers.
+// svc_attributes consistency check in svc_direct.hpp covers all 35 slots.
 static_assert(shizuku::svc_direct_of((uintptr_t)shizuku::object_api::CALL_METHOD) == shizuku::svc_direct_kind::CALL_METHOD);
 static_assert(shizuku::svc_direct_of((uintptr_t)shizuku::object_api::CALL_METHOD_DESCRIPTOR) == shizuku::svc_direct_kind::CALL_DESCRIPTOR);
 static_assert(shizuku::svc_direct_of((uintptr_t)shizuku::object_api::EXIT_METHOD) == shizuku::svc_direct_kind::EXIT_METHOD);
@@ -291,6 +296,7 @@ extern "C" SHIZUKU_SVC_RAM void shizuku_armv8m_svc_handler() {
   case (uint32_t)object_api::EXIT_METHOD: return exit_method(exc_return, psp, core);
   case (uint32_t)object_api::FORWARD_CHILD_EXIT: return forward_child_exit(exc_return, psp, core);
   case (uint32_t)object_api::GET_CURRENT_OBJECT: return get_current(exc_return, psp, core);
+  case (uint32_t)object_api::GET_TIME_US: return get_time(exc_return, psp, core);
   case (uint32_t)object_api::GET_CALLER_OBJECT: return get_caller(exc_return, psp, core);
   case (uint32_t)object_api::SET_BUDGET: return set_budget(exc_return, psp, core);
   default: return generic(exc_return, core);

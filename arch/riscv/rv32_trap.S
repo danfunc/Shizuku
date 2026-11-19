@@ -197,6 +197,8 @@ shizuku_rv32_restore:
   beq t0, t1, .Lrv32_umode_exit_entry
   li t1, RV32_TAG_U_ECALL
   beq t0, t1, .Lrv32_umode_exit_ecall
+  li t1, RV32_TAG_U_TIME
+  beq t0, t1, .Lrv32_umode_exit_ecall
   li t1, RV32_TAG_ECALL_SCRUB
   beq t0, t1, .Lrv32_exit_scrub
   li t1, RV32_TAG_U_SCRUB
@@ -205,6 +207,8 @@ shizuku_rv32_restore:
   li t1, RV32_TAG_ECALL_SCRUB
   beq t0, t1, .Lrv32_exit_scrub
 #endif
+  li t1, RV32_TAG_TIME
+  beq t0, t1, .Lrv32_exit_scrub
 1:
   lw t0, RV32_F_MEPC(sp)
   csrw mepc, t0
@@ -276,6 +280,13 @@ shizuku_rv32_restore:
 //   gp/tp は触らない: caller stub が戻った直後に自分の値を入れ直すが、その 1 命令の間に
 //   割込みが入っても IDF 側の ISR が使う gp が壊れないように、ここでは 0 にしない。
 .Lrv32_exit_scrub:
+  // A time reply is the only scrubbed reply with a third output word.
+  mv a2, zero
+  lw t0, RV32_F_MCAUSE(sp)
+  li t1, RV32_TAG_TIME
+  bne t0, t1, 2f
+  lw a2, RV32_F_A2(sp)
+2:
   lw t0, RV32_F_MEPC(sp)
   csrw mepc, t0
   lw t0, RV32_F_MSTATUS(sp)
@@ -291,7 +302,6 @@ shizuku_rv32_restore:
   mv t4, zero
   mv t5, zero
   mv t6, zero
-  mv a2, zero
   mv a3, zero
   mv a4, zero
   mv a5, zero
@@ -384,6 +394,13 @@ shizuku_rv32_restore:
 //   frame の各語はロード直後に sw zero でゼロ化し、user stack 上に frame の残りを残さない。
 .Lrv32_umode_exit_ecall:
 .Lrv32_umode_exit_scrub:
+  mv a2, zero
+  lw t0, RV32_F_MCAUSE(sp)
+  li t1, RV32_TAG_U_TIME
+  bne t0, t1, 2f
+  lw a2, RV32_F_A2(sp)
+  sw zero, RV32_F_A2(sp)
+2:
   lw t0, RV32_F_MEPC(sp)
   sw zero, RV32_F_MEPC(sp)
   csrw mepc, t0
@@ -405,7 +422,6 @@ shizuku_rv32_restore:
   mv t4, zero
   mv t5, zero
   mv t6, zero
-  mv a2, zero
   mv a3, zero
   mv a4, zero
   mv a5, zero

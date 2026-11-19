@@ -32,11 +32,23 @@ typedef struct {
     uint32_t reserved;
 } shizuku_c6_selftest_record_t;
 
+// Separate fixed 64-byte record: keep the existing 32-byte selftest ABI.
+// Addresses and values are RV32 words, even when the adapter is host-tested.
+typedef struct { uint32_t name, got, want; } shizuku_c6_failure_entry_t;
+typedef struct {
+    uint32_t magic;   // 0x46364353
+    uint32_t version; // 1
+    uint32_t total;   // all failures, saturating
+    uint32_t stored;  // published entries, at most four
+    shizuku_c6_failure_entry_t entries[4];
+} shizuku_c6_failure_record_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 extern volatile shizuku_c6_selftest_record_t shizuku_c6_selftest_record;
+extern volatile shizuku_c6_failure_record_t shizuku_c6_failure_record;
 
 uint32_t shizuku_c6_selftest_name_to_id(const char *name);
 void shizuku_c6_selftest_record_init(void);

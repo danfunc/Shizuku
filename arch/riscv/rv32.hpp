@@ -7,6 +7,7 @@
 #include "arch/riscv/rv32_frame.h"
 #include "shizuku/concepts/arch.hpp"
 #include "shizuku/rv32_abi.hpp"
+#include "shizuku/object_api.hpp"
 #include "shizuku/stack_window.hpp"
 
 // 共通の RV32 trap 経路 (arch/riscv/rv32_trap.S) の入口・戻り口。
@@ -208,10 +209,21 @@ public:
 
   static void set_result(exception_frame_t &frame, uintptr_t error,
                          uintptr_t value) {
+    // A replacement two-word reply must revoke a prior clock reply's a2
+    // authority. Keep the scrub policy even when replacing after a switch.
+    if (frame.mcause == RV32_TAG_TIME) frame.mcause = RV32_TAG_ECALL_SCRUB;
+    else if (frame.mcause == RV32_TAG_U_TIME) frame.mcause = RV32_TAG_U_SCRUB;
     frame.a0 = error;
     frame.a1 = value;
   }
 
+  static void set_time_result(exception_frame_t &frame, shizuku::object_error error, uint64_t value) {
+    set_result(frame, (uintptr_t)error, uint32_t(value));
+    frame.a2 = uint32_t(value >> 32);
+    // These exits scrub every other scratch register, including after a switch.
+    frame.mcause = (frame.mstatus & RV32_MSTATUS_MPP) == 0
+                       ? RV32_TAG_U_TIME : RV32_TAG_TIME;
+  }
   static void set_entry(exception_frame_t &frame, uintptr_t pc, uintptr_t lr) {
     frame.mepc = pc;
     frame.ra = lr;
@@ -587,6 +599,9 @@ public:
 #if defined(__riscv)
   // caller 側 ABI converter (shizuku/rv32_abi.hpp): カーネルは sp / pc / a0 / a1 以外を
   // 保証しない。callee-saved・ra・gp・tp の退避と復元は ecall の中 (クラバー + 明示退避)。
+  [[gnu::always_inline]] static rv32_abi::time_result get_time_us() {
+    return rv32_abi::ecall<true>((uintptr_t)shizuku::object_api::GET_TIME_US, 0, 0, 0, 0);
+  }
   [[gnu::always_inline]] static syscall_result syscall(uintptr_t number, uintptr_t a1 = 0,
                                 uintptr_t a2 = 0, uintptr_t a3 = 0,
                                 uintptr_t a4 = 0) {
@@ -603,6 +618,7 @@ public:
   }
 #else
   // 非-RISC-V 環境でのホスト呼出しを成功に見せる no-op は禁止。未対応時リンク不能とする。
+  static rv32_abi::time_result get_time_us();
   static syscall_result syscall(uintptr_t number, uintptr_t a1 = 0,
                                 uintptr_t a2 = 0, uintptr_t a3 = 0,
                                 uintptr_t a4 = 0);

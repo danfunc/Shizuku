@@ -240,6 +240,7 @@ public:
   bool svc_exit(CONTEXT *context, bool forward, core_arg_t<ARCH> core); // EXIT_METHOD と FORWARD_CHILD_EXIT の共通部
   bool svc_call_method(CONTEXT *context, core_arg_t<ARCH> core);
   bool svc_get_current(CONTEXT *context, core_arg_t<ARCH> core);
+  bool svc_get_time(CONTEXT *context, core_arg_t<ARCH> core);
   bool svc_get_caller(CONTEXT *context, core_arg_t<ARCH> core);
   bool svc_yield(CONTEXT *context, core_arg_t<ARCH> core);
   bool svc_run_for(CONTEXT *context, core_arg_t<ARCH> core);
@@ -266,6 +267,9 @@ public:
   }
   bool svc_get_current(CONTEXT *context) requires (!arch_has_core_num<ARCH>) {
     return svc_get_current(context, no_core{});
+  }
+  bool svc_get_time(CONTEXT *context) requires (!arch_has_core_num<ARCH>) {
+    return svc_get_time(context, no_core{});
   }
   bool svc_get_caller(CONTEXT *context) requires (!arch_has_core_num<ARCH>) {
     return svc_get_caller(context, no_core{});
