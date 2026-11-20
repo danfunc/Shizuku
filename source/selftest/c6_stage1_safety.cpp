@@ -199,6 +199,8 @@ asm(
     "  beq a0, t0, .Lreentrant_aba_child_a2\n"
     "  li t0, 32\n"
     "  beq a0, t0, .Lprobe_return_sp\n"
+    "  li t0, 36\n"
+    "  beq a0, t0, .Lprobe_write_window_low\n"
     "  li a0, 0\n"
     "  ret\n"
     "\n"
@@ -977,6 +979,32 @@ asm(
     // 実測値で窓の位置を知るための較正用。
     ".Lprobe_return_sp:\n"
     "  mv a0, sp\n"
+    "  ret\n"
+    "\n"
+    // cmd 36: 入場後に自分の窓の最下位 16 語 (入場 sp - 256 .. -192) へ canary 0x5A5A5A5A を書いて 0 を返す。
+    // sp を 256 下げて窓全体を自分の枠にしてから書く (枠の内側なので U probe の枠規約を満たす)。M 側の
+    // "M -> U return does not zero the callee window" 検査が、戻り (M の呼び手) で残るかを見る。
+    ".Lprobe_write_window_low:\n"
+    "  addi sp, sp, -256\n"
+    "  li t0, 0x5A5A5A5A\n"
+    "  sw t0, 0(sp)\n"
+    "  sw t0, 4(sp)\n"
+    "  sw t0, 8(sp)\n"
+    "  sw t0, 12(sp)\n"
+    "  sw t0, 16(sp)\n"
+    "  sw t0, 20(sp)\n"
+    "  sw t0, 24(sp)\n"
+    "  sw t0, 28(sp)\n"
+    "  sw t0, 32(sp)\n"
+    "  sw t0, 36(sp)\n"
+    "  sw t0, 40(sp)\n"
+    "  sw t0, 44(sp)\n"
+    "  sw t0, 48(sp)\n"
+    "  sw t0, 52(sp)\n"
+    "  sw t0, 56(sp)\n"
+    "  sw t0, 60(sp)\n"
+    "  addi sp, sp, 256\n"
+    "  li a0, 0\n"
     "  ret\n"
     "\n"
     ".size u_mode_probe_worker, .-u_mode_probe_worker\n"
@@ -1820,25 +1848,38 @@ void c6_stage1_safety() {
                    caller_sentinel_addr >= stage1_callee_hi,
                stage1_callee_hi, stage1_win_hi);
   auto *u_stack_words = reinterpret_cast<volatile uint32_t *>(stage1_callee_hi - shizuku::kStackWindowStep);
-  for (size_t i = 0; i < STAGE1_WIN_WORDS; ++i)
-    u_stack_words[i] = U_STACK_CANARY;
+  // 事前に最下位 16 語を 0 にする。canary を敷くのは M ではなく U callee 自身 (cmd 36): M の ecall の間は
+  // カーネルの C の stack が M の trap frame (窓の上端 144B) の直下から窓の中へ下へ伸び、callee に入る前に
+  // 最下位側の語を上書きするため (実機の診断で確認: ecall_finish の戻り番地などが i=7, 11 に残った)。
+  // callee が入場した後に自分で書いた語は、M への戻り (trusted stack 上のカーネル + 窓の上端 144B の再開 frame)
+  // では触られない。0 から始めるので、canary が見えるなら callee が書いて戻りで消えなかったことになる。
+  constexpr size_t STAGE1_CANARY_CHECK_WORDS = 16;
+  static_assert(STAGE1_CANARY_CHECK_WORDS <= STAGE1_WIN_WORDS - STAGE1_FRAME_WORDS);
+  for (size_t i = 0; i < STAGE1_CANARY_CHECK_WORDS; ++i)
+    u_stack_words[i] = 0;
   const auto closed_res = ARCH::syscall(
       static_cast<uintptr_t>(object_api::CALL_METHOD),
       OBJECT_STAGE1_PROBE,
       METHOD_STAGE1_PROBE,
-      99 /* cmd=99: no-op U callee */);
-  // 窓 256B = 64 語、resume frame 144B = 36 語なので、frame より下は 28 語。そのうち最下位の 16 語
-  // (窓の下端から 64B) だけを見る: 窓の上側にある frame と、no-op callee が入場 sp から下へ使う数語から
-  // 十分に離れ、確実に触られない範囲に絞る (実機未実行のため弱い側)。
-  constexpr size_t STAGE1_CANARY_CHECK_WORDS = 16;
-  static_assert(STAGE1_CANARY_CHECK_WORDS <= STAGE1_WIN_WORDS - STAGE1_FRAME_WORDS);
-  bool canary_intact = true;
+      36 /* cmd=36: U callee writes the canary into its own lowest 16 window words, then returns 0 */);
+  // 戻った直後 (関数呼出しを挟まず) に最下位 16 語 (窓の下端から 64B) を見る。最初の食い違いの添字と値は
+  // 失敗の記録の got に残す: got = (添字 << 16) | (その語の下位 16bit)、want = canary の下位 16bit。
+  // 全部一致なら got = want = 1。
+  size_t canary_bad_index = STAGE1_CANARY_CHECK_WORDS;
+  uint32_t canary_bad_value = 0;
   for (size_t i = 0; i < STAGE1_CANARY_CHECK_WORDS; ++i) {
-    if (u_stack_words[i] != U_STACK_CANARY) canary_intact = false;
+    const uint32_t word = u_stack_words[i];
+    if (word != U_STACK_CANARY) {
+      canary_bad_index = i;
+      canary_bad_value = word;
+      break;
+    }
   }
-  record_check("stage1: M -> U return does not zero the callee window (lowest 16 window words keep the canary)",
+  const bool canary_intact = canary_bad_index == STAGE1_CANARY_CHECK_WORDS;
+  record_check("stage1: M -> U return does not zero the callee window (U callee's own lowest 16 window words keep the canary)",
                closed_res.error == 0 && closed_res.value == 0 && canary_intact,
-               canary_intact ? 1 : 0, 1);
+               canary_intact ? 1ul : static_cast<unsigned long>((canary_bad_index << 16) | (canary_bad_value & 0xFFFFu)),
+               canary_intact ? 1ul : static_cast<unsigned long>(U_STACK_CANARY & 0xFFFFu));
   const auto sp_probe_res2 = ARCH::syscall(
       static_cast<uintptr_t>(object_api::CALL_METHOD),
       OBJECT_STAGE1_PROBE,
