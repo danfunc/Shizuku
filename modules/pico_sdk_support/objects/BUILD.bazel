@@ -189,8 +189,14 @@ pico_btstack_make_gatt_header(
 
 cc_library(
     name = "ble_uart",
-    srcs = ["ble_uart.cpp"],
-    hdrs = ["internal_headers/shizuku/objects/ble_uart.hpp"],
+    srcs = ["ble_uart.cpp"] + select({
+        "//configs:bt_classic": ["bt_classic.cpp"],
+        "//conditions:default": [],
+    }),
+    hdrs = [
+        "internal_headers/shizuku/objects/ble_uart.hpp",
+        "internal_headers/shizuku/objects/bt_classic.hpp",
+    ],
     includes = ["internal_headers"],
     target_compatible_with = _CYW43_ONLY,
     deps = [
@@ -227,6 +233,9 @@ cc_library(
         "//conditions:default": [],
     }) + select({
         "//configs:bt_tlv_ram": ["SHIZUKU_BT_TLV_RAM=1"],
+        "//conditions:default": [],
+    }) + select({
+        "//configs:bt_classic": ["SHIZUKU_BT_CLASSIC=1"],
         "//conditions:default": [],
     }) + select({
         "//configs:flashfs_only_selftest": ["SHIZUKU_FLASHFS_ONLY=1"],

@@ -36,7 +36,14 @@ template <class A> [[gnu::always_inline]] inline result invoke_svc(object_api ap
     return {r0 == 0 ? status::ok : status::operation_failed, r1, r0};
   }
 }
-[[gnu::noinline, gnu::noclone]] static result invoke(object_api api, uintptr_t a1 = 0,
+// ★used + retain: shizuku_v2_service_resume は、この関数にインライン展開された
+//   invoke_svc の asm (armv8m_abi.hpp の `.if service`) の中でだけ定義される。
+//   yield/grant/sleep_us を誰も呼ばないファーム (selftest を持たない車など) では
+//   この関数が -ffunction-sections + --gc-sections で捨てられ、カーネル本体
+//   (dispatch.cpp, armv8m_svc.hpp, native_call.hpp) が参照するラベルが未定義になって
+//   リンクに失敗する。利用者の有無に関わらずラベルを出すため、コンパイラにもリンカにも
+//   捨てさせない。
+[[gnu::noinline, gnu::noclone, gnu::used, gnu::retain]] static result invoke(object_api api, uintptr_t a1 = 0,
                                                     uintptr_t a2 = 0) {
   if (in_isr()) return {status::bad_context, 0, 0};
   if (!ARCH::current_priv()) return {status::not_privileged, 0, 0};

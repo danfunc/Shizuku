@@ -64,6 +64,10 @@ enum struct method : uintptr_t {
   SET_PAIRING_LOCK = 11,
   // 保存済みボンドを全部消す。★締め出されたときの最後の逃げ道 (有線 UART から)。
   FORGET_BONDS = 12,
+  // Classic HID host サービス (SHIZUKU_BT_CLASSIC ビルドのみ。bt_classic.hpp 参照)。
+  // GET: hid_rx ストリーム番号を返す / SET: a1 = 外が作った hid_tx ストリーム番号。
+  GET_HID_RX_STREAM = 13,
+  SET_HID_TX_STREAM = 14,
 };
 
 // オブジェクトを登録 (任意のオブジェクトIDを指定可能)

@@ -65,6 +65,9 @@ extern "C" {
 #include "shizuku/object_api.hpp"
 #include "shizuku/method_entry.hpp"
 #include "shizuku/objects/ble_uart.hpp"
+#if defined(SHIZUKU_BT_CLASSIC)
+#include "shizuku/objects/bt_classic.hpp"
+#endif
 #if !defined(SHIZUKU_RP2040)
 #include "shizuku/objects/gdb_stub.hpp" // GDB リンクをストリームで運ぶ
 #endif
@@ -561,6 +564,16 @@ shizuku::stream::handle<frame_t> g_tx;
 // (STREAM_OPEN) consumer 席に
 //   座るだけ。番号は合成側が起動前に SET_TX_STREAM で渡す。
 uintptr_t g_tx_in_id = NO_STREAM;
+#if defined(SHIZUKU_BT_CLASSIC)
+// ---- Classic HID host サービス (bt_classic.cpp) との STREAM ---------------------
+// hid_rx: owner が producer (bt_classic の emit が積む)。hid_tx: 外が producer、
+// owner が consumer。席は poll スレッドの冒頭で座る (STREAM_BIND は発行元から導出)。
+shizuku::stream::handle<bt_classic::hid_frame> g_hid_rx;
+uintptr_t g_hid_rx_stream_id = 0;
+shizuku::stream::handle<bt_classic::hid_frame> g_hid_tx_in;
+uintptr_t g_hid_tx_in_id = NO_STREAM;
+void hid_emit(const bt_classic::hid_frame &f) { g_hid_rx.push(f); } // 満杯は最古を上書き
+#endif
 shizuku::stream::handle<frame_t> g_tx_in;
 
 #if !defined(SHIZUKU_RP2040)
@@ -1202,6 +1215,15 @@ static void packet_handler(uint8_t packet_type, uint16_t, uint8_t *packet,
     }
     break;
   case HCI_EVENT_DISCONNECTION_COMPLETE:
+#if defined(SHIZUKU_BT_CLASSIC)
+    // ★LE 以外 (Classic) の切断で LE の接続状態 (承認・通知・再広告) を巻き込まない。
+    if (hci_event_disconnection_complete_get_connection_handle(packet) !=
+        con_handle) {
+      bt_classic::on_classic_disconnect(
+          hci_event_disconnection_complete_get_reason(packet));
+      break;
+    }
+#endif
     BOARD::diag_printf(
         "[BLE_UART] disconnected (reason=0x%02x), re-advertising\n",
         hci_event_disconnection_complete_get_reason(packet));
@@ -1397,6 +1419,19 @@ uintptr_t method_set_ch2_tx_stream(uintptr_t argument, uintptr_t, uintptr_t,
   return 1;
 }
 
+#if defined(SHIZUKU_BT_CLASSIC)
+uintptr_t method_get_hid_rx_stream(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
+  return g_hid_rx_stream_id;
+}
+
+// a0 = 外 (車) が作った hid_tx ストリーム番号。席に座るのは poll スレッド。
+uintptr_t method_set_hid_tx_stream(uintptr_t argument, uintptr_t, uintptr_t,
+                                   uintptr_t) {
+  g_hid_tx_in_id = argument;
+  return 1;
+}
+#endif
+
 uintptr_t method_get_ota_stream(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   return g_ota_stream_id;
 }
@@ -1536,6 +1571,10 @@ static void bt_stack_bringup() {
 #if defined(SHIZUKU_BOOT_LOG_WAIT)
   crash_mark(boot_diag_breadcrumb::AFTER_GATT_INIT);
 #endif
+#if defined(SHIZUKU_BT_CLASSIC)
+  // Classic HID host。l2cap_init 済み・hci_power_control(ON) の前。
+  bt_classic::init(&hid_emit);
+#endif
 
   hci_event_callback_registration.callback = &packet_handler;
   hci_add_event_handler(&hci_event_callback_registration);
@@ -1669,6 +1708,18 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   //   write コールバックがここのスレッドで走る)、ハブからの本線は consumer。
   api(shizuku::object_api::STREAM_BIND, g_rx_stream_id,
       (uintptr_t)shizuku::stream::role::PRODUCER);
+#if defined(SHIZUKU_BT_CLASSIC)
+  api(shizuku::object_api::STREAM_BIND, g_hid_rx_stream_id,
+      (uintptr_t)shizuku::stream::role::PRODUCER);
+  if (g_hid_tx_in_id != NO_STREAM) {
+    const auto opened = api(shizuku::object_api::STREAM_OPEN, g_hid_tx_in_id);
+    if (opened.error == 0 && opened.value != 0) {
+      g_hid_tx_in = shizuku::stream::handle<bt_classic::hid_frame>(opened.value);
+      api(shizuku::object_api::STREAM_BIND, g_hid_tx_in_id,
+          (uintptr_t)shizuku::stream::role::CONSUMER);
+    }
+  }
+#endif
   if (g_ch2_tx_in_id != NO_STREAM) {
     const auto opened = api(shizuku::object_api::STREAM_OPEN, g_ch2_tx_in_id);
     if (opened.error == 0 && opened.value != 0) {
@@ -1811,6 +1862,14 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
       }
     }
 
+#if defined(SHIZUKU_BT_CLASSIC)
+    {
+      bt_classic::hid_frame hf;
+      while (g_hid_tx_in_id != NO_STREAM && g_hid_tx_in.available() != 0 &&
+             g_hid_tx_in.pop(&hf))
+        bt_classic::on_command(hf);
+    }
+#endif
     poll_cdc_commands();
     process_cdc_approval_response();
     expire_cdc_approval();
@@ -2078,6 +2137,17 @@ uintptr_t ble_uart_main(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
   failures += export_method<&method_set_pairing_lock>(method::SET_PAIRING_LOCK);
   failures +=
       export_method<&method_forget_bonds>(method::FORGET_BONDS);
+#if defined(SHIZUKU_BT_CLASSIC)
+  failures += export_method<&method_get_hid_rx_stream>(method::GET_HID_RX_STREAM);
+  failures += export_method<&method_set_hid_tx_stream>(method::SET_HID_TX_STREAM);
+  {
+    const auto hid_rx_created = api(shizuku::object_api::STREAM_CREATE,
+                                    sizeof(bt_classic::hid_frame), 32, 0);
+    failures += hid_rx_created.error;
+    g_hid_rx_stream_id = hid_rx_created.value;
+    g_hid_rx = shizuku::stream::handle<bt_classic::hid_frame>(g_hid_rx_stream_id);
+  }
+#endif
   failures += export_method<&poll_loop>(method::POLL);
 
   const auto rx_created = api(shizuku::object_api::STREAM_CREATE,

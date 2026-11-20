@@ -70,9 +70,10 @@ genrule(
 )
 
 # 自己テストを省略する OTA 検証用ビルド。既定プロファイルは変更しない。
-config_setting(
+# 実体は //configs:skip_selftest (オブジェクト番号の生成と同じ条件を共有する)。
+alias(
     name = "skip_selftest",
-    define_values = {"skip_selftest": "true"},
+    actual = "//configs:skip_selftest",
 )
 
 # 生バイナリ (選択中の pico-sdk C++ toolchain の objcopy)。OTA 転送用。

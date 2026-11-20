@@ -23,6 +23,15 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# BLE (NUS) + Classic (HID host) の和集合。PICO_BTSTACK_CONFIG をこれに向け、
+# PICO_BT_ENABLE_CLASSIC=True / PICO_BT_ENABLE_BLE=True / --define=bt_classic=1 と組で使う。
+cc_library(
+    name = "btstack_config_classic",
+    hdrs = ["config_classic/btstack_config.h"],
+    includes = ["config_classic"],
+    visibility = ["//visibility:public"],
+)
+
 # ★TinyUSB の設定を差し替える (CDC を 2 本にする)。.bazelrc の
 #   PICO_TINYUSB_CONFIG がこれを指している。
 cc_library(

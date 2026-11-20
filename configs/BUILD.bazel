@@ -80,6 +80,20 @@ config_setting(
     define_values = {"crash_record": "true"},
     visibility = ["//visibility:public"],
 )
+# 自己テストを省略するビルド (--define=skip_selftest=true)。firmware の select と
+# オブジェクト番号の生成 (//:object_ids_hpp) が同じ条件を使う。
+config_setting(
+    name = "skip_selftest",
+    define_values = {"skip_selftest": "true"},
+    visibility = ["//visibility:public"],
+)
+
+# Classic HID host を BT core に載せる (--define=bt_classic=1)。未指定なら従来どおり BLE のみ。
+config_setting(
+    name = "bt_classic",
+    define_values = {"bt_classic": "1"},
+    visibility = ["//visibility:public"],
+)
 config_setting(
     name = "bt_tlv_ram",
     define_values = {"bt_tlv": "ram"},
