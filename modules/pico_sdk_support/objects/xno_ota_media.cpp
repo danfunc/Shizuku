@@ -8,6 +8,7 @@
 // ===========================================================================
 #include "shizuku/objects/xno_ota_media.h"
 
+#include "shizuku/objects/flash_map.hpp"
 #include "shizuku/objects/flash_ops.hpp"
 #if defined(SHIZUKU_BOOT_LOG_WAIT) && defined(SHIZUKU_CRASH_RECORD)
 #include "shizuku/objects/usb_cdc.hpp"
@@ -115,6 +116,57 @@ uint32_t xno_ota_media_vector_table_offset(void) {
   return FLASH_PAGE_SIZE;
 #else
   return 0;
+#endif
+}
+
+// ---------------------------------------------------------------------------
+//  stage3 の配置 (XNO objects/stage3 の layout_rp2350.hpp との突き合わせ)
+// ---------------------------------------------------------------------------
+//  XNO のヘッダは見えない (Shizuku は XNO に依存しない) ので、値を二重に持つ。
+//  ズレは kStage3LayoutMatches で機械的に検出し、ずれたまま 0xA000 リンクの像が
+//  OTA を受けるときは present() が負を返して commit を拒否させる。
+//  XNO 側の対の検査: XNO objects/stage3/rp2350_layout_test.cpp の static_assert。
+#if !defined(SHIZUKU_RP2040)
+namespace {
+namespace fm = shizuku::objects::flash_map;
+
+constexpr uint32_t kStage3AppOffset = 0x0000A000;  // layout_rp2350.hpp APP_OFFSET
+constexpr uint32_t kStage3AppBytes = 0x000F6000;   // APP_SIZE (984 KiB)
+
+constexpr bool kStage3LayoutMatches =
+    fm::FIRMWARE_OFFSET == 0 &&
+    kStage3AppOffset + kStage3AppBytes == fm::FIRMWARE_OFFSET + fm::FIRMWARE_BYTES &&
+    fm::FS_OFFSET == 0x00100000 && fm::FS_BYTES == 0x00100000 &&
+    fm::STAGING_OFFSET == 0x00200000 &&
+    fm::STAGING_OFFSET + fm::STAGING_BYTES == 0x003FD000 &&
+    fm::BT_RESERVED_OFFSET == 0x003FD000 && fm::BT_RESERVED_BYTES == 0x00003000;
+}  // namespace
+#endif
+
+int32_t xno_ota_media_stage3_present(void) {
+#if defined(SHIZUKU_RP2040)
+  return 0;
+#else
+  // 像が 0xA000 にリンクされている (= stage3 の後ろの app) かをリンク位置で決める。
+  if (xno_ota_media_image_flash_offset() != kStage3AppOffset)
+    return 0;
+  return kStage3LayoutMatches ? 1 : -1;
+#endif
+}
+
+uint32_t xno_ota_media_app_flash_offset(void) {
+#if defined(SHIZUKU_RP2040)
+  return 0;
+#else
+  return kStage3AppOffset;
+#endif
+}
+
+uint32_t xno_ota_media_app_max_bytes(void) {
+#if defined(SHIZUKU_RP2040)
+  return 0;
+#else
+  return kStage3AppBytes;
 #endif
 }
 

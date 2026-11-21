@@ -255,6 +255,7 @@ cc_library(
     hdrs = ["internal_headers/shizuku/objects/xno_ota_media.h"],
     includes = ["internal_headers"],
     deps = [
+        ":flash_layout",
         ":flash_ops",
         ":usb_cdc",
         "@pico-sdk//src/common/boot_picoboot_headers",

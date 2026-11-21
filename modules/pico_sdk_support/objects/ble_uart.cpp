@@ -1544,6 +1544,8 @@ uintptr_t method_get_pairing_state(uintptr_t out, uintptr_t, uintptr_t,
   s->nc_passkey = g_nc_passkey;
   s->strikes = g_pair_strikes;
   s->nc_pending = nc_pending_handle != HCI_CON_HANDLE_INVALID ? 1 : 0;
+  s->approval_pending = g_cdc_approval_mode != cdc_approval_mode::NONE ? 1 : 0;
+  s->approval_has_number = g_cdc_approval_mode == cdc_approval_mode::NUMERIC ? 1 : 0;
   s->locked = pairing_locked_now(now) ? 1 : 0;
   // ★件数は写しを返す。le_device_db_count() を直に呼ぶと btstack の内部を
   //   別スレッドから読むことになる (今の実装は単なる static int だが、

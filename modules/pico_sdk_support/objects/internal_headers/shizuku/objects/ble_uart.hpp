@@ -38,8 +38,13 @@ struct pairing_state {
   uint8_t bonded;              // 保存済みボンド件数
   uint8_t connected;           // 1 = リンクあり
   uint8_t authorized;          // 1 = 暗号化・認証済み (コマンドを受け付ける)
-  uint8_t reserved[3];
+  // 承認待ち (NC でも JW でも 1)。nc_pending は NC 専用のまま意味を変えない。
+  uint8_t approval_pending;
+  // approval_pending のとき 1 = nc_passkey が有効 (NC) / 0 = 番号なし (Just Works)。
+  uint8_t approval_has_number;
+  uint8_t reserved[1];
 };
+static_assert(sizeof(pairing_state) == 28, "pairing_state layout must not change");
 
 enum struct method : uintptr_t {
   MAIN = 0,

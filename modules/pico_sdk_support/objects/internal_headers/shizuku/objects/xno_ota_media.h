@@ -58,6 +58,13 @@ void xno_ota_media_reboot_after_commit(void);
 // 割り込みを待つ (wfi)。★RAM 常駐。
 void xno_ota_media_wait_for_interrupt(void);
 
+// ---- stage3 (journal 付きブートローダ) 経由の commit 用。XNO の ota_media.h と同じ宣言 ----
+//   1 = stage3 搭載 (app が 0xA000 にリンクされ、flash 配置が XNO layout_rp2350 と一致)
+//   0 = 従来 (commit_blast)、<0 = app は 0xA000 だが配置が合わない (commit を拒否すべき)
+int32_t xno_ota_media_stage3_present(void);
+uint32_t xno_ota_media_app_flash_offset(void);
+uint32_t xno_ota_media_app_max_bytes(void);
+
 // 緊急 UART 出力。未初期化なら黙って戻る。
 void xno_ota_media_emergency_puts(const char *text);
 
