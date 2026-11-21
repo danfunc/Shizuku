@@ -399,6 +399,17 @@ static void decline_cdc_approval(bool timed_out) {
 }
 
 static void handle_cdc_command_line(const char *line) {
+  if (strcmp(line, "PAIR ALLOW") == 0) {
+    g_pair_allow_until_us = BOARD::time_us() + PAIRING_ALLOW_WINDOW_US;
+    g_pair_mode_dirty = true;
+    BOARD::diag_printf("[BLE_UART] CDC pairing allow ticket issued (3 minutes)\n");
+    return;
+  }
+  if (strcmp(line, "PAIR FORGET!") == 0) {
+    g_forget_bonds_requested = true;
+    BOARD::diag_printf("[BLE_UART] CDC forget bonds requested\n");
+    return;
+  }
   if (strcmp(line, "A") == 0) {
     g_just_works_mode = true;
     apply_security_mode();
