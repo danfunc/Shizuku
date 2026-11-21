@@ -236,6 +236,16 @@ static uint64_t g_cdc_approval_deadline_us = 0;
 static uint32_t g_cdc_approval_number = 0;
 static bool g_pairing_approved = false;
 static volatile uint8_t g_cdc_answer_requested = 0; // 0=none, 1=Y, 2=N
+#if defined(SHIZUKU_ENABLE_BOOTSEL)
+// BOOTSEL approval: only while a CDC approval is pending. Press->release once
+// approves. A button already held when approval starts must be released first.
+static bool g_bootsel_active = false;
+static bool g_bootsel_armed = false;
+static bool g_bootsel_pressed_seen = false;
+static bool g_bootsel_answer = false;
+static uint64_t g_bootsel_next_us = 0;
+constexpr uint64_t BOOTSEL_POLL_INTERVAL_US = 200000;
+#endif
 static char g_cdc_command_line[32]{};
 static uint8_t g_cdc_command_length = 0;
 static constexpr uint64_t CDC_APPROVAL_TIMEOUT_US = 30000000ull;
@@ -380,6 +390,10 @@ static void clear_cdc_approval() {
   g_cdc_approval_deadline_us = 0;
   g_cdc_approval_number = 0;
   g_cdc_answer_requested = 0;
+#if defined(SHIZUKU_ENABLE_BOOTSEL)
+  g_bootsel_active = false;
+  g_bootsel_answer = false;
+#endif
 }
 
 static void decline_cdc_approval(bool timed_out) {
@@ -465,6 +479,11 @@ static void process_cdc_approval_response() {
     return;
   }
 
+#if defined(SHIZUKU_ENABLE_BOOTSEL)
+  const bool via_bootsel = g_bootsel_answer;
+#else
+  const bool via_bootsel = false;
+#endif
   clear_cdc_approval();
   // Set this before calling BTstack: its API can run the state machine
   // synchronously and may deliver PAIRING_COMPLETE before returning.
@@ -474,15 +493,56 @@ static void process_cdc_approval_response() {
     BOARD::diag_printf(
         "[BLE_UART] applying CDC approval on BTstack owner (mode=NC)\n");
     sm_numeric_comparison_confirm(handle);
+    if (via_bootsel)
+      BOARD::diag_printf("[BLE_UART] pairing approved via BOOTSEL\n");
     BOARD::diag_printf("[BLE_UART] pairing approved via CDC (mode=NC, MITM)\n");
   } else if (mode == cdc_approval_mode::JUST_WORKS) {
     BOARD::diag_printf(
         "[BLE_UART] applying CDC approval on BTstack owner (mode=JW)\n");
     sm_just_works_confirm(handle);
+    if (via_bootsel)
+      BOARD::diag_printf("[BLE_UART] pairing approved via BOOTSEL\n");
     BOARD::diag_printf(
         "[BLE_UART] pairing approved via CDC (mode=JW, no MITM)\n");
   }
 }
+
+#if defined(SHIZUKU_ENABLE_BOOTSEL)
+// Owner-thread only. Approval only (no reject on the button).
+static void poll_bootsel_approval() {
+  if (g_cdc_approval_mode == cdc_approval_mode::NONE) {
+    g_bootsel_active = false;
+    return;
+  }
+  const uint64_t now = BOARD::time_us();
+  if (!g_bootsel_active) {
+    g_bootsel_active = true;
+    g_bootsel_armed = false;
+    g_bootsel_pressed_seen = false;
+    g_bootsel_next_us = now;
+    BOARD::diag_printf("[BLE_UART] press BOOTSEL to approve\n");
+  }
+  if (now < g_bootsel_next_us)
+    return;
+  g_bootsel_next_us = now + BOOTSEL_POLL_INTERVAL_US;
+  bool pressed = false;
+  if (!bootsel_read(pressed))
+    return;
+  if (!g_bootsel_armed) {
+    if (!pressed)
+      g_bootsel_armed = true;
+    return;
+  }
+  if (pressed) {
+    g_bootsel_pressed_seen = true;
+    return;
+  }
+  if (g_bootsel_pressed_seen && g_cdc_answer_requested == 0) {
+    g_bootsel_answer = true;
+    g_cdc_answer_requested = 1;
+  }
+}
+#endif
 
 static void poll_cdc_commands() {
   for (unsigned count = 0; count < 64; ++count) {
@@ -1882,6 +1942,9 @@ uintptr_t poll_loop(uintptr_t, uintptr_t, uintptr_t, uintptr_t) {
     }
 #endif
     poll_cdc_commands();
+#if defined(SHIZUKU_ENABLE_BOOTSEL)
+    poll_bootsel_approval();
+#endif
     process_cdc_approval_response();
     expire_cdc_approval();
 

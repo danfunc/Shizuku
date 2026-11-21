@@ -238,6 +238,10 @@ cc_library(
         "//configs:bt_classic": ["SHIZUKU_BT_CLASSIC=1"],
         "//conditions:default": [],
     }) + select({
+        # BLE ペアリングの BOOTSEL 承認 (ble_uart.cpp の poll_bootsel_approval)。
+        "//configs:bootsel_enabled": ["SHIZUKU_ENABLE_BOOTSEL=1"],
+        "//conditions:default": [],
+    }) + select({
         "//configs:flashfs_only_selftest": ["SHIZUKU_FLASHFS_ONLY=1"],
         "//conditions:default": [],
     }),
